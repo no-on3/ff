@@ -276,6 +276,80 @@ const Usage: React.FC = () => {
             </div>
           )}
 
+          {usage.caches.length > 0 && (
+            <div className="card overflow-x-auto mb-4" aria-label="Caches">
+              <table className="data-table">
+                <thead className="text-gray-500">
+                  <tr>
+                    <th className="py-2 pr-4 font-medium">Cache</th>
+                    <th className="py-2 pr-4 font-medium text-right">Memory</th>
+                    <th className="py-2 pr-4 font-medium text-right">Hours</th>
+                    <th className="py-2 pr-4 font-medium text-right">GB-hours</th>
+                    <th className="py-2 font-medium text-right">Cost (estimated)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.caches.map((cache) => (
+                    <tr key={cache.cacheId} data-cache-id={cache.cacheId} className="border-t border-gray-200">
+                      <td className="py-2 pr-4">
+                        {cache.deleted ? (
+                          <>
+                            {cache.name} <span className="text-gray-500">(deleted)</span>
+                          </>
+                        ) : (
+                          <Link to="/caches" className="text-blue-700 hover:underline">
+                            {cache.name}
+                          </Link>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{cache.memoryMb.toLocaleString('en-US')} MB</td>
+                      <td className="py-2 pr-4 text-right">{cache.hours.toLocaleString('en-US')}</td>
+                      <td className="py-2 pr-4 text-right">{Number(cache.gbHours).toLocaleString('en-US', { maximumFractionDigits: 3 })}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{cache.cost !== null && usage.estimate ? formatMoney(cache.cost, usage.estimate.currency) : '–'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-500 mt-3">As AWS ElastiCache bills a node: its memory by the hour, whatever its keys use, measured once an hour.</p>
+            </div>
+          )}
+
+          {usage.email.length > 0 && (
+            <div className="card overflow-x-auto mb-4" aria-label="E-mail">
+              <table className="data-table">
+                <thead className="text-gray-500">
+                  <tr>
+                    <th className="py-2 pr-4 font-medium">Sent from</th>
+                    <th className="py-2 pr-4 font-medium text-right">Recipients</th>
+                    <th className="py-2 pr-4 font-medium text-right">Attachments</th>
+                    <th className="py-2 font-medium text-right">Cost (estimated)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {usage.email.map((identity) => (
+                    <tr key={identity.resourceId} data-email-id={identity.resourceId} className="border-t border-gray-200">
+                      <td className="py-2 pr-4">
+                        {identity.deleted ? (
+                          <>
+                            {identity.identity} <span className="text-gray-500">(deleted)</span>
+                          </>
+                        ) : (
+                          <Link to="/email" className="text-blue-700 hover:underline">
+                            {identity.identity}
+                          </Link>
+                        )}
+                      </td>
+                      <td className="py-2 pr-4 text-right">{identity.recipients.toLocaleString('en-US')}</td>
+                      <td className="py-2 pr-4 text-right">{identity.attachmentBytes > 0 ? formatSize(identity.attachmentBytes) : '–'}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{identity.cost !== null && usage.estimate ? formatMoney(identity.cost, usage.estimate.currency) : '–'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="text-xs text-gray-500 mt-3">As AWS SES bills it: each recipient of a message, a suppressed one too, and its attachments by the GB, each recipient's copy.</p>
+            </div>
+          )}
+
           <button type="button" className="btn btn-secondary" onClick={downloadCsv} disabled={downloading}>
             {downloading ? 'Preparing…' : `Download ${monthLabel(usage.month)} as CSV`}
           </button>

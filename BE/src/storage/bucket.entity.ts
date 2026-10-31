@@ -1,5 +1,6 @@
 import { Check, Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 import type { NotificationRule } from './bucket-notifications';
+import type { WebsiteConfiguration } from './website';
 
 /** Where a bucket is in its life. */
 export enum BucketStatus {
@@ -43,6 +44,14 @@ export class Bucket {
    */
   @Column({ type: 'jsonb', nullable: true })
   notifications: NotificationRule[] | null;
+
+  /**
+   * Its website configuration, as S3 keeps one: with one, its files are a
+   * site, public to read at its website address alone; null for none, the
+   * bucket private.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  website: WebsiteConfiguration | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

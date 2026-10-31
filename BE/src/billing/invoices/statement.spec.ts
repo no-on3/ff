@@ -1,8 +1,8 @@
 /**
  * L1: a month's usage statement (client-readiness plan, P-36, D9), priced as
  * the hourly rating prices the month: each function's usage and cost, each
- * database's, the free tier, the total rounded once, and what the rating
- * debited or only rated in shadow mode.
+ * database's, queue's and cache's, each domain's mail, the free tier, the total rounded once, and
+ * what the rating debited or only rated in shadow mode.
  */
 import { Decimal } from '../decimal';
 import { BookPrices, NO_RESOURCE_PRICES } from '../price-book';
@@ -20,6 +20,7 @@ const database = (resourceId: string, name: string, priceBookId: string, gb: big
   tier1Requests: 0n,
   tier2Requests: 0n,
   requests: 0n,
+  bytes: 0n,
 });
 /** A queue asked `requests` requests in the month, as SQS bills them. */
 const queue = (resourceId: string, name: string, priceBookId: string, requests: bigint) => ({
@@ -32,6 +33,33 @@ const queue = (resourceId: string, name: string, priceBookId: string, requests: 
   tier1Requests: 0n,
   tier2Requests: 0n,
   requests,
+  bytes: 0n,
+});
+/** A domain's mail in the month: its recipients, and its attachments' bytes, each recipient's copy. */
+const mail = (resourceId: string, name: string, priceBookId: string, recipients: bigint, bytes: bigint) => ({
+  resourceId,
+  kind: 'email' as const,
+  name,
+  priceBookId,
+  byteHours: 0n,
+  hours: 0n,
+  tier1Requests: 0n,
+  tier2Requests: 0n,
+  requests: recipients,
+  bytes,
+});
+/** A cache of `mb` MB through `hours` of the month's hours, its memory the plan's. */
+const cache = (resourceId: string, name: string, priceBookId: string, mb: bigint, hours: bigint) => ({
+  resourceId,
+  kind: 'cache' as const,
+  name,
+  priceBookId,
+  byteHours: mb * 1_048_576n * hours,
+  hours,
+  tier1Requests: 0n,
+  tier2Requests: 0n,
+  requests: 0n,
+  bytes: 0n,
 });
 
 const book = (id: string, validFrom: string, perMillion: string): BookPrices => ({
@@ -128,8 +156,8 @@ describe("a month's usage statement (L1, P-36)", () => {
 
     expect(statement.resources).toEqual([
       // 2 GB for 100 of October's 744 hours: 0.268817 GB-month, 0.092989 TND; 10 GB all month: 3.4592 TND.
-      { resourceId: 'd-1', kind: 'database', name: 'audit', gbMonths: '0.268817', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, amountMinor: 93n },
-      { resourceId: 'd-2', kind: 'database', name: 'orders', gbMonths: '10', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, amountMinor: 3_459n },
+      { resourceId: 'd-1', kind: 'database', name: 'audit', gbMonths: '0.268817', hours: 100n, gbHours: '200', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, attachmentsGb: '0', amountMinor: 93n },
+      { resourceId: 'd-2', kind: 'database', name: 'orders', gbMonths: '10', hours: 744n, gbHours: '7440', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, attachmentsGb: '0', amountMinor: 3_459n },
     ]);
     expect([statement.functions, statement.usageMinor, statement.freeTierMinor, statement.totalMinor]).toEqual([[], 3_552n, -346n, 3_206n]);
   });
@@ -142,10 +170,36 @@ describe("a month's usage statement (L1, P-36)", () => {
 
     expect(statement.resources).toEqual([
       // 3,000,000 requests: 3.6096 TND; 500,000: 0.6016 TND.
-      { resourceId: 'q-1', kind: 'queue', name: 'orders', gbMonths: '0', tier1Requests: 0n, tier2Requests: 0n, requests: 3_000_000n, amountMinor: 3_610n },
-      { resourceId: 'q-2', kind: 'queue', name: 'receipts', gbMonths: '0', tier1Requests: 0n, tier2Requests: 0n, requests: 500_000n, amountMinor: 602n },
+      { resourceId: 'q-1', kind: 'queue', name: 'orders', gbMonths: '0', hours: 0n, gbHours: '0', tier1Requests: 0n, tier2Requests: 0n, requests: 3_000_000n, attachmentsGb: '0', amountMinor: 3_610n },
+      { resourceId: 'q-2', kind: 'queue', name: 'receipts', gbMonths: '0', hours: 0n, gbHours: '0', tier1Requests: 0n, tier2Requests: 0n, requests: 500_000n, attachmentsGb: '0', amountMinor: 602n },
     ]);
     expect([statement.usageMinor, statement.freeTierMinor, statement.totalMinor]).toEqual([4_211n, -1_203n, 3_008n]);
+  });
+
+  it('lists each cache by name, its hours, GB-hours and cost, as ElastiCache bills a node, with no free tier', () => {
+    // ElastiCache for Valkey's $0.0256 a GB-hour times 3.0080.
+    const priced = { ...book('b1', '2026-10-01T00:00:00Z', '0.6016'), cacheGbHour: Decimal.parse('0.0770048') };
+
+    const statement = buildStatement({ ...OCTOBER, books: [priced], rows: [], resources: [cache('c-1', 'sessions', 'b1', 64n, 744n)] });
+
+    expect(statement.resources).toEqual([
+      // 64 MB through October's 744 hours: 46.5 GB-hours, 3.5807232 TND.
+      { resourceId: 'c-1', kind: 'cache', name: 'sessions', gbMonths: '0.0625', hours: 744n, gbHours: '46.5', tier1Requests: 0n, tier2Requests: 0n, requests: 0n, attachmentsGb: '0', amountMinor: 3_581n },
+    ]);
+    expect([statement.usageMinor, statement.freeTierMinor, statement.totalMinor]).toEqual([3_581n, 0n, 3_581n]);
+  });
+
+  it("lists each domain's or address's mail by name, its recipients, its attachments' GB and cost, as SES bills them, with no free tier", () => {
+    // SES's $0.10 a thousand recipients and $0.12 a GB of attachments, times 3.0080.
+    const priced = { ...book('b1', '2026-10-01T00:00:00Z', '0.6016'), perEmailRecipient: Decimal.parse('0.0003008'), emailAttachmentsGb: Decimal.parse('0.36096') };
+
+    const statement = buildStatement({ ...OCTOBER, books: [priced], rows: [], resources: [mail('e-1', 'shop.example.tn', 'b1', 12_500n, 2n * GIB)] });
+
+    expect(statement.resources).toEqual([
+      // 12,500 recipients: 3.76 TND; 2 GB of attachments: 0.72192 TND.
+      { resourceId: 'e-1', kind: 'email', name: 'shop.example.tn', gbMonths: '0', hours: 0n, gbHours: '0', tier1Requests: 0n, tier2Requests: 0n, requests: 12_500n, attachmentsGb: '2', amountMinor: 4_482n },
+    ]);
+    expect([statement.usageMinor, statement.freeTierMinor, statement.totalMinor]).toEqual([4_482n, 0n, 4_482n]);
   });
 
   it("names a function by its ID when its name is gone, and lists nothing for a month without usage", () => {

@@ -1,0 +1,394 @@
+# Step 5 plan: the way out
+
+| | |
+|---|---|
+| **Status** | Proposed on 2026-10-30 with step 4's close (the [step-4 plan](step-4-plan.md), W-10), checked against the code the same day by a read-only survey (§1). **Waiting for you:** the fourteen choices of §9, each with a recommendation. As with every step, nothing of it is built until you confirm them; until then the [decision log](decisions.md) lists them among its questions. |
+| **Goal** | Step 5 of [What to build next](what-to-build-next.md) (§8): the "no lock-in" promise, in code. AWS's own tools work against FF with one endpoint setting: `aws lambda …`, AWS's SDKs and Terraform's AWS provider reach a Lambda API of FF's, signed as AWS signs requests. A function has versions and aliases. One SAM `template.yaml`, with its queues, buckets and schedules, deploys on FF with `ff deploy` and unchanged on AWS with `sam deploy`. And `ff export` writes what a move to AWS needs, with a cost estimate at AWS's prices from the account's real usage, while `ff doctor` lists what still points at FF |
+| **Parent plans** | [What to build next](what-to-build-next.md) §8 (the Lambda API with AWS's signing, versions and aliases, Terraform modules, the export kit, SAM events) and §10 (what every service needs); the [local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): E-06 (the Lambda API, its §6.6), E-07 (functions' credentials and endpoints, §4.8), E-08 (Terraform and OpenTofu), E-09 (`ff export`, `ff doctor`, the cost estimate, §7), E-10 (SAM's events, its ADR-009), R-01 (versions and aliases, §6.5), §6.3 (invoke) and §6.9 (the differences, said plainly); the [CLI plan](cli-plan.md)'s C-30, C-32 and C-33 |
+| **Builds on** | The [step-1 plan](step-1-plan.md): packages and `ff package`, function URLs, schedules, AWS's events ([ADR 0007](adr/0007-function-events.md)); the [step-2 plan](step-2-plan.md): the S3 front door and its signature check ([ADR 0009](adr/0009-buckets.md)), the account's access keys and functions' own; the [step-3 plan](step-3-plan.md): the SQS endpoint, calls that don't wait and their settings, event source mappings, bucket notifications ([ADR 0010](adr/0010-queue.md)); the step-4 plan: the SES endpoint, whose paths are signed escaped twice ([ADR 0012](adr/0012-customer-mail.md)), deploy keys that expire, and the export kit's pages for sites, mail and caches |
+| **Decision records** | ADR 0014 (Lambda's API: its front door, its signatures and keys, which operations), ADR 0015 (versions and aliases: how a version runs), ADR 0016 (SAM templates on FF: where a template is read, and what a stack keeps), each from X-01's spikes |
+
+Task numbers start with X, for *exit*. The CLI plan keeps its own numbers: its C-30 (`ff deploy` from a SAM template), C-32 (`ff export`) and C-33 (`ff doctor`) are this plan's command-line parts.
+
+## 1. Where FF stands
+
+Checked against the code on 2026-10-30, at the end of step 4 (`feat/step-4`, through W-09).
+
+| Finding | Where | Consequence |
+|---|---|---|
+| **FF's functions API is its own: Lambda's words, not Lambda's shape.** `/functions/:id` by UUID; camelCase fields (`name`, `runtime` `nodejs` or `python`, `code` or `codeSha256`, `handler`, `memory`, `timeout`, `environment`, `secrets`, `eventFormat`); no description, tags, role or architecture. A create answers once an instance runs the code, an update once the new version is live, a failed one rolled back. A function's failure answers as an HTTP error. | `BE/src/functions/functions.controller.ts`, `functions.service.ts`, `dto/create-function.dto.ts`, `entities/function.entity.ts` | Lambda's API is a second way in over the same service, as the SQS endpoint is over SQS's operations (D1). Its answers differ: at once, with a `State` (D6); a function's error inside a 200 (D8). |
+| **Most of Lambda's settings exist under FF's names:** calls that don't wait (`X-Amz-Invocation-Type`, `Event` 202, `DryRun` 204), their retries and destinations, event source mappings in Lambda's names, function URLs (`NONE`, `AWS_IAM`, CORS, `BUFFERED`), schedules in EventBridge's expressions, and `minInstances` and `maxInstances`. | `BE/src/functions/event-invoke-config.controller.ts`, `async-invocations.service.ts`; `BE/src/event-sources/`; `BE/src/function-urls/function-urls.controller.ts`; `BE/src/schedules/`; `BE/src/functions/dto/update-scaling-config.dto.ts` | Most of D2's operations translate what is built. New: versions, aliases, permissions, tags, concurrency's names, and a way to download a function's code. |
+| **One live version per function.** One Deployment and one Service, `fn-<id>`; `FUNCTION_VERSION` is always `$LATEST`; an ARN is read with `$LATEST` or nothing after it. The runtimes already print a call's version from `FUNCTION_VERSION` in its `START` line. | `BE/src/orchestrator/kubernetes/manifests.ts` (`deploymentManifest`), `naming.ts`, `BE/src/functions/arns.ts`; `runtimes/nodejs/src/main.ts`, `runtimes/python/ff_runtime/protocol.py` | A version runs in pods of its own, and every way into a function learns a qualifier (D9). |
+| **Code is already immutable and shared.** A package per account, named by its zip's SHA-256 in base64, as Lambda's `CodeSha256` (which Terraform's `source_code_hash` compares); one code image per package, kept while a function names it; unused packages purged after an hour. | `BE/src/packages/package.entity.ts`, `packages.service.ts` (the purge's `NAMED`); [ADR 0003](adr/0003-code-delivery.md) | A version is a row that names a package. The purge must count versions. The account's code storage is the packages it names (D9, D14). |
+| **A function has one environment,** sealed, written into two Secrets used in turn during a rollout. | `BE/src/functions/environment.store.ts`, `BE/src/orchestrator/kubernetes/naming.ts` | A version keeps a sealed copy of its own, as Lambda freezes a version's variables (D9). |
+| **Three signature checks:** S3's (header and presigned, streaming chunks, the path as S3 signs it), SQS's (the body's hash), SES's (each path segment escaped twice, as every service but S3). Each refuses a session token. | `BE/src/storage/sigv4.ts`, `BE/src/queues/sqs-signature.ts`, `BE/src/email/ses-signature.ts` (`canonicalUriTwice`) | Lambda's paths carry ARNs with colons, signed escaped twice: SES's rule, for the service `lambda`. One module for all four (D3). |
+| **Access keys reach buckets, queues and mail, never functions.** `AKFF…` IDs; the secret sealed, so that a signature can be checked; all or named buckets and queues; read-only or not; two per account, owners only. FF's API keys (`ffk_…`) keep only their secret's SHA-256, so they can't check a signature. | `BE/src/storage/storage-key.entity.ts`, `key-reach.ts`, `storage-keys.service.ts` (`MAX_ACCOUNT_KEYS`), `storage-keys.controller.ts`; `BE/src/api-keys/api-key-format.ts`; [ADR 0004](adr/0004-identity-and-tenancy.md) §3 | Access keys gain functions, with levels (D4). |
+| **Two promises wait for this step.** A function's own key works until the function is deleted: "short-lived ones, as AWS gives, come with step 5" ([decision 10](decisions.md)). An `AWS_IAM` function URL takes an FF API key "until FF checks AWS's signatures" (decision 16). Deploy keys already expire after an hour. | `BE/src/storage/function-keys.service.ts`; `BE/src/function-urls/function-url.gateway.ts` (`callerOf`); `storage-keys.service.ts` (`DEPLOY_KEY_MS`) | Functions' keys expire (D5); `AWS_IAM` URLs take AWS's signature (D3). |
+| **Five front doors, each a port of the backend's own** behind the edge's named hosts: function URLs 3001, S3 3002, SQS 3003, sites 3004, SES 3005. Functions reach S3, SQS and SES at `ff-storage`'s fixed address, with endpoints FF sets. | `BE/src/main.ts`, `BE/src/config/configuration.ts`, `deploy/k8s/platform/edge/Caddyfile`, `deploy/k8s/platform/10-backend.yaml`, `deploy/k8s/README.md`, `deploy/dev-server/ff.caddy` (its seven fixed names) | Lambda's API is the sixth, on 3006 at `lambda.<domain>` (D1); one DNS record more on the development server. |
+| **A function can't send one service to AWS and keep FF's others.** `AWS_ENDPOINT_URL_S3`, `_SQS` and `_SESV2`, and the key's variables, are FF's to set: reserved. | `BE/src/functions/environment.ts` (`ENDPOINTS_RESERVED`, `LAMBDA_RESERVED`) | A switch per function, so that a move can go one service at a time, as the parent plan's §7.2 says (D12). |
+| **AWS's reads beyond what FF offers fail.** At the S3 front door, a bucket's tags, policy, ACL, CORS, versioning, encryption and lifecycle answer `NotImplemented`. At the SQS endpoint, tags and permissions answer `UnsupportedOperation`, and a queue made with tags is refused. | `BE/src/storage/s3-requests.ts` (`operationOf`), `BE/src/queues/sqs-operations.ts` (`NOT_OFFERED`) | Terraform's provider reads these after each change: they get answers, and tags are kept (D10). |
+| **No template, no stack.** `ff init` writes a handler, `events/event.json` and a README; `ff deploy` takes a file or a folder, with flags; nothing reads a `template.yaml` (the CLI plan's C-30, planned). `ff package` writes Lambda's zip; `--compile` turns TypeScript into JavaScript, which Lambda's Node.js runtime needs, while FF's runs a `.ts` handler itself. | `cli/src/commands/init.rs`, `deploy.rs`, `package.rs`, `cli/src/cli.rs`; `runtimes/nodejs/README.md`; the CLI plan's C-30 | SAM's subset in `ff deploy` (D11); an export turns inline TypeScript into JavaScript (D12). |
+| **The export kit is five pages and a script, and no command:** databases, buckets (`s3-sync.sh`), queues, sites, mail and caches. The guide says `ff export` "will put" them in its kit. Nothing yet for functions themselves, no runbook, and no way to download a function's code (C-32 named `GET /functions/:id/code`). | `cli/templates/export/data/`; `docs/getting-started.md`; the CLI plan's C-32 and C-33 | `ff export` collects them, with a page for functions, the code and a runbook (D12). |
+| **AWS's prices are in every price book already:** AWS's US$ prices and the rate used (`source.usdPrices`, `usdRate`), checked SKU by SKU. Usage is kept by month for functions (each call's cold start too), databases, buckets, queues, caches and mail. AWS also bills what FF doesn't: databases' and caches' instances, data sent out (decision 12), logs, cold starts. | `BE/src/billing/price-book.ts` (`awsPriceProblems`); `BE/src/usage/usage.service.ts`, `usage-estimate.ts`, `usage-record.entity.ts` (`initMs`) | The estimate is a rating with the US$ prices, plus lines for what FF doesn't bill (D13). |
+| **Limits and rates follow one recipe.** Changes count against the plan's `writesPerMinute` (60 on beta); reads are free. | `BE/src/plans/plan-limits.ts`, `BE/src/plans/rate-limits.ts` | Two new limits (D14); Terraform's parallel changes may meet the rate (§8). |
+| **The tests already drive AWS's clients:** the AWS CLI, AWS's SDK for JavaScript and boto3, in L4 and in the CLI's suite. Nothing uses Terraform, OpenTofu or the SAM CLI. The small app is set up by about twenty `ff` commands. | `hack/e2e.sh`, `hack/cli-e2e.sh`, `hack/lib/s3-clients/`, `hack/lib/sqs-clients/`, `hack/install-tools.sh`; `examples/orders-app/README.md` | X-01 brings the three tools, pinned; the small app becomes one template (X-15). |
+
+## 2. Goals and non-goals
+
+**Goals:**
+
+1. **AWS's tools against FF:** what the AWS CLI, AWS's SDK for JavaScript v3 and boto3 call to make, change, call and delete functions, with only the endpoint changed (`AWS_ENDPOINT_URL_LAMBDA`, or a profile's `services` section), signed with Signature Version 4 by one of the account's access keys; Lambda's answers and errors in Lambda's shapes.
+2. **Versions and aliases:** publish a version, point `prod` at it, send a share of the calls to the next one, roll back by pointing it back. Through FF's API, the console, `ff` and Lambda's API.
+3. **Terraform:** a tested provider block and reference modules for functions, queues and buckets. `apply`, then a second `plan` with nothing to change, then `destroy`, with OpenTofu and with Terraform's CLI.
+4. **One SAM template:** `ff deploy` reads a `template.yaml` with its functions, their URLs, schedules, queues, buckets and events; `sam deploy` takes the same file on AWS.
+5. **The export kit:** `ff export` writes a SAM template, Terraform files, the code, the data pages and scripts, the secrets' names and a runbook, for the account's own resources, and prices its last three months at AWS's list; `ff doctor` lists what still points at FF, in a project and in the account.
+6. **Functions' keys that expire,** as a Lambda role's credentials do, and functions that call other functions through Lambda's API.
+
+**Non-goals:** CloudFormation's API, so `sam deploy` against FF itself, and IAM's policy language (What to build next §11); an STS of FF's; API Gateway, and SAM's `Api` events with it; EventBridge's APIs (unless §9, 11 says otherwise); RDS's and ElastiCache's APIs: databases and caches stay `ff db` and `ff caches`; Lambda's layers, container images, response streaming, SnapStart, code signing, VPCs, event filtering, and event sources other than SQS; provisioned concurrency on an alias; AWS's additions of 2025 and 2026 (durable functions, Managed Instances, tenant isolation); the conformance suite against AWS's emulator and real Lambda (the parent plan's §6.10), beyond what L4 checks; exports to other clouds (`--target container`, the parent plan's §7.6); moving the customer's data for them: the kit says how, the customer runs it.
+
+## 3. Decisions
+
+Proposed; §9 lists the choices to confirm.
+
+### D1. Lambda's API: the backend's sixth front door
+- A server of the backend's own, on a port of its own (`FF_LAMBDA_PORT`, 3006), at `https://lambda.<domain>` behind the edge, and inside the cluster at `ff-storage`'s fixed address, where functions reach it with their key and `AWS_ENDPOINT_URL_LAMBDA`.
+- Lambda's REST API in JSON, at the dated paths AWS documents for each operation (`/2015-03-31/functions/…`, `/2017-03-31/tags/…`, `/2019-09-25/…/event-invoke-config`, `/2021-10-31/…/url`). A function is named by its name, its ARN or its partial ARN, with `:version` or `:alias` after it. Each answer carries `x-amzn-RequestId`; each refusal comes in Lambda's error shape, its type in `x-amzn-ErrorType`. Another account's function answers as a missing one, as everywhere in FF.
+- A translation over FF's own services, as the SQS endpoint is over SQS's operations: functions, calls that don't wait, mappings, URLs, async settings. Nothing about a function differs by the way it came; the audit log names the access key.
+- A client sets one endpoint: `AWS_ENDPOINT_URL_LAMBDA`, `--endpoint-url`, or a profile's `services` section with FF's endpoints (the parent plan's §6.6).
+- **Why:** every AWS service FF speaks is a port of the backend's own behind the edge (S3, SQS, sites, SES), where the checks of keys, plans and credit already live. A service of its own can come later from the same code, as the website server can.
+- **AWS's names:** the Lambda API reference's operations and paths; `AWS_ENDPOINT_URL_LAMBDA`; `x-amzn-RequestId`, `x-amzn-ErrorType`; `ResourceNotFoundException`.
+
+### D2. Lambda's operations: 41 first, the others refused saying they come later
+- **First,** what the AWS CLI, AWS's SDKs, Terraform's provider and SAM's resources call, as the parent plan's §6.6 lists it and X-01's spike will confirm:
+  - functions: `CreateFunction`, `GetFunction`, `GetFunctionConfiguration`, `ListFunctions`, `UpdateFunctionCode`, `UpdateFunctionConfiguration`, `DeleteFunction`, and `GetFunctionCodeSigningConfig`, which answers that there is none (Terraform's provider reads it);
+  - `Invoke`;
+  - versions and aliases: `PublishVersion`, `ListVersionsByFunction`, `CreateAlias`, `GetAlias`, `UpdateAlias`, `DeleteAlias`, `ListAliases`;
+  - function URLs: `CreateFunctionUrlConfig`, `GetFunctionUrlConfig`, `UpdateFunctionUrlConfig`, `DeleteFunctionUrlConfig`, `ListFunctionUrlConfigs`;
+  - event source mappings, for SQS: `CreateEventSourceMapping`, `GetEventSourceMapping`, `UpdateEventSourceMapping`, `DeleteEventSourceMapping`, `ListEventSourceMappings`;
+  - async settings: `PutFunctionEventInvokeConfig`, `UpdateFunctionEventInvokeConfig`, `GetFunctionEventInvokeConfig`, `DeleteFunctionEventInvokeConfig`, `ListFunctionEventInvokeConfigs`;
+  - permissions: `AddPermission`, `RemovePermission`, `GetPolicy`;
+  - concurrency: `PutFunctionConcurrency`, `GetFunctionConcurrency`, `DeleteFunctionConcurrency`;
+  - tags: `TagResource`, `UntagResource`, `ListTags`;
+  - `GetAccountSettings`.
+- **Later,** each answering 400 in Lambda's shape, naming the operation and saying FF doesn't offer it yet, which no client retries: layers; provisioned concurrency; `InvokeWithResponseStream`; `InvokeAsync`, which AWS deprecated; code signing's own operations; runtime management; recursion settings; event sources other than SQS, and event filtering; AWS's additions of 2025 and 2026.
+- **Why:** Lambda's API is about 70 operations. The subset is what the tools call, as S3's, SQS's and SES's front doors began with theirs (§9, 2).
+- **AWS's names:** those of the Lambda API reference, each at its own dated path (§5).
+
+### D3. One signature check for every AWS API
+- Signature Version 4 read and checked by one module for every front door. Each front door tells it three things: its service's name (`s3`, `sqs`, `ses`, `lambda`); how its paths are signed (S3's way, or each segment escaped twice, as every other service: a colon of an ARN, `%3A` on the wire, is signed `%253A`); and its error words. S3's presigned URLs and streaming chunks stay its own, on top.
+- Checked against AWS's published Signature Version 4 test suite. The three readers of today move onto it, their tests passing as they are.
+- An `AWS_IAM` function URL also takes a request signed for `lambda` by a key that may invoke the function, as Lambda checks one; an FF API key still works there, as decision 16 said.
+- **Why:** three copies today, and Lambda's paths need SES's rule: one place for the check that matters most.
+- **AWS's names:** Signature Version 4, `AWS4-HMAC-SHA256`, the credential scope `<day>/<region>/lambda/aws4_request`, `X-Amz-Date`; function URLs' `AWS_IAM`.
+
+### D4. Access keys that reach functions
+- The account's access keys (`AKFF…`, today's storage keys) may name the functions they reach, or all of them, with one of three levels, close to how IAM groups Lambda's actions: **read** (Lambda's List and Read actions), **invoke** (those, and `lambda:InvokeFunction`, so an `AWS_IAM` URL too), **write** (every operation). Their buckets, queues and mail stay as they are.
+- A key made before this step reaches no function until it is given some: no key gains a right it didn't have (§9, 5).
+- Each key gets a name, as an IAM user has one, and an account may have more than two (§9, 14). They stay the owners' to make and revoke.
+- A function's own key may invoke its account's functions, as a role allowed `lambda:InvokeFunction`; it changes none.
+- The console's access keys get a page of their own, each key with what it reaches; `ff keys create|list|revoke`, with `ff buckets keys` as another name for it.
+- **Why:** AWS's tools sign with an access key. FF's API keys keep only a hash of their secret, so they can't check a signature. IAM's policy language is one of the things What to build next §11 leaves out.
+- **AWS's names:** IAM's access keys and access levels; `lambda:InvokeFunction`, `lambda:GetFunction`, `lambda:ListFunctions`.
+
+### D5. Functions' keys that expire (E-07)
+- A function's own key works 12 hours, as a role's session can last. At half its life the backend writes a new one into the function's environment Secret and replaces its pods one at a time, each new pod ready before an old one goes, so that no call is lost. A function scaled to zero starts with a fresh key. A key copied out of a function stops working within 12 hours; a deleted function's at once, as today.
+- The same variables as today (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, the region, FF's endpoints), with `AWS_ENDPOINT_URL_LAMBDA` beside them, reserved like the others. No `AWS_SESSION_TOKEN`: an expiry alone protects as much, and no front door has to learn tokens (§9, 6).
+- An expired key is refused saying it expired, in each service's words.
+- **Why:** decision 10's promise. A key in an environment is the secret most likely to leak (a log line, a dump). FF's pods can live for days (`minInstances`), where Lambda recycles its environments: so FF replaces its pods.
+- **AWS's names:** Lambda's execution role and its temporary credentials; STS's sessions, up to 12 hours.
+
+### D6. Changes answered at once, as Lambda answers them
+- On Lambda's API, `CreateFunction` answers at once with `State: Pending`, and `UpdateFunctionCode` and `UpdateFunctionConfiguration` with `LastUpdateStatus: InProgress`. FF's rollout goes on after the answer, as today: a real instance checked, a failure rolled back. `GetFunction` then says `Active`, or `Failed` with its `StateReason`; and `Successful`, or `Failed` with its `LastUpdateStatusReason`, the previous version still live. The tools' waiters (`aws lambda wait function-active-v2`, `function-updated-v2`, Terraform's) ask until then.
+- A second change while one rolls out is refused with `ResourceConflictException`, as Lambda refuses it. `RevisionId` is taken as Lambda takes it: a change that names an older one is refused with `PreconditionFailedException`.
+- A rollout that a stopped backend left half done is undone at the next start: the record's version applied again, the change `Failed`, saying why.
+- FF's own API and the console keep answering once the change is live (§9, 3).
+- **Why:** the tools are built for it; the AWS CLI and boto3 wait 60 seconds for an answer; and the record and the Deployment keep describing the same version.
+- **AWS's names:** `State` (`Pending`, `Active`, `Failed`), `StateReasonCode`, `LastUpdateStatus` (`InProgress`, `Successful`, `Failed`), `RevisionId`, `ResourceConflictException`, `PreconditionFailedException`; the waiters `FunctionActiveV2` and `FunctionUpdatedV2`.
+
+### D7. Lambda's settings: kept, mapped onto FF's, or refused
+- **Kept as given:** `Role`, any IAM role's ARN of the right shape, shown back (FF has no IAM: the function's own key stands for its role); `Description`; `Tags`, on functions, queues and buckets (D10); `TracingConfig` `PassThrough`; `LoggingConfig` `Text`, its log group `/aws/lambda/<name>`.
+- **Mapped onto FF's:**
+  - `Runtime` `nodejs24.x` and `python3.13`, FF's two runtimes; any other name is refused, naming the two (§9, 4).
+  - `Code.ZipFile` (base64 in the request, 50 MB zipped, Lambda's limit for a direct upload), or `Code.S3Bucket` and `S3Key`, a bucket of the account that the key reaches: stored as FF's packages are, its `CodeSha256` the zip's. `GetFunction`'s `Code.Location` is a link of FF's to the zip, good for 10 minutes, as Lambda's.
+  - `ReservedConcurrentExecutions` onto `maxInstances`; 0 stops every call, as on Lambda. A function at FF's default reads as no reservation, so that Terraform's default sees nothing to change.
+  - `DeadLetterConfig` with a queue of the account: a call that fails for good sends its event there, beside its destination's record.
+  - `Environment.Variables` onto the function's variables. Its secrets stay apart, untouched and never shown.
+  - `Architectures` `x86_64` alone; `EphemeralStorage` 512 MB, FF's `/tmp`.
+- **Refused, saying why:** `VpcConfig` (FF needs none: a function reaches its account's services without one), `Layers`, `KMSKeyArn` (FF seals with its own keys), `FileSystemConfigs`, `ImageUri` and `PackageType: Image`, `SnapStart`, `CodeSigningConfigArn`, `TracingConfig` `Active` (X-Ray, the parent plan's §6.9), `S3ObjectVersion` (FF keeps no object versions).
+- **Permissions:** `AddPermission`, `RemovePermission`, `GetPolicy`: each statement kept as sent and given back, not enforced (§9, 8).
+- **The account:** `GetAccountSettings` from the plan's limits and what the account uses.
+- **Why:** each field means the same on FF, or is refused aloud. Nothing that would change what runs is silently ignored. Only the role and the permissions are kept without effect, because FF's keys and URLs decide instead, and that is said everywhere.
+- **AWS's names:** the fields above, as `CreateFunction` and `UpdateFunctionConfiguration` name them; `InvalidParameterValueException`.
+
+### D8. Invoke, as Lambda's
+- `RequestResponse` answers 200 with the function's answer as it returned it. A function that threw or timed out answers 200 too, with `X-Amz-Function-Error: Unhandled` and Lambda's error document, as Lambda does. `X-Amz-Executed-Version` says the version that ran. With `X-Amz-Log-Type: Tail`, `X-Amz-Log-Result` holds the call's last 4 KB of output, in base64: the runtimes give it back with their answer, a small change of their protocol, since the log store sees lines about 5 seconds late.
+- `Event` 202 and `DryRun` 204, as FF's API answers them already; `X-Amz-Client-Context` reaches the function's context, as Lambda's `clientContext`.
+- Refusals: `RequestTooLargeException` (413) past 6 MB, or 1 MB for `Event`; `TooManyRequestsException` (429) when no instance is free or past the plan's rate, with its `Reason`; without credit, 429 too, its message saying the account's credit ran out (the parent plan's §6.9); a function not yet `Active`, refused as Lambda refuses one, its state named.
+- **Why:** callers on AWS read these headers (the SDKs' `FunctionError` and `LogResult`). On Lambda, a function's error is the call's outcome, not an HTTP error.
+- **AWS's names:** `Invoke`, `InvocationType`, `LogType`, `ClientContext`, `Qualifier`, `X-Amz-Function-Error`, `X-Amz-Log-Result`, `X-Amz-Executed-Version`, `TooManyRequestsException`, `RequestTooLargeException`.
+
+### D9. Versions and aliases (R-01)
+- **Publishing** (`PublishVersion`, FF's `POST /functions/:id/versions`, `ff publish`) makes version 1, 2, 3… of a function, never reused, frozen: its package (its code image, by digest), runtime, handler, memory, timeout, event format, description, and its variables and secrets as they were, sealed as the function's are. `CodeSha256` and `RevisionId` are checked when given, as Lambda checks them. When nothing changed since the last version, publishing answers with that version, as Lambda does.
+- **Each version that is called runs in pods of its own:** a Deployment `fn-<id>-v<n>`, made at its first call and scaled to zero when idle, as `$LATEST`'s is. The runtime is told its number (`FUNCTION_VERSION`, which it already reads), so its log lines say `Version: 3`. A function's instances are counted together, across its versions, against its `maxInstances` and the plan (§9, 7).
+- **An alias** (`CreateAlias`, `ff alias set prod 3`) names a version, or `$LATEST`, and at most one other version with a share of the calls, as Lambda's. Moving it back is a rollback.
+- **A version or an alias can be named wherever a function is:** an invoke (`Qualifier`, `ff invoke shop:prod`), a function URL (one per alias, as Lambda's `Qualifier`), an event source mapping, a destination, a schedule, a bucket's notification. The history and the metrics say which version ran each call, and the alias it came through.
+- A version is deleted only when no alias names it, as on Lambda. Deleting the function deletes its versions and aliases. The packages that versions name are kept, and count against the account's code storage (D14).
+- Warm instances (`minInstances`) stay `$LATEST`'s in this step; on an alias, as Lambda's provisioned concurrency, later.
+- **Why:** staging and safe deploys. SAM's `AutoPublishAlias` and Terraform's `aws_lambda_alias` need them. Code is already one image per package (ADR 0003), so a version costs a row until it is called.
+- **AWS's names:** `$LATEST`, `PublishVersion`, `ListVersionsByFunction`, `CreateAlias`, `UpdateAlias`, `RoutingConfig.AdditionalVersionWeights`, `Qualifier`, qualified ARNs (`…:function:shop:prod`), CloudWatch's `ExecutedVersion` and `Resource` dimensions.
+
+### D10. Terraform against FF (E-08)
+- **A provider block, tested and documented:** the AWS provider with FF's region (`tn-tunis-1`); `endpoints` for `lambda`, `s3`, `sqs` and `sesv2`; `s3_use_path_style`; and `skip_credentials_validation`, `skip_requesting_account_id`, `skip_metadata_api_check` and `skip_region_validation`, since FF has no STS or IAM (the parent plan's §6.6). Moving to AWS removes those lines and sets an AWS region.
+- **What the provider reads after each change gets an answer.** A bucket's policy, ACL, CORS, versioning, encryption, lifecycle and the rest are answered as S3 answers when there is none, where the provider doesn't accept `NotImplemented`. Tags are kept on functions, queues and buckets (`TagResource`, `TagQueue`, `PutBucketTagging`, 50 a resource, as AWS's), where today tags are refused. X-01 lists exactly which reads.
+- **Four reference modules,** written to apply on FF and, with only the provider changed, on AWS: a function (its code, URL, alias and async settings); a queue worker (a queue, its dead-letter queue, a function reading it); a bucket that runs a function (its notification and permission); a site (a bucket with its website configuration). A function's role is the module's input: on FF any role ARN, on AWS one the module makes.
+- **Shipped inside `ff`,** as the export kit's pages are: `ff init --template terraform` writes the provider block and the modules into a project. No registry is needed while FF's repository is private (the CLI plan's question 3).
+- **Tested with OpenTofu,** the parent plan's default (MPL), **and Terraform's CLI**, both with the AWS provider (MPL), pinned: `apply`, a second `plan` with nothing to change, `destroy`, in L4.
+- Schedules stay `ff schedule` and SAM's events: EventBridge Scheduler's API later (§9, 11). Databases and caches stay `ff db` and `ff caches`: RDS's and ElastiCache's APIs are another size of work.
+- **Why:** many teams keep their infrastructure as Terraform. A plan that shows changes when nothing changed is broken for them: hence the reads and the tags.
+- **AWS's names:** `aws_lambda_function`, `aws_lambda_function_url`, `aws_lambda_alias`, `aws_lambda_permission`, `aws_lambda_event_source_mapping`, `aws_lambda_function_event_invoke_config`, `aws_sqs_queue`, `aws_s3_bucket`, `aws_s3_bucket_notification`, `aws_s3_bucket_website_configuration`, `aws_s3_object`.
+
+### D11. One SAM template, deployed by `ff` (C-30, E-10)
+- **`ff deploy` in a folder with a `template.yaml`** (or `--template`, `sam build`'s `.aws-sam/build/template.yaml` too) reads it, builds each function's code as `ff package` does, and makes or changes what it declares, in order, through FF's API. Its **stack**, named by `--stack-name` or `samconfig.toml`, keeps in FF which resources the template made: the next deploy changes them, and removes what the template no longer has, after asking (§9, 9). `ff delete-stack`, as `sam delete`. The console and `ff get` say when a function belongs to a stack.
+- **The subset,** each piece meaning what it means to SAM: `Globals`; `Parameters`, with `--parameter-overrides`; `!Ref`, `!GetAtt`, `!Sub`, `!Join`, and the pseudo parameters (`AWS::Region`, `AWS::AccountId`, `AWS::StackName`) as FF's; `AWS::Serverless::Function` with `CodeUri`, `Handler`, `Runtime`, `MemorySize`, `Timeout`, `Description`, `Environment`, `Tags`, `ReservedConcurrentExecutions`, `FunctionUrlConfig`, `AutoPublishAlias`, `EventInvokeConfig`, `DeadLetterQueue`, and `Events` of the types `Schedule`, `ScheduleV2`, `SQS`, `S3` and `HttpApi` (§9, 10); `AWS::SQS::Queue`; `AWS::S3::Bucket`, with its notifications and its website; `AWS::Lambda::Permission`; `Outputs`, printed. `Policies` are read and left for AWS: on FF a function's key reaches its account.
+- **Anything else fails before any change,** in one message listing every resource and key outside the subset, as the CLI plan's C-30 says (`Conditions` among them, for now).
+- `!Ref` of a queue in a function's environment gives the URL that functions reach inside the cluster, so that AWS's SDK for JavaScript, which sends to the URL's host, keeps working ([ADR 0010](adr/0010-queue.md)).
+- FF's secrets stay out of templates: set them with `ff secrets` or `ff db create --secret-for`. A template variable with a secret's name is refused.
+- `ff init --template sam` makes `sam init`'s layout.
+- **Why:** the parent plan's ADR-009: one file, the customer's, which `sam deploy` takes as it is on AWS. FF builds no CloudFormation (What to build next §11).
+- **AWS's names:** `Transform: AWS::Serverless-2016-10-31` and the resources and properties above; `sam build`, `sam deploy`, `sam delete`, `samconfig.toml`, `--parameter-overrides`.
+
+### D12. The export kit, and `ff doctor` (E-09, C-32, C-33)
+- **`ff export`** writes a folder, for the account or the functions named:
+  - `template.yaml`, SAM: the functions with their URLs, schedules, mappings, async settings and aliases; the queues; the buckets with their notifications and sites;
+  - `terraform/`, the same for AWS's provider, with IAM roles;
+  - `code/<function>.zip`, through FF's new `GET /functions/:id/code`; inline TypeScript turned into JavaScript, which Lambda's Node.js runtime needs;
+  - `data/`: the pages written since step 2 for what the account has, its names filled in, and a new `lambda.md` for functions, their URLs and custom domains, schedules, aliases and keys;
+  - `secrets.template.env`: names only, never a value;
+  - `MIGRATION.md`: the parent plan's runbook (§7.5), with the account's own resources, in the order that works: the data first, then the queues, then the functions;
+  - `cost-estimate.md` (D13).
+- **Roles from what each function used:** the front doors note, a day at a time, which buckets, queues and mail each key touched, and whether it read or wrote. Each function's role in the export grants those alone, through SAM's policy templates: least privilege, as the parent plan's §7.1 asks.
+- **One service at a time:** FF's endpoints can be turned off for a function, one service at a time (`awsEndpoints`), so that it reaches AWS's S3 with an AWS key kept as a secret while FF still serves its queues (the parent plan's §7.2). Today they are always set, and reserved.
+- **Versions:** the export writes `$LATEST`, and the aliases that name it, as `AutoPublishAlias`. Aliases of older versions are listed in `MIGRATION.md`: AWS numbers versions anew.
+- **`ff doctor`** checks a project, each finding with its file and line (the CLI plan's C-33): FF's variables and hosts in the code, `ffk_` keys, `event.body` of FF's original event, writes outside `/tmp`, `.ts` handlers, Lambda's limits, a template outside the subset. With `--account`, it lists what still points at FF: functions given FF's endpoints, URLs called with FF's API keys, custom domains to move to CloudFront, warm instances that AWS bills as provisioned concurrency, keys still in use. `--strict` makes warnings fail.
+- **Why:** the kit is the promise itself: a customer can see the door before needing it. Most of its pieces exist; this writes them out for one account.
+- **AWS's names:** SAM, Terraform's AWS provider, IAM roles, SAM's policy templates (`S3ReadPolicy`, `S3CrudPolicy`, `SQSPollerPolicy`, `SQSSendMessagePolicy`), CloudFormation's `NoEcho` parameters.
+
+### D13. A cost estimate at AWS's prices (E-09)
+- `GET /usage/aws-estimate?months=3`, `ff usage --aws`, the console's Usage page and the export's `cost-estimate.md`: each of the last three months' counted usage (calls and GB-seconds, databases' and buckets' GB-months, S3's and SQS's requests, caches' hours, mail), priced at the AWS US$ prices the price book records, with the free tiers AWS gives every account every month; in US$, and in dinars at the book's rate; beside what FF billed.
+- **With what AWS bills that FF doesn't,** each line with its assumption, and each one the customer can leave out (§9, 12): an RDS instance for each database (the smallest, in one zone); an ElastiCache node for each cache; cold starts (AWS bills Lambda's start-up time since August 2025; FF doesn't); the data sent out (FF counts it, decision 12); CloudWatch Logs; CloudFront for sites; a NAT gateway when functions in a VPC reach the internet.
+- These extra prices sit in each book beside AWS's others, with the date they were read, checked the same way; the admin app edits them.
+- Called an estimate everywhere, with the date of AWS's prices.
+- **Why:** the parent plan's §7.3: an honest budget for after the move, and FF's own value shown beside it.
+- **AWS's names:** Lambda's requests and GB-seconds, and its INIT phase; RDS's `db.t4g.micro`; ElastiCache's `cache.t4g.micro`; CloudWatch Logs; CloudFront; NAT Gateway; the AWS Free Tier.
+
+### D14. Plans, usage, metrics and suspension
+- **New limits,** each in the plan's schema, the admin app, the console and `ff account`, as every limit: `codeStorageMb`, the packages an account's functions and versions name (5 GB on beta, as Lambda's 75 GB a region; past it, a publish or an upload is refused with `CodeStorageExceededException`); `accessKeys` (10 on beta). No count of versions, aliases or stacks: they cost rows (§9, 14).
+- Lambda's API counts as FF's API does: changes against `writesPerMinute`, calls against `invokesPerSecond`, reads free. Nothing is billed for the API, as on AWS; a call is billed as any call, whatever its version.
+- **Metrics** by version and alias, as CloudWatch's dimensions; an alarm may name an alias.
+- **Suspended:** Lambda's endpoint refuses the account's keys, as the other front doors do. **Without credit:** changes go on, calls are refused, as today. **Closed:** versions, aliases, stacks and keys go with the account's data.
+- **The audit log:** `function.publish`, `alias.*`, `stack.*`; a change made with an SDK, under its access key.
+- **Why:** What to build next §10: limits, a bill, an admin page, metrics and alarms, for every service.
+- **AWS's names:** `CodeStorageExceededException`; `GetAccountSettings`'s `TotalCodeSize`; CloudWatch's `ExecutedVersion` and `Resource`.
+
+## 4. Data model
+
+Proposed, each table with `account_id`:
+
+- `functions`: `description`, `role` (as given), `revision_id`, `update_status` and `update_reason` (`InProgress`, `Successful`, `Failed`), `dead_letter_queue` (a queue's ARN), `aws_endpoints` (the services FF gives its endpoint for).
+- `function_versions`: the function, the version's number, its package's SHA-256, runtime, handler, memory, timeout, event format, description, `code_sha256`, `revision_id`, its environment sealed (variables and secrets as published), when it was published.
+- `function_aliases`: the function, the alias's name, its version (or `$LATEST`), one more version and its share, description, `revision_id`.
+- `function_policies`: the function and its qualifier, each statement's ID and the statement as sent.
+- `resource_tags`: a function's, a queue's or a bucket's tags, each key and value.
+- `function_urls`, `event_source_mappings`, `function_event_invoke_configs`, `schedules` and buckets' notifications: the qualifier they name (a version or an alias), none for `$LATEST`.
+- `function_invocations`: the version that ran, and the alias it came through.
+- `storage_keys` (the access keys): `name`, `functions` (names, or none named), `function_access` (`read`, `invoke`, `write`); a function's own key's `expires_at`, 12 hours after it was made.
+- `key_uses`: by key, day, resource (a bucket, a queue or the mail) and access (read or write): what the export's roles grant.
+- `stacks`: its name, its template's SHA-256, its parameters, its last deploy and who made it; `stack_resources`: each logical ID, its type, and the FF resource it made.
+- Price books: `source.usdPrices` gains the estimate's extra lines (D13). Plans: `codeStorageMb` and `accessKeys`.
+
+## 5. API changes
+
+Proposed:
+
+- **Lambda's endpoint** on `FF_LAMBDA_PORT`, at `FF_LAMBDA_BASE`, D2's operations at Lambda's own paths:
+  - functions: `POST /2015-03-31/functions`, `GET /2015-03-31/functions/`, `GET` and `DELETE /2015-03-31/functions/{name}`, `GET` and `PUT …/{name}/configuration`, `PUT …/{name}/code`, `GET /2020-06-30/functions/{name}/code-signing-config`;
+  - `POST /2015-03-31/functions/{name}/invocations`;
+  - `GET` and `POST …/{name}/versions`; `GET` and `POST …/{name}/aliases`; `GET`, `PUT` and `DELETE …/{name}/aliases/{alias}`;
+  - `POST`, `GET`, `PUT` and `DELETE /2021-10-31/functions/{name}/url`; `GET …/{name}/urls`;
+  - `POST` and `GET /2015-03-31/event-source-mappings/`; `GET`, `PUT` and `DELETE …/event-source-mappings/{uuid}`;
+  - `PUT`, `POST`, `GET` and `DELETE /2019-09-25/functions/{name}/event-invoke-config`; `GET …/event-invoke-config/list`;
+  - `POST` and `GET /2015-03-31/functions/{name}/policy`; `DELETE …/policy/{statementId}`;
+  - `PUT` and `DELETE /2017-10-31/functions/{name}/concurrency`; `GET /2019-09-30/functions/{name}/concurrency`;
+  - `POST`, `GET` and `DELETE /2017-03-31/tags/{arn}`;
+  - `GET /2016-08-19/account-settings/`;
+  - and the code's link, `GET /code/{token}`, unsigned, 10 minutes.
+- **FF's API:**
+  - `GET` and `POST /functions/:id/versions`; `GET` and `DELETE /functions/:id/versions/:version`;
+  - `GET` and `POST /functions/:id/aliases`; `GET`, `PUT` and `DELETE /functions/:id/aliases/:name`;
+  - a qualifier on `POST /functions/:id/invoke`, on `/functions/:id/url` (a URL per alias), and on mappings, destinations, schedules and notifications (a qualified ARN);
+  - `GET /functions/:id/code` (the zip; `?qualifier=`; inline TypeScript as JavaScript when asked);
+  - `GET` and `PUT /functions/:id/tags`, and tags on queues and buckets;
+  - `description`, `deadLetterQueue` and `awsEndpoints` on a function;
+  - `GET /stacks`; `GET`, `PUT` and `DELETE /stacks/:name`;
+  - `GET /usage/aws-estimate`;
+  - `POST /storage-keys` with `name`, `functions` and `functionAccess`.
+- **The S3 front door:** the reads Terraform makes answered as S3 answers when there is none; `PutBucketTagging`, `GetBucketTagging`, `DeleteBucketTagging`. **The SQS endpoint:** `TagQueue`, `UntagQueue`, `ListQueueTags`, and `CreateQueue`'s tags.
+- **Function URLs:** `AWS_IAM` also takes a request signed for `lambda` (D3).
+- **The edge:** `lambda.<domain>` to the backend's 3006; on the development server, an eighth fixed name, `lambda.dev.ffunc.cloud`, one DNS record more at OVH.
+- **Scopes:** `functions:read`, `functions:write` and `functions:invoke` cover versions, aliases, tags and code; `stacks:read` and `stacks:write` are new. Each route in both of L5's loops; Lambda's endpoint in L5 with another account's key, as the SQS endpoint is.
+- **The admin app:** an account's keys with what each reaches, its code storage, a function's versions and aliases, the account's stacks.
+
+## 6. Working rules
+
+As step 4's: a commit for each task or part, `type(scope): summary (X-xx)`; one heavy operation at a time, `hack/check-resources.sh` first, `FF_CI_JOBS` for the test workers; L1 to L5 for what each part touches, a new route's L5 rules in both loops; the docs and this plan's log in the same commit; the console checked in a browser, a phone's width too; no task or decision number in the code, its comments or its tests. New with this step:
+
+- Each AWS tool the tests drive (the AWS CLI, AWS's SDKs for JavaScript and Python, OpenTofu, Terraform's CLI and its AWS provider, the SAM CLI, cfn-lint) is pinned to a release at least two weeks old, installed by `hack/install-tools.sh` with its checksum checked, and named with its version in the progress row.
+- An API message reworded, or a refusal's list changed, is searched for in `hack/`, and the suite that asserts it runs, L5 included.
+- The names the backend's DTOs give are mirrored in `ff` and the console; their contract tests run (`cargo test`, the console's and the admin app's vitest).
+
+## 7. Tasks
+
+The order follows §9's first choice as recommended: the export kit first.
+
+### Phase 0: groundwork
+
+#### X-00: The plan and the baseline
+- This plan confirmed, the choices of §9 in the decision log, which will number them; the branch made from step 4's merge; every suite green, its counts in the progress log.
+
+#### X-01: Spikes and ADRs 0014 to 0016
+- **What AWS's tools call:** a minimal Lambda endpoint, Node.js's standard library alone (`hack/spikes/lambda/`), recording every request. Against it: the AWS CLI v2, AWS's SDK for JavaScript v3 and boto3 (a function made, waited for, called with its log tail, changed, published, aliased, given a URL, a permission, a mapping, async settings and tags, deleted); Terraform's AWS provider with OpenTofu and Terraform (the reference modules' resources, against this endpoint and FF's own S3 and SQS front doors); the SAM CLI (`sam build`, `sam validate --lint`). For each: the operations, their paths and how they are signed, the reads after each change, the waiters' polls, how each client shows Lambda's errors and a "later" refusal, and the largest body.
+- **Versions:** two versions of one function in pods of their own on the dev cluster: a version's first call from zero, the instances counted together, an alias's share over a thousand calls.
+- **Keys that expire:** an SDK in a pod past its key's end; a function's pods replaced with a fresh key under load, with no call lost; the cost for a hundred warm functions.
+- **SAM's YAML:** a reader in Rust that keeps CloudFormation's short tags (`!Ref`, `!GetAtt`, `!Sub`), on `sam init`'s templates and on the small app's.
+- **Done when:** ADRs 0014, 0015 and 0016 record what was measured and decided, and D2's list is the spike's.
+
+### Phase 1: the export kit
+
+#### X-02: `ff export`
+- D12: `GET /functions/:id/code`; the SAM template and the Terraform files written from the account's resources; the code; the data pages with the new `lambda.md`; the secrets' names; `MIGRATION.md`; the keys' daily uses and the roles made from them; `awsEndpoints`. `sam validate --lint`, cfn-lint and `tofu validate` on every export, in L4 and in the CLI's suite.
+
+#### X-03: The cost estimate at AWS's prices
+- D13: the estimate's prices in the books (a migration gives the current book AWS's, with their date), `GET /usage/aws-estimate`, `ff usage --aws`, the console's Usage page, the export's `cost-estimate.md`. L1 with AWS's own pricing examples worked by hand; L2 over three months of usage.
+
+#### X-04: `ff doctor`
+- D12's checks on a project, each with its file and line, and on the account with `--account`; `--strict`. L1, a fixture for each check; the CLI's suite on the small app.
+
+### Phase 2: versions and aliases
+
+#### X-05: Versions and aliases in the backend
+- D9: the tables; publishing; a version's pods; aliases and their shares; the qualifier wherever a function is named (the URL gateway, the scheduler, the queues' poller, the worker of calls that don't wait, bucket notifications); the history's version; the packages kept; `codeStorageMb`; FF's API. L1 to L5.
+
+#### X-06: Versions and aliases in the console, `ff` and the admin app
+- A function's Versions panel (publish, aliases with their shares, a rollback in one move); `ff publish|versions|alias`, `ff invoke name:alias`, `ff deploy --publish --alias prod`; metrics by version and alias, alarms on an alias; the admin app's function page; `ff export` writes the aliases.
+
+### Phase 3: keys and signatures
+
+#### X-07: One signature check, and keys that reach functions
+- D3 and D4: the shared module, the three readers moved onto it with their tests unchanged, AWS's test suite; keys' functions, levels and names, and `accessKeys`; functions' own keys that invoke; `AWS_IAM` URLs signed for `lambda`; the console's Access keys page; `ff keys`. L5 with another account's key at every front door.
+
+#### X-08: Functions' keys that expire
+- D5: keys of 12 hours, renewed at half their life, pods replaced before; a function scaled to zero starting with a fresh key; the lasting keys of today revoked at each function's next rollout. L2; L4, an expired key refused at each front door; the platform's suite on GitHub.
+
+### Phase 4: Lambda's API
+
+#### X-09: The Lambda endpoint, and functions
+- D1, D2, D6 and D7: the server on `FF_LAMBDA_PORT`; `lambda.<domain>` at the edge and on the development server; functions' `AWS_ENDPOINT_URL_LAMBDA`; the functions' operations, tags, code by zip or from a bucket, `Code.Location`, the account's settings; changes answered at once, the rollout after; Lambda's errors. L1, L2, and L4 with the AWS CLI, AWS's SDK for JavaScript and boto3.
+
+#### X-10: Invoke, and the rest of Lambda's settings
+- D8, and D9 under Lambda's names: `Invoke` (a function's error as the call's outcome, the log tail from the runtimes), versions and aliases, URLs, mappings, async settings and the dead-letter queue, concurrency, permissions, and the refusals of what comes later. A function's page in the console gives the AWS CLI's commands for it. L4 with the three clients; L5.
+
+### Phase 5: Terraform
+
+#### X-11: Terraform against FF
+- D10: S3's and SQS's reads answered, and tags; the provider block and the four modules inside `ff`, `ff init --template terraform`; L4 with OpenTofu and Terraform (`apply`, nothing left to change, `destroy`); the guide's section.
+
+### Phase 6: SAM
+
+#### X-12: `ff deploy` from a `template.yaml`
+- D11, functions first: the reader, and its one refusal listing everything outside the subset; `Globals`, `Parameters`, the intrinsics, `FunctionUrlConfig`, `AutoPublishAlias`, `EventInvokeConfig`; stacks (`/stacks`) and removals asked first; `ff init --template sam`, `ff delete-stack`. `sam init`'s hello worlds, their `Api` event and the output that names its API written for a function URL (§9, 10).
+
+#### X-13: SAM's events, queues and buckets
+- D11's events (`Schedule`, `ScheduleV2`, `SQS`, `S3`, `HttpApi`); `AWS::SQS::Queue`; `AWS::S3::Bucket` with its notifications and website; `AWS::Lambda::Permission`; `Outputs`. A template that `ff export` wrote, deployed again on FF, makes the same resources. `sam validate --lint` on every fixture.
+
+### Phase 7: close
+
+#### X-14: Documentation
+- The guide's "The way out" (AWS's tools against FF, versions and aliases, Terraform, SAM, the export, the estimate, `ff doctor`); `how-it-works.html`'s scenarios (a function made with the AWS CLI through Lambda's endpoint, an alias's share moving, a template deployed, an export) and a lane for the endpoint; pages in French, "Fonctions, comme AWS Lambda" and "Partir vers AWS"; ADRs 0014 to 0016 as built; the CLI plan's C-30, C-32 and C-33 done.
+
+#### X-15: The step closed
+- The small app as one `template.yaml`: its three functions, its URL, its queue and mapping, its schedule, its receipts' bucket; its database, cache, mail and site made as before, which SAM's resources don't declare. `ff deploy` makes it on FF; `ff export` writes it back; the same file passes `sam validate --lint`, and with an AWS account (§9, 13) `sam deploy` on AWS and the app's smoke test. The guide walks through it; `hack/cli-e2e.sh` runs it. What to build next marks step 5 done, and step 6 gets its plan.
+
+## 8. Risks
+
+| Risk | What lowers it |
+|---|---|
+| Lambda's API is large, and each tool calls more than the operations it is named for (Terraform's provider reads a function's code-signing settings, versions and tags after every change) | X-01 records every call of every tool; D2's first list is its result; everything else answers a clear "later", which no client retries |
+| A tool's new release calls something FF doesn't answer (Terraform's AWS provider has a release most weeks) | The versions tested are pinned and named in the docs; the nightly run tries the latest and says what changed |
+| Accepting what FF ignores reads as a promise: a role, a permission | Refused wherever ignoring would change what runs (a VPC, layers, KMS); kept without effect only for the role and the permissions, which FF's keys and URLs replace, and said in the guide, the API's description and by `ff doctor` |
+| A change answered at once is left half done when the backend stops | The record and the Deployment keep describing the same version; a stale rollout is undone at the next start, the change `Failed`, saying why |
+| Versions multiply pods and the account's quota | A version has pods only while it is called; a function's instances are counted together; the plan's code storage |
+| A warm pod's key expires before the pod is replaced | Renewed at half its life; a start from zero checks the key first; measured by X-01; an expired key refused saying so, so that the cause is plain |
+| Real SAM templates use what the subset lacks (`Api` events, DynamoDB tables, layers, IAM of their own) | One refusal listing all of it, before any change; `ff doctor` on a template; the subset's page in the guide; `ff export` writes `FunctionUrlConfig` |
+| `ff deploy` can't roll a whole template back, as CloudFormation does | Resources made in order; a failure stops the deploy and says what was done; deploying again goes on from there; the docs say so |
+| The way out is never tried on AWS, for want of an AWS account FF can pay for: the very problem FF solves | Offline checks in every run (`sam validate --lint`, cfn-lint, `tofu validate`, Moto); a monthly run on AWS once you have an account (§9, 13) |
+| Terraform's parallel changes pass the plan's 60 changes a minute | `TooManyRequestsException` with `Retry-After`, which the provider retries; the guide's `-parallelism`; the rate for Lambda's endpoint raised if the beta shows the need |
+| A function calls itself through Lambda's API, in a loop | The plan's calls a second and the account's credit stop it; Lambda's loop detection later |
+| CI's minutes: OpenTofu, Terraform and the SAM CLI make each run longer, while the private repository has 2,000 free minutes a month (the decision log's open question) | The new suites in the nightly run and on demand; each push runs the endpoint's own checks |
+| Names like AWS's: `lambda.ffunc.cloud`, `arn:aws:`, Lambda's error names | Part of decision 18's legal check before the launch (the parent plan's ADR-006) |
+| The cost estimate is read as a quote | Called an estimate, with the date of AWS's prices and each line's assumption |
+
+## 9. Choices for you to confirm
+
+Each with what it means and a recommendation. Your answers go into the decision log, which will number them. As with every step, building starts only once you have confirmed them.
+
+1. **The order.** By what depends on what: versions, keys, Lambda's API, Terraform, SAM, and the export kit last. Or the export kit first (with the estimate and `ff doctor`), then versions, keys, Lambda's API, Terraform, SAM. **Recommended: the export kit first.** It keeps the promise soonest, with the least risk: it only reads FF's API as it is. Lambda's API, the largest and riskiest part, then comes after the versions it must translate. If time runs short, SAM's events and weighted aliases are what the parent plan names to wait (its §12).
+2. **How much of Lambda's API first.** The 41 operations that the AWS CLI, AWS's SDKs, Terraform's provider and SAM's resources call (D2), the others refused with a clear "later". Or all of Lambda's, about 70: layers, provisioned concurrency, code signing and streaming included. **Recommended: the 41,** as X-01 confirms them: the same rule as S3's, SQS's and SES's front doors, and what customers' tools actually use.
+3. **How a change is answered on Lambda's API.** Lambda answers a create or an update at once ("Pending", "InProgress") and the tools ask again until it is done; FF's API answers once the new version runs. At once on Lambda's API, FF's own API unchanged; or once live, on both. **Recommended: at once,** as Lambda: the waiters of the AWS CLI and Terraform expect it, the AWS CLI and boto3 give up after 60 seconds, and the console keeps waiting as it does today.
+4. **Runtime names.** FF runs Node.js 24 and Python 3.13. Answer only to `nodejs24.x` and `python3.13`, refusing other names and naming these two. Or accept `nodejs22.x` and `python3.12` and run them on FF's: what runs would differ from what the template says, and Terraform would show a change every time. Or build those runtimes now (What to build next §9.1). **Recommended: the two names alone.** It is honest, both run on Lambda, and the same template works on both sides; more versions come with §9.1.
+5. **What an access key may do with functions.** Today a key reaches buckets, queues and mail. A key names the functions it reaches, or all, at one of three levels: read, invoke, write (D4); keys made before reach no function until given some; a function's own key may invoke the account's functions. Or keys made before also reach every function, for convenience. Or IAM's policy language, which What to build next §11 leaves out. **Recommended: the three levels, and old keys reaching no function:** no key gains a right it didn't have.
+6. **Functions' keys.** Today a function's key works until the function is deleted; decision 10 said short-lived ones come with this step. Keys of 12 hours, as a Lambda role's session, each function's pods replaced with a fresh key before the old one ends, with no call lost. Or lasting keys, made new at each deploy. **Recommended: 12 hours,** as promised: a key copied out of a function stops working within hours. Without a session token: the expiry gives the same protection, and the front doors change least.
+7. **How a version runs.** Each version that is called gets pods of its own, made at its first call and scaled to zero when idle, as `$LATEST` today: two versions answer at once, and an alias can send a share of the calls to each. Or one version live at a time, an alias moving it: cheaper, but no shares, and a call to another version waits for a rollout. **Recommended: pods of its own,** Lambda's behaviour; an idle version costs nothing. Warm instances stay on `$LATEST` for now; on an alias, as Lambda's provisioned concurrency, later.
+8. **Lambda's permissions.** On AWS, a function's policy says who may call it: S3, a URL's public callers, another account. FF has no IAM: its own rules already decide (the account's buckets, schedules and URLs call its functions; keys decide the rest). Keep each statement as sent and give it back, without effect, so that Terraform modules and SAM templates apply unchanged. Or refuse `AddPermission`, and those templates fail. **Recommended: kept, without effect, and said plainly** in the guide, the API's description and by `ff doctor`.
+9. **Where a SAM template is read.** In `ff deploy`, which calls FF's API and records what it made as a stack in FF, so that the next deploy updates and removes what the template no longer has, and a CI needs no local file. Or in the backend, which applies a template sent to it, as CloudFormation does: the console could deploy templates, but there is more to build. Or a CloudFormation endpoint, so that `sam deploy` itself works: What to build next §11 says no. **Recommended: in `ff`, with the stack kept in FF:** one reader, in one place, tested once; the template stays the file `sam deploy` takes on AWS.
+10. **SAM's web events.** SAM gives a function a web address three ways: `FunctionUrlConfig` (a function URL); `HttpApi` events (API Gateway's HTTP API, the same event as FF's URLs send, version 2.0); and `Api` events (API Gateway's REST API, another event, version 1.0, which `sam init`'s hello world uses). Take `FunctionUrlConfig`, and `HttpApi` events whose routes all go to one function, made its URL; refuse `Api`, saying why. Or map `Api` too, FF building its other event. Or `FunctionUrlConfig` alone. **Recommended: the first.** The function gets the same event on both sides. `sam init`'s hello world then needs its event, and the output that names its API, written for a function URL. An HTTP router of FF's, as API Gateway, is a product of its own.
+11. **Schedules in Terraform.** The modules cover functions with their URLs, aliases, permissions, mappings and async settings, queues, and buckets with their notifications and sites, as the parent plan's §6.6 lists. Add schedules now, through EventBridge Scheduler's API (five operations, one more endpoint)? Or leave them to `ff schedule` and SAM's events in this step. **Recommended: later.** The step is already the largest, and the parent plan's list stops there; Scheduler's API can come if customers ask.
+12. **What the cost estimate counts.** FF's own counts priced at AWS's list, alone. Or with the lines AWS bills that FF doesn't (D13): an RDS instance for each database, an ElastiCache node for each cache, cold starts, data out, logs, CloudFront, a NAT gateway, each with its assumption. **Recommended: with them,** else the estimate is far too low for any app with a database; each line says what it assumes and can be left out.
+13. **Trying the way out on AWS itself.** A real test needs an AWS account, paid by card: FF's own problem too. Offline checks only (`sam validate --lint`, cfn-lint, `tofu validate`, and Moto, an open-source stand-in for AWS's services). Or offline in every run, plus a monthly run on a real AWS account, paid with a technology card or a partner's, as the parent plan's §6.10 says. Or real AWS in every run. **Recommended: offline in every run, and a monthly real run once you have an account.** Until then, the docs say the export is checked offline.
+14. **Limits on beta.** Code storage of 5 GB per account, the packages its functions and versions name (Lambda gives 75 GB a region); 10 access keys per account, each with a name (IAM gives a user two, but an account has many users); no count of versions, aliases or stacks, which cost rows; Lambda's API under the plan's 60 changes a minute, its reads free. **Recommended: these,** in the plan like every limit, changed in the admin app.
+
+## 10. Effort (rough estimates, one developer)
+
+| Part | Weeks |
+|---|---|
+| X-00 and X-01: the plan, four spikes, three ADRs | 1 to 1.5 |
+| The export kit, the estimate and `ff doctor` (X-02 to X-04) | 3.5 to 4 |
+| Versions and aliases (X-05, X-06) | 2.5 to 3.5 |
+| Keys, signatures, and functions' keys that expire (X-07, X-08) | 1.5 to 2 |
+| Lambda's API (X-09, X-10) | 4 to 5 |
+| Terraform (X-11) | 2 to 2.5 |
+| SAM templates (X-12, X-13) | 2.5 to 3 |
+| Documentation and the close (X-14, X-15) | 1.5 to 2 |
+| **Together** | **18.5 to 23.5** |
+
+About 92 to 118 working days, where step 4's plan said 34 to 46. What to build next §8 counts 15.5 weeks for its five rows. This plan adds what every service needs (its §10: the console, the admin app, `ff`, L5, the pages in French), the CLI plan's C-30 (the SAM reader, which §8 doesn't count), Terraform's reads of buckets and queues, and functions' keys that expire. Lambda's API's weeks depend most on what X-01 finds each tool calls; SAM's on §9's ninth and tenth choices.
+
+## 11. Progress log
+
+| Task | Status | Commits | Notes |
+|---|---|---|---|
+| X-00 The plan and the baseline | ⏳ Planned: waiting for your choices (§9) | | |
+| X-01 Spikes and ADRs 0014 to 0016 | ⏳ Planned | | |
+| X-02 `ff export` | ⏳ Planned | | |
+| X-03 The cost estimate at AWS's prices | ⏳ Planned | | |
+| X-04 `ff doctor` | ⏳ Planned | | |
+| X-05 Versions and aliases in the backend | ⏳ Planned | | |
+| X-06 Versions and aliases in the console, `ff` and the admin app | ⏳ Planned | | |
+| X-07 One signature check, and keys that reach functions | ⏳ Planned | | |
+| X-08 Functions' keys that expire | ⏳ Planned | | |
+| X-09 The Lambda endpoint, and functions | ⏳ Planned | | |
+| X-10 Invoke, and the rest of Lambda's settings | ⏳ Planned | | |
+| X-11 Terraform against FF | ⏳ Planned | | |
+| X-12 `ff deploy` from a `template.yaml` | ⏳ Planned | | |
+| X-13 SAM's events, queues and buckets | ⏳ Planned | | |
+| X-14 Documentation | ⏳ Planned | | |
+| X-15 The step closed | ⏳ Planned | | |

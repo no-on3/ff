@@ -3,6 +3,7 @@ import { config } from '../config';
 import { requestHeaders } from '../lib/session';
 import type { AuthType, FunctionUrl, UrlCors } from '../lib/function-url';
 import type { CustomDomain } from '../lib/custom-domains';
+import type { SiteDomain, SiteMetrics, Website, WebsiteBody } from '../lib/sites';
 import type { Schedule } from '../lib/schedules';
 
 const api = axios.create({
@@ -474,6 +475,43 @@ export interface QueueUsage {
   cost: string | null;
 }
 
+/** A cache's fields in GET /usage, as the API's CacheUsageView names them: contract.test.ts checks them. */
+export const CACHE_USAGE_FIELDS = ['cacheId', 'name', 'deleted', 'hours', 'memoryMb', 'gbHours', 'gbMonths', 'cost'] as const satisfies ReadonlyArray<keyof CacheUsage>;
+/** A customer's cache in the month, as its hours were measured. */
+export interface CacheUsage {
+  cacheId: string;
+  name: string;
+  /** Deleted since: its usage stays. */
+  deleted: boolean;
+  /** The hours it was measured in, each billed as ElastiCache bills a node-hour. */
+  hours: number;
+  /** Its memory at its latest measure, in MB. */
+  memoryMb: number;
+  /** Its memory times its hours, as it is billed: "19.5". */
+  gbHours: string;
+  /** The same in GB-months, as the CSV gives it. */
+  gbMonths: string;
+  /** null without a price book. */
+  cost: string | null;
+}
+
+/** A domain's or an address's mail in GET /usage, as the API's EmailUsageView names its fields: contract.test.ts checks them. */
+export const EMAIL_USAGE_FIELDS = ['resourceId', 'identity', 'deleted', 'recipients', 'attachmentBytes', 'cost'] as const satisfies ReadonlyArray<keyof EmailUsage>;
+/** The mail one of the account's domains or addresses sent in the month, as SES bills it. */
+export interface EmailUsage {
+  /** Its line in the bill. */
+  resourceId: string;
+  identity: string;
+  /** The domain or address was deleted since: its usage stays. */
+  deleted: boolean;
+  /** Its messages' recipients, each one, a suppressed one too. */
+  recipients: number;
+  /** Its messages' attachments, each recipient's copy, in bytes. */
+  attachmentBytes: number;
+  /** null without a price book. */
+  cost: string | null;
+}
+
 /** GET /usage: one month by the UTC calendar. */
 export interface MonthlyUsage {
   /** YYYY-MM */
@@ -486,6 +524,10 @@ export interface MonthlyUsage {
   buckets: BucketUsage[];
   /** Each of its queues asked anything in the month, the most requests first. */
   queues: QueueUsage[];
+  /** Each of its caches measured in the month, the most GB-hours first. */
+  caches: CacheUsage[];
+  /** Each domain or address its mail went from in the month, the most recipients first. */
+  email: EmailUsage[];
   totals: UsageAmounts;
   /** null when no price book covers the month. */
   estimate: UsageEstimate | null;
@@ -732,6 +774,7 @@ export interface PlanLimits {
   storageRequestsPerSecond: number;
   /** The largest object one PutObject may send, in MB. */
   maxObjectMb: number;
+  siteTransferGbPerMonth: number;
   /** Customers' queues, all together. */
   queues: number;
   /** The queues one function may read in batches. */
@@ -740,6 +783,16 @@ export interface PlanLimits {
   queueRequestsPerSecond: number;
   /** What the account's messages may hold together, in MB, its functions' waiting asynchronous calls among them. */
   queueStorageMb: number;
+  /** Customers' caches, all together. */
+  caches: number;
+  /** One cache's memory, in MB: past it, its least recently used keys go. */
+  cacheMb: number;
+  /** The domains the account may send mail from, its proved addresses apart. */
+  emailIdentities: number;
+  /** Messages a day, each recipient one, as SES's Max24HourSend. */
+  emailsPerDay: number;
+  /** Messages a second, as SES's MaxSendRate. */
+  emailsPerSecond: number;
 }
 
 export interface Plan {
@@ -847,6 +900,10 @@ export const SCOPES = [
   'storage:write',
   'queues:read',
   'queues:write',
+  'caches:read',
+  'caches:write',
+  'email:read',
+  'email:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 
@@ -1010,6 +1067,8 @@ export interface AlarmBody {
   bucketName?: string | null;
   /** The queue watched, by its name, for its messages and its requests; null otherwise. */
   queueName?: string | null;
+  /** The cache watched, by its name, for its memory, connections, hits, misses and evictions, an hour at a time; null otherwise. */
+  cacheName?: string | null;
   metric: string;
   statistic: string;
   /** Seconds per datapoint: 60, 300 or 3600. */
@@ -1031,6 +1090,7 @@ export const ALARM_FIELDS = [
   'databaseId',
   'bucketName',
   'queueName',
+  'cacheName',
   'metric',
   'statistic',
   'period',
@@ -1146,8 +1206,204 @@ export const databasesApi = {
   metrics: (id: string, params: { start?: string; end?: string } = {}) => api.get<DatabaseMetrics>(`/databases/${id}/metrics`, { params }),
 };
 
+/** A customer's cache's status, as the API's CacheStatus names them: contract.test.ts checks them. */
+export const CACHE_STATUSES = ['creating', 'active', 'suspended', 'deleting'] as const;
+export type CacheStatus = (typeof CACHE_STATUSES)[number];
+
+/** A cache's fields, as the API's CacheView names them: contract.test.ts checks them. */
+export const CACHE_FIELDS = [
+  'name',
+  'status',
+  'host',
+  'port',
+  'address',
+  'memoryMb',
+  'bytesUsedForCache',
+  'currConnections',
+  'engine',
+  'passwordSetAt',
+  'createdAt',
+] as const satisfies ReadonlyArray<keyof Cache>;
+
+/** A customer's cache, Valkey as AWS ElastiCache gives it (ADR 0013): never its password, which FF doesn't keep. */
+export interface Cache {
+  /** Its name in the account. */
+  name: string;
+  status: CacheStatus;
+  /** The server, as functions and developers reach it. */
+  host: string;
+  /** Its own port on the server. */
+  port: number;
+  /** How to connect, over TLS, without the password. */
+  address: string;
+  /** The plan's memory for it, in MB: past it, the least recently used keys go. */
+  memoryMb: number;
+  /** The bytes its keys use now; null when the server could not be asked. */
+  bytesUsedForCache: number | null;
+  /** Its connections now; null when the server could not be asked. */
+  currConnections: number | null;
+  /** What answers it: Valkey, which speaks Redis OSS's protocol. */
+  engine: string;
+  passwordSetAt: string | null;
+  createdAt: string;
+}
+// A field missing from CACHE_FIELDS stops the build.
+type UnlistedCacheField = Exclude<keyof Cache, (typeof CACHE_FIELDS)[number]>;
+const everyCacheFieldListed: [UnlistedCacheField] extends [never] ? true : never = true;
+void everyCacheFieldListed;
+
+/** A cache just made, or given a new password: the password, and the address with it, in this answer only. */
+export interface CacheWithPassword extends Cache {
+  password: string;
+  url: string;
+}
+
+/** The account's caches: every member reads them; owners and developers make, change and delete them. */
+export const cachesApi = {
+  list: () => api.get<Cache[]>('/caches'),
+  get: (name: string) => api.get<Cache>(`/caches/${name}`),
+  create: (name: string) => api.post<CacheWithPassword>('/caches', { name }),
+  /** A new password: the old one logs no new connection in; those under way keep theirs. */
+  resetPassword: (name: string) => api.post<CacheWithPassword>(`/caches/${name}/password`),
+  remove: (name: string) => api.delete(`/caches/${name}`),
+  /** Its memory used, connections, hits, misses and evictions, a point an hour; the last 60 hours by default. */
+  metrics: (name: string, params: { start?: string; end?: string } = {}) => api.get<CacheMetrics>(`/caches/${name}/metrics`, { params }),
+};
+
+/** Where a domain's or an address's proof is, as SES v2's VerificationStatus names it (ADR 0012). */
+export type IdentityStatus = 'PENDING' | 'SUCCESS' | 'FAILED' | 'TEMPORARY_FAILURE';
+
+/** A record a domain publishes, and what it is for. */
+export interface MailRecord {
+  purpose: 'DKIM' | 'MAIL_FROM' | 'SPF' | 'DMARC';
+  type: 'TXT' | 'MX';
+  name: string;
+  value: string;
+}
+
+/** A domain or an address the account sends mail from, as the API's EmailIdentityView names its fields. */
+export interface EmailIdentity {
+  identity: string;
+  type: 'DOMAIN' | 'EMAIL_ADDRESS';
+  status: IdentityStatus;
+  sendingEnabled: boolean;
+  /** A domain's DKIM selector: its record is at <selector>._domainkey.<domain>. */
+  dkimSelector: string | null;
+  /** A domain's own return path, where its bounces come back once its MX record is FF's. */
+  mailFromDomain: string | null;
+  mailFromVerified: boolean;
+  /** The records a domain publishes; none for an address. */
+  records: MailRecord[];
+  verifiedAt: string | null;
+  createdAt: string;
+}
+
+/** The account's sending, as SES v2's GetAccount says it. */
+export interface EmailAccount {
+  sandbox: boolean;
+  sendingEnabled: boolean;
+  enforcementStatus: 'HEALTHY' | 'PROBATION' | 'SHUTDOWN';
+  max24HourSend: number;
+  maxSendRate: number;
+  sentLast24Hours: number;
+}
+
+export type SuppressionReason = 'BOUNCE' | 'COMPLAINT';
+
+/** An address on the account's suppression list: no mail of the account goes to it. */
+export interface Suppression {
+  address: string;
+  reason: SuppressionReason;
+  /** The message whose bounce or complaint put it there; null when the account did. */
+  messageId: string | null;
+  feedback: string | null;
+  updatedAt: string;
+}
+
+export type EmailRecipientStatus = 'QUEUED' | 'SENT' | 'SUPPRESSED' | 'BOUNCED' | 'COMPLAINED' | 'FAILED';
+
+export interface EmailRecipient {
+  address: string;
+  status: EmailRecipientStatus;
+  diagnostic: string | null;
+}
+
+/** A message the account sent, through the SES endpoint or the API, and what became of each recipient. */
+export interface EmailMessage {
+  messageId: string;
+  from: string;
+  identity: string;
+  status: 'QUEUED' | 'SENT' | 'FAILED';
+  recipients: EmailRecipient[];
+  sizeBytes: number;
+  createdAt: string;
+  sentAt: string | null;
+}
+
+/** A message to send, as SendEmail takes a simple one. */
+export interface SendEmail {
+  from: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  replyTo?: string[];
+  subject: string;
+  text?: string;
+  html?: string;
+}
+
+/** Customers' mail (ADR 0012): the domains and addresses it goes from, the account's sending, its messages, its suppression list. */
+export const emailApi = {
+  identities: () => api.get<EmailIdentity[]>('/email/identities'),
+  addIdentity: (identity: string) => api.post<EmailIdentity>('/email/identities', { identity }),
+  /** A domain's records looked up now; an address's link e-mailed again. */
+  verifyIdentity: (identity: string) => api.post<EmailIdentity>(`/email/identities/${encodeURIComponent(identity)}/verify`),
+  removeIdentity: (identity: string) => api.delete(`/email/identities/${encodeURIComponent(identity)}`),
+  account: () => api.get<EmailAccount>('/email/account'),
+  suppressions: () => api.get<{ suppressions: Suppression[]; next: string | null }>('/email/suppressions'),
+  suppress: (address: string, reason: SuppressionReason) => api.put<Suppression>(`/email/suppressions/${encodeURIComponent(address)}`, { reason }),
+  unsuppress: (address: string) => api.delete(`/email/suppressions/${encodeURIComponent(address)}`),
+  messages: (limit = 20) => api.get<{ messages: EmailMessage[] }>('/email/messages', { params: { limit } }),
+  send: (message: SendEmail) => api.post<{ messageId: string }>('/email/messages', message),
+  metrics: (params: { start?: string; end?: string } = {}) => api.get<EmailMetrics>('/email/metrics', { params }),
+};
+
+/**
+ * GET /email/metrics: a point an hour, oldest first, as CloudWatch names SES's: each hour's recipients, counted in their
+ * message's hour; the reputation rates, fractions, over the 14 days that end with each hour, null without a recipient reached.
+ */
+export interface EmailMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: {
+    Send: { Sum: number[] };
+    Delivery: { Sum: number[] };
+    Bounce: { Sum: number[] };
+    Complaint: { Sum: number[] };
+    'Reputation.BounceRate': { Average: Array<number | null> };
+    'Reputation.ComplaintRate': { Average: Array<number | null> };
+  };
+}
+
+/** GET /caches/:name/metrics: a point an hour, oldest first, as CloudWatch names ElastiCache's; null for an hour it wasn't sampled in. */
+export interface CacheMetrics {
+  period: number;
+  start: string;
+  end: string;
+  timestamps: string[];
+  metrics: {
+    BytesUsedForCache: { Maximum: Array<number | null>; Average: Array<number | null> };
+    CurrConnections: { Maximum: Array<number | null>; Average: Array<number | null> };
+    CacheHits: { Sum: Array<number | null> };
+    CacheMisses: { Sum: Array<number | null> };
+    Evictions: { Sum: Array<number | null> };
+  };
+}
+
 /** A bucket's fields, as the API's BucketView names them: contract.test.ts checks them. */
-export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
+export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'siteUrl', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
 
 /** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
 export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'queues', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
@@ -1167,6 +1423,8 @@ export interface Bucket {
   objects: number | null;
   /** The hour of that measure. */
   measuredAt: string | null;
+  /** Its site's address, public to read, once its website configuration is set; null for none. */
+  siteUrl: string | null;
   createdAt: string;
 }
 
@@ -1202,6 +1460,8 @@ export interface CreatedStorageKey extends StorageKey {
   endpoint: string;
   /** The SQS endpoint, AWS_ENDPOINT_URL_SQS, for the account's queues. */
   sqsEndpoint: string;
+  /** The SES endpoint, AWS_ENDPOINT_URL_SESV2, for the account's mail. */
+  sesEndpoint: string;
   region: string;
 }
 
@@ -1218,6 +1478,22 @@ export const bucketsApi = {
   notifications: (name: string) => api.get<NotificationConfiguration>(`/buckets/${name}/notifications`),
   /** Replaced whole, as S3's PutBucketNotificationConfiguration: a destination by its ARN or its name. */
   setNotifications: (name: string, configuration: NotificationConfigurationBody) => api.put<NotificationConfiguration>(`/buckets/${name}/notifications`, configuration),
+};
+
+/** A bucket's site: its website configuration, as S3's in its JSON names, and the site's own domains. */
+export const sitesApi = {
+  /** 404 when the bucket is no site. */
+  get: (bucket: string) => api.get<Website>(`/buckets/${bucket}/website`),
+  /** Replaced whole, as S3's PutBucketWebsite: the bucket a site from now on. */
+  put: (bucket: string, website: WebsiteBody) => api.put<Website>(`/buckets/${bucket}/website`, website),
+  /** No longer a site: its files kept, private again. */
+  remove: (bucket: string) => api.delete(`/buckets/${bucket}/website`),
+  domains: (bucket: string) => api.get<SiteDomain[]>(`/buckets/${bucket}/website/domains`),
+  addDomain: (bucket: string, domain: string) => api.post<SiteDomain>(`/buckets/${bucket}/website/domains`, { domain }),
+  verifyDomain: (bucket: string, domain: string) => api.post<SiteDomain>(`/buckets/${bucket}/website/domains/${encodeURIComponent(domain)}/verify`),
+  removeDomain: (bucket: string, domain: string) => api.delete(`/buckets/${bucket}/website/domains/${encodeURIComponent(domain)}`),
+  /** Its visits, a point per period: a minute, five or an hour; a bucket no longer a site still has its past ones. */
+  metrics: (bucket: string, params: { start?: string; end?: string; period?: 60 | 300 | 3600 } = {}) => api.get<SiteMetrics>(`/buckets/${bucket}/website/metrics`, { params }),
 };
 
 /** A configuration's key filter, as S3's JSON names it: a prefix, a suffix. */

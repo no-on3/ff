@@ -5,7 +5,7 @@ import { Currency } from './currency.entity';
 import { PriceBook } from './price-book.entity';
 import { BookPrices, bookPrices } from './price-book';
 import { BookSegment, FunctionUsage, MonthEstimate, ResourceUsage, hoursIn, rateMonth } from './rating';
-import { BILLED_CALL, SAMPLE_SUMS, callSums } from './usage-sql';
+import { BILLED_CALL, EMAIL_RESOURCE_ID, SAMPLE_SUMS, callSums } from './usage-sql';
 
 /** A month by the UTC calendar: its first instant and the next month's. */
 export function monthBounds(month: string): { from: Date; to: Date } {
@@ -45,6 +45,8 @@ interface SampleRow {
   tier1: string;
   tier2: string;
   requests: string;
+  /** Mail's attachments, each recipient's copy; none for the others. */
+  bytes?: string;
 }
 
 /**
@@ -168,10 +170,12 @@ export class PricingService {
   }
 
   /**
-   * The account's databases, buckets and queues in [start, end), as the
-   * rater takes them: from their hourly samples, each one's byte-hours and
-   * the hours it was sampled in; a bucket's requests by S3's two classes,
-   * from the front door's counts; a queue's requests as SQS bills them.
+   * The account's databases, buckets, queues and caches in [start, end), as
+   * the rater takes them: from their hourly samples, each one's byte-hours and
+   * the hours it was sampled in, a cache's memory its plan's; a bucket's
+   * requests by S3's two classes, from the front door's counts; a queue's
+   * requests as SQS bills them; and each domain's or address's mail, its
+   * messages' recipients and their attachments, as SES bills them.
    */
   private async resourceUsage(accountId: string, start: Date, end: Date): Promise<ResourceUsage[]> {
     const databases = await this.books.manager.query<SampleRow[]>(
@@ -187,7 +191,7 @@ export class PricingService {
          FROM (SELECT "bucket_id", sum("size_bytes")::text AS "byteHours", count(*)::text AS "hours" FROM "bucket_samples"
                 WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3 GROUP BY "bucket_id") s
          FULL JOIN (SELECT "bucket_id", coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0)::text AS "tier1",
-                           coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0)::text AS "tier2"
+                           coalesce(sum("requests") FILTER (WHERE "class" IN ('tier2', 'website')), 0)::text AS "tier2"
                       FROM "storage_request_counts" WHERE "account_id" = $1 AND "minute" >= $2 AND "minute" < $3 AND "class" <> 'free'
                      GROUP BY "bucket_id") r
            ON r."bucket_id" = s."bucket_id"`,
@@ -200,6 +204,21 @@ export class PricingService {
         GROUP BY "queue_id" HAVING sum("requests") > 0`,
       [accountId, start, end],
     );
+    const caches = await this.books.manager.query<SampleRow[]>(
+      `SELECT "cache_id" AS "resourceId", sum("memory_mb"::bigint * 1048576)::text AS "byteHours", count(*)::text AS "hours", '0' AS "tier1", '0' AS "tier2", '0' AS "requests"
+         FROM "cache_samples"
+        WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3
+        GROUP BY "cache_id"`,
+      [accountId, start, end],
+    );
+    const mail = await this.books.manager.query<SampleRow[]>(
+      `SELECT ${EMAIL_RESOURCE_ID} AS "resourceId", '0' AS "byteHours", '0' AS "hours", '0' AS "tier1", '0' AS "tier2",
+              sum("recipients")::text AS "requests", sum("attachment_bytes"::bigint * "recipients")::text AS "bytes"
+         FROM "email_sends"
+        WHERE "account_id" = $1 AND "sent_at" >= $2 AND "sent_at" < $3
+        GROUP BY "account_id", "identity"`,
+      [accountId, start, end],
+    );
     const usage = (kind: ResourceUsage['kind']) => (row: SampleRow): ResourceUsage => ({
       resourceId: row.resourceId,
       kind,
@@ -208,7 +227,14 @@ export class PricingService {
       tier1Requests: BigInt(row.tier1),
       tier2Requests: BigInt(row.tier2),
       requests: BigInt(row.requests),
+      bytes: BigInt(row.bytes ?? '0'),
     });
-    return [...databases.map(usage('database')), ...buckets.map(usage('bucket')), ...queues.map(usage('queue'))];
+    return [
+      ...databases.map(usage('database')),
+      ...buckets.map(usage('bucket')),
+      ...queues.map(usage('queue')),
+      ...caches.map(usage('cache')),
+      ...mail.map(usage('email')),
+    ];
   }
 }

@@ -72,6 +72,9 @@ export function operationOf(method: string, address: S3Address, query: URLSearch
     if (method === 'GET' && has('location') && only('location')) return op('GetBucketLocation', 'tier2');
     if (method === 'GET' && has('notification') && only('notification')) return op('GetBucketNotificationConfiguration', 'tier2');
     if (method === 'PUT' && has('notification') && only('notification')) return op('PutBucketNotificationConfiguration', 'tier1', true);
+    if (method === 'GET' && has('website') && only('website')) return op('GetBucketWebsite', 'tier2');
+    if (method === 'PUT' && has('website') && only('website')) return op('PutBucketWebsite', 'tier1', true);
+    if (method === 'DELETE' && has('website') && only('website')) return op('DeleteBucketWebsite', 'free', true);
     if (method === 'GET' && has('uploads') && only(UPLOADS_LISTING)) return op('ListMultipartUploads', 'tier1');
     if (method === 'GET' && only(LISTING)) return op(query.get('list-type') === '2' ? 'ListObjectsV2' : 'ListObjects', 'tier1');
     if (method === 'HEAD' && names.length === 0) return op('HeadBucket', 'tier2');

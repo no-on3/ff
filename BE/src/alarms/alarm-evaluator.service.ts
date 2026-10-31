@@ -12,16 +12,22 @@ import {
   AlarmState,
   BILLING_METRICS,
   BUCKET_METRICS,
+  CACHE_METRICS,
+  EMAIL_METRICS,
   DATABASE_METRICS,
   Evaluation,
   QUEUE_METRICS,
+  SITE_ALARM_METRICS,
   bucketDatapointsOf,
+  cacheDatapointsOf,
+  emailDatapointsOf,
   databaseDatapointsOf,
   datapointsOf,
   evaluate,
   evaluationWindow,
   notifies,
   queueDatapointsOf,
+  siteDatapointsOf,
   stateReason,
 } from './alarm-rules';
 import { alarmChanges, alarmEvaluations } from '../monitoring/operator-metrics';
@@ -105,10 +111,10 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
     if (rows.length === 0) return [];
     return this.dataSource
       .getRepository(Alarm)
-      .find({ where: { id: In(rows.map((row) => row.id)) }, relations: { account: true, function: true, database: true, bucket: true, queue: true } });
+      .find({ where: { id: In(rows.map((row) => row.id)) }, relations: { account: true, function: true, database: true, bucket: true, queue: true, cache: true } });
   }
 
-  /** The alarm's datapoints, oldest first: its periods' values, a database's hours, a bucket's or a queue's periods, or the account's money as it is. */
+  /** The alarm's datapoints, oldest first: its periods' values, a database's, a cache's or the account's mail's hours, a bucket's, its site's or a queue's periods, or the account's money as it is. */
   private async datapoints(alarm: Alarm, now: Date): Promise<Array<number | null>> {
     if (BILLING_METRICS.includes(alarm.metric)) {
       const view = await this.billing.balance(alarm.accountId, now);
@@ -119,12 +125,19 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
     if (DATABASE_METRICS.includes(alarm.metric)) {
       return databaseDatapointsOf(await this.metrics.forDatabase(alarm.accountId, alarm.databaseId as string, window), alarm.metric, alarm.statistic);
     }
+    if (SITE_ALARM_METRICS.includes(alarm.metric)) {
+      return siteDatapointsOf(await this.metrics.siteMetrics(alarm.accountId, alarm.bucketId as string, window), alarm.metric, alarm.statistic);
+    }
     if (BUCKET_METRICS.includes(alarm.metric)) {
       return bucketDatapointsOf(await this.metrics.bucketMetrics(alarm.accountId, alarm.bucketId as string, window), alarm.metric, alarm.statistic);
     }
     if (QUEUE_METRICS.includes(alarm.metric)) {
       return queueDatapointsOf(await this.metrics.queueMetrics(alarm.accountId, alarm.queueId as string, window), alarm.metric, alarm.statistic);
     }
+    if (CACHE_METRICS.includes(alarm.metric)) {
+      return cacheDatapointsOf(await this.metrics.cacheMetrics(alarm.accountId, alarm.cacheId as string, window), alarm.metric, alarm.statistic);
+    }
+    if (EMAIL_METRICS.includes(alarm.metric)) return emailDatapointsOf(await this.metrics.emailMetrics(alarm.accountId, window), alarm.metric);
     const view = alarm.functionId ? await this.metrics.forFunction(alarm.accountId, alarm.functionId, window) : await this.metrics.forAccount(alarm.accountId, window);
     return datapointsOf(view, alarm.metric, alarm.statistic);
   }
@@ -162,6 +175,7 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
       databaseName: alarm.database?.name ?? null,
       bucketName: alarm.bucket?.name ?? null,
       queueName: alarm.queue?.name ?? null,
+      cacheName: alarm.cache?.name ?? null,
       from,
       to: evaluation.state,
       evaluation,
@@ -180,6 +194,7 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
             databaseId: alarm.databaseId,
             bucketName: alarm.bucket?.name ?? null,
             queueName: alarm.queue?.name ?? null,
+            cacheName: alarm.cache?.name ?? null,
             metric: alarm.metric,
             statistic: alarm.statistic,
             period: alarm.period,

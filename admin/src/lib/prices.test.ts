@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PriceDocument, bookRows, draftDocument, earliestStart, formFrom, multiplyDecimals, pricesQueues, pricesStorage, queueTierLabel, sourceLabel, storageTierLabel, tierLabel } from './prices';
+import { PriceDocument, bookRows, draftDocument, earliestStart, formFrom, multiplyDecimals, pricesCaches, pricesEmail, pricesQueues, pricesStorage, queueTierLabel, sourceLabel, storageTierLabel, tierLabel } from './prices';
 
 /** The first price book, as the backend's migration loads it (P-30). */
 const FIRST: PriceDocument = {
@@ -269,6 +269,47 @@ describe("a new price book from one with customers' queues' prices", () => {
   });
 });
 
+/** The book after those, as the backend's migration adds it: ElastiCache's price of a cache's memory, at the same rate, without a free tier. */
+const WITH_CACHES: PriceDocument = {
+  ...WITH_QUEUES,
+  source: { ...WITH_QUEUES.source, usdPrices: { ...WITH_QUEUES.source.usdPrices!, cacheGbHour: '0.0256' } },
+  prices: { ...WITH_QUEUES.prices, cacheGbHour: '0.0770048' },
+};
+
+describe("a new price book from one with customers' caches' price", () => {
+  it('gives it back unchanged', () => {
+    expect(draftDocument(formFrom(WITH_CACHES, NOW), WITH_CACHES, NOW)).toEqual({
+      validFrom: '2026-10-17T11:00:00Z',
+      document: { ...WITH_CACHES, source: { ...WITH_CACHES.source, readOn: '2026-10-17' } },
+    });
+  });
+
+  it("prices it at a new rate too, AWS's US$ price times it, and takes a TND price as given in manual mode", () => {
+    const form = formFrom(WITH_CACHES, NOW);
+    const manual = { ...form, mode: 'manual' as const, storage: { ...form.storage, tnd: { ...form.storage.tnd, cacheGbHour: '0.08' } } };
+
+    expect(draftDocument({ ...form, rate: '3.1' }, WITH_CACHES, NOW)).toMatchObject({ document: { prices: { cacheGbHour: '0.07936' }, source: { usdPrices: { cacheGbHour: '0.0256' } } } });
+    const draft = draftDocument(manual, WITH_CACHES, NOW);
+    expect('document' in draft && draft.document.prices.cacheGbHour).toBe('0.08');
+  });
+
+  it('names it left empty, and adds it to no book drafted from one without it', () => {
+    const form = formFrom(WITH_CACHES, NOW);
+
+    expect(draftDocument({ ...form, storage: { ...form.storage, usd: { ...form.storage.usd, cacheGbHour: '' } } }, WITH_CACHES, NOW)).toEqual({
+      problems: ['Cache memory, per GB-hour (US$): must be a decimal number, such as 0.0000166667'],
+    });
+    const draft = draftDocument(formFrom(WITH_QUEUES, NOW), WITH_QUEUES, NOW);
+    expect([pricesCaches(WITH_QUEUES), pricesCaches(WITH_CACHES), 'document' in draft && pricesCaches(draft.document)]).toEqual([false, true, false]);
+  });
+
+  it('lists it in TND and in US$, last, in a book that has it', () => {
+    const rows = bookRows(WITH_CACHES);
+    expect(rows[rows.length - 1]).toEqual(['Cache memory, per GB-hour', '0.0770048', '0.0256']);
+    expect(bookRows(WITH_QUEUES).filter(([label]) => label.includes('Cache'))).toEqual([]);
+  });
+});
+
 describe('a price book, to read (P-73)', () => {
   it('names each duration tier by where it ends', () => {
     expect(FIRST.prices.gbSecond.map((_tier, index) => tierLabel(FIRST.prices.gbSecond, index))).toEqual([
@@ -283,5 +324,50 @@ describe('a price book, to read (P-73)', () => {
       "AWS Lambda's US$ prices × 3.0080 TND per US$ (rate of 2026-10-14)",
       'Prices set by an operator',
     ]);
+  });
+});
+
+/** The book after those, as the backend's migration adds it: SES's prices of a recipient and of a GB of attachments, at the same rate, without a free tier. */
+const WITH_EMAIL: PriceDocument = {
+  ...WITH_CACHES,
+  source: { ...WITH_CACHES.source, usdPrices: { ...WITH_CACHES.source.usdPrices!, emailRecipientsPerThousand: '0.10', emailAttachmentsGb: '0.12' } },
+  prices: { ...WITH_CACHES.prices, emailRecipientsPerThousand: '0.3008', emailAttachmentsGb: '0.36096' },
+};
+
+describe("a new price book from one with customers' mail's prices", () => {
+  it('gives it back unchanged', () => {
+    expect(draftDocument(formFrom(WITH_EMAIL, NOW), WITH_EMAIL, NOW)).toEqual({
+      validFrom: '2026-10-17T11:00:00Z',
+      document: { ...WITH_EMAIL, source: { ...WITH_EMAIL.source, readOn: '2026-10-17' } },
+    });
+  });
+
+  it("prices them at a new rate too, AWS's US$ prices times it, and takes TND prices as given in manual mode", () => {
+    const form = formFrom(WITH_EMAIL, NOW);
+    const manual = { ...form, mode: 'manual' as const, storage: { ...form.storage, tnd: { ...form.storage.tnd, emailRecipientsPerThousand: '0.3', emailAttachmentsGb: '0.4' } } };
+
+    expect(draftDocument({ ...form, rate: '3.1' }, WITH_EMAIL, NOW)).toMatchObject({
+      document: { prices: { emailRecipientsPerThousand: '0.31', emailAttachmentsGb: '0.372' }, source: { usdPrices: { emailRecipientsPerThousand: '0.10', emailAttachmentsGb: '0.12' } } },
+    });
+    const draft = draftDocument(manual, WITH_EMAIL, NOW);
+    expect('document' in draft && [draft.document.prices.emailRecipientsPerThousand, draft.document.prices.emailAttachmentsGb]).toEqual(['0.3', '0.4']);
+  });
+
+  it('names one left empty, and adds them to no book drafted from one without them', () => {
+    const form = formFrom(WITH_EMAIL, NOW);
+
+    expect(draftDocument({ ...form, storage: { ...form.storage, usd: { ...form.storage.usd, emailAttachmentsGb: '' } } }, WITH_EMAIL, NOW)).toEqual({
+      problems: ['E-mail attachments, per GB (US$): must be a decimal number, such as 0.0000166667'],
+    });
+    const draft = draftDocument(formFrom(WITH_CACHES, NOW), WITH_CACHES, NOW);
+    expect([pricesEmail(WITH_CACHES), pricesEmail(WITH_EMAIL), 'document' in draft && pricesEmail(draft.document)]).toEqual([false, true, false]);
+  });
+
+  it('lists them in TND and in US$, last, in a book that has them', () => {
+    expect(bookRows(WITH_EMAIL).slice(-2)).toEqual([
+      ['E-mail, per 1,000 recipients', '0.3008', '0.10'],
+      ['E-mail attachments, per GB', '0.36096', '0.12'],
+    ]);
+    expect(bookRows(WITH_CACHES).filter(([label]) => label.startsWith('E-mail'))).toEqual([]);
   });
 });

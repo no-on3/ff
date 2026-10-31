@@ -18,15 +18,15 @@
 	}
 }
 
-# FF's six fixed names: certificates from Let's Encrypt, which this proxy gets and renews by itself.
-api.@DOMAIN@, console.@DOMAIN@, admin.@DOMAIN@, login.@DOMAIN@, sqs.@DOMAIN@, s3.@DOMAIN@ {
+# FF's seven fixed names: certificates from Let's Encrypt, which this proxy gets and renews by itself.
+api.@DOMAIN@, console.@DOMAIN@, admin.@DOMAIN@, login.@DOMAIN@, sqs.@DOMAIN@, s3.@DOMAIN@, email.@DOMAIN@ {
 	import ff-edge
 }
 
-# Function URLs and buckets, a host each: one certificate for each wildcard, from this proxy's own authority, whose
-# root a browser must trust (README.md). Let's Encrypt's would take a DNS-01 challenge, through a key that can change
-# every record of the domain, or a certificate per host on demand, through the proxy's main file.
-*.s3.@DOMAIN@, *.fn.@DOMAIN@ {
+# Function URLs, buckets and sites, a host each: one certificate for each wildcard, from this proxy's own authority,
+# whose root a browser must trust (README.md). Let's Encrypt's would take a DNS-01 challenge, through a key that can
+# change every record of the domain, or a certificate per host on demand, through the proxy's main file.
+*.s3.@DOMAIN@, *.fn.@DOMAIN@, *.site.@DOMAIN@ {
 	tls internal
 	import ff-edge
 }

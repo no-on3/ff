@@ -39,6 +39,10 @@ const production: Env = {
   FF_FUNCTION_URL_BASE: 'https://fn.ff.example',
   FF_STORAGE_BASE: 'https://s3.ff.example',
   FF_SQS_BASE: 'https://sqs.ff.example',
+  FF_SES_BASE: 'https://email.ff.example',
+  FF_EMAIL_MAIL_HOST: 'mail.ff.example',
+  FF_EMAIL_BOUNCE_DOMAIN: 'bounces.mail.ff.example',
+  FF_WEBSITE_BASE: 'https://site.ff.example',
   FF_CODE_REGISTRY: 'http://ff-code-registry.ff-system.svc.cluster.local:5000',
 };
 
@@ -248,6 +252,69 @@ describe('configuration', () => {
 
       expect(found).toEqual(['FF_DATA_DB_ADMIN_PASSWORD must not be the development default when NODE_ENV=production']);
       expect(problems({ ...dev, FF_DATA_DB_ADMIN_PASSWORD: 'hunter2' }).join(' ')).not.toContain('hunter2');
+    });
+  });
+
+  describe("customers' cache server (ADR 0013)", () => {
+    const server: Env = { ...dev, FF_CACHE_HOST: '10.199.0.11', FF_CACHE_AGENT_URL: 'https://10.199.0.11:6390/', FF_CACHE_AGENT_TOKEN: 'ff-cache-dev', FF_CACHE_CIDRS: '10.199.0.11/32' };
+    let dir: string;
+
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-cache-'));
+      fs.writeFileSync(path.join(dir, 'data-db.crt'), '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n');
+      fs.writeFileSync(path.join(dir, 'cache.crt'), '-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----');
+    });
+
+    afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    it('has none unless FF_CACHE_HOST names it', () => {
+      expect(configuration(dev).cache).toBeNull();
+    });
+
+    it("reaches its agent as named; functions reach its caches' ports at its addresses, its CA after the database server's", () => {
+      const config = configuration({
+        ...server,
+        FF_DATA_DB_HOST: '10.199.0.10',
+        FF_DATA_DB_ADMIN_PASSWORD: 'ff-data-admin-dev',
+        FF_DATA_DB_CIDRS: '10.199.0.10/32',
+        FF_DATA_DB_CA_FILE: path.join(dir, 'data-db.crt'),
+        FF_CACHE_CA_FILE: path.join(dir, 'cache.crt'),
+      });
+
+      expect(config.cache).toEqual({
+        host: '10.199.0.11',
+        ports: { first: 6400, last: 6999 },
+        agentUrl: 'https://10.199.0.11:6390',
+        agentToken: 'ff-cache-dev',
+        cidrs: ['10.199.0.11/32'],
+        ca: '-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----',
+      });
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: ['10.199.0.10/32'], port: 5432 },
+        { cidrs: ['10.199.0.11/32'], port: 6400, endPort: 6999 },
+      ]);
+      expect(config.kubernetes.dataDbCa).toBe('-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n-----BEGIN CERTIFICATE-----\nMIIC\n-----END CERTIFICATE-----');
+    });
+
+    it('needs its agent and the addresses functions reach it at, and refuses its other settings without it', () => {
+      expect(problems({ ...dev, FF_CACHE_HOST: '10.199.0.11' })).toEqual([
+        "FF_CACHE_AGENT_URL is required when FF_CACHE_HOST is set: the backend tells the agent of customers' cache server what each cache is",
+        "FF_CACHE_AGENT_TOKEN is required when FF_CACHE_HOST is set: the backend tells the agent of customers' cache server what each cache is",
+        "FF_CACHE_CIDRS is required when FF_CACHE_HOST is set: functions reach customers' cache server only at these addresses, through their NetworkPolicy",
+      ]);
+      expect(problems({ ...dev, FF_CACHE_AGENT_TOKEN: 'x', FF_CACHE_CIDRS: '10.199.0.11/32' })).toEqual([
+        "FF_CACHE_AGENT_TOKEN is set, but FF_CACHE_HOST is not: it names customers' cache server",
+        "FF_CACHE_CIDRS is set, but FF_CACHE_HOST is not: it names customers' cache server",
+      ]);
+      expect(problems({ ...server, FF_CACHE_PORTS: '80-90' })).toEqual([expect.stringContaining('FF_CACHE_PORTS must be a range of ports from 1024 up')]);
+      expect(problems({ ...server, FF_CACHE_AGENT_URL: 'http://10.199.0.11:6390' })).toEqual([expect.stringContaining('FF_CACHE_AGENT_URL must be an https:// URL')]);
+    });
+
+    it('refuses the development token in production, and never repeats a token', () => {
+      const found = problems({ ...production, ...server, NODE_ENV: 'production', FF_AUTH_MODE: 'oidc', FF_DEV_ACCOUNT_ID: undefined });
+
+      expect(found).toEqual(['FF_CACHE_AGENT_TOKEN must not be the development default when NODE_ENV=production']);
+      expect(problems({ ...dev, FF_CACHE_AGENT_TOKEN: 'hunter2' }).join(' ')).not.toContain('hunter2');
     });
   });
 
@@ -507,6 +574,99 @@ describe('configuration', () => {
       expect(problems({ ...dev, FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003/sqs' })).toEqual([
         expect.stringMatching(/^FF_SQS_FUNCTION_ENDPOINT must be an origin, such as http:\/\/10.43.0.251:3003, at which functions reach queues' SQS endpoint/),
       ]);
+    });
+  });
+
+  describe("customers' mail's SES endpoint, and the server that sends it", () => {
+    it("is served on port 3005, apart from the API, at localhost in development, naming FF's region; the mail server is mail.localhost", () => {
+      const config = configuration(dev);
+
+      expect(config.ses).toEqual({ port: 3005, base: 'http://localhost:3005', region: 'tn-tunis-1', functionEndpoint: '' });
+      expect(config.email).toEqual({ mailHost: 'mail.localhost', bounceDomain: 'bounces.mail.localhost', domainResolvers: [], server: null });
+    });
+
+    it('takes an origin, a trailing slash dropped, port 0 for none, and the mail server by its name in lower case', () => {
+      const config = configuration({ ...production, FF_SES_BASE: 'https://email.example.tn/', FF_SES_PORT: '0', FF_EMAIL_MAIL_HOST: 'Mail.Example.TN' });
+
+      expect([config.ses.port, config.ses.base, config.email.mailHost]).toEqual([0, 'https://email.example.tn', 'mail.example.tn']);
+      expect(problems({ ...dev, FF_SES_BASE: 'https://email.example.tn/v2' })).toEqual([expect.stringMatching(/^FF_SES_BASE must be an origin, such as https:\/\/email.example.tn/)]);
+    });
+
+    it("is reached over TLS in production, and its mail server by a public name, which customers' domains' records name", () => {
+      expect(problems({ ...production, FF_SES_BASE: 'http://email.example.tn' })).toEqual([expect.stringMatching(/^FF_SES_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
+      expect(problems({ ...production, FF_EMAIL_MAIL_HOST: 'mail.localhost', FF_EMAIL_BOUNCE_DOMAIN: 'localhost' })).toEqual([
+        "FF_EMAIL_MAIL_HOST must be a public name when NODE_ENV=production, such as mail.example.tn: customers' domains' records name it",
+        "FF_EMAIL_BOUNCE_DOMAIN must be a public name when NODE_ENV=production, such as bounces.mail.example.tn: customers' domains' records name it",
+      ]);
+    });
+
+    it("is reached by functions at a Service's fixed address, on the endpoint's port, beside the SQS endpoint", () => {
+      const config = configuration({ ...production, FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003', FF_SES_FUNCTION_ENDPOINT: 'http://10.43.0.251:3005/' });
+
+      expect(config.ses.functionEndpoint).toBe('http://10.43.0.251:3005');
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: [], port: 3003 },
+        { cidrs: [], port: 3005 },
+      ]);
+    });
+
+    it("refuses functions' endpoint without the SES endpoint, and their addresses without functions' endpoint", () => {
+      expect(problems({ ...dev, FF_SES_PORT: '0', FF_SES_FUNCTION_ENDPOINT: 'http://10.43.0.251:3005' })).toEqual([
+        "FF_SES_FUNCTION_ENDPOINT is set, but FF_SES_PORT is 0: functions' keys send mail through the SES endpoint, which isn't running",
+      ]);
+      expect(problems({ ...dev, FF_SES_FUNCTION_CIDRS: '172.18.0.1/32' })).toEqual([
+        'FF_SES_FUNCTION_CIDRS is set, but FF_SES_FUNCTION_ENDPOINT is not: it names where functions reach the SES endpoint',
+      ]);
+    });
+  });
+
+  describe("the server of customers' mail (ADR 0012)", () => {
+    const server: Env = { ...dev, FF_EMAIL_SMTP_HOST: '10.199.0.12', FF_EMAIL_AGENT_URL: 'https://10.199.0.12:6391/', FF_EMAIL_AGENT_TOKEN: 'ff-mail-dev' };
+    let dir: string;
+
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-mail-'));
+      fs.writeFileSync(path.join(dir, 'mail.crt'), '-----BEGIN CERTIFICATE-----\nMIID\n-----END CERTIFICATE-----\n');
+    });
+
+    afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+    it('has none unless FF_EMAIL_SMTP_HOST names it: then nothing is sent', () => {
+      expect(configuration(dev).email.server).toBeNull();
+    });
+
+    it('takes mail on port 25 over TLS alone, its agent as named, its CA read', () => {
+      const config = configuration({ ...server, FF_EMAIL_CA_FILE: path.join(dir, 'mail.crt') });
+
+      expect(config.email.server).toEqual({
+        smtpHost: '10.199.0.12',
+        smtpPort: 25,
+        agentUrl: 'https://10.199.0.12:6391',
+        agentToken: 'ff-mail-dev',
+        ca: '-----BEGIN CERTIFICATE-----\nMIID\n-----END CERTIFICATE-----\n',
+        requireTls: true,
+      });
+      expect(configuration({ ...server, FF_EMAIL_SMTP_PORT: '2525' }).email.server?.smtpPort).toBe(2525);
+    });
+
+    it('needs its agent, which gives the bounces back, and refuses its other settings without it', () => {
+      expect(problems({ ...dev, FF_EMAIL_SMTP_HOST: '10.199.0.12' })).toEqual([
+        "FF_EMAIL_AGENT_URL is required when FF_EMAIL_SMTP_HOST is set: customers' bounces come back through the agent of their mail's server",
+        "FF_EMAIL_AGENT_TOKEN is required when FF_EMAIL_SMTP_HOST is set: customers' bounces come back through the agent of their mail's server",
+      ]);
+      expect(problems({ ...dev, FF_EMAIL_AGENT_TOKEN: 'x', FF_EMAIL_CA_FILE: '/nowhere.crt' })).toEqual([
+        "FF_EMAIL_AGENT_TOKEN is set, but FF_EMAIL_SMTP_HOST is not: it names the server of customers' mail",
+        "FF_EMAIL_CA_FILE is set, but FF_EMAIL_SMTP_HOST is not: it names the server of customers' mail",
+      ]);
+      expect(problems({ ...server, FF_EMAIL_AGENT_URL: 'http://10.199.0.12:6391' })).toEqual([expect.stringContaining('FF_EMAIL_AGENT_URL must be an https:// URL')]);
+      expect(problems({ ...server, FF_EMAIL_SMTP_PORT: '0' })).toEqual([expect.stringContaining('FF_EMAIL_SMTP_PORT')]);
+    });
+
+    it('refuses the development token in production, and never repeats a token', () => {
+      const found = problems({ ...production, ...server, NODE_ENV: 'production', FF_AUTH_MODE: 'oidc', FF_DEV_ACCOUNT_ID: undefined });
+
+      expect(found).toEqual(['FF_EMAIL_AGENT_TOKEN must not be the development default when NODE_ENV=production']);
+      expect(problems({ ...dev, FF_EMAIL_AGENT_TOKEN: 'hunter2' }).join(' ')).not.toContain('hunter2');
     });
   });
 

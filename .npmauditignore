@@ -15,8 +15,9 @@ BE body-parser GHSA-27r3-jxmh-p828 2026-11-05
 # BE/package.json then, until Nest pins it.
 BE multer GHSA-q7qp-rjg7-q26m 2026-11-05
 
-# zod 4.6.5: memory exhausted while validating an oversized collection with constraints. The backend validates with
-# it its own configuration, what operators set (platform settings, price books, plan limits), and one customer's
-# request, an owner's shares for the low-balance e-mails: a list the body's limit, 100 KB, keeps under some 50,000
-# numbers. Fixed in 4.6.6 (2026-10-11), two weeks old on 2026-10-25: updated then.
-BE zod GHSA-mrhx-c7xc-m3w5 2026-10-25
+# follow-redirects 1.16.1, through axios 1.20.0, in the console and the admin app: credentials kept across a redirect
+# to another site. It is axios's adapter for Node.js's http, which axios's "browser" field swaps for nothing, so
+# neither app's build carries it (no line of it in dist/assets): nothing reaches it. Fixed in 1.16.2 (2026-10-25),
+# two weeks old on 2026-11-08: updated then.
+FE follow-redirects GHSA-mrwp-f3q8-3g9p 2026-11-08
+admin follow-redirects GHSA-mrwp-f3q8-3g9p 2026-11-08

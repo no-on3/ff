@@ -14,12 +14,14 @@ RUN test -n "$VITE_API_URL" && test -n "$VITE_OIDC_AUTHORITY" \
       || { echo "VITE_API_URL and VITE_OIDC_AUTHORITY are required: the production console logs in and calls the API" >&2; exit 1; }
 RUN npm run build
 
-# Caddy 2.11.7, built here with Go 1.26.9 and golang.org/x/net v0.60.0, which fix advisories in its release's
-# binary (Go 1.26.8, x/net v0.59.0); the admin app's image builds it the same way. Without the capability to bind
-# ports below 1024 (XCADDY_SETCAP), which a container without any capability may not execute. It listens on 8080.
+# Caddy 2.11.7, built here with Go 1.26.9, golang.org/x/net v0.60.0 and go-jose v4.1.6, which fix advisories in its
+# release's binary (Go 1.26.8, x/net v0.59.0, go-jose v4.1.5); the admin app's image builds it the same way. Without
+# the capability to bind ports below 1024 (XCADDY_SETCAP), which a container without any capability may not
+# execute. It listens on 8080.
 FROM golang:1.26.9-alpine3.24 AS caddy
 RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7 \
- && XCADDY_SETCAP=0 xcaddy build v2.11.7 --replace golang.org/x/net=golang.org/x/net@v0.60.0 --output /tmp/caddy
+ && XCADDY_SETCAP=0 xcaddy build v2.11.7 --replace golang.org/x/net=golang.org/x/net@v0.60.0 \
+      --replace github.com/go-jose/go-jose/v4=github.com/go-jose/go-jose/v4@v4.1.6 --output /tmp/caddy
 
 FROM alpine:3.24.2
 LABEL org.opencontainers.image.title="ff-console" \

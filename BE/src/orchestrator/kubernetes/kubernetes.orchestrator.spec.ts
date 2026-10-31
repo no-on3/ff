@@ -18,7 +18,7 @@ import {
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, RequestOptions } from './kube-client';
 import { KubernetesOrchestrator, isRolledOut, loadErrorIn } from './kubernetes.orchestrator';
 import { StoredLine, decodeCursor, pageQuery, tailQuery } from './log-store';
-import { BLOCKED_EGRESS_CIDRS, DATA_DB_CA_SECRET, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
+import { BLOCKED_EGRESS_CIDRS, DATA_DB_CA_SECRET, INTERNET_PORTS, RUNTIME_PORT, TENANT_NETWORK_POLICY_NAME, TENANT_QUOTA_NAME } from './manifests';
 import { ANNOTATIONS, LABELS, functionResourceName, accountNamespace } from './naming';
 import { settings, tenant, workload } from './test-fixtures';
 
@@ -229,6 +229,7 @@ describe('KubernetesOrchestrator', () => {
       expect(api.applied.find((a) => a.manifest.kind === 'ResourceQuota')!.manifest.spec.hard.pods).toBe('9');
       expect(api.applied.find((a) => a.manifest.kind === 'NetworkPolicy')!.manifest.spec.egress).toContainEqual({
         to: [{ ipBlock: { cidr: '0.0.0.0/0', except: BLOCKED_EGRESS_CIDRS } }],
+        ports: INTERNET_PORTS,
       });
     });
 

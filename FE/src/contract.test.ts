@@ -32,6 +32,12 @@ import functionUrlEntitySource from '../../BE/src/functions/entities/function-ur
 import customDomainDtoSource from '../../BE/src/function-urls/dto/custom-domain.dto.ts?raw';
 import customDomainEntitySource from '../../BE/src/function-urls/custom-domain.entity.ts?raw';
 import scheduleDtoSource from '../../BE/src/schedules/dto/schedule.dto.ts?raw';
+import cacheDtoSource from '../../BE/src/caches/dto/cache.dto.ts?raw';
+import emailDtoSource from '../../BE/src/email/dto/email.dto.ts?raw';
+import emailIdentityEntitySource from '../../BE/src/email/email-identity.entity.ts?raw';
+import emailMessageEntitySource from '../../BE/src/email/email-message.entity.ts?raw';
+import cacheEntitySource from '../../BE/src/caches/cache.entity.ts?raw';
+import cacheNamesSource from '../../BE/src/caches/cache-names.ts?raw';
 import databaseDtoSource from '../../BE/src/databases/dto/database.dto.ts?raw';
 import databaseEntitySource from '../../BE/src/databases/database.entity.ts?raw';
 import databaseNamesSource from '../../BE/src/databases/database-names.ts?raw';
@@ -41,20 +47,24 @@ import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
 import eventSourceDtoSource from '../../BE/src/event-sources/dto/event-source.dto.ts?raw';
 import bucketNotificationsDtoSource from '../../BE/src/storage/dto/notifications.dto.ts?raw';
 import bucketNotificationsSource from '../../BE/src/storage/bucket-notifications.ts?raw';
+import websiteDtoSource from '../../BE/src/storage/dto/website.dto.ts?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
 import { MAX_ATTEMPTS } from './lib/notifications';
-import { COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
+import { CACHE_METRICS, COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME, ORIGIN } from './lib/function-url';
 import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
 import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
+import { CACHE_NAME } from './lib/caches';
+import { EMAIL_ACCOUNT_FIELDS, IDENTITY_FIELDS, IDENTITY_STATUSES, MESSAGE_FIELDS, RECIPIENT_FIELDS, RECIPIENT_STATUSES, SEND_FIELDS, SUPPRESSION_FIELDS } from './lib/email';
 import { DATABASE_NAME } from './lib/databases';
 import { BUCKET_NAME } from './lib/buckets';
 import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
 import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES } from './lib/event-sources';
 import { EVENT_TYPES as NOTIFICATION_EVENTS } from './lib/bucket-notifications';
+import { SITE_DOMAIN_FIELDS, SITE_METRICS, WEBSITE_FIELDS } from './lib/sites';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { ENDPOINTS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
 import {
@@ -66,7 +76,11 @@ import {
   BUCKET_REQUEST_METRICS,
   BUCKET_USAGE_FIELDS,
   QUEUE_USAGE_FIELDS,
+  CACHE_USAGE_FIELDS,
+  EMAIL_USAGE_FIELDS,
   STORAGE_KEY_FIELDS,
+  CACHE_FIELDS,
+  CACHE_STATUSES,
   DATABASE_FIELDS,
   DATABASE_STATUSES,
   DATABASE_USAGE_FIELDS,
@@ -346,8 +360,8 @@ describe('the alarms', () => {
 
   it("offer the API's metrics, each with its statistics", () => {
     const block = alarmRulesSource.slice(alarmRulesSource.indexOf('export const STATISTICS = {'), alarmRulesSource.indexOf('} as const;'));
-    // A key may be quoted, as one starting with a digit is: '4xxErrors'.
-    const backend = Object.fromEntries([...block.matchAll(/^\s+'?(\w+)'?: \[([^\]]*)\]/gm)].map(([, metric, list]) => [metric, list.split(',').map((s) => s.trim().replace(/'/g, ''))]));
+    // A key may be quoted, as one starting with a digit is, '4xxErrors', or one with a dot, 'Reputation.BounceRate'.
+    const backend = Object.fromEntries([...block.matchAll(/^\s+'?([\w.]+)'?: \[([^\]]*)\]/gm)].map(([, metric, list]) => [metric, list.split(',').map((s) => s.trim().replace(/'/g, ''))]));
     expect(backend).toEqual(Object.fromEntries(Object.entries(STATISTICS).map(([metric, list]) => [metric, [...list]])));
   });
 
@@ -454,6 +468,53 @@ describe("a function URL's own domain", () => {
   });
 });
 
+describe("a bucket's site (ADR 0011)", () => {
+  it("has the API's fields, its website configuration's and its own domains', so the panel reads each one there is", () => {
+    const view = websiteDtoSource.slice(websiteDtoSource.indexOf('export class WebsiteView {'));
+
+    expect([...view.slice(0, view.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1])).toEqual([...WEBSITE_FIELDS]);
+    expect(dtoFields(customDomainDtoSource, 'export class SiteDomainView {')).toEqual([...SITE_DOMAIN_FIELDS]);
+  });
+});
+
+describe("customers' mail (ADR 0012)", () => {
+  it("has the API's fields, so the E-mail page reads each one there is, and sends what SendEmail takes", () => {
+    expect(dtoFields(emailDtoSource, 'export class EmailIdentityView {')).toEqual([...IDENTITY_FIELDS]);
+    expect(dtoFields(emailDtoSource, 'export class EmailAccountView {')).toEqual([...EMAIL_ACCOUNT_FIELDS]);
+    expect(dtoFields(emailDtoSource, 'export class SuppressionView {')).toEqual([...SUPPRESSION_FIELDS]);
+    expect(dtoFields(emailDtoSource, 'export class EmailMessageView {')).toEqual([...MESSAGE_FIELDS]);
+    expect(dtoFields(emailDtoSource, 'export class MessageRecipientView {')).toEqual([...RECIPIENT_FIELDS]);
+    // A request's fields, its optional ones too.
+    const body = emailDtoSource.slice(emailDtoSource.indexOf('export class SendEmailDto {'));
+    expect([...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1])).toEqual([...SEND_FIELDS]);
+  });
+
+  it("has the API's statuses, an identity's and a recipient's", () => {
+    const statuses = emailIdentityEntitySource.slice(emailIdentityEntitySource.indexOf('export enum EmailIdentityStatus'));
+    const recipient = /export type RecipientStatus = ([^;]+);/.exec(emailMessageEntitySource)?.[1] ?? '';
+
+    expect([...statuses.slice(0, statuses.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...IDENTITY_STATUSES]);
+    expect([...recipient.matchAll(/'(\w+)'/g)].map((match) => match[1])).toEqual([...RECIPIENT_STATUSES]);
+  });
+});
+
+describe("a customer's cache (ADR 0013)", () => {
+  it("has the API's fields, statuses and name rule, so its page reads each one there is and the form refuses what the API would", () => {
+    const statuses = cacheEntitySource.slice(cacheEntitySource.indexOf('export enum CacheStatus'));
+
+    expect(dtoFields(cacheDtoSource, 'export class CacheView {')).toEqual([...CACHE_FIELDS]);
+    expect(dtoFields(cacheDtoSource, 'export class CacheWithPassword extends CacheView {')).toEqual(['password', 'url']);
+    expect([...statuses.slice(0, statuses.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1])).toEqual([...CACHE_STATUSES]);
+    expect(/export const CACHE_NAME = \/(.+)\/;/.exec(cacheNamesSource)?.[1]).toBe(CACHE_NAME.source);
+  });
+
+  it("has the API's metrics, as CloudWatch names ElastiCache's, which its alarms watch", () => {
+    expect(dtoFields(metricsDtoSource, 'class CacheMetricSeries {')).toEqual([...CACHE_METRICS]);
+    expect(dtoFields(metricsDtoSource, 'class CacheStatisticSeries {')).toEqual(['Maximum', 'Average']);
+    expect(dtoFields(metricsDtoSource, 'class CacheCountSeries {')).toEqual(['Sum']);
+  });
+});
+
 describe("a customer's database (ADR 0008)", () => {
   it("has the API's fields, statuses and name rule, so its pages read each one there is and the form refuses what the API would", () => {
     const statuses = databaseEntitySource.slice(databaseEntitySource.indexOf('export enum DatabaseStatus'));
@@ -528,7 +589,7 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
   it("have the API's fields and name rule, so the page reads each one there is and the form refuses what the API would", () => {
     expect(dtoFields(storageDtoSource, 'export class BucketView {')).toEqual([...BUCKET_FIELDS]);
     expect(dtoFields(storageDtoSource, 'export class StorageKeyView {')).toEqual([...STORAGE_KEY_FIELDS]);
-    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'sqsEndpoint', 'region']);
+    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'sqsEndpoint', 'sesEndpoint', 'region']);
     expect(/export const BUCKET_NAME = \/(.+)\/;/.exec(storageNamesSource)?.[1]).toBe(BUCKET_NAME.source);
   });
 
@@ -536,6 +597,9 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
     expect(dtoFields(metricsDtoSource, 'class BucketMetricSeries {')).toEqual(['BucketSizeBytes', 'NumberOfObjects', ...BUCKET_REQUEST_METRICS]);
     expect(dtoFields(metricsDtoSource, 'class BucketStorageSeries {')).toEqual(['Average']);
     expect(dtoFields(metricsDtoSource, 'class BucketRequestSeries {')).toEqual(['Sum']);
+    // A site's, as CloudWatch names a CloudFront distribution's.
+    expect(dtoFields(metricsDtoSource, 'class SiteMetricSeries {')).toEqual([...SITE_METRICS]);
+    expect(dtoFields(metricsDtoSource, 'class SiteShareSeries {')).toEqual(['Average']);
     expect(dtoFields(usageDtoSource, 'export class BucketUsageView {')).toEqual([...BUCKET_USAGE_FIELDS]);
     expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('buckets');
   });
@@ -543,6 +607,16 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
   it("have the API's fields of a queue's month on the Usage page", () => {
     expect(dtoFields(usageDtoSource, 'export class QueueUsageView {')).toEqual([...QUEUE_USAGE_FIELDS]);
     expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('queues');
+  });
+
+  it("have the API's fields of a cache's month on the Usage page", () => {
+    expect(dtoFields(usageDtoSource, 'export class CacheUsageView {')).toEqual([...CACHE_USAGE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('caches');
+  });
+
+  it("have the API's fields of a domain's or an address's mail's month on the Usage page", () => {
+    expect(dtoFields(usageDtoSource, 'export class EmailUsageView {')).toEqual([...EMAIL_USAGE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class MonthlyUsageView {')).toContain('email');
   });
 });
 

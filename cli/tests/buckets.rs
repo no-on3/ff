@@ -130,7 +130,7 @@ fn a_bucket_with_files_answers_the_apis_words() {
 fn keys_create_prints_the_secret_once_as_aws_tools_read_it() {
     let mut made = key(KEY_ID, json!(["photos"]), true);
     made.as_object_mut().unwrap().extend(
-        json!({ "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "endpoint": "https://s3.example.tn", "sqsEndpoint": "https://sqs.example.tn", "region": "tn-tunis-1" })
+        json!({ "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "endpoint": "https://s3.example.tn", "sqsEndpoint": "https://sqs.example.tn", "sesEndpoint": "https://email.example.tn", "region": "tn-tunis-1" })
             .as_object()
             .unwrap()
             .clone(),
@@ -140,7 +140,7 @@ fn keys_create_prints_the_secret_once_as_aws_tools_read_it() {
     ff(&with_key(&api.url)).args(["buckets", "keys", "create", "--bucket", "photos", "--read-only"]).assert().success().stdout(format!(
         "{KEY_ID} made, reaching the bucket photos, read-only: its secret, shown this once (FF keeps it sealed; `ff buckets keys revoke {KEY_ID}` stops it):\n\
          export AWS_ACCESS_KEY_ID={KEY_ID}\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\n\
-         export AWS_ENDPOINT_URL_S3=https://s3.example.tn\nexport AWS_ENDPOINT_URL_SQS=https://sqs.example.tn\n"
+         export AWS_ENDPOINT_URL_S3=https://s3.example.tn\nexport AWS_ENDPOINT_URL_SQS=https://sqs.example.tn\nexport AWS_ENDPOINT_URL_SESV2=https://email.example.tn\n"
     ));
     assert_eq!(
         serde_json::from_str::<Value>(&api.requests()[0].body).unwrap(),

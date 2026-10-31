@@ -168,12 +168,68 @@ export class QueueUsageView {
   cost: string | null;
 }
 
+export class EmailUsageView {
+  @ApiProperty({ example: '5d41402a-bc4b-2a76-b971-9d911017c592', description: "Its line in the bill: made of the account and the domain or address" })
+  resourceId: string;
+
+  @ApiProperty({ example: 'shop.example.tn', description: 'The domain or address the mail went from' })
+  identity: string;
+
+  @ApiProperty({ description: 'The domain or address was deleted since: its usage stays' })
+  deleted: boolean;
+
+  @ApiProperty({ example: 1250, description: "Its messages' recipients, each one, a suppressed one too, as SES bills them" })
+  recipients: number;
+
+  @ApiProperty({ example: 52_428_800, description: "What its messages' attachments weighed as sent, each recipient's copy, in bytes: SES bills them by the GB" })
+  attachmentBytes: number;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    example: '0.376',
+    description: "Its estimated cost in the estimate's currency, rounded to the minor unit; null without a price book",
+  })
+  cost: string | null;
+}
+
+export class CacheUsageView {
+  @ApiProperty({ example: '9b2e4c1a-7d3f-4a6b-8c5e-0f1a2b3c4d5e' })
+  cacheId: string;
+
+  @ApiProperty({ example: 'sessions', description: 'Its name in the month' })
+  name: string;
+
+  @ApiProperty({ description: 'The cache was deleted since: its usage stays' })
+  deleted: boolean;
+
+  @ApiProperty({ example: 312, description: 'The hours it was measured in, each billed as ElastiCache bills a node-hour' })
+  hours: number;
+
+  @ApiProperty({ example: 64, description: 'Its memory at its latest measure, in MB: the plan\'s when it was made' })
+  memoryMb: number;
+
+  @ApiProperty({ example: '19.5', description: 'Its memory times its hours, in GB-hours, as it is billed, whatever its keys used' })
+  gbHours: string;
+
+  @ApiProperty({ example: '0.026210', description: 'The same in GB-months, over the month\'s hours, as the CSV gives storage' })
+  gbMonths: string;
+
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    example: '1.502',
+    description: "Its estimated cost in the estimate's currency, rounded to the minor unit; null without a price book",
+  })
+  cost: string | null;
+}
+
 /** The month's estimated cost at FF's prices (P-30, D8). Each amount is rounded once, from the exact ones. */
 export class UsageEstimateView {
   @ApiProperty({ example: 'TND' })
   currency: string;
 
-  @ApiProperty({ example: '28.877', description: 'Every function, database, bucket and queue together, before the free tier' })
+  @ApiProperty({ example: '28.877', description: 'Every function, database, bucket, queue and cache together, before the free tier' })
   usage: string;
 
   @ApiProperty({
@@ -218,6 +274,12 @@ export class MonthlyUsageView {
   @ApiProperty({ type: [QueueUsageView], description: "Each of the account's queues asked anything in the month (ADR 0010), the most requests first" })
   queues: QueueUsageView[];
 
+  @ApiProperty({ type: [CacheUsageView], description: "Each of the account's caches measured in the month (ADR 0013), the most GB-hours first" })
+  caches: CacheUsageView[];
+
+  @ApiProperty({ type: [EmailUsageView], description: "Each domain or address the account's mail went from in the month (ADR 0012), the most recipients first" })
+  email: EmailUsageView[];
+
   @ApiProperty({ type: UsageAmountsView, description: "The account's calls in the month, from the same records as its functions'" })
   totals: UsageAmountsView;
 
@@ -226,7 +288,7 @@ export class MonthlyUsageView {
 }
 
 /** The month as UsageService reads it from the records, before it is priced. */
-export type UsageMonth = Omit<MonthlyUsageView, 'functions' | 'databases' | 'buckets' | 'queues' | 'estimate'> & { functions: Array<Omit<FunctionUsageView, 'cost'>> };
+export type UsageMonth = Omit<MonthlyUsageView, 'functions' | 'databases' | 'buckets' | 'queues' | 'caches' | 'email' | 'estimate'> & { functions: Array<Omit<FunctionUsageView, 'cost'>> };
 
 /** A database's month as UsageService reads it from its samples, before it is priced. */
 export type DatabaseMonth = Omit<DatabaseUsageView, 'cost'>;
@@ -236,3 +298,9 @@ export type BucketMonth = Omit<BucketUsageView, 'cost'>;
 
 /** A queue's month as UsageService reads it from its request counts, before it is priced. */
 export type QueueMonth = Omit<QueueUsageView, 'cost'>;
+
+/** A cache's month as UsageService reads it from its samples, before it is priced. */
+export type CacheMonth = Omit<CacheUsageView, 'cost'>;
+
+/** A domain's or an address's mail in a month as UsageService reads it from its billing records, before it is priced. */
+export type EmailMonth = Omit<EmailUsageView, 'cost'>;

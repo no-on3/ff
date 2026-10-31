@@ -19,6 +19,8 @@ import { MIGRATIONS } from '../migrations';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
+import { withCachePrices } from '../migrations/1793333328301-CacheMeasures';
+import { withEmailPrices } from '../migrations/1793345460517-EmailBilling';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
@@ -68,6 +70,12 @@ const KEY_QUEUES = migrationNames.find((name) => name.startsWith('KeyQueues')) a
 const EVENT_SOURCE_MAPPINGS = migrationNames.find((name) => name.startsWith('EventSourceMappings')) as string;
 const BUCKET_NOTIFICATIONS = migrationNames.find((name) => name.startsWith('BucketNotifications')) as string;
 const QUEUE_BILLING = migrationNames.find((name) => name.startsWith('QueueBilling')) as string;
+const BUCKET_WEBSITES = migrationNames.find((name) => name.startsWith('BucketWebsites')) as string;
+const DEPLOY_KEYS = migrationNames.find((name) => name.startsWith('DeployKeys')) as string;
+const CACHES = migrationNames.find((name) => name.startsWith('Caches1')) as string;
+const CACHE_MEASURES = migrationNames.find((name) => name.startsWith('CacheMeasures')) as string;
+const EMAIL_IDENTITIES = migrationNames.find((name) => name.startsWith('EmailIdentities')) as string;
+const EMAIL_MESSAGES = migrationNames.find((name) => name.startsWith('EmailMessages')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -589,9 +597,10 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
 
+      // The caches' and mail's migrations after it give both ElastiCache's SKU and SES's too.
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        { valid_from: next, prices: withQueuePrices(current), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'test' },
+        { valid_from: next, prices: withEmailPrices(withCachePrices(withQueuePrices(current))), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'test' },
       ]);
       const minute = `date_trunc('minute', now())`;
       await dataSource.query(
@@ -661,6 +670,243 @@ run('database schema (L2, real PostgreSQL)', () => {
       // The alarms the code before it doesn't know go; the others stay.
       expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Errors' }]);
       expect(await dataSource.query(`SELECT to_regclass('queue_samples') AS s, to_regclass('async_event_counts') AS c`)).toEqual([{ s: null, c: null }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the sites' migration counts their requests in a class of their own, gives every plan its monthly limit, and reverts dropping the sites' minutes alone", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id: bucket }] = await dataSource.query(`INSERT INTO buckets (account_id, name, store_name) VALUES ($1, 'shop', 'ff-000000000000000000000001') RETURNING id`, [ACCOUNT]);
+      const counted = (kind: string) =>
+        dataSource.query(
+          `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
+           VALUES ($1, date_trunc('minute', now()), $2, gen_random_uuid(), $3, 'shop', 1, 1, 0, 0, 0, 0, 100)`,
+          [bucket, kind, ACCOUNT],
+        );
+      await counted('tier2');
+      await counted('website');
+      await expect(counted('cdn')).rejects.toThrow(/violates check constraint/);
+      expect((await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`))[0].limits.siteTransferGbPerMonth).toBe(10);
+
+      await migrateDownTo(dataSource, BUCKET_WEBSITES);
+
+      expect(await dataSource.query(`SELECT class FROM storage_request_counts`)).toEqual([{ class: 'tier2' }]);
+      await expect(counted('website')).rejects.toThrow(/violates check constraint/);
+      await expect(dataSource.query(`DELETE FROM storage_request_counts`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect((await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`))[0].limits.siteTransferGbPerMonth).toBeUndefined();
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the caches' migration gives every plan one cache of 64 MB, keeps a cache's name its account's once, its port and its name on the server the server's once, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      const cache = (accountId: string, name: string, serverName: string, port: number, status = 'active') =>
+        dataSource.query(
+          `INSERT INTO caches (account_id, name, server_name, port, memory_mb, password_sha256, status) VALUES ($1, $2, $3, $4, 64, repeat('0', 64), $5)`,
+          [accountId, name, serverName, port, status],
+        );
+      await cache(ACCOUNT, 'sessions', 'fc-000000000000000000000001', 6400);
+      await cache('000000000002', 'sessions', 'fc-000000000000000000000002', 6401); // another account's, of the same name
+      await expect(cache(ACCOUNT, 'sessions', 'fc-000000000000000000000003', 6402)).rejects.toThrow(/duplicate key/);
+      await expect(cache(ACCOUNT, 'rates', 'fc-000000000000000000000003', 6400)).rejects.toThrow(/duplicate key/);
+      await expect(cache(ACCOUNT, 'rates', 'fc-000000000000000000000001', 6402)).rejects.toThrow(/duplicate key/);
+      await expect(cache(ACCOUNT, 'rates', 'fc-000000000000000000000003', 6402, 'read_only')).rejects.toThrow(/violates check constraint/);
+      expect((await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`))[0].limits).toMatchObject({ caches: 1, cacheMb: 64 });
+
+      await migrateDownTo(dataSource, DEPLOY_KEYS);
+
+      expect(await dataSource.query(`SELECT to_regclass('caches') AS t`)).toEqual([{ t: null }]);
+      const [{ limits }] = await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`);
+      expect([limits.caches, limits.cacheMb]).toEqual([undefined, undefined]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the mail-billing migration keeps each message's billing record by month, append-only, rates mail's hours beside the others', gives books not started yet SES's SKUs, adds its own from next month's first hour, and reverts unless an hour of mail is rated", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, EMAIL_MESSAGES);
+      // As after the mail-sending migration, in a month later than its own: no book starts next month yet.
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      await dataSource.query(`DELETE FROM price_books WHERE valid_from > now()`);
+      const cached = withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)));
+      const [{ id: future }] = await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', '2099-01-01T00:00:00Z', $1, 'test') RETURNING id`, [
+        JSON.stringify(cached),
+      ]);
+      const [{ prices: current }] = await dataSource.query(`SELECT prices FROM price_books WHERE valid_from <= now() ORDER BY valid_from DESC LIMIT 1`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
+        { valid_from: next, prices: withEmailPrices(current), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(cached), created_by: 'test' },
+      ]);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO email_sends (message_id, sent_at, account_id, identity, recipients, attachment_bytes) VALUES (gen_random_uuid(), now(), $1, 'shop.example.tn', 3, 12)`,
+        [ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE email_sends SET recipients = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM email_sends`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'email_sends')).toEqual([{ relname: monthPartition('email_sends', 0) }, { relname: monthPartition('email_sends', 1) }]);
+      const alarm = (metric: string, statistic: string) =>
+        dataSource.query(
+          `INSERT INTO alarms (account_id, name, metric, statistic, period, comparison, threshold, evaluation_periods, datapoints_to_alarm, actions)
+           VALUES ($1, $2, $2, $3, 3600, 'GreaterThanThreshold', 0, 1, 1, '{"email": true, "webhookUrls": []}')`,
+          [ACCOUNT, metric, statistic],
+        );
+      await alarm('Reputation.BounceRate', 'Average');
+      await alarm('Errors', 'Sum');
+
+      // Reverted with records present: the alarms the code before it doesn't know go, the book it made goes, the other loses SES's SKUs.
+      await migrateDownTo(dataSource, EMAIL_MESSAGES);
+
+      expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Errors' }]);
+      expect(await dataSource.query(`SELECT to_regclass('email_sends') AS s, (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'resource_usage_hourly' AND column_name = 'bytes') AS b`)).toEqual([
+        { s: null, b: 0 },
+      ]);
+      expect(await dataSource.query(`SELECT id, prices FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([{ id: future, prices: cached }]);
+
+      // Once an hour of mail is rated, it refuses: those are billed records.
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(
+        `INSERT INTO resource_usage_hourly (account_id, hour, resource_id, kind, name, price_book_id, byte_hours, hours, tier1_requests, tier2_requests, requests, bytes)
+         VALUES ($1, date_trunc('hour', now()), gen_random_uuid(), 'email', 'shop.example.tn', (SELECT id FROM price_books LIMIT 1), 0, 0, 0, 0, 3, 36)`,
+        [ACCOUNT],
+      );
+      await expect(migrateDownTo(dataSource, EMAIL_MESSAGES)).rejects.toThrow('1 hour(s) of mail were rated: they are billed records, and reverting would drop them');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the cache-measures migration samples caches by month, append-only, rates their hours beside the others', lets an alarm watch a cache and go with it, gives books not started yet ElastiCache's SKU, adds its own from next month's first hour, and reverts unless a cache's hour is rated", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, CACHES);
+      // As after the queue-billing migration, in a month later than its own: no book starts next month yet.
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      await dataSource.query(`DELETE FROM price_books WHERE valid_from > now()`);
+      const queued = withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK));
+      const [{ id: future }] = await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', '2099-01-01T00:00:00Z', $1, 'test') RETURNING id`, [
+        JSON.stringify(queued),
+      ]);
+      const [{ prices: current }] = await dataSource.query(`SELECT prices FROM price_books WHERE valid_from <= now() ORDER BY valid_from DESC LIMIT 1`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
+        // The mail's migration after it gives both SES's SKUs too.
+        { valid_from: next, prices: withEmailPrices(withCachePrices(current)), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(queued)), created_by: 'test' },
+      ]);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const cache = async (name: string, port: number) =>
+        (
+          await dataSource.query(
+            `INSERT INTO caches (account_id, name, server_name, port, memory_mb, password_sha256, status) VALUES ($1, $2, $3, $4, 64, repeat('0', 64), 'active') RETURNING id`,
+            [ACCOUNT, name, `fc-${String(port).padStart(24, '0')}`, port],
+          )
+        )[0].id as string;
+      const alarm = (cacheId: string | null, metric: string, statistic: string) =>
+        dataSource.query(
+          `INSERT INTO alarms (account_id, cache_id, name, metric, statistic, period, comparison, threshold, evaluation_periods, datapoints_to_alarm, actions)
+           VALUES ($1, $2, $3, $3, $4, 3600, 'GreaterThanThreshold', 0, 1, 1, '{"email": true, "webhookUrls": []}')`,
+          [ACCOUNT, cacheId, metric, statistic],
+        );
+      const gone = await cache('gone', 6400);
+      await alarm(gone, 'Evictions', 'Sum');
+      await dataSource.query(`DELETE FROM caches WHERE id = $1`, [gone]);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM alarms`)).toEqual([{ n: 0 }]); // it went with its cache
+      const sessions = await cache('sessions', 6401);
+      await dataSource.query(
+        `INSERT INTO cache_samples (cache_id, hour, account_id, name, memory_mb, bytes_used, connections, hits, misses, evictions, process_started_at)
+         VALUES ($1, date_trunc('hour', now()), $2, 'sessions', 64, 1000, 1, 0, 0, 0, now())`,
+        [sessions, ACCOUNT],
+      );
+      await expect(dataSource.query(`UPDATE cache_samples SET bytes_used = 0`)).rejects.toThrow(/is append-only: UPDATE refused/);
+      await expect(dataSource.query(`DELETE FROM cache_samples`)).rejects.toThrow(/is append-only: DELETE refused/);
+      expect(await partitionsOf(dataSource, 'cache_samples')).toEqual([{ relname: monthPartition('cache_samples', 0) }, { relname: monthPartition('cache_samples', 1) }]);
+      await alarm(sessions, 'BytesUsedForCache', 'Maximum');
+      await alarm(null, 'Errors', 'Sum');
+
+      // Reverted with samples present: the alarms the code before it doesn't know go, the book it made goes, the other loses ElastiCache's SKU.
+      await migrateDownTo(dataSource, CACHES);
+
+      expect(await dataSource.query(`SELECT metric FROM alarms`)).toEqual([{ metric: 'Errors' }]);
+      expect(await dataSource.query(`SELECT to_regclass('cache_samples') AS s, (SELECT count(*)::int FROM information_schema.columns WHERE table_name = 'alarms' AND column_name = 'cache_id') AS a`)).toEqual([
+        { s: null, a: 0 },
+      ]);
+      expect(await dataSource.query(`SELECT id, prices FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([{ id: future, prices: queued }]);
+
+      // Once a cache's hour is rated, it refuses: those are billed records.
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(
+        `INSERT INTO resource_usage_hourly (account_id, hour, resource_id, kind, name, price_book_id, byte_hours, hours, tier1_requests, tier2_requests, requests)
+         VALUES ($1, date_trunc('hour', now()), $2, 'cache', 'sessions', (SELECT id FROM price_books LIMIT 1), 67108864, 1, 0, 0, 0)`,
+        [ACCOUNT, sessions],
+      );
+      await expect(migrateDownTo(dataSource, CACHES)).rejects.toThrow('1 hour(s) of caches were rated: they are billed records, and reverting would drop them');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the mail migration gives every plan the sandbox's limits, keeps an identity its account's once and an address once on its list, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      const identity = (accountId: string, name: string, type = 'DOMAIN') =>
+        dataSource.query(`INSERT INTO email_identities (account_id, identity, type) VALUES ($1, $2, $3)`, [accountId, name, type]);
+      const suppressed = (address: string, reason: string) => dataSource.query(`INSERT INTO email_suppressions (account_id, address, reason) VALUES ($1, $2, $3)`, [ACCOUNT, address, reason]);
+      await identity(ACCOUNT, 'shop.example.tn');
+      await identity('000000000002', 'shop.example.tn'); // another account's, of the same name
+      await expect(identity(ACCOUNT, 'shop.example.tn')).rejects.toThrow(/duplicate key/);
+      await expect(identity(ACCOUNT, '192.0.2.1', 'IP_ADDRESS')).rejects.toThrow(/violates check constraint/);
+      await suppressed('gone@example.tn', 'BOUNCE');
+      await expect(suppressed('gone@example.tn', 'COMPLAINT')).rejects.toThrow(/duplicate key/);
+      await expect(suppressed('angry@example.tn', 'SPAM')).rejects.toThrow(/violates check constraint/);
+      expect((await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`))[0].limits).toMatchObject({ emailIdentities: 2, emailsPerDay: 200, emailsPerSecond: 1 });
+
+      await migrateDownTo(dataSource, CACHE_MEASURES);
+
+      expect(await dataSource.query(`SELECT to_regclass('email_identities') AS i, to_regclass('email_suppressions') AS s`)).toEqual([{ i: null, s: null }]);
+      const [{ limits }] = await dataSource.query(`SELECT limits FROM plans WHERE id = 'beta'`);
+      expect([limits.emailIdentities, limits.emailsPerDay, limits.emailsPerSecond]).toEqual([undefined, undefined, undefined]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the mail-sending migration keeps a message once by its ID, in one of its three states, an account's sending once, a new one's SES's defaults, and reverts with both present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      const message = (id: string, status = 'QUEUED') =>
+        dataSource.query(
+          `INSERT INTO email_messages (id, account_id, identity, from_address, return_path, recipients, recipient_count, size_bytes, status)
+           VALUES ($1, $2, 'shop.example.tn', 'orders@shop.example.tn', 'b-x@bounces.mail.localhost', '[]', 1, 10, $3)`,
+          [id, ACCOUNT, status],
+        );
+      await message('3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b');
+      await expect(message('3f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b')).rejects.toThrow(/duplicate key/);
+      await expect(message('4f2a1b4c-5d6e-4f70-8a9b-0c1d2e3f4a5b', 'DELIVERED')).rejects.toThrow(/violates check constraint/);
+      await dataSource.query(`INSERT INTO email_sending (account_id) VALUES ($1)`, [ACCOUNT]);
+      await expect(dataSource.query(`INSERT INTO email_sending (account_id) VALUES ($1)`, [ACCOUNT])).rejects.toThrow(/duplicate key/);
+      await expect(dataSource.query(`UPDATE email_sending SET enforcement_status = 'BANNED'`)).rejects.toThrow(/violates check constraint/);
+      expect(await dataSource.query(`SELECT production_access, sending_enabled, enforcement_status FROM email_sending`)).toEqual([
+        { production_access: false, sending_enabled: true, enforcement_status: 'HEALTHY' },
+      ]);
+
+      await migrateDownTo(dataSource, EMAIL_IDENTITIES);
+
+      expect(await dataSource.query(`SELECT to_regclass('email_messages') AS m, to_regclass('email_sending') AS s`)).toEqual([{ m: null, s: null }]);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -1024,9 +1270,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
       const books = await dataSource.query(`SELECT id, valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
       expect(books).toEqual([
-        // The queues' migration after it gives both SQS's SKU too.
-        { id: expect.any(String), valid_from: next, prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'system' },
-        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)), created_by: 'test' },
+        // The queues', the caches' and mail's migrations after it give both SQS's SKU, ElastiCache's and SES's too.
+        { id: expect.any(String), valid_from: next, prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'system' },
+        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'test' },
       ]);
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -1146,7 +1392,7 @@ run('database schema (L2, real PostgreSQL)', () => {
     it('names tables and columns in snake_case, defaults UUIDs to gen_random_uuid(), and keeps time zones', async () => {
       const rows = await columns();
       const tables = [...new Set(rows.map((row) => row.table_name))].sort();
-      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts|queue_samples|async_event_counts)_\d{4}_\d{2}$/; // their partitions, one per month
+      const monthly = /^(usage_records|capacity_samples|database_samples|bucket_samples|storage_request_counts|queue_request_counts|queue_samples|async_event_counts|cache_samples|email_sends)_\d{4}_\d{2}$/; // their partitions, one per month
 
       expect(tables.filter((table) => !monthly.test(table))).toEqual([
         'accounts',
@@ -1156,11 +1402,18 @@ run('database schema (L2, real PostgreSQL)', () => {
         'audit_log',
         'bucket_samples',
         'buckets',
+        'cache_samples',
+        'caches',
         'capacity_samples',
         'currencies',
         'custom_domains',
         'database_samples',
         'databases',
+        'email_identities',
+        'email_messages',
+        'email_sending',
+        'email_sends',
+        'email_suppressions',
         'event_source_mappings',
         'function_environments',
         'function_event_invoke_configs',
@@ -1207,10 +1460,14 @@ run('database schema (L2, real PostgreSQL)', () => {
         monthPartition('async_event_counts', 1),
         monthPartition('bucket_samples', 0),
         monthPartition('bucket_samples', 1),
+        monthPartition('cache_samples', 0),
+        monthPartition('cache_samples', 1),
         monthPartition('capacity_samples', 0),
         monthPartition('capacity_samples', 1),
         monthPartition('database_samples', 0),
         monthPartition('database_samples', 1),
+        monthPartition('email_sends', 0),
+        monthPartition('email_sends', 1),
         monthPartition('queue_request_counts', 0),
         monthPartition('queue_request_counts', 1),
         monthPartition('queue_samples', 0),
@@ -1221,7 +1478,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         usagePartition(1),
       ]);
       expect(rows.filter((row) => !/^[a-z][a-z0-9_]*$/.test(row.column_name))).toEqual([]);
-      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets', 'queues']) {
+      for (const table of ['functions', 'function_invocations', 'function_metrics', 'users', 'invitations', 'price_books', 'ledger_accounts', 'ledger_transactions', 'payments', 'notification_deliveries', 'alarms', 'packages', 'buckets', 'queues', 'email_identities']) {
         expect(rows.find((row) => row.table_name === table && row.column_name === 'id')?.column_default).toBe(
           'gen_random_uuid()',
         );

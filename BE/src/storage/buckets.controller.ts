@@ -3,9 +3,11 @@ import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
 import { BucketNotificationsService } from './bucket-notifications.service';
+import { BucketWebsitesService } from './bucket-websites.service';
 import { BucketsService } from './buckets.service';
 import { NotificationConfigurationDto, NotificationConfigurationView } from './dto/notifications.dto';
 import { BucketView, CreateBucketDto } from './dto/storage.dto';
+import { WebsiteConfigurationDto, WebsiteView } from './dto/website.dto';
 
 /**
  * Customers' buckets (ADR 0009), as AWS S3 gives them, behind FF's S3 front
@@ -19,6 +21,7 @@ export class BucketsController {
   constructor(
     private readonly buckets: BucketsService,
     private readonly notifications: BucketNotificationsService,
+    private readonly websites: BucketWebsitesService,
   ) {}
 
   @Get()
@@ -80,6 +83,43 @@ export class BucketsController {
   @ApiResponse({ status: 404, description: 'No such bucket in the account' })
   putNotifications(@Param('name') name: string, @Body() dto: NotificationConfigurationDto, @Principal() principal: Principal): Promise<NotificationConfigurationView> {
     return this.notifications.put(principal.accountId, name, dto);
+  }
+
+  @Get(':name/website')
+  @RequireScope('storage:read')
+  @ApiOperation({ summary: "A bucket's website configuration, as S3's GetBucketWebsite in its JSON names, and its site's address" })
+  @ApiResponse({ status: 200, type: WebsiteView })
+  @ApiResponse({ status: 404, description: 'No such bucket in the account, or it is no site' })
+  getWebsite(@Param('name') name: string, @Principal() principal: Principal): Promise<WebsiteView> {
+    return this.websites.get(principal.accountId, name);
+  }
+
+  @Put(':name/website')
+  @RequireScope('storage:write')
+  @RequireRole(...WRITERS)
+  @RequireActiveAccount()
+  @ApiOperation({
+    summary: "Make a bucket a site, as S3's PutBucketWebsite: its website configuration replaced whole",
+    description:
+      'Every file of the bucket is then public to read at its site, https://<bucket>.<the sites\' host>/, as S3 serves a website: a folder\'s path answers its index document, a path with no file the error document with 404, ' +
+      'or, for a single-page app, the index document with 200. Its S3 API stays signed. Redirects and routing rules come later.',
+  })
+  @ApiResponse({ status: 200, type: WebsiteView })
+  @ApiResponse({ status: 400, description: 'An index document with a slash, or a name too long' })
+  @ApiResponse({ status: 404, description: 'No such bucket in the account' })
+  putWebsite(@Param('name') name: string, @Body() dto: WebsiteConfigurationDto, @Principal() principal: Principal): Promise<WebsiteView> {
+    return this.websites.put(principal.accountId, name, dto);
+  }
+
+  @Delete(':name/website')
+  @HttpCode(204)
+  @RequireScope('storage:write')
+  @RequireRole(...WRITERS)
+  @ApiOperation({ summary: "A bucket no longer a site, as S3's DeleteBucketWebsite: its files private again, and kept" })
+  @ApiResponse({ status: 204 })
+  @ApiResponse({ status: 404, description: 'No such bucket in the account' })
+  async removeWebsite(@Param('name') name: string, @Principal() principal: Principal): Promise<void> {
+    await this.websites.remove(principal.accountId, name);
   }
 
   @Delete(':name')

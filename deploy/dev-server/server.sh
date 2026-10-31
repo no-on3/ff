@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # FF on its development server (README.md), as root, from the checkout install.sh copied to /data/ff/src: k3s and
-# gVisor; PostgreSQL, S3, mail and customers' databases beside the cluster, in Docker Compose; FF's passwords and keys,
-# made once, in /data/ff/secrets; the images built here and given to k3s; deploy/k8s applied and the platform deployed
-# by its deploy.sh; the first operator; FF's route in the server's own proxy (/data/proxy); then every hostname
-# checked through that proxy. A step already done does nothing, so that an update is the same run. No password is
-# ever printed, or put on a command line.
+# gVisor; PostgreSQL, S3, mail, and customers' database, cache and mail servers beside the cluster, in Docker Compose;
+# FF's passwords and keys, made once, in /data/ff/secrets; the images built here and given to k3s; deploy/k8s applied
+# and the platform deployed by its deploy.sh; the first operator; FF's route in the server's own proxy (/data/proxy);
+# then every hostname checked through that proxy. A step already done does nothing, so that an update is the same
+# run. No password is ever printed, or put on a command line.
 #   FF_VERSION=<the images' tag> FF_ADMIN_ALLOW=<address>/32 /data/ff/src/deploy/dev-server/server.sh
 set -euo pipefail
 home=/data/ff
@@ -22,6 +22,12 @@ k3s_data=/data/kubernetes/k3s
 edge_address=10.43.0.252 # the edge's Service, as the overlay fixes it (k8s/kustomization.yaml)
 # The services beside the cluster (docker-compose.yml), <Service>:<port name>:<port docker0's address publishes>.
 beside=(ff-dev-postgres:postgres:5433 ff-dev-s3:s3:8333 ff-dev-smtp:smtp:1025)
+# Customers' database, cache and mail servers' network beside the cluster, and their addresses there: functions reach
+# a server at docker0's address, and Docker sends the connection on to the server's own, which is what the cluster's
+# firewall checks against functions' NetworkPolicy. The caches' ports are the backend's (k8s/backend.env).
+customers_subnet=10.199.0.0/24 customers_gateway=10.199.0.1
+data_db_address=10.199.0.10 cache_address=10.199.0.11 mail_address=10.199.0.12 mailpit_address=10.199.0.13
+cache_ports="$(sed -n 's/^FF_CACHE_PORTS=//p' "$src/deploy/dev-server/k8s/backend.env")"
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml PATH="/usr/local/bin:$PATH"
 compose=(docker compose --project-directory "$home")
 work="$(mktemp -d "$home/.run-XXXXXX")" # on the data disk, readable by root alone: some files here hold secrets
@@ -38,6 +44,7 @@ write_if_changed() {
 [ "$(id -u)" = 0 ] || fail "run it as root: install.sh runs it with sudo"
 [ -n "$k3s_version" ] && [ -n "$gvisor_release" ] || fail "no k3s or gVisor version in $src/hack: is the checkout whole?"
 [ -n "$domain" ] || fail "no FF_API_HOST=api.<domain> in $src/deploy/dev-server/k8s/edge.env"
+[ -n "$cache_ports" ] || fail "no FF_CACHE_PORTS=<first>-<last> in $src/deploy/dev-server/k8s/backend.env"
 [ -d "$proxy/sites" ] || fail "no proxy at $proxy: on this server, the projects' sites reach ports 80 and 443 through it"
 id deploy >/dev/null 2>&1 || fail "no user deploy, which owns /data/<project>"
 host_address="$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1)"
@@ -62,6 +69,9 @@ for name in postgres-password ff-db-password keycloak-db-password keycloak-admin
 done
 secret s3-access-key sh -c "printf 'ffdev%s' '$(hex 8)'"
 secret log-store-delete-key hex 32
+# The backend's tokens at the agents of customers' caches and mail, which keep their SHA-256 alone.
+secret cache-agent-token hex 32
+secret mail-agent-token hex 32
 secret encryption-keys sh -c 'echo "$(date +%Y-%m):$(head -c 32 /dev/urandom | base64)"'
 # The code registry's two users, bcrypt, by Apache's htpasswd in its image, each password on its stdin.
 registry_users() {
@@ -80,16 +90,31 @@ print(json.dumps({"identities": [{"name": "ff", "credentials": [{"accessKey": ke
 chown 1000:deploy "$secrets/s3.json"
 chmod 0440 "$secrets/s3.json"
 
-step "PostgreSQL, S3, mail and customers' databases beside the cluster, on $host_address ($home)"
+step "PostgreSQL, S3, mail, and customers' database, cache and mail servers beside the cluster, on $host_address ($home)"
 install -o deploy -g deploy -m 0644 "$src/deploy/dev-server/docker-compose.yml" "$home/docker-compose.yml"
 env_file="FF_HOST_ADDRESS=$host_address
 FF_DOMAIN=$domain
 POSTGRES_PASSWORD=$(cat "$secrets/postgres-password")
 FF_DATA_DB_SUPERUSER_PASSWORD=$(cat "$secrets/data-db-superuser-password")
-FF_DATA_DB_ADMIN_PASSWORD=$(cat "$secrets/data-db-admin-password")"
+FF_DATA_DB_ADMIN_PASSWORD=$(cat "$secrets/data-db-admin-password")
+FF_CUSTOMERS_SUBNET=$customers_subnet
+FF_CUSTOMERS_GATEWAY=$customers_gateway
+FF_DATA_DB_ADDRESS=$data_db_address
+FF_CACHE_ADDRESS=$cache_address
+FF_MAIL_ADDRESS=$mail_address
+FF_MAILPIT_ADDRESS=$mailpit_address
+FF_CACHE_PORTS=$cache_ports
+FF_CACHE_AGENT_TOKEN_SHA256=$(sha256sum <"$secrets/cache-agent-token" | cut -d' ' -f1)
+FF_MAIL_AGENT_TOKEN_SHA256=$(sha256sum <"$secrets/mail-agent-token" | cut -d' ' -f1)"
 write_if_changed "$home/.env" "$env_file" 0600 || true
 chown deploy:deploy "$home/.env"
-"${compose[@]}" up -d --build --wait --quiet-pull >"$work/compose.log" 2>&1 ||
+# Customers' servers' images, without BuildKit's provenance attestation, which names each build: with it, the same
+# files make a new image each time, and Compose would start each server again, every customer's cache emptied and
+# every session on their databases ended. This server's Compose (2.40) doesn't pass on its own `provenance: false`.
+for name in data-db cache mail; do
+  docker build -q --provenance=false -t "ff-$name:dev-server" "$src/deploy/$name" >/dev/null
+done
+"${compose[@]}" up -d --no-build --wait --quiet-pull >"$work/compose.log" 2>&1 ||
   { tail -20 "$work/compose.log" >&2; fail "the services beside the cluster didn't start"; }
 # The backend's and Keycloak's databases, each with its user: made once, their passwords set each run. The SQL,
 # passwords and all, goes on psql's stdin, never its command line.
@@ -108,7 +133,24 @@ for i in $(seq 1 60); do
   [ "$i" -lt 60 ] || { "${compose[@]}" logs --tail 5 s3 >&2; fail "S3 doesn't refuse an unsigned request on $host_address:8333"; }
   sleep 2
 done
-echo "  running: $("${compose[@]}" ps --format '{{.Service}}' | sort | paste -sd' '); S3 with FF's identities"
+# The agents of customers' caches and mail answer the backend's token, at their names, with the certificates they
+# made from their own CAs, which the backend gets too (the overlay); the mail server's Postfix runs.
+"${compose[@]}" cp cache:/var/lib/ff-cache/tls/ca.crt "$work/cache-ca.crt"
+"${compose[@]}" cp customer-mail:/var/lib/ff-mail/tls/ca.crt "$work/mail-ca.crt"
+for agent in cache:6390 mail:6391; do
+  name="${agent%%:*}" port="${agent#*:}"
+  printf 'authorization: Bearer %s\n' "$(cat "$secrets/$name-agent-token")" >"$work/$name-agent-header"
+  for i in $(seq 1 30); do
+    status="$(curl -s -o "$work/$name-health" -w '%{http_code}' --max-time 3 --cacert "$work/$name-ca.crt" -H "@$work/$name-agent-header" \
+      --resolve "$name.$domain:$port:$host_address" "https://$name.$domain:$port/health")"
+    [ "$status" = 200 ] && break
+    [ "$i" -lt 30 ] || fail "the $name server's agent doesn't answer its token at $name.$domain:$port (it said $status)"
+    sleep 2
+  done
+done
+python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1]))["postfix"] else 1)' "$work/mail-health" ||
+  { "${compose[@]}" logs --tail 5 customer-mail >&2; fail "the mail server's Postfix doesn't run"; }
+echo "  running: $("${compose[@]}" ps --format '{{.Service}}' | sort | paste -sd' '); S3 with FF's identities; both agents"
 
 step "k3s $k3s_version, without its ingress and load balancer, and gVisor $gvisor_release"
 changed=false
@@ -173,10 +215,11 @@ done
 for entry in "${beside[@]}"; do
   ufw allow proto tcp from 10.42.0.0/16 to "$host_address" port "${entry##*:}" comment "FF dev server: k3s pods to ${entry%%:*}" >/dev/null
 done
-# Customers' databases by their name, inside the cluster, where the internet's DNS doesn't answer it yet.
-dns="db.$domain:53 {
+# Customers' database, cache and mail servers by their names, inside the cluster, where the internet's DNS doesn't
+# answer them: docker0's address, where each listens.
+dns="db.$domain:53 cache.$domain:53 mail.$domain:53 {
     hosts {
-        $host_address db.$domain
+        $host_address db.$domain cache.$domain mail.$domain
     }
 }"
 if [ "$(kubectl -n kube-system get configmap coredns-custom -o jsonpath='{.data.ff-dev-server\.server}' 2>/dev/null)" != "$dns" ]; then
@@ -216,7 +259,8 @@ apply_secret ff-system ff-backend --from-file=DB_PASSWORD="$secrets/ff-db-passwo
   --from-file=FF_OBJECT_STORE_ACCESS_KEY="$secrets/s3-access-key" --from-file=FF_OBJECT_STORE_SECRET_KEY="$secrets/s3-secret-key" \
   --from-literal=FF_SMTP_URL=smtp://ff-dev-smtp.ff-system.svc.cluster.local:1025 \
   --from-file=FF_CODE_REGISTRY_PASSWORD="$secrets/registry-backend-password" \
-  --from-file=FF_DATA_DB_ADMIN_PASSWORD="$secrets/data-db-admin-password"
+  --from-file=FF_DATA_DB_ADMIN_PASSWORD="$secrets/data-db-admin-password" \
+  --from-file=FF_CACHE_AGENT_TOKEN="$secrets/cache-agent-token" --from-file=FF_EMAIL_AGENT_TOKEN="$secrets/mail-agent-token"
 apply_secret ff-system ff-code-registry --from-file=htpasswd="$secrets/registry-htpasswd"
 apply_secret ff-system keycloak --from-file=KC_DB_PASSWORD="$secrets/keycloak-db-password" \
   --from-literal=KC_BOOTSTRAP_ADMIN_USERNAME=admin --from-file=KC_BOOTSTRAP_ADMIN_PASSWORD="$secrets/keycloak-admin-password" \
@@ -232,8 +276,10 @@ step "the platform, with deploy/k8s/platform/deploy.sh"
 overlay="$home/overlay"
 rm -rf "$overlay"
 install -d -m 0700 "$overlay"
-# The CA of customers' databases, which the backend reads and hands to functions' pods.
+# The CAs of customers' database and cache servers, which the backend reads and hands to functions' pods, and of
+# their mail server, which the backend checks it against.
 "${compose[@]}" cp data-db:/var/lib/postgresql/tls/ca.crt "$overlay/data-db-ca.crt"
+cp "$work/cache-ca.crt" "$work/mail-ca.crt" "$overlay/"
 # The production realm, its mail to the server's Mailpit, which takes neither TLS nor a login.
 python3 - "$src/deploy/k8s/platform/keycloak/ff-realm.json" "$overlay/ff-realm.json" <<'PY'
 import json, sys
@@ -264,7 +310,8 @@ configMapGenerator:
     behavior: merge
     literals:
       - FF_DATA_DB_ADMIN_HOST=$host_address
-      - FF_DATA_DB_CIDRS=$host_address/32
+      - FF_DATA_DB_CIDRS=$data_db_address/32
+      - FF_CACHE_CIDRS=$cache_address/32
   - name: ff-edge
     namespace: ff-edge
     behavior: merge
@@ -278,6 +325,12 @@ configMapGenerator:
   - name: ff-data-db-ca
     namespace: ff-system
     files: [ca.crt=data-db-ca.crt]
+  - name: ff-cache-ca
+    namespace: ff-system
+    files: [ca.crt=cache-ca.crt]
+  - name: ff-email-ca
+    namespace: ff-system
+    files: [ca.crt=mail-ca.crt]
 images:
   - {name: ff-backend, newTag: "$version"}
   - {name: ff-console, newTag: "$version"}
@@ -332,16 +385,16 @@ else
 fi
 
 step "every hostname, through the server's proxy, as from the internet"
-# Let's Encrypt's certificates for the six fixed names, which the proxy asks for once it has the route: a minute
+# Let's Encrypt's certificates for the seven fixed names, which the proxy asks for once it has the route: a minute
 # or so the first time. Checked against the system's roots alone.
-for name in api console admin login s3 sqs; do
+for name in api console admin login s3 sqs email; do
   for i in $(seq 1 60); do
     curl -s -o /dev/null --cacert /etc/ssl/certs/ca-certificates.crt --resolve "$name.$domain:443:127.0.0.1" "https://$name.$domain/" && break
     [ "$i" -lt 60 ] || fail "no certificate from Let's Encrypt for $name.$domain after 3 minutes: the proxy's log says why (docker compose --project-directory $proxy logs caddy)"
     sleep 3
   done
 done
-# Then as a browser that trusts the system's roots and the proxy's own, which signs function URLs' and buckets'.
+# Then as a browser that trusts the system's roots and the proxy's own, which signs function URLs', buckets' and sites'.
 { cat /etc/ssl/certs/ca-certificates.crt
   docker compose --project-directory "$proxy" exec -T caddy cat /data/caddy/pki/authorities/local/root.crt; } >"$work/roots.pem"
 passed=0
@@ -364,10 +417,12 @@ check "the login: the realm's issuer is the public address" "200 https://login.$
 check "the admin app and Keycloak's administration refuse an address not allowed: this machine's" "403 403" \
   "$(at "admin.$domain" /) $(at "login.$domain" /admin/master/console/)"
 check "buckets' S3 endpoint: S3's refusal of an unsigned request" 403 "$(at "s3.$domain" /)"
-# A host under the function domain or the S3 endpoint that is no URL and no bucket: the edge gets no certificate for
-# it, as the backend says no, so the proxy has nothing to give but its own 502.
-check "a host that is no function URL, or no bucket, gets nothing from the edge" "502 502" \
-  "$(at "nothing-$(hex 4).fn.$domain" /) $(at "nobody-$(hex 4).s3.$domain" /)"
+# A host under the function domain, the S3 endpoint or the sites' domain that is no URL, no bucket and no site: the
+# edge gets no certificate for it, as the backend says no, so the proxy has nothing to give but its own 502.
+check "a host that is no function URL, no bucket or no site gets nothing from the edge" "502 502 502" \
+  "$(at "nothing-$(hex 4).fn.$domain" /) $(at "nobody-$(hex 4).s3.$domain" /) $(at "nosite-$(hex 4).site.$domain" /)"
 check "queues' SQS endpoint: SQS's refusal of an unsigned request" "true" \
   "$(code="$(at "sqs.$domain" / -X POST)"; [ "${code:0:1}" = 4 ] && echo true || echo "false ($code)")"
+check "customers' mail's SES endpoint: SES's refusal of an unsigned request" "403 MissingAuthenticationTokenException" \
+  "$(at "email.$domain" /v2/email/account) $(header x-amzn-errortype | cut -d: -f1)"
 echo "server.sh: $passed checks passed; FF $version is up at https://console.$domain"

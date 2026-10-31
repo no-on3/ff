@@ -5,6 +5,52 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-10-30: step 4 started, its eleven choices as recommended
+
+You said: "read docs/step-4-plan.md and docs/what-to-build-next.md, extract what's not done yet, create a dedicated tasks list for it, and then start working on it and don't stop until you are finished. You can deploy to server". The list is the [step-4 task list](step-4-tasks.md). Building without stopping meant answering the [step-4 plan](step-4-plan.md)'s §9 without asking: each of its eleven choices is taken as the plan recommended it. Any of them can still change; each says below what changing it would touch. The branch `feat/step-4` was made from `master` at `82d66ba`. The step was done the same day, W-00 to W-10, and installed on the development server (Deploy 2).
+
+### Step 4: the whole app runs here
+
+**40. A site is a bucket with S3's website configuration,** its files sent with `aws s3 sync` or `ff sites deploy`. ✅ Taken as recommended. The way out stays S3 and CloudFront, and buckets' measures, limits and bills serve sites as they are. Deploys with rollbacks, as Netlify has, can come on top later.
+- **Changed already:** W-02 (`6dc2371`): S3's website configuration at the S3 front door, in S3's XML, and in FF's API, and the website server, which answers as S3's website endpoint does; W-03 (`0eef134`): `ff sites deploy`, which sends only what changed with a deploy's own key, and the console's site panel.
+- **Still to change:** nothing.
+
+**41. Single-page apps: an unknown path answers the index document with 200,** as CloudFront's custom error response does, a site's own setting, on with `ff sites deploy --spa`. ✅ Taken as recommended. Off, a site answers as S3 alone does: the error document, with 404.
+- **Changed already:** W-02 (`6dc2371`): a site's `singlePageApp`, with which the website server answers an unknown path with the index document and 200; W-03 (`0eef134`): `ff sites deploy --spa`.
+- **Still to change:** nothing.
+
+**42. Sites live under FF's domain, at `<bucket>.site.ffunc.cloud`,** as function URLs live under `fn.ffunc.cloud`; on the development server, `<bucket>.site.dev.ffunc.cloud`. ✅ Taken as recommended. A domain of its own for customers' content (sites and function URLs), so that a phishing page on one never marks FF's own domain, as GitHub keeps `github.io` apart from `github.com`, is a question for before the public launch: added at the end of this log.
+- **Changed already:** W-03 (`0eef134`): `<bucket>.site.<domain>` at the edge, its certificates made on demand, and a customer's own domain for a site; on the development server, the record `*.site.dev`, made by you on 2026-10-30, and a site there, which the smoke test visits (Deploy 2).
+- **Still to change:** nothing in this step; a domain of its own for customers' content, before the public launch (the questions at the end).
+
+**43. The bytes sites send out are counted, not billed,** as decision 12 says of all bytes out, with a limit a month per plan to protect the server: 10 GB on beta. ✅ Taken as recommended.
+- **Changed already:** W-02 (`6dc2371`): a site's bytes counted, never billed, against the plan's `siteTransferGbPerMonth`, 10 GB on beta, past which the account's sites answer 403 until the month's end; each visit billed as a request of S3's second class, as a `GET` is.
+- **Still to change:** nothing.
+
+**44. E-mail's interface: SES v2's API first,** so that AWS's SDKs work with only the endpoint changed and the quotas sit in one place; SMTP, with a password made from a key as SES makes it, later. ✅ Taken as recommended.
+- **Changed already:** W-06 (`0a8bba0`): SES v2's API at an endpoint of its own, `email.<domain>`, signed for `ses` with the account's keys or a function's: identities, the account, the suppression list; W-07 (`3599ead`): `SendEmail`, simple and raw.
+- **Still to change:** nothing in this step; SMTP later, as this decision says.
+
+**45. The server that sends customers' mail: a Postfix of its own,** the backend signing each message with the customer's DKIM key, never FF's own relay, so that one customer's spam can't stop FF's own mail. ✅ Taken as recommended. Postal does more, with more to run.
+- **Changed already:** W-07 (`3599ead`): `deploy/mail/`, Postfix 3.11 and FF's agent, the backend signing each message with its domain's DKIM key, what bounced and the complaints read back; on the development server, beside the cluster, its mail handed to Mailpit, none sent (Deploy 2).
+- **Still to change:** in production, a server and an IP address of its own, checked against block lists first (the plan's §8).
+
+**46. The sandbox, as SES's:** a new account sends only to addresses it proved, 200 a day, until an operator lifts it in the admin app. ✅ Taken as recommended.
+- **Changed already:** W-07 (`3599ead`): in the sandbox, mail to what the account proved alone, within the plan's 200 a day and 1 a second (W-06's `emailsPerDay` and `emailsPerSecond`); W-08 (`b4ff421`): the admin app's account page, where an operator lets an account out of the sandbox or puts it back, with a reason, in the account's audit log and an e-mail to its owners.
+- **Still to change:** nothing.
+
+**47. A cache is a Valkey process of its own,** its memory the plan's, on a server of customers' caches; never one Valkey shared by every account, where one account could fill the memory of all. ✅ Taken as recommended.
+- **Changed already:** W-04 (`7b40ee9`): `deploy/cache/`, Valkey 9.1.2 and FF's agent, each cache a process of its own under a user of its own, with the plan's memory, and `/caches` in FF's API; on the development server, beside the cluster (Deploy 2).
+- **Still to change:** nothing.
+
+**48. A cache keeps nothing on disk:** it is a cache, said plainly in the docs; a restart empties it. ✅ Taken as recommended.
+- **Changed already:** W-04 (`7b40ee9`): a cache's keys in memory alone, nothing on disk; W-09 (`de6622d`): ADR 0013 as built and the French page on caches say that a restarted cache starts empty. An update of the development server no longer starts customers' caches again when nothing of theirs changed (Deploy 2, `e787d6d`).
+- **Still to change:** nothing.
+
+**49. The order: sites, then caches, then e-mail.** ✅ Taken as recommended. Sites are the smallest and reuse the most; e-mail has the most risk, and its server's IP address the most to check.
+
+**50. FF's own counters (its rate limits) stay in the backend's memory** in this step; in Valkey once the backend runs more than one copy, as the client-readiness plan says. ✅ Taken as recommended.
+
 ## 2026-10-24, later: FF's domain is ffunc.cloud, and its repository on GitHub
 
 You said: "I bought ffunc.cloud, i want to use instead", then made its records for the development server at OVH; and: "i also created an empty git repository: https://github.com/no-on3/ff so everything can be automated".
@@ -15,7 +61,7 @@ You said: "I bought ffunc.cloud, i want to use instead", then made its records f
 - **Still to change:** production's wildcard certificates. The edge asks for them by DNS-01 through RFC 2136, which OVH's DNS doesn't take (the questions at the end).
 
 **39. FF's repository is on GitHub: `no-on3/ff`.** ✅ Your answer, and "push to github". Public when you made it, private since, the same day.
-- **What it means:** GitHub runs the workflow already in `.github/workflows/ci.yml`, each stage of `hack/ci.sh` on GitHub's own machines. A private repository has 2,000 free minutes of them a month on GitHub Free, and the workflow's jobs may take up to 170 per push to `master`, by their time limits, and 45 a night (the questions at the end). The history pushed has no secret (gitleaks, every commit) and no trace of the server's address.
+- **What it means:** GitHub runs the workflow already in `.github/workflows/ci.yml`, each stage of `hack/ci.sh` on GitHub's own machines. A private repository has 2,000 free minutes of them a month on GitHub Free, and the workflow's jobs may take up to 170 per push to `master`, by their time limits, and 215 a night, as the nightly run repeats every job, not the platform's alone (the questions at the end). The history pushed has no secret (gitleaks, every commit) and no trace of the server's address.
 - **Changed already:** `master` pushed on 2026-10-24 (`2a381f4`), GitHub's default branch since.
 - **Still to change:** how the development server updates from it (the questions at the end).
 
@@ -28,7 +74,8 @@ You asked, with step 3 done, for four things: the step-3 migrations on your deve
 
 **35, done: Caddy rebuilt.** ✅ Your answer. The three images that carry Caddy now build it themselves, 2.11.7 with Go 1.26.9 and x/net v0.60.0, which fix its release's three advisories (`3d1635a`). A newer one of Go's (CVE-2026-111943, crypto/x509) needs Go 1.26.10, released 2026-10-19: accepted until 2026-11-02, when it is two weeks old.
 - **Found on the way** (`d4eaa94`): the security stage hadn't passed since 2026-10-21. Gitleaks' nine findings were made-up test values, now listed. npm audit found new advisories in the backend's dependencies whose fixes are under two weeks old: `.npmauditignore` now accepts such an advisory for a while, as `.trivyignore.yaml` does for images, and the API refuses compressed bodies, which closes body-parser's.
-- **Still to change:** each fix once it is two weeks old, when its exception expires and the security stage says so: zod 4.6.6 on 2026-10-25, Go 1.26.10 for Caddy on 2026-11-02, body-parser 2.4.0 and multer 2.5.0 on 2026-11-05.
+- **Changed already:** zod 4.6.7 in the backend on 2026-10-30, with step 4's merge, its exception having ended on 2026-10-25; and the same day, go-jose v4.1.6 in the three images' Caddy, whose v4.1.5 a new advisory names (CVE-2026-116587, a denial of service through a JWK's RSA parameters), its fix two weeks old since 2026-10-28; in WAL-G's release binary, built with v4.1.4, the same advisory accepted until 2026-11-20 with its others, as WAL-G reaches S3 with a key and parses no JWK.
+- **Still to change:** each fix once it is two weeks old, when its exception expires and the security stage says so: Go 1.26.10 for Caddy on 2026-11-02, body-parser 2.4.0 and multer 2.5.0 on 2026-11-05, follow-redirects 1.16.2 in the console and the admin app on 2026-11-08 (an advisory of 2026-10-30, which nothing they ship reaches).
 
 **36, done: step 3 is in `master`.** ✅ Your answer. Merged on 2026-10-24 (`2a381f4`), without a checkout, as step 2 was: `master` had not moved, so no file changed, and your dev servers saw nothing.
 
@@ -260,8 +307,9 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
-| The step-4 plan's eleven choices, each with a recommendation: static sites' shape and address, the bytes they send out, e-mail's interface and the server that sends it, the sandbox, caches' isolation and persistence, the order, and FF's own counters | [Step-4 plan](step-4-plan.md) §9 | Step 4: static sites, e-mail from apps, a cache; nothing of it is built before |
-| GitHub's minutes, now that the repository is private: GitHub Free gives it 2,000 a month, and the workflow may take up to 170 per push to `master` and 45 a night. Public again, where they are free; the nightly run weekly; or the cluster's stage on demand alone | This log, 39 | Whether CI keeps running all month |
+| Step 5's fourteen choices, each with a recommendation: the order (the export kit first), how much of Lambda's API, how its changes are answered, runtime names, what access keys may do with functions, functions' keys that expire, how a version runs, Lambda's permissions, where a SAM template is read, SAM's web events, schedules in Terraform, what the cost estimate counts, trying the way out on AWS itself, and the limits on beta | [Step-5 plan](step-5-plan.md) §9 | Step 5: nothing of it is built until you confirm them |
+| A domain of its own for customers' content, sites and function URLs, so that a phishing page on one never marks `ffunc.cloud` itself, as GitHub keeps `github.io` apart from `github.com`; or both under `ffunc.cloud`, as now | This log, 42 | The public launch: the names customers' sites and function URLs get, and their certificates |
+| GitHub's minutes, now that the repository is private: GitHub Free gives it 2,000 a month, and the workflow may take up to 170 per push to `master` and 215 a night, its every job, up to about 6,450 a month by the nightly run alone. Public again, where they are free; the nightly run weekly; or the cluster's stage on demand alone | This log, 39 | Whether CI keeps running all month |
 | How the development server updates: by itself, pulling each commit of `master` whose tests passed on GitHub (recommended: GitHub then holds no key to the server; a private repository takes a read-only deploy key of the server's own, and a token that reads the workflow's results), or by GitHub, through a key to the server | This log, 39 | Deploys without anyone running `install.sh` |
 | Function URLs' and buckets' certificates on the development server: the proxy's own authority, as now (recommended); Let's Encrypt's by DNS-01, through an OVH key that can change every record of `ffunc.cloud`, kept on the server other projects share; or one per host on demand, through a line in the shared proxy's main file | [`deploy/dev-server`](../deploy/dev-server/README.md) | Whether a browser that doesn't trust the proxy's root can call a function at its URL |
 | Production's wildcard certificates: the edge's DNS-01 speaks RFC 2136, which OVH's DNS doesn't take: OVH's module in the edge, a DNS server of FF's for the zones of `fn` and `s3`, or one certificate per host on demand | [`deploy/k8s`](../deploy/k8s/README.md); this log, 17 and 38 | Production's install |

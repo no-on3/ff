@@ -1,8 +1,8 @@
 # Who reaches whom. In ff-system, nothing unless allowed below or by the log store's own policy (logging/): the
-# edge reaches the backend (its API, and its port for functions' URLs), the two apps and Keycloak; the backend reaches Keycloak for the realm's keys,
+# edge reaches the backend (its API, and its ports for functions' URLs, buckets, queues, sites and mail), the two apps and Keycloak; the backend reaches Keycloak for the realm's keys,
 # and the code registry, to push code images; the metrics store reaches the backend's metrics port. Tenants'
-# functions reach the backend's S3 front door and SQS endpoint, with their own keys to their account's buckets and
-# queues, and nothing else of them. The edge takes the world on its two ports. The API server's proxy, the kubelet's probes and the nodes' pulls
+# functions reach the backend's S3 front door, SQS endpoint and SES endpoint, with their own keys to their account's
+# buckets, queues and mail, and nothing else of them. The edge takes the world on its two ports. The API server's proxy, the kubelet's probes and the nodes' pulls
 # of code images come from the node, which k3s lets through.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -44,8 +44,12 @@ spec:
           protocol: TCP
         - port: 3003
           protocol: TCP
-    # Functions, in the tenants' namespaces that the backend makes: buckets' S3 front door and queues' SQS endpoint
-    # alone (ff-storage).
+        - port: 3004
+          protocol: TCP
+        - port: 3005
+          protocol: TCP
+    # Functions, in the tenants' namespaces that the backend makes: buckets' S3 front door, queues' SQS endpoint and
+    # mail's SES endpoint alone (ff-storage).
     - from:
         - namespaceSelector:
             matchLabels:
@@ -57,6 +61,8 @@ spec:
         - port: 3002
           protocol: TCP
         - port: 3003
+          protocol: TCP
+        - port: 3005
           protocol: TCP
     - from:
         - namespaceSelector:

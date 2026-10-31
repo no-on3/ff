@@ -1,8 +1,8 @@
 /**
  * L2: customers' own domains on a real PostgreSQL: a domain in an account once,
- * verified in one account at most however many add it, gone with its URL and
- * its function; and every plan with its limit on them. Each run works in a
- * scratch database, dropped afterwards.
+ * for a URL or a site, verified in one account at most however many add it,
+ * gone with its URL and its function, or with its bucket; and every plan with
+ * its limit on them. Each run works in a scratch database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -16,6 +16,7 @@ import { FunctionUrl, UrlAuthType } from '../functions/entities/function-url.ent
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { parsePlanLimits } from '../plans/plan-limits';
 import { plan } from '../plans/test-fixtures';
+import { Bucket } from '../storage/bucket.entity';
 import { CustomDomain, DomainStatus } from './custom-domain.entity';
 import { CustomDomainsService } from './custom-domains.service';
 import { DomainResolver } from './domain-check';
@@ -32,7 +33,7 @@ run("customers' domains, in the database (L2)", () => {
   const cnames: Record<string, string> = {};
   const resolver: DomainResolver = { cname: async (name) => (cnames[name] ? [cnames[name]] : []), txt: async () => [], addresses: async () => [] };
   const config = {
-    getOrThrow: (key: string) => ({ 'functionUrls.base': 'https://fn.example.tn', 'functionUrls.edgeAddresses': [] })[key],
+    getOrThrow: (key: string) => ({ 'functionUrls.base': 'https://fn.example.tn', 'functionUrls.edgeAddresses': [], 'website.base': 'https://site.example.tn' })[key],
     get: () => 'production',
   } as unknown as ConfigService;
 
@@ -49,6 +50,12 @@ run("customers' domains, in the database (L2)", () => {
     });
     await db.dataSource.getRepository(FunctionUrl).insert({ functionId: fn.id, accountId, urlId, authType: UrlAuthType.NONE });
     return { id: fn.id, host: `${urlId}.fn.example.tn` };
+  };
+
+  /** A bucket of the account that is a site; its host, for CNAMEs. */
+  const withSite = async (accountId: string, name: string) => {
+    await db.dataSource.getRepository(Bucket).insert({ accountId, name, storeName: `ff-${name}`, website: { indexDocument: 'index.html', errorDocument: null, singlePageApp: false } });
+    return { name, host: `${name}.site.example.tn` };
   };
 
   beforeAll(async () => {
@@ -68,6 +75,7 @@ run("customers' domains, in the database (L2)", () => {
       { record: async () => undefined } as never,
       config,
       resolver,
+      db.dataSource.getRepository(Bucket),
     );
   });
 
@@ -105,6 +113,28 @@ run("customers' domains, in the database (L2)", () => {
     await domains.add(ONE, a.id, 'blog.example.tn');
 
     await expect(domains.add(ONE, b.id, 'blog.example.tn')).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it("serves a site's domain once proved, with its bucket, and keeps it from the account's URLs", async () => {
+    const [site, url] = [await withSite(ONE, 'docs-one'), await withUrl(ONE, 'docs-fn', 'g'.repeat(32))];
+    cnames['docs.example.tn'] = site.host;
+
+    expect(await domains.addToSite(ONE, site.name, 'docs.example.tn')).toMatchObject({ bucket: site.name, status: DomainStatus.VERIFIED });
+    expect((await domains.forHost('docs.example.tn'))?.bucket?.name).toBe(site.name);
+    await expect(domains.add(ONE, url.id, 'docs.example.tn')).rejects.toThrow("The account has docs.example.tn already: a domain serves one function's URL or one site");
+    // A row for both, or for neither, is refused by the database itself.
+    const row = { domain: 'both.example.tn', accountId: ONE, token: 'x'.repeat(32), status: DomainStatus.PENDING };
+    await expect(db.dataSource.getRepository(CustomDomain).insert({ ...row, functionId: url.id, bucketId: (await db.dataSource.getRepository(Bucket).findOneByOrFail({ name: site.name })).id })).rejects.toThrow(/check constraint/);
+    await expect(db.dataSource.getRepository(CustomDomain).insert({ ...row, functionId: null, bucketId: null })).rejects.toThrow(/check constraint/);
+  });
+
+  it('deletes the domains with their bucket', async () => {
+    const site = await withSite(ONE, 'gone-site');
+    await domains.addToSite(ONE, site.name, 'gone.example.tn');
+
+    await db.dataSource.getRepository(Bucket).delete({ name: site.name });
+
+    expect(await db.dataSource.getRepository(CustomDomain).countBy({ domain: 'gone.example.tn' })).toBe(0);
   });
 
   it('deletes the domains with their URL, and with their function', async () => {

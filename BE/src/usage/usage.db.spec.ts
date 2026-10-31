@@ -393,8 +393,14 @@ run('usage records (L2, P-20)', () => {
       'async_event_counts_2031_02',
       'async_event_counts_2031_03',
       'async_event_counts_2031_04',
+      'cache_samples_2031_02',
+      'cache_samples_2031_03',
+      'cache_samples_2031_04',
+      'email_sends_2031_02',
+      'email_sends_2031_03',
+      'email_sends_2031_04',
     ]);
-    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(24); // again: nothing to do
+    await expect(usage.ensurePartitions(new Date('2031-02-10T12:00:00Z'))).resolves.toHaveLength(30); // again: nothing to do
 
     const fn = await newFunction();
     const at = async (startedAt: string, requestId: string) => {

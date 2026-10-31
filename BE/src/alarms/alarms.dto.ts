@@ -69,6 +69,16 @@ export class AlarmDto {
   @MaxLength(80)
   queueName?: string | null;
 
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'sessions',
+    description: "The cache watched, by its name, as ElastiCache's CacheClusterId: for its memory, connections, hits, misses and evictions, whose period is an hour; none otherwise",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  cacheName?: string | null;
+
   @ApiProperty({ enum: METRICS })
   @IsIn(METRICS, { message: `metric must be one of ${METRICS.join(', ')}` })
   metric: Metric;
@@ -128,6 +138,7 @@ export class AlarmView {
   @ApiProperty({ nullable: true, type: String }) databaseId: string | null;
   @ApiProperty({ nullable: true, type: String }) bucketName: string | null;
   @ApiProperty({ nullable: true, type: String }) queueName: string | null;
+  @ApiProperty({ nullable: true, type: String }) cacheName: string | null;
   @ApiProperty({ enum: METRICS }) metric: Metric;
   @ApiProperty({ enum: ALL_STATISTICS }) statistic: Statistic;
   @ApiProperty({ enum: ALARM_PERIODS }) period: number;

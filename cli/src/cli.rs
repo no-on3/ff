@@ -189,9 +189,21 @@ pub enum Command {
     #[command(subcommand)]
     Db(DbCommand),
 
+    /// The account's caches, Valkey as AWS ElastiCache gives it
+    #[command(subcommand)]
+    Caches(CachesCommand),
+
+    /// The account's mail, as AWS SES v2 sends it: its domains and addresses, its messages, its suppression list
+    #[command(subcommand)]
+    Email(EmailCommand),
+
     /// The account's buckets, as AWS S3 gives them, and its access keys to them and to its queues
     #[command(subcommand)]
     Buckets(BucketsCommand),
+
+    /// The account's sites: a bucket's files, public at its own address, as S3's website hosting serves them
+    #[command(subcommand)]
+    Sites(SitesCommand),
 
     /// The account's queues, as Amazon SQS's standard queues, which AWS's SDKs and CLI reach with a key of
     /// `ff buckets keys create`
@@ -589,6 +601,139 @@ pub enum DbCommand {
 }
 
 #[derive(Subcommand)]
+pub enum CachesCommand {
+    /// Make a cache: its address, with its password, printed this once
+    Create {
+        /// Its name: lower-case letters, digits and hyphens, as AWS ElastiCache names its clusters
+        name: String,
+
+        #[command(flatten)]
+        secret: CacheSecretFor,
+    },
+
+    /// List the account's caches: their status, memory and connections now
+    List,
+
+    /// Show a cache: how to reach it, its memory and connections now
+    Get {
+        /// The cache's name
+        name: String,
+    },
+
+    /// Give a cache a new password: its address printed this once; the old one logs no new connection in
+    Password {
+        /// The cache's name
+        name: String,
+
+        #[command(flatten)]
+        secret: CacheSecretFor,
+    },
+
+    /// Delete a cache, with its keys
+    Delete {
+        /// The cache's name
+        name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EmailCommand {
+    /// List the domains and addresses the account sends from, and where each one's proof is
+    Identities,
+
+    /// Add a domain to send from, with the records to publish, or an address, which gets a link to follow
+    Add {
+        /// A domain, such as shop.example.tn, or an address, such as orders@shop.example.tn
+        identity: String,
+    },
+
+    /// Show a domain or an address: where its proof is, and the records a domain publishes
+    Get {
+        /// The domain or the address
+        identity: String,
+    },
+
+    /// Look a domain's records up now, or e-mail an address its link again
+    Verify {
+        /// The domain or the address
+        identity: String,
+    },
+
+    /// Delete a domain or an address: no mail goes from it after
+    Delete {
+        /// The domain or the address
+        identity: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// The account's sending: its sandbox, its quotas and what it sent, as SES's GetAccount says it
+    Account,
+
+    /// Send a message, as SES's SendEmail sends a simple one
+    Send {
+        /// From an address the account proved, or one at a domain it proved: "Shop <orders@shop.example.tn>"
+        #[arg(long)]
+        from: String,
+
+        /// A recipient; given again for each other one
+        #[arg(long = "to", required = true)]
+        to: Vec<String>,
+
+        /// A copy's recipient
+        #[arg(long)]
+        cc: Vec<String>,
+
+        /// A recipient the others don't see
+        #[arg(long)]
+        bcc: Vec<String>,
+
+        #[arg(long)]
+        subject: String,
+
+        /// The text body
+        #[arg(long, required_unless_present = "html")]
+        text: Option<String>,
+
+        /// The HTML body
+        #[arg(long)]
+        html: Option<String>,
+    },
+
+    /// The account's latest messages, and what became of each recipient
+    Messages {
+        /// How many, the latest first: 1 to 100
+        #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=100))]
+        limit: u32,
+    },
+
+    /// The account's suppression list: the addresses no mail of the account goes to
+    Suppressions,
+
+    /// Put an address on the suppression list
+    Suppress {
+        /// The address
+        address: String,
+
+        /// Why, as SES names it
+        #[arg(long, default_value = "BOUNCE", value_parser = ["BOUNCE", "COMPLAINT"])]
+        reason: String,
+    },
+
+    /// Take an address off the suppression list: the account's mail goes to it again
+    Unsuppress {
+        /// The address
+        address: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum BucketsCommand {
     /// Make a bucket: its name unique across FF, as on AWS
     Create {
@@ -667,6 +812,114 @@ pub enum BucketsCommand {
         /// Remove them all, after asking
         #[arg(long)]
         clear: bool,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SitesCommand {
+    /// Upload a built site's folder to a bucket, as its site: the files that changed, each typed and cached by its
+    /// name, then the bucket's files the folder hasn't deleted; the bucket made a site if it isn't one
+    Deploy {
+        /// The bucket's name
+        bucket: String,
+
+        /// The built site's folder, such as ./dist; names starting with a dot are left out, .well-known apart
+        folder: PathBuf,
+
+        /// A single-page app's: a path with no file answers the index document, with 200, for the app's own routes
+        #[arg(long, conflicts_with = "no_spa")]
+        spa: bool,
+
+        /// No longer a single-page app's: a path with no file answers the error document, with 404
+        #[arg(long)]
+        no_spa: bool,
+
+        /// The file a folder's path answers [default: the site's, else index.html]
+        #[arg(long, value_name = "NAME")]
+        index_document: Option<String>,
+
+        /// The page a path with no file answers, with 404 [default: the site's, else the folder's 404.html]
+        #[arg(long, value_name = "KEY")]
+        error_document: Option<String>,
+
+        /// Keep the bucket's files the folder hasn't: delete none
+        #[arg(long)]
+        keep: bool,
+    },
+
+    /// Show a bucket's site: its address and its settings
+    Get {
+        /// The bucket's name
+        bucket: String,
+    },
+
+    /// Make a bucket no site: its address stops answering, its files are kept, private again
+    Remove {
+        /// The bucket's name
+        bucket: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Show a site's visits, as CloudWatch names a CloudFront distribution's metrics: its requests, the bytes sent
+    /// and the share that failed, a row per period
+    Metrics {
+        /// The bucket's name
+        bucket: String,
+
+        /// Seconds per row
+        #[arg(long, default_value_t = 60, value_parser = period)]
+        period: u32,
+
+        /// How far back: 30m, 6h, 2d
+        #[arg(long, default_value = "1h")]
+        since: String,
+    },
+
+    /// The site's own domains, proved by DNS
+    #[command(subcommand)]
+    Domains(SiteDomainsCommand),
+}
+
+#[derive(Subcommand)]
+pub enum SiteDomainsCommand {
+    /// List the site's domains, verified or not
+    List {
+        /// The bucket's name
+        bucket: String,
+    },
+
+    /// Add a domain of the account's, and show the DNS records that prove it
+    Add {
+        /// The bucket's name
+        bucket: String,
+
+        /// The domain, such as www.shop.tn
+        domain: String,
+    },
+
+    /// Check the domain's DNS records again
+    Verify {
+        /// The bucket's name
+        bucket: String,
+
+        /// The domain
+        domain: String,
+    },
+
+    /// Remove a domain: the site stops answering there at once
+    Remove {
+        /// The bucket's name
+        bucket: String,
+
+        /// The domain
+        domain: String,
 
         /// Don't ask first: a script must say it
         #[arg(long, short)]
@@ -962,6 +1215,18 @@ pub struct SecretFor {
 
     /// The secret's name, which the function reads from its environment
     #[arg(long, default_value = "DATABASE_URL", value_name = "NAME")]
+    pub secret_name: String,
+}
+
+/// Where a cache's address goes besides the terminal: functions' secrets.
+#[derive(Args)]
+pub struct CacheSecretFor {
+    /// Set the address as a secret of this function too, which rolls it out; again for each function
+    #[arg(long = "secret-for", value_name = "FUNCTION")]
+    pub functions: Vec<String>,
+
+    /// The secret's name, which the function reads from its environment
+    #[arg(long, default_value = "REDIS_URL", value_name = "NAME")]
     pub secret_name: String,
 }
 

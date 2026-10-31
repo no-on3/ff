@@ -1,6 +1,7 @@
 # FF's edge: TLS for the API, the console, the admin app and the login, each on its hostname, for functions' URLs,
-# every host under the function domain, for buckets' S3 endpoint and every bucket's host under it, and for queues'
-# SQS endpoint; certificates from Let's Encrypt (ACME), kept on the edge's volume.
+# every host under the function domain, for buckets' S3 endpoint and every bucket's host under it, for queues' SQS
+# endpoint, for mail's SES endpoint, and for buckets' sites, every host under the sites' domain; certificates from Let's Encrypt (ACME), kept
+# on the edge's volume.
 # Every value is the edge's environment (edge.env, and the Secret ff-edge-dns), read when Caddy starts. The admin
 # app, and Keycloak's own admin console, answer only the addresses FF_ADMIN_ALLOW names; everyone else gets 403.
 # The caller's address is the connection's: the Service keeps it (externalTrafficPolicy: Local), and each app
@@ -24,8 +25,9 @@
 	# Caddy's own redirects would name its port, 8443: the one below names none, so 443.
 	auto_https disable_redirects
 	# A certificate on demand (a function URL's host with FF_FUNCTION_URL_TLS=on-demand, a bucket's with
-	# FF_STORAGE_TLS=on-demand, a customer's own domain always) only for a host the backend says is one, verified:
-	# nobody makes the edge ask a certificate authority for names of their choosing.
+	# FF_STORAGE_TLS=on-demand, a site's with FF_WEBSITE_TLS=on-demand, a customer's own domain always) only for a
+	# host the backend says is one, verified: nobody makes the edge ask a certificate authority for names of their
+	# choosing.
 	on_demand_tls {
 		ask http://ff-backend.ff-system.svc.cluster.local:3001/tls/allowed
 	}
@@ -55,10 +57,10 @@ http:// {
 	reverse_proxy ff-backend.ff-system.svc.cluster.local:80
 }
 
-# Function URLs' certificates, as FF_FUNCTION_URL_TLS chooses, and buckets' as FF_STORAGE_TLS does: one for
-# *.<domain>, which Let's Encrypt issues only through DNS (DNS-01), here by RFC 2136 updates signed with a TSIG key; or
-# one per host, at the host's first request, once the backend says yes (50 a week per registered domain, Let's
-# Encrypt's limit, for function URLs and buckets together: a small beta's).
+# Function URLs' certificates, as FF_FUNCTION_URL_TLS chooses, buckets' as FF_STORAGE_TLS does, and sites' as
+# FF_WEBSITE_TLS does: one for *.<domain>, which Let's Encrypt issues only through DNS (DNS-01), here by RFC 2136
+# updates signed with a TSIG key; or one per host, at the host's first request, once the backend says yes (50 a week
+# per registered domain, Let's Encrypt's limit, for function URLs, buckets and sites together: a small beta's).
 (function-url-tls-wildcard) {
 	tls {
 		dns rfc2136 {
@@ -113,9 +115,30 @@ http:// {
 	reverse_proxy ff-backend.ff-system.svc.cluster.local:3003
 }
 
-# Customers' own domains for their functions' URLs, each proved by DNS: every other host, its certificate made on
-# demand at its first request once the backend says the domain is verified, else the handshake fails. Without HSTS:
-# the domain is the customer's, and its other names too.
+# Customers' mail's SES endpoint, to the backend's, as the clients sent it: their signatures cover the host and the
+# body, so nothing is rewritten, added or compressed. One name, and its own certificate.
+{$FF_SES_HOST} {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	log
+	reverse_proxy ff-backend.ff-system.svc.cluster.local:3005
+}
+
+# Buckets' sites, <bucket>.<sites' domain>, to the backend's website server: public pages, read-only, compressed as
+# the console's are. Their certificate as FF_WEBSITE_TLS chooses: one for the domain through DNS, or one per site on
+# demand, once the backend says the bucket is one.
+*.{$FF_WEBSITE_DOMAIN} {
+	import function-url-tls-{$FF_WEBSITE_TLS}
+	import common
+	reverse_proxy ff-backend.ff-system.svc.cluster.local:3004
+}
+
+# Customers' own domains for their functions' URLs and their buckets' sites, each proved by DNS: every other host,
+# its certificate made on demand at its first request once the backend says the domain is verified, else the
+# handshake fails; the function URL gateway hands a site's to the website server. Not compressed, as a function's
+# answers are its own. Without HSTS: the domain is the customer's, and its other names too.
 https:// {
 	tls {
 		on_demand

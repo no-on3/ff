@@ -4,6 +4,7 @@ import { DEFAULT_API_URL, config } from './config';
 import type { AccountSummary, AccountView, StatusChange } from './lib/accounts';
 import type { OperatorAction } from './lib/audit';
 import type { Grant, GrantRequest } from './lib/credits';
+import type { AccountEmail, EmailChange } from './lib/email';
 import type { AdminInvoice, DraftsPage, IssueResult } from './lib/invoices';
 import type { Overview } from './lib/overview';
 import type { AdminPayment } from './lib/payments';
@@ -96,6 +97,12 @@ export const accountsApi = {
   storage: (id: string, enabled: boolean, reason: string) => api.put<AccountView>(`${accountPath(id)}/storage`, { enabled, reason }),
   /** Credit FF gives (P-74): the grant, and the account page after it. */
   grant: (id: string, request: GrantRequest) => api.post<{ grant: Grant; account: AccountView }>(`${accountPath(id)}/credits`, request),
+};
+
+/** An account's mail (ADR 0012): its sandbox, its switch, its standing; each change with the operator's reason. */
+export const emailApi = {
+  get: (id: string) => api.get<AccountEmail>(`${accountPath(id)}/email`),
+  change: (id: string, change: EmailChange, reason: string) => api.put<AccountEmail>(`${accountPath(id)}/email`, { ...change, reason }),
 };
 
 const functionPath = (id: string) => `/admin/functions/${encodeURIComponent(id)}`;

@@ -3,8 +3,8 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireScope } from '../auth/route-rules';
 import { CustomerMetricsService } from './customer-metrics.service';
-import { DATABASE_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
-import { BucketMetricsView, DatabaseMetricsView, MetricsQuery, MetricsView, QueueMetricsView } from './dto/metrics-query.dto';
+import { CACHE_PERIOD, DATABASE_PERIOD, EMAIL_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
+import { BucketMetricsView, CacheMetricsView, DatabaseMetricsView, EmailMetricsView, MetricsQuery, MetricsView, QueueMetricsView, SiteMetricsView } from './dto/metrics-query.dto';
 
 /** A window the request names, or 400 saying why it can't be. */
 function windowOf(query: MetricsQuery): MetricsWindow {
@@ -17,8 +17,10 @@ function windowOf(query: MetricsQuery): MetricsWindow {
  * The account's metrics, as CloudWatch names Lambda's, from its usage records
  * and capacity samples: a function's, or all its functions' together; a
  * database's, as CloudWatch names RDS's, from its hourly samples; a bucket's,
- * as CloudWatch names S3's, from its hourly samples and its requests; and a
- * queue's, as CloudWatch names SQS's, from its minute samples and its requests.
+ * as CloudWatch names S3's, from its hourly samples and its requests; a
+ * queue's, as CloudWatch names SQS's, from its minute samples and its
+ * requests; a cache's, as CloudWatch names ElastiCache's, from its hourly
+ * samples; and its mail's, as CloudWatch names SES's, from its messages.
  */
 @ApiTags('metrics')
 @Controller()
@@ -54,6 +56,32 @@ export class MetricsController {
     return this.metrics.forDatabase(principal.accountId, id, windowOf({ ...query, period: DATABASE_PERIOD }));
   }
 
+  @Get('caches/:name/metrics')
+  @RequireScope('metrics:read')
+  @ApiOperation({
+    summary: "A cache's BytesUsedForCache, CurrConnections, CacheHits, CacheMisses and Evictions, as CloudWatch names ElastiCache's: a point an hour",
+    description: "From its hourly samples: what its keys use and its connections, each hour; its hits, misses and evictions in the hour; null for an hour it was not sampled in. The period is an hour, 3600 s, its default here.",
+  })
+  @ApiResponse({ status: 200, type: CacheMetricsView })
+  @ApiResponse({ status: 404, description: 'No such cache in the account' })
+  forCache(@Param('name') name: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
+    if (query.period !== undefined && query.period !== CACHE_PERIOD) throw new BadRequestException(`A cache's metrics have a point an hour: period must be ${CACHE_PERIOD}`);
+    return this.metrics.forCache(principal.accountId, name, windowOf({ ...query, period: CACHE_PERIOD }));
+  }
+
+  @Get('email/metrics')
+  @RequireScope('metrics:read')
+  @ApiOperation({
+    summary: "The account's mail's Send, Delivery, Bounce, Complaint, Reputation.BounceRate and Reputation.ComplaintRate, as CloudWatch names SES's: a point an hour",
+    description:
+      "From its messages, each recipient one, counted in its message's hour; its reputation over the 14 days that end with each hour, as FF's enforcement judges it. Messages are kept 30 days: an hour before has none. The period is an hour, 3600 s, its default here.",
+  })
+  @ApiResponse({ status: 200, type: EmailMetricsView })
+  forEmail(@Query() query: MetricsQuery, @Principal() principal: Principal) {
+    if (query.period !== undefined && query.period !== EMAIL_PERIOD) throw new BadRequestException(`Mail's metrics have a point an hour: period must be ${EMAIL_PERIOD}`);
+    return this.metrics.emailMetrics(principal.accountId, windowOf({ ...query, period: EMAIL_PERIOD }));
+  }
+
   @Get('buckets/:name/metrics')
   @RequireScope('metrics:read')
   @ApiOperation({
@@ -65,6 +93,19 @@ export class MetricsController {
   @ApiResponse({ status: 404, description: 'No such bucket in the account' })
   forBucket(@Param('name') name: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
     return this.metrics.forBucket(principal.accountId, name, windowOf(query));
+  }
+
+  @Get('buckets/:name/website/metrics')
+  @RequireScope('metrics:read')
+  @ApiOperation({
+    summary: "A bucket's site's visits, as CloudWatch names a CloudFront distribution's metrics: a point per period",
+    description:
+      "From the website server's counts by the minute: Requests and BytesDownloaded, each period's Sum; 4xxErrorRate, 5xxErrorRate and TotalErrorRate, the share of the visits answered 4xx, 5xx or either, in percent, each period's Average, null in a period without a visit. The bucket's own metrics count these visits among its requests.",
+  })
+  @ApiResponse({ status: 200, type: SiteMetricsView })
+  @ApiResponse({ status: 404, description: 'No such bucket in the account' })
+  forSite(@Param('name') name: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
+    return this.metrics.forSite(principal.accountId, name, windowOf(query));
   }
 
   @Get('queues/:name/metrics')

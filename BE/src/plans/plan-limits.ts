@@ -61,6 +61,8 @@ export const planLimitsSchema = z.strictObject({
   storageRequestsPerSecond: positive,
   /** The largest object one PutObject may send, in MB: S3's own limit is 5 GB. */
   maxObjectMb: positive,
+  /** What the account's sites may send out in a month, in GB, all its buckets' together: past it, they answer 403 until the next. */
+  siteTransferGbPerMonth: positive,
   /** Customers' queues, the account's together (ADR 0010). */
   queues: z.number().int().min(0),
   /** The queues one function may read in batches: its event source mappings. */
@@ -69,6 +71,16 @@ export const planLimitsSchema = z.strictObject({
   queueRequestsPerSecond: positive,
   /** What the account's messages may hold together, in MB, its functions' asynchronous calls waiting to run among them. */
   queueStorageMb: positive,
+  /** Customers' caches, the account's together (ADR 0013). */
+  caches: z.number().int().min(0),
+  /** One cache's memory, in MB, as Valkey's maxmemory: past it, its least recently used keys go. */
+  cacheMb: positive,
+  /** The domains the account may send mail from, its proved addresses apart (ADR 0012). */
+  emailIdentities: z.number().int().min(0),
+  /** Messages a day, each recipient one, as SES's Max24HourSend: the sandbox's 200 on beta. */
+  emailsPerDay: z.number().int().min(0),
+  /** Messages a second, as SES's MaxSendRate. */
+  emailsPerSecond: positive,
 });
 
 export type PlanLimits = z.infer<typeof planLimitsSchema>;

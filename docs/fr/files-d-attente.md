@@ -35,7 +35,7 @@ aws sqs send-message --queue-url "$(aws sqs get-queue-url --queue-name commandes
   --message-body '{"commande": 42}'
 ```
 
-`ff buckets keys create --queue commandes` crée une clé qui n'atteint que cette file, et n'en affiche le secret qu'à ce moment-là, sous la forme des cinq variables que lisent les outils d'AWS, `AWS_ENDPOINT_URL_SQS` parmi elles. Depuis une fonction, rien à régler : `new SQSClient({})` en Node.js et `boto3.client("sqs")` en Python marchent tels quels, la fonction ayant sa propre clé, comme sur AWS Lambda avec un rôle. Dans la console, la page « Queues » : les files du compte et leurs messages ; pour chacune, ses attributs, l'envoi et la réception de messages pour la déboguer, ses dernières heures et ses alarmes.
+`ff buckets keys create --queue commandes` crée une clé qui n'atteint que cette file, et n'en affiche le secret qu'à ce moment-là, sous la forme des six variables que lisent les outils d'AWS, `AWS_ENDPOINT_URL_SQS` parmi elles. Depuis une fonction, rien à régler : `new SQSClient({})` en Node.js et `boto3.client("sqs")` en Python marchent tels quels, la fonction ayant sa propre clé, comme sur AWS Lambda avec un rôle. Dans la console, la page « Queues » : les files du compte et leurs messages ; pour chacune, ses attributs, l'envoi et la réception de messages pour la déboguer, ses dernières heures et ses alarmes.
 
 ## Une fonction qui lit une file
 

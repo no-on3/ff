@@ -124,6 +124,7 @@ run('support, for operators (L2)', () => {
       {} as never, // nor the buckets
       {} as never, // nor the queues
       {} as never,
+      {} as never, // nor the caches
     );
     // The environment's names come from its store, which other suites test; the URL from its table, here.
     const environmentNames = async () => ({ variables: ['TABLE'], secrets: ['DB_PASSWORD'] });

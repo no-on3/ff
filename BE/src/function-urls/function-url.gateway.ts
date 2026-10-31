@@ -21,6 +21,7 @@ import { EventFormat, Function, FunctionStatus } from '../functions/entities/fun
 import { FunctionsService } from '../functions/functions.service';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { S3FrontDoor } from '../storage/front-door';
+import { WebsiteServer } from '../storage/website-server';
 import { refusals, statusClass, urlResponses } from '../monitoring/operator-metrics';
 import { FunctionThrottledError } from '../orchestrator/orchestrator.errors';
 import { PlansService } from '../plans/plans.service';
@@ -51,6 +52,9 @@ class Refusal extends Error {
     super(message);
   }
 }
+
+/** What a request's host names: a function's URL, or a bucket's site, by a customer's own domain. */
+type HostTarget = { url: FunctionUrl } | { site: string };
 
 const EMPTY = Buffer.alloc(0);
 
@@ -147,6 +151,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     @InjectRepository(Account) private readonly accounts: Repository<Account>,
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
     private readonly frontDoor: S3FrontDoor,
+    private readonly websites: WebsiteServer,
   ) {
     this.domain = functionDomain(config.getOrThrow<string>('functionUrls.base'));
     // Behind the edge, the caller is in X-Forwarded-For, which only the proxies the API trusts may set.
@@ -179,15 +184,17 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     // The request's ID is the invocation's, chosen first: the event names it, and so does every answer, a refusal too.
     const requestId = randomUUID();
     const time = new Date();
-    let answer: UrlAnswer;
+    let answer: UrlAnswer | null;
     try {
       const sourceIp = plainAddress(proxyAddr(request, this.trusted) ?? '');
-      answer = await withRequestContext({ requestId, ip: sourceIp }, () => this.answer(request, { requestId, sourceIp, time }));
+      answer = await withRequestContext({ requestId, ip: sourceIp }, () => this.answer(request, response, { requestId, sourceIp, time }));
     } catch (error) {
       // Not a refusal: the gateway itself failed. The details go to the log, under the request's ID.
       this.logger.error(`A function URL's request failed (request ${requestId}): ${describeError(error)}`, error instanceof Error ? error.stack : undefined);
       answer = jsonAnswer(HttpStatus.INTERNAL_SERVER_ERROR, 'Internal Server Error');
     }
+    // A site's answer, which the website server sent itself.
+    if (answer === null) return;
     try {
       this.send(request, response, answer, requestId);
     } catch (error) {
@@ -196,8 +203,15 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     }
   }
 
-  private async answer(request: IncomingMessage, context: { requestId: string; sourceIp: string; time: Date }): Promise<UrlAnswer> {
-    const url = await this.urlFor(request.headers.host);
+  /** The answer to send; null once the website server has answered a site's request itself. */
+  private async answer(request: IncomingMessage, response: ServerResponse, context: { requestId: string; sourceIp: string; time: Date }): Promise<UrlAnswer | null> {
+    const target = await this.targetOf(request.headers.host);
+    // A customer's own domain for a bucket's site: the website server answers it, as it answers the site's own host.
+    if (target && 'site' in target) {
+      await this.websites.serve(request, response, target.site);
+      return null;
+    }
+    const url = target?.url ?? null;
     // A host that is neither a URL nor a customer's domain is the edge itself, asking before a certificate.
     if (!url && pathOf(request.url) === TLS_ALLOWED_PATH) return this.tlsAllowed(request.url as string);
     if (!url) return jsonAnswer(HttpStatus.NOT_FOUND, 'Not Found');
@@ -217,26 +231,33 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     return url.cors ? withCors(answer, url.cors, origin) : answer;
   }
 
-  /** The URL a host names: by its ID under the function domain, or a customer's verified domain; null for any other. */
-  private async urlFor(host: string | undefined): Promise<FunctionUrl | null> {
+  /**
+   * What a host names: a URL by its ID under the function domain, or a
+   * customer's verified domain, for a URL or for a bucket's site, while the
+   * bucket is one; null for any other host.
+   */
+  private async targetOf(host: string | undefined): Promise<HostTarget | null> {
     const urlId = urlIdOf(host, this.domain);
-    if (urlId) return this.urls.forUrlId(urlId);
     const name = hostName(host);
-    const domain = name ? await this.domains.forHost(name) : null;
-    return domain ? this.urls.forFunction(domain.functionId) : null;
+    const domain = urlId || !name ? null : await this.domains.forHost(name);
+    if (domain?.bucketId) return domain.bucket?.website ? { site: domain.bucket.name } : null;
+    const url = urlId ? await this.urls.forUrlId(urlId) : domain?.functionId ? await this.urls.forFunction(domain.functionId) : null;
+    return url ? { url } : null;
   }
 
   /**
    * The edge's question before it gets a certificate on demand, for a host it
    * hasn't one for (Caddy's on_demand_tls ask, one address for all its hosts):
-   * 200 for a function URL's host, a customer's verified domain, or buckets'
-   * S3 endpoint and a bucket's host under it; 404 for any other, so that nobody
-   * makes it ask a certificate authority for names of their choosing. Only the
-   * edge reaches this port in a cluster.
+   * 200 for a function URL's host, a customer's verified domain for a URL or a
+   * site, buckets' S3 endpoint and a bucket's host under it, or a site's host;
+   * 404 for any other, so that nobody makes it ask a certificate authority for
+   * names of their choosing. Only the edge reaches this port in a cluster.
    */
   private async tlsAllowed(target: string): Promise<UrlAnswer> {
     const domain = new URL(target, 'http://edge').searchParams.get('domain') ?? undefined;
-    const known = (await this.urlFor(domain)) !== null || (domain !== undefined && (await this.frontDoor.allowsCertificate(domain)));
+    const known =
+      (await this.targetOf(domain)) !== null ||
+      (domain !== undefined && ((await this.frontDoor.allowsCertificate(domain)) || (await this.websites.allowsCertificate(domain))));
     return known ? { status: HttpStatus.OK, headers: [['content-type', 'text/plain']], body: Buffer.from('allowed') } : jsonAnswer(HttpStatus.NOT_FOUND, 'Not Found');
   }
 

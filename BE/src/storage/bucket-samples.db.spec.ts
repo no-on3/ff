@@ -46,7 +46,7 @@ run("customers' buckets measured every hour (L2, ADR 0009)", () => {
     accessKey: process.env.FF_OBJECT_STORE_ACCESS_KEY ?? 'ffdevaccesskey',
     secretKey: process.env.FF_OBJECT_STORE_SECRET_KEY ?? 'ffdevsecretkey-local-only',
   };
-  const config = new ConfigService({ objectStore, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, mail: { consoleUrl: 'https://console.example.tn' } });
+  const config = new ConfigService({ objectStore, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' }, mail: { consoleUrl: 'https://console.example.tn' } });
   const s3 = new S3Client({
     endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
     region: 'us-east-1',

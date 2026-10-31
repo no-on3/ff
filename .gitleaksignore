@@ -29,6 +29,8 @@ ba4fdf5f123f7fc2c9801cb8b0407ee598e43017:BE/src/api-keys/api-key-format.spec.ts:
 5f7a6e01127915d497a42834b1b63fd16d2d119a:docs/how-it-works.html:generic-api-key:1238
 a032412e1c92022e5e09cb3dd4bad325aaaad595:cli/src/commands/buckets.rs:aws-access-token:284
 6565961b813d57b2ba4a25ff42f0a70bd0d58186:BE/src/functions/functions.service.spec.ts:generic-api-key:1681
+de6622df8698677ecb303e6db2e73d3612e4582c:docs/how-it-works.html:generic-api-key:1590
+de6622df8698677ecb303e6db2e73d3612e4582c:docs/how-it-works.html:generic-api-key:1617
 
 # A made-up DNS verification token a test checks a TXT record against.
 d0f5604181033285d0ce20dc5f8a8ea5233a27e6:BE/src/function-urls/domain-check.spec.ts:generic-api-key:5
@@ -38,3 +40,14 @@ d0f5604181033285d0ce20dc5f8a8ea5233a27e6:BE/src/function-urls/domain-check.spec.
 
 # "Authorization: Bearer the-callers-own-token": a made-up token the test checks the history masks.
 7eb725b157c53dd54174c3b07188c482a596baf9:hack/e2e.sh:curl-auth-header:325
+
+# Valkey's image, valkey/valkey:9.1.2-alpine3.24: "valkey:" read as a key and its value.
+d6b35baee2313b05035542fe86b825cfa8e6d80e:docs/adr/0013-caches.md:generic-api-key:18
+d6b35baee2313b05035542fe86b825cfa8e6d80e:hack/spikes/cache/README.md:generic-api-key:12
+d6b35baee2313b05035542fe86b825cfa8e6d80e:hack/spikes/cache/valkey.sh:generic-api-key:16
+7b40ee9fd31cc819b3a8398d2d6b363de50f50c9:deploy/cache/Dockerfile:generic-api-key:6
+7b40ee9fd31cc819b3a8398d2d6b363de50f50c9:deploy/cache/README.md:generic-api-key:8
+
+# "Authorization: Bearer ff-cache-dev": the development cache server's own token (docker-compose.yml), which
+# production refuses.
+7b40ee9fd31cc819b3a8398d2d6b363de50f50c9:hack/e2e.sh:curl-auth-header:903

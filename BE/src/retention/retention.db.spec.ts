@@ -107,8 +107,19 @@ run('what FF keeps only for a while (L2)', () => {
       noFunctionKeys(),
     );
     const packages = new PackagesService(db.dataSource.getRepository(Package), objectStore as never, audit, { deleteImage: async () => undefined } as never);
-    // An account without databases or buckets: deleting them asks no server, nor the store.
-    retention = new RetentionService(db.dataSource, functions, packages, { deleteAll: async () => 0 } as never, { deleteAll: async () => 0 } as never, orchestrator as unknown as Orchestrator, audit, config, new QueueStore(db.dataSource, { count: () => undefined } as never));
+    // An account without databases, caches or buckets: deleting them asks no server, nor the store.
+    retention = new RetentionService(
+      db.dataSource,
+      functions,
+      packages,
+      { deleteAll: async () => 0 } as never,
+      { deleteAll: async () => 0 } as never,
+      orchestrator as unknown as Orchestrator,
+      audit,
+      config,
+      new QueueStore(db.dataSource, { count: () => undefined } as never),
+      { deleteAll: async () => 0 } as never,
+    );
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
   });
 
@@ -202,6 +213,29 @@ run('what FF keeps only for a while (L2)', () => {
     });
   });
 
+  describe("customers' messages' purge", () => {
+    it('deletes the messages sent more than 30 days before now, or before the time given', async () => {
+      const [{ now }] = await query<Array<{ now: Date }>>('SELECT now()');
+      const sent = async (daysAgo: number) =>
+        (
+          await query<Array<{ id: string }>>(
+            `INSERT INTO email_messages (id, account_id, identity, from_address, return_path, recipients, recipient_count, size_bytes, status, created_at)
+             SELECT gen_random_uuid(), id, 'shop.example.tn', 'orders@shop.example.tn', 'b-x@bounces.mail.localhost', '[]', 1, 100, 'SENT', now() - make_interval(days => $1)
+               FROM accounts LIMIT 1 RETURNING id`,
+            [daysAgo],
+          )
+        )[0].id;
+      const old = await sent(31);
+      const recent = await sent(29);
+      const left = async () => (await query<Array<{ id: string }>>('SELECT id FROM email_messages WHERE id = ANY($1)', [[old, recent]])).map((row) => row.id);
+
+      expect(await retention.purgeEmails()).toBeGreaterThanOrEqual(1);
+      expect(await left()).toEqual([recent]);
+      await retention.purgeEmails(new Date(now.getTime() + 2 * DAY * 1000));
+      expect(await left()).toEqual([]);
+    });
+  });
+
   describe("closed accounts' data", () => {
     /** A closed account whose data is due `dueInSeconds` from now (past when negative): a Node.js and a Python function, each called. */
     async function closedAccount(dueInSeconds: number): Promise<{ id: string; functions: Function[] }> {
@@ -233,8 +267,16 @@ run('what FF keeps only for a while (L2)', () => {
     const packagesOf = (accountId: string) => count('SELECT count(*)::int AS n FROM packages WHERE account_id = $1', accountId);
     const deletedAt = async (accountId: string) =>
       (await query<Array<{ at: Date | null }>>('SELECT data_deleted_at AS at FROM accounts WHERE id = $1', [accountId]))[0].at;
-    /** A notification delivered to the account, its webhook secret, an alarm, and a queue of its own with a message. */
+    /** A notification delivered to the account, its webhook secret, an alarm, a queue of its own with a message, and its mail: a domain, a message, its sending, an address suppressed. */
     const notified = async (accountId: string) => {
+      await query(`INSERT INTO email_identities (account_id, identity, type, status, dkim_selector) VALUES ($1, 'shop.example.tn', 'DOMAIN', 'SUCCESS', 'ff0a1b2c3d')`, [accountId]);
+      await query(
+        `INSERT INTO email_messages (id, account_id, identity, from_address, return_path, recipients, recipient_count, size_bytes, status)
+         VALUES (gen_random_uuid(), $1, 'shop.example.tn', 'orders@shop.example.tn', 'b-x@bounces.mail.localhost', '[{"address": "ana@example.tn", "status": "SENT"}]', 1, 100, 'SENT')`,
+        [accountId],
+      );
+      await query(`INSERT INTO email_sending (account_id, production_access) VALUES ($1, true)`, [accountId]);
+      await query(`INSERT INTO email_suppressions (account_id, address, reason) VALUES ($1, 'gone@example.tn', 'BOUNCE')`, [accountId]);
       const [{ id: queue }] = await query<Array<{ id: string }>>(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders', 'customer') RETURNING id`, [accountId]);
       await query(`INSERT INTO queue_messages (queue_id, message_id, body, size_bytes, expires_at) VALUES ($1, gen_random_uuid(), 'hi', 2, now() + interval '4 days')`, [queue]);
       await query(
@@ -253,13 +295,18 @@ run('what FF keeps only for a while (L2)', () => {
       await count('SELECT count(*)::int AS n FROM webhook_secrets WHERE account_id = $1', accountId),
       await count('SELECT count(*)::int AS n FROM alarms WHERE account_id = $1', accountId),
       await count('SELECT count(*)::int AS n FROM queues WHERE account_id = $1', accountId),
+      await count(
+        `SELECT ((SELECT count(*) FROM email_identities WHERE account_id = $1) + (SELECT count(*) FROM email_messages WHERE account_id = $1)
+               + (SELECT count(*) FROM email_sending WHERE account_id = $1) + (SELECT count(*) FROM email_suppressions WHERE account_id = $1))::int AS n`,
+        accountId,
+      ),
     ];
     const auditOf = async (accountId: string) =>
       (await query<Array<{ action: string; actor: string; resource: string }>>('SELECT action, actor, resource FROM audit_log WHERE account_id = $1 ORDER BY id', [accountId])).map(
         (row) => `${row.action} ${row.actor} ${row.resource}`,
       );
 
-    it("deletes a closed account's functions, with their code and history, its packages, its namespace, its logs and its notifications once its date has passed, keeps its usage records, and says so once", async () => {
+    it("deletes a closed account's functions, with their code and history, its packages, its namespace, its logs, its notifications and its mail once its date has passed, keeps its usage records, and says so once", async () => {
       const due = await closedAccount(-MINUTE);
       const later = await closedAccount(DAY);
       const active = await functionOn('beta');
@@ -273,8 +320,8 @@ run('what FF keeps only for a while (L2)', () => {
 
       expect([await functionsOf(due.id), await historyOf(due.id), await recordsOf(due.id)]).toEqual([0, 0, 2]);
       expect([await notificationsOf(due.id), await notificationsOf(later.id)]).toEqual([
-        [0, 0, 0, 0],
-        [1, 1, 1, 1],
+        [0, 0, 0, 0, 0],
+        [1, 1, 1, 1, 4],
       ]);
       expect(removed).toEqual([node.id, python.id]);
       expect(objectStore.deleteCode.mock.calls).toEqual([[`${node.id}/code.ts`], [`${python.id}/code.py`]]);

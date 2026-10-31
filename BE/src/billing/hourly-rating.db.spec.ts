@@ -6,7 +6,7 @@
  * the free tier at a month's start, minInstances and the monthly fee, shadow
  * mode, and the parent's reconciliation criterion (rated usage equals raw
  * usage); customers' databases, from their hourly samples to the month's
- * statement, their buckets and their queues; then the job: settling,
+ * statement, their buckets, their queues, their caches and their mail; then the job: settling,
  * catching up, two backends at once, and what an account reads of its money.
  *   docker compose up -d --wait postgres && npm run test:db
  */
@@ -48,7 +48,7 @@ async function ratingWorld() {
   const db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
   await db.dataSource.runMigrations({ transaction: 'each' });
   for (let month = 1; month <= 9; month++) {
-    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts']) {
+    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'cache_samples', 'email_sends']) {
       await db.dataSource.query('SELECT ff_ensure_month_partition($1, $2::date)', [table, `${Y}-${String(month).padStart(2, '0')}-01`]);
     }
   }
@@ -106,6 +106,19 @@ async function ratingWorld() {
         `INSERT INTO storage_request_counts (bucket_id, minute, class, writer, account_id, name, requests, gets, puts, errors4xx, errors5xx, bytes_in, bytes_out)
          VALUES ($1, $2, $3, gen_random_uuid(), $4, $5, $6, 0, 0, 0, 0, 0, 0)`,
         [bucketId, minute, kind, accountId, name, requests],
+      ),
+    /** A customer's cache's hourly sample: its name and memory, the plan's, then; what its keys use doesn't count. */
+    cacheSample: (accountId: string, cacheId: string, name: string, hour: Date, memoryMb: number) =>
+      query(
+        `INSERT INTO cache_samples (cache_id, hour, account_id, name, memory_mb, bytes_used, connections, hits, misses, evictions, process_started_at)
+         VALUES ($1, $2, $3, $4, $5, 1000, 1, 0, 0, 0, $2)`,
+        [cacheId, hour, accountId, name, memoryMb],
+      ),
+    /** A message's billing record: the domain or address it went from, its recipients and its attachments' bytes. */
+    emailSend: (accountId: string, identity: string, sentAt: Date, recipients: number, attachmentBytes = 0) =>
+      query(
+        `INSERT INTO email_sends (message_id, sent_at, account_id, identity, recipients, attachment_bytes) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)`,
+        [sentAt, accountId, identity, recipients, attachmentBytes],
       ),
     queueRequests: (accountId: string, queueId: string, name: string, minute: Date, requests: number, deleted = 0) =>
       query(
@@ -671,6 +684,150 @@ run("the hourly rating of customers' queues (L2, ADR 0010)", () => {
     await w.queueRequests(b, randomUUID(), 'drained', at('09-01T03:00:00'), 0, 5);
 
     expect(await w.pricing.accountsWithUsage(`${Y}-09`)).toEqual([a]);
+  });
+});
+
+run("the hourly rating of customers' mail (L2, ADR 0012)", () => {
+  let w: Awaited<ReturnType<typeof ratingWorld>>;
+  const first = at('09-01T00:00:00');
+  let a: string;
+
+  beforeAll(async () => {
+    w = await ratingWorld();
+    // Plain prices: 0.01 TND a recipient, 1 TND a GB of attachments; calls free: only mail costs here.
+    await w.addBook(first, { ...REQUESTS_ONLY('0'), emailRecipientsPerThousand: '10', emailAttachmentsGb: '1' });
+    a = await w.account();
+    // 00:00: 100 recipients from the domain, 10 from an address; 01:00: 50 more from the domain, each with 1 MB attached.
+    await w.emailSend(a, 'shop.example.tn', at('09-01T00:10:00'), 100);
+    await w.emailSend(a, 'ana@example.tn', at('09-01T00:30:00'), 10);
+    await w.emailSend(a, 'shop.example.tn', at('09-01T01:20:00'), 50, 1_048_576);
+    await w.startAt(first);
+    w.state.shadow = false;
+    for (let i = 0; i < 2; i++) await w.rating.rateHour(new Date(first.getTime() + i * HOUR_MS));
+  });
+
+  afterAll(async () => {
+    await w?.db.drop();
+  });
+
+  it("rates each hour's mail by the domain or address it went from: its recipients, and its attachments' bytes, each recipient's copy", async () => {
+    const rows = await w.query(
+      `SELECT hour, kind, name, byte_hours::int AS "byteHours", hours, requests::int AS requests, bytes::text AS bytes
+         FROM resource_usage_hourly WHERE account_id = $1 ORDER BY hour, name`,
+      [a],
+    );
+
+    const row = (hour: Date, name: string, requests: number, bytes: number) => ({ hour, kind: 'email', name, byteHours: 0, hours: 0, requests, bytes: String(bytes) });
+    expect(rows).toEqual([row(first, 'ana@example.tn', 10, 0), row(first, 'shop.example.tn', 100, 0), row(at('09-01T01:00:00'), 'shop.example.tn', 50, 50 * 1_048_576)]);
+    // One line in the bill for each identity, the same from hour to hour.
+    const [{ lines }] = await w.query<Array<{ lines: number }>>(`SELECT count(DISTINCT resource_id)::int AS lines FROM resource_usage_hourly WHERE account_id = $1`, [a]);
+    expect(lines).toBe(2);
+  });
+
+  it('charges each hour its recipients and its attachments by the GB, without a free tier', async () => {
+    // 110 recipients: 1.100 TND; then 50 more and 50 MB attached: 0.500 + 0.048828125, the month 1.649 once rounded.
+    expect(await w.charges(a)).toEqual([
+      ['09-01T00', 1_100, 1_100, false, true],
+      ['09-01T01', 549, 1_649, false, true],
+    ]);
+  });
+
+  it("lists it on the month's statement and its PDF, by the domain or address, with its recipients, attachments' GB and amount", async () => {
+    const config = { getOrThrow: () => ({ seller: { name: 'FF SARL', taxId: null, address: '1 rue du Lac, 1053 Tunis' }, bank: null }) } as unknown as ConfigService;
+    const invoices = new InvoicesService(w.db.dataSource, w.ledger, w.pricing, {} as AuditService, {} as never, {} as ObjectStoreService, config);
+    const now = at('09-02T00:00:00');
+
+    const statement = await invoices.statementIn(w.db.dataSource.manager, a, `${Y}-09`, now);
+
+    expect(statement.resources.map((r) => [r.kind, r.name, r.requests, r.attachmentsGb, r.amountMinor])).toEqual([
+      ['email', 'ana@example.tn', 10n, '0', 100n],
+      ['email', 'shop.example.tn', 150n, '0.048828', 1_549n],
+    ]);
+    const [page] = pdfRows(await invoices.statementPdf(a, `${Y}-09`, now)).map((rows) => rows.map((row) => row.replaceAll(String.fromCharCode(0xa0), ' ')));
+    expect(page).toEqual(
+      expect.arrayContaining([
+        'Courrier envoyé de | Destinataires | Go joints | Montant HT',
+        'ana@example.tn | 10 | 0 | 0,100 TND',
+        'shop.example.tn | 150 | 0,048828 | 1,549 TND',
+        'Total HT | 1,649 TND',
+      ]),
+    );
+  });
+
+  it('reconciles it: the recipients rated equal those sent; a message written after its hour was rated shows', async () => {
+    const [before] = (await reconcile(w.db.dataSource, w.pricing, `${Y}-09`)).accounts;
+    expect([before.accountId, reconciled(before), before.ratedEmailRecipients, before.countedEmailRecipients, before.ratedQueueRequests]).toEqual([a, true, 160n, 160n, 0n]);
+
+    await w.emailSend(a, 'shop.example.tn', at('09-01T00:50:00'), 5);
+
+    const [after] = (await reconcile(w.db.dataSource, w.pricing, `${Y}-09`)).accounts;
+    expect([reconciled(after), after.countedEmailRecipients - after.ratedEmailRecipients]).toEqual([false, 5n]);
+  });
+});
+
+run("the hourly rating of customers' caches (L2, ADR 0013)", () => {
+  let w: Awaited<ReturnType<typeof ratingWorld>>;
+  const first = at('09-01T00:00:00');
+  const sessions = randomUUID();
+  let a: string;
+
+  beforeAll(async () => {
+    w = await ratingWorld();
+    // Plain prices: 0.8 TND a GB-hour of a cache's memory, so 0.05 an hour of 64 MB; calls free: only caches cost here.
+    await w.addBook(first, { ...REQUESTS_ONLY('0'), cacheGbHour: '0.8' });
+    a = await w.account();
+    // 00:00 and 01:00 at 64 MB; 02:00 not sampled, its server down; 03:00 at 128 MB, its plan's memory raised.
+    await w.cacheSample(a, sessions, 'sessions', first, 64);
+    await w.cacheSample(a, sessions, 'sessions', at('09-01T01:00:00'), 64);
+    await w.cacheSample(a, sessions, 'sessions', at('09-01T03:00:00'), 128);
+    await w.startAt(first);
+    w.state.shadow = false;
+    for (let i = 0; i < 4; i++) await w.rating.rateHour(new Date(first.getTime() + i * HOUR_MS));
+  });
+
+  afterAll(async () => {
+    await w?.db.drop();
+  });
+
+  it("rates each hour a cache was sampled in by its memory for that hour, as ElastiCache bills a node, with its name then; an hour not sampled, none", async () => {
+    const rows = await w.query(
+      `SELECT hour, resource_id AS id, kind, name, byte_hours::text AS "byteHours", hours, tier1_requests::int AS tier1, tier2_requests::int AS tier2, requests::int AS requests
+         FROM resource_usage_hourly WHERE account_id = $1 ORDER BY hour`,
+      [a],
+    );
+
+    const row = (hour: Date, mb: number) => ({ hour, id: sessions, kind: 'cache', name: 'sessions', byteHours: String(mb * 1_048_576), hours: 1, tier1: 0, tier2: 0, requests: 0 });
+    expect(rows).toEqual([row(first, 64), row(at('09-01T01:00:00'), 64), row(at('09-01T03:00:00'), 128)]);
+  });
+
+  it('charges each hour sampled its memory by the GB-hour, without a free tier', async () => {
+    expect(await w.charges(a)).toEqual([
+      ['09-01T00', 50, 50, false, true],
+      ['09-01T01', 50, 100, false, true],
+      ['09-01T03', 100, 200, false, true],
+    ]);
+  });
+
+  it("lists it on the month's statement and its PDF, by name, with its hours, GB-hours and amount", async () => {
+    const config = { getOrThrow: () => ({ seller: { name: 'FF SARL', taxId: null, address: '1 rue du Lac, 1053 Tunis' }, bank: null }) } as unknown as ConfigService;
+    const invoices = new InvoicesService(w.db.dataSource, w.ledger, w.pricing, {} as AuditService, {} as never, {} as ObjectStoreService, config);
+    const now = at('09-02T00:00:00');
+
+    const statement = await invoices.statementIn(w.db.dataSource.manager, a, `${Y}-09`, now);
+
+    expect(statement.resources.map((r) => [r.kind, r.name, r.hours, r.gbHours, r.amountMinor])).toEqual([['cache', 'sessions', 3n, '0.25', 200n]]);
+    const [page] = pdfRows(await invoices.statementPdf(a, `${Y}-09`, now)).map((rows) => rows.map((row) => row.replaceAll(String.fromCharCode(0xa0), ' ')));
+    expect(page).toEqual(expect.arrayContaining(['Cache | Heures | Go-heures | Montant HT', 'sessions | 3 | 0,25 | 0,200 TND', 'Total HT | 0,200 TND']));
+  });
+
+  it('reconciles it: the memory rated equals the memory sampled; a sample written after its hour was rated shows', async () => {
+    const [before] = (await reconcile(w.db.dataSource, w.pricing, `${Y}-09`)).accounts;
+    expect([before.accountId, reconciled(before), before.ratedByteHours, before.sampledByteHours]).toEqual([a, true, 256n * 1_048_576n, 256n * 1_048_576n]);
+
+    await w.cacheSample(a, sessions, 'sessions', at('09-01T02:00:00'), 64);
+
+    const [after] = (await reconcile(w.db.dataSource, w.pricing, `${Y}-09`)).accounts;
+    expect([reconciled(after), after.sampledByteHours - after.ratedByteHours]).toEqual([false, 64n * 1_048_576n]);
   });
 });
 

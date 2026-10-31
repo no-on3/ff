@@ -6,6 +6,7 @@
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
+import { withCachePrices } from '../migrations/1793333328301-CacheMeasures';
 import { PriceDocument, priceDocumentProblems, priceDocumentSchema, storageKeysMissing } from './price-book';
 
 const withPrices = (prices: Partial<PriceDocument['prices']>, source: Record<string, unknown> = FIRST_PRICE_BOOK.source) => ({
@@ -73,6 +74,15 @@ describe("a price book's problems (L1, P-73)", () => {
     expect([storageKeysMissing(priced, queued), storageKeysMissing(queued, queued)]).toEqual([[], []]);
     expect(storageKeysMissing(queued, priced)).toEqual(['prices.queueRequestsPerMillion', 'freeTier.queueRequests']);
     expect(priceDocumentProblems(queued)).toEqual([]);
+  });
+
+  it("names ElastiCache's price when a book lacks it that the book before it has", () => {
+    const queued = priceDocumentSchema.parse(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)));
+    const cached = priceDocumentSchema.parse(withCachePrices(queued));
+
+    expect([storageKeysMissing(queued, cached), storageKeysMissing(cached, cached)]).toEqual([[], []]);
+    expect(storageKeysMissing(cached, queued)).toEqual(['prices.cacheGbHour']);
+    expect(priceDocumentProblems(cached)).toEqual([]);
   });
 
   it("names the schema's problems before any of AWS's", () => {

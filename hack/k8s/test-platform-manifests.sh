@@ -13,8 +13,9 @@
 #     mounted from their Secret where its settings look;
 #   - the production realm up to date with the development realm;
 #   - function URLs: the edge's function domain the backend's, the backend's port for them reached by the edge alone;
-#   - buckets' S3 front door and queues' SQS endpoint: the edge's host for each the backend's, the backend's port for
-#     each reached by the edge and tenants' functions alone, functions' fixed address for it, each host sent there;
+#   - buckets' S3 front door, queues' SQS endpoint and mail's SES endpoint: the edge's host for each the backend's,
+#     the backend's port for each reached by the edge and tenants' functions alone, functions' fixed address for it,
+#     each host sent there; the mail server's names public ones;
 #   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image, both ways to function URLs' and
 #     buckets' certificates; behind a proxy, its allowlist believing X-Forwarded-For from FF_EDGE_TRUSTED_PROXIES
 #     alone, the edge run and asked on a Docker network of its own;
@@ -220,15 +221,16 @@ check "the edge's storage host is the host of the backend's FF_STORAGE_BASE" "s3
   "$(sed -n 's/^FF_STORAGE_HOST=//p' "$platform/edge.env") $(sed -n 's#^FF_STORAGE_BASE=https://##p' "$platform/backend.env")"
 storage_port="$(sed -n 's/^FF_STORAGE_PORT=//p' "$platform/backend.env")"
 sqs_port="$(sed -n 's/^FF_SQS_PORT=//p' "$platform/backend.env")"
+ses_port="$(sed -n 's/^FF_SES_PORT=//p' "$platform/backend.env")"
 # reached_by <port>: the backend's Service port and container port for it, and who its NetworkPolicy lets in there,
-# the edge's pods or tenants' functions; "functions reach more" when functions reach a port other than buckets' and
-# queues'.
+# the edge's pods or tenants' functions; "functions reach more" when functions reach a port other than buckets',
+# queues' and mail's.
 reached_by() {
-  python3 - "$work/platform.yaml" "$1" "$storage_port" "$sqs_port" <<'PY'
+  python3 - "$work/platform.yaml" "$1" "$storage_port" "$sqs_port" "$ses_port" <<'PY'
 import sys, yaml
 docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
 port = int(sys.argv[2])
-theirs = {int(sys.argv[3]), int(sys.argv[4])}
+theirs = {int(sys.argv[3]), int(sys.argv[4]), int(sys.argv[5])}
 named = lambda kind, name: next(d for d in docs if d['kind'] == kind and d['metadata']['name'] == name)
 container = next(p for p in named('Deployment', 'ff-backend')['spec']['template']['spec']['containers'][0]['ports'] if p['containerPort'] == port)
 service = next(p for p in named('Service', 'ff-backend')['spec']['ports'] if p['targetPort'] == container['name'])
@@ -277,19 +279,45 @@ check "functions' address for it: the Service ff-storage's fixed one, on that po
 check "the edge sends its host there" "1 1" \
   "$(grep -c '^{\$FF_SQS_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$sqs_port$" "$platform/edge/Caddyfile")"
 
+echo "== customers' mail's SES endpoint"
+# The edge serves the backend's SES endpoint, one host, on the backend's port for it; functions reach that port at
+# ff-storage's address too. The mail server's names are public ones, as production requires.
+check "the edge's SES host is the host of the backend's FF_SES_BASE" "email.example.tn email.example.tn" \
+  "$(sed -n 's/^FF_SES_HOST=//p' "$platform/edge.env") $(sed -n 's#^FF_SES_BASE=https://##p' "$platform/backend.env")"
+check "the backend's port for mail in its Service, reached by the edge and tenants' functions alone" "$ses_port ses edge,functions" \
+  "$(reached_by "$ses_port")"
+check "functions' address for it: the Service ff-storage's fixed one, on that port, which the backend names to their pods" \
+  "10.43.0.251:$ses_port ses http://10.43.0.251:$ses_port none" \
+  "$(ff_storage "$ses_port") $(sed -n 's/^FF_SES_FUNCTION_ENDPOINT=//p' "$platform/backend.env") $(grep -q '^FF_SES_FUNCTION_CIDRS=.' "$platform/backend.env" && echo some || echo none)"
+check "the edge sends its host there" "1 1" \
+  "$(grep -c '^{\$FF_SES_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$ses_port$" "$platform/edge/Caddyfile")"
+check "the mail server and FF's own return path by public names" "mail.example.tn bounces.mail.example.tn" \
+  "$(sed -n 's/^FF_EMAIL_MAIL_HOST=//p' "$platform/backend.env") $(sed -n 's/^FF_EMAIL_BOUNCE_DOMAIN=//p' "$platform/backend.env")"
+
+echo "== buckets' sites"
+# The edge serves every host under the sites' domain on the backend's port for sites, which nothing else reaches; a
+# customer's own domain for a site reaches the function URL gateway, as every other host does, which hands it on.
+check "the edge's sites' domain is the host of the backend's FF_WEBSITE_BASE" "site.example.tn site.example.tn" \
+  "$(sed -n 's/^FF_WEBSITE_DOMAIN=//p' "$platform/edge.env") $(sed -n 's#^FF_WEBSITE_BASE=https://##p' "$platform/backend.env")"
+website_port="$(sed -n 's/^FF_WEBSITE_PORT=//p' "$platform/backend.env")"
+check "the backend's port for sites in its Service, reached by the edge alone" "$website_port website edge" "$(reached_by "$website_port")"
+check "the edge sends their hosts there, compressed" "1 1 1" \
+  "$(grep -c '^\*\.{\$FF_WEBSITE_DOMAIN} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$website_port$" "$platform/edge/Caddyfile") \
+$(sed -n '/^\*\.{\$FF_WEBSITE_DOMAIN} {$/,/^}/p' "$platform/edge/Caddyfile" | grep -c '^	import common$')"
+
 echo "== the edge"
 docker build -q -t ff-edge:test "$FF_REPO_ROOT/deploy/edge" >/dev/null
 check "its image: Caddy 2.11.7 with the RFC 2136 DNS module, as the numeric user 65532" "v2.11.7 1 65532:65532" \
   "$(docker run --rm ff-edge:test caddy version | cut -d' ' -f1) $(docker run --rm ff-edge:test caddy list-modules | grep -c '^dns.providers.rfc2136$') $(docker image inspect ff-edge:test --format '{{.Config.User}}')"
-# Both ways to function URLs' and buckets' certificates: one for the domain by DNS, with a TSIG key as its Secret
+# Both ways to function URLs', buckets' and sites' certificates: one for the domain by DNS, with a TSIG key as its Secret
 # gives it, or one per host on demand.
 validated=""
 for mode in wildcard on-demand; do
   validated+="$(docker run --rm --read-only --tmpfs /tmp --tmpfs /data --cap-drop ALL --security-opt no-new-privileges --env-file "$platform/edge.env" \
-      -e FF_FUNCTION_URL_TLS="$mode" -e FF_STORAGE_TLS="$mode" -e FF_DNS_TSIG_KEY="$(head -c 32 /dev/urandom | base64)" -v "$platform/edge/Caddyfile:/etc/caddy/Caddyfile:ro" \
+      -e FF_FUNCTION_URL_TLS="$mode" -e FF_STORAGE_TLS="$mode" -e FF_WEBSITE_TLS="$mode" -e FF_DNS_TSIG_KEY="$(head -c 32 /dev/urandom | base64)" -v "$platform/edge/Caddyfile:/etc/caddy/Caddyfile:ro" \
       ff-edge:test caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >"$work/validate-$mode.log" 2>&1; echo $?) "
 done
-check "its Caddyfile, with its settings, valid for Caddy, function URLs' and buckets' certificates by DNS or on demand" "0 0 " "$validated"
+check "its Caddyfile, with its settings, valid for Caddy, function URLs', buckets' and sites' certificates by DNS or on demand" "0 0 " "$validated"
 # Behind a proxy of the server's own (deploy/dev-server), the allowlist believes X-Forwarded-For from the addresses
 # FF_EDGE_TRUSTED_PROXIES names, and from nobody else. The edge on a network of its own, asked from another container
 # there: past the allowlist, the admin app it proxies to isn't there, a 502; refused, a 403.
@@ -303,7 +331,7 @@ edge_trusting() { # <proxies>: the edge started anew, trusting them, 198.51.100.
   docker rm -f "$edge_test" >/dev/null 2>&1 || true
   docker run -d --name "$edge_test" --network "$edge_test" --network-alias admin.example.tn --read-only --tmpfs /tmp --tmpfs /data \
     --cap-drop ALL --security-opt no-new-privileges --env-file "$platform/edge.env" -e FF_EDGE_TLS=local_certs \
-    -e FF_FUNCTION_URL_TLS=on-demand -e FF_STORAGE_TLS=on-demand -e FF_ADMIN_ALLOW=198.51.100.7/32 -e FF_EDGE_TRUSTED_PROXIES="$1" \
+    -e FF_FUNCTION_URL_TLS=on-demand -e FF_STORAGE_TLS=on-demand -e FF_WEBSITE_TLS=on-demand -e FF_ADMIN_ALLOW=198.51.100.7/32 -e FF_EDGE_TRUSTED_PROXIES="$1" \
     -v "$platform/edge/Caddyfile:/etc/caddy/Caddyfile:ro" ff-edge:test >/dev/null
   for _ in $(seq 1 30); do [ -n "$(admin_status)" ] && return; sleep 1; done
 }

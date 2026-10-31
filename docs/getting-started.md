@@ -136,6 +136,18 @@ hack/k8s/data-db-up.sh            # about 2 minutes the first time: it builds it
 - Functions reach it whatever their account's internet access: their NetworkPolicy opens its address on port 5432, and nothing else of that network. Node.js functions trust its certificate through `NODE_EXTRA_CA_CERTS`, which FF sets to the CA it mounts in their pods; a Python driver finds the CA at `/etc/ff/data-db/ca.crt`.
 - `hack/k8s/data-db-up.sh psql` opens `psql` in it as its superuser; `hack/k8s/data-db-up.sh down` stops it, and `down --volumes` deletes its data too, as `docker compose down -v` does.
 
+**11. Customers' caches (optional).** Each cache is a Valkey process of its own, on a server of customers' caches apart from FF's ([ADR 0013](adr/0013-caches.md)). In development it is `docker-compose.yml`'s `cache`, Valkey 9.1 with FF's agent, on the database server's network (at 10.199.0.11), which the cluster's node joins. The script builds and starts it, copies the CA of its certificate to `hack/.cache-server/ca.crt`, and prints the `FF_CACHE_*` lines for `BE/.env`; restart the backend after adding them. Without them, FF has no caches.
+
+```bash
+hack/k8s/cache-up.sh              # down stops it, its caches kept; down --volumes deletes them
+```
+
+**12. Customers' mail (optional).** Customers' mail goes out through a Postfix of their own, never FF's ([ADR 0012](adr/0012-customer-mail.md)). In development it is `docker-compose.yml`'s `mail`, with FF's agent, on the same network, which hands every message to Mailpit (http://localhost:58025) instead of its recipients' servers, so that nothing leaves this machine. The script builds and starts both, copies the CA of the server's certificate to `hack/.mail-server/ca.crt`, and prints the `FF_EMAIL_*` lines for `BE/.env`; restart the backend after adding them. Without them, the SES endpoint takes identities and keeps the suppression list, but sends nothing: `SendEmail` answers `SendingPausedException`, saying why.
+
+```bash
+hack/k8s/mail-up.sh               # down stops it; down --volumes deletes what came back unread
+```
+
 **Check the whole setup** with the end-to-end test. It uses its own compose project, ports, and backend, so it can run next to your dev stack. It takes about 3 minutes and needs 3.5 GB of free memory.
 
 ```bash
@@ -475,7 +487,7 @@ aws --endpoint-url http://s3.localhost:3002 s3 cp ./cat.jpg s3://photos/2026/cat
 aws --endpoint-url http://s3.localhost:3002 s3 ls s3://photos --recursive
 ```
 
-Or with `ff`, whose key's secret comes as the four variables AWS's tools read, `AWS_ENDPOINT_URL_S3` among them, so that the CLI needs no `--endpoint-url`:
+Or with `ff`, whose key's secret comes as the six variables AWS's tools read, `AWS_ENDPOINT_URL_S3` among them, so that the CLI needs no `--endpoint-url`:
 
 ```bash
 ff buckets create photos
@@ -593,9 +605,9 @@ aws sqs receive-message --queue-url "$queue" --wait-time-seconds 10   # then del
 
 **In FF's API too,** beside the endpoint, the same queues the same way, as SQS's own operations run there: `GET /queues` lists the account's, each with its URL, ARN, attributes and messages counted (`available`, `inFlight`, `delayed`); `POST /queues` makes one (`{"name": "orders", "visibilityTimeout": 60}`, SQS's attributes by their names; a name the account has, 409); `GET`, `PATCH` (what is given changes; `"redrivePolicy": null` removes it) and `DELETE /queues/<name>`; `POST /queues/<name>/purge`. To debug a queue, `POST /queues/<name>/messages` sends a message (`{"body": "…", "attributes": {"item": {"dataType": "String", "stringValue": "harissa"}}}`), `POST /queues/<name>/receive` receives up to ten (`maxMessages`, `visibilityTimeout`, `waitTimeSeconds`), each hidden and counted as any receive, and `DELETE /queues/<name>/messages/<receiptHandle>` deletes one. Every member lists them; owners and developers change them; an API key needs `queues:read` and `queues:write`. The audit log names each `queue.create`, `queue.update`, `queue.purge` and `queue.delete`, whichever way it came, an SDK's under its access key.
 
-**In the console,** the Queues page lists the account's queues, each with its messages (waiting, in flight, delayed) and what they hold, and makes one; a queue's page has its URL, ARN and endpoint, the AWS CLI's commands for it, its attributes, which owners and developers change there, a dead-letter queue among them, and, to debug it, sending a message, receiving up to ten (each received as by any receive: hidden for the visibility timeout, its receive counted) and deleting those received, a purge and the queue's deletion. The access keys, on the Queues page as on the Buckets page, reach every bucket and queue, or one of them alone, and a key just made comes with its five variables, `AWS_ENDPOINT_URL_SQS` among them. A function's "Calls that don't wait" offer the account's queues as destinations.
+**In the console,** the Queues page lists the account's queues, each with its messages (waiting, in flight, delayed) and what they hold, and makes one; a queue's page has its URL, ARN and endpoint, the AWS CLI's commands for it, its attributes, which owners and developers change there, a dead-letter queue among them, and, to debug it, sending a message, receiving up to ten (each received as by any receive: hidden for the visibility timeout, its receive counted) and deleting those received, a purge and the queue's deletion. The access keys, on the Queues page as on the Buckets page, reach every bucket and queue, or one of them alone, and a key just made comes with its six variables, `AWS_ENDPOINT_URL_SQS` among them. A function's "Calls that don't wait" offer the account's queues as destinations.
 
-**With `ff`,** `ff queues create orders` makes one, with SQS's attributes as flags (`--visibility-timeout 1m`, `--retention 4d`, `--delay 5s`, `--receive-wait 20s`, `--max-message-size 262144`), each duration checked against SQS's range before any call, and a dead-letter queue by its name (`--dead-letter-queue orders-dlq --max-receive-count 3`); `ff queues list` and `ff queues get orders` give the messages, the URL, ARN and endpoint, and the attributes in words; `ff queues set orders …` changes those given, `--no-dead-letter-queue` removing it. To debug a queue, `ff queues send orders '{"item": "harissa"}' [--attribute item=harissa] [--delay 30s]` (`-` reads the body from stdin, `@file` from a file), `ff queues receive orders [--max 10] [--wait 20s] [--delete]`, which prints each message's receipt handle, and `ff queues delete-message orders <receipt handle>`; `ff queues purge` and `ff queues delete` ask first, a script saying `--yes`. `ff buckets keys create --queue orders` makes a key for that queue alone, and prints its five variables. `ff queues metrics orders [--period 300] [--since 6h]` prints its metrics, a row per period: the most messages waiting and in flight, the oldest message's age, the messages sent, received and deleted, and the receives that found none; then the window's totals.
+**With `ff`,** `ff queues create orders` makes one, with SQS's attributes as flags (`--visibility-timeout 1m`, `--retention 4d`, `--delay 5s`, `--receive-wait 20s`, `--max-message-size 262144`), each duration checked against SQS's range before any call, and a dead-letter queue by its name (`--dead-letter-queue orders-dlq --max-receive-count 3`); `ff queues list` and `ff queues get orders` give the messages, the URL, ARN and endpoint, and the attributes in words; `ff queues set orders …` changes those given, `--no-dead-letter-queue` removing it. To debug a queue, `ff queues send orders '{"item": "harissa"}' [--attribute item=harissa] [--delay 30s]` (`-` reads the body from stdin, `@file` from a file), `ff queues receive orders [--max 10] [--wait 20s] [--delete]`, which prints each message's receipt handle, and `ff queues delete-message orders <receipt handle>`; `ff queues purge` and `ff queues delete` ask first, a script saying `--yes`. `ff buckets keys create --queue orders` makes a key for that queue alone, and prints its six variables. `ff queues metrics orders [--period 300] [--since 6h]` prints its metrics, a row per period: the most messages waiting and in flight, the oldest message's age, the messages sent, received and deleted, and the receives that found none; then the window's totals.
 
 **An access key may name the queues it reaches** (`POST /storage-keys` with `"queues": ["orders"]`), as it names buckets: a key that names neither reaches all the account's buckets and queues; one that names some reaches those alone, so that a key naming buckets alone reaches no queue, and one naming queues alone no bucket. A queue it doesn't name answers `AccessDenied`, and `ListQueues` lists the ones it names.
 
@@ -656,9 +668,89 @@ aws s3api get-bucket-notification-configuration --bucket photos
 
 **In the console,** a bucket's page has "Notifications": each configuration in words (its events, the keys it names, where they go) and its ID; owners and developers add one, the account's functions and queues offered, or remove one. **With `ff`,** `ff buckets notify photos thumbnails --prefix images/` has the bucket run a function for its new objects (`--queue removals --event 's3:ObjectRemoved:*'` sends its deletions to a queue; `--suffix`, `--id`), `ff buckets notifications photos` lists them, `--remove <id>` takes one away, and `--clear` all of them, after asking.
 
+### A static site
+
+A bucket's files served as a website, as S3's website hosting serves them with CloudFront in front ([ADR 0011](adr/0011-static-sites.md)): public to read at the site's address alone, its S3 API still signed. The backend serves sites on a port of its own, `FF_WEBSITE_PORT` (3004), each at `<bucket>.` and the host of `FF_WEBSITE_BASE`: `http://shop.site.localhost:3004` in development, where browsers and curl take `*.localhost` to this machine, and `https://shop.site.<domain>` behind the edge in production. A built frontend goes up with `ff sites deploy`:
+
+```bash
+ff buckets create shop
+ff sites deploy shop ./dist --spa              # a Vite app's built folder
+# ./dist deployed to shop, made a site: 14 files uploaded, 0 files unchanged, 0 files deleted
+# http://shop.site.localhost:3004
+curl -s http://shop.site.localhost:3004/orders/42 | head -3   # a route of the app: its index.html, with 200
+ff sites get shop                              # its address and settings
+ff sites metrics shop --since 1h               # its visits, as CloudFront's metrics name them
+```
+
+**A deploy** asks the API for a key of its own (`POST /buckets/<name>/website/deploy-keys`: the bucket alone, read-write, for an hour, never listed or counted with the account's two keys), lists the bucket, and uploads the files whose MD5 isn't the stored ETag, assets first and pages last, so that a page never names an asset not there yet. Each file is typed by its name, from the website server's own table, and cached a year (`immutable`) when its name carries a hash, as bundlers name assets, `no-cache` otherwise. It deletes the bucket's files the folder hasn't, unless `--keep`, revokes its key, and makes the bucket a site when it isn't one: `index.html` its index document and the folder's `404.html` its error document unless `--index-document` and `--error-document` say otherwise; `--spa` for a single-page app. `ff` signs the uploads itself: no AWS CLI needed. `aws s3 sync ./dist s3://shop` works too, with one of the account's keys, as for any bucket; the site serves what the bucket holds.
+
+**The website configuration** is S3's: `PutBucketWebsite`, `GetBucketWebsite` and `DeleteBucketWebsite` at the S3 front door, in S3's XML (`aws s3 website s3://shop --index-document index.html --error-document 404.html`), or `PUT`, `GET` and `DELETE /buckets/<name>/website` in FF's API, in S3's JSON names, with one setting of FF's that S3's XML can't say, as CloudFront's custom error responses give it: `{"indexDocument": {"suffix": "index.html"}, "errorDocument": {"key": "404.html"}, "singlePageApp": true}`. Redirects and routing rules answer `NotImplemented`. A read-only key changes nothing; owners and developers change it; the audit log names each `bucket.website`. `ff sites remove shop` (`DELETE …/website`) makes the bucket no site again: its address answers 404 at once, its files kept, private.
+
+**What a visitor gets:** `GET` and `HEAD` alone (anything else 405); a folder's path answers its index document, a folder named without its slash is redirected to it (302), a path with no file answers the error document with 404, or, a single-page app's, the index document with 200. The browser's `If-None-Match`, `If-Modified-Since` and `Range` go to the store, so that a file it has answers 304 and a range 206; the type the file was uploaded with, or one by its name when it says nothing; `X-Content-Type-Options: nosniff` on every answer; no cookie. A path with a `.` or `..` segment, however escaped, answers 400 before the store is asked: nothing outside the bucket is ever read.
+
+**Your own domain** for a site is proved as a function URL's is: `ff sites domains add shop www.shop.tn` (`POST /buckets/<name>/website/domains`) says the records to make, a CNAME to the site's host, or a TXT record and the edge's addresses, and `ff sites domains verify shop www.shop.tn` checks them once they are made. Once proved, the site answers there too, with a certificate the edge makes on demand. The plan's custom domains count a site's and function URLs' together: 5 on beta.
+
+**Counted, billed and limited:** each visit counts in its bucket's minute, in a class of its own (`website`), billed as S3's GETs, with what it sent; the bucket's storage is billed as any bucket's. The bytes sites send are counted, not billed ([decision 12](decisions.md)), within the plan's limit: past 10 GB a month together on beta, the account's sites answer 403, saying so, until the month's end. A suspended account's sites, and those whose storage FF turned off, answer 403; without credit they still answer, as reads do. `GET /buckets/<name>/website/metrics` gives `Requests` and `BytesDownloaded` (Sum), `4xxErrorRate`, `5xxErrorRate` and `TotalErrorRate` (Average, in percent), as CloudWatch names a CloudFront distribution's; an alarm on `Requests` or a rate names the bucket. The console's bucket page has the site's panel: its address, its settings, the deploy command and the AWS CLI's, its last day's visits, its domains.
+
+**The way out:** an S3 bucket behind CloudFront, its files uploaded again from the built folder with the same cache headers, and a template of the pieces together: [`cli/templates/export/data/s3-website.md`](../cli/templates/export/data/s3-website.md), which `ff export` will put in its kit. In French: [Sites statiques](fr/sites.md).
+
+### E-mail from apps
+
+Mail from an app's code, as Amazon SES v2 sends it ([ADR 0012](adr/0012-customer-mail.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers SES v2's REST API on a port of its own, `FF_SES_PORT` (3005), at `FF_SES_BASE` (`http://localhost:3005`; `https://email.<domain>` behind the edge in production), signed with AWS Signature Version 4 for the service `ses` by one of the account's access keys, a read-only one only reading. It serves `CreateEmailIdentity`, `GetEmailIdentity`, `ListEmailIdentities`, `DeleteEmailIdentity`, `SendEmail` (simple and raw), `GetAccount`, and the suppression list's `PutSuppressedDestination`, `GetSuppressedDestination`, `ListSuppressedDestinations` and `DeleteSuppressedDestination`; anything else answers `NotImplemented`. Sending needs the server of customers' mail (setup's step 12).
+
+```bash
+ff email add shop.example.tn                   # the records to publish at its DNS, printed:
+# FOR              TYPE  NAME                                   VALUE
+# DKIM             TXT   ff3c9a2e1b._domainkey.shop.example.tn  v=DKIM1; k=rsa; p=MIIB…
+# MAIL FROM        MX    bounces.mail.shop.example.tn           10 mail.localhost
+# SPF              TXT   bounces.mail.shop.example.tn           v=spf1 a:mail.localhost -all
+# DMARC (advised)  TXT   _dmarc.shop.example.tn                 v=DMARC1; p=none;
+ff email verify shop.example.tn                # looks now, rather than in the minute
+ff email add me@example.tn                     # an address, for the sandbox: FF e-mails it a link
+ff email send --from orders@shop.example.tn --to me@example.tn --subject Hello --text 'From FF'
+ff email messages                              # what became of each recipient
+```
+
+**A domain** gets a DKIM key of FF's, RSA of 2,048 bits, sealed as secrets are, under a selector of its own (`ff` and 8 hexadecimal characters), as SES's "bring your own DKIM" would take one, and four records to publish: the key's TXT, which proves the domain; its return path's MX and SPF, `bounces.mail.<domain>`, which bring its bounces back to FF's server; and a DMARC policy that only reports, advised. FF looks them up every minute for 72 hours, then gives up (`FAILED`; `ff email verify` tries again); once proved, once a day, its mail refused while its record is gone. Until its MX is found, its bounces come back through FF's own return path (`FF_EMAIL_BOUNCE_DOMAIN`). **An address** is proved by the link FF e-mails it, for the sandbox, where every recipient must be proved too. The plan counts domains: 2 on beta, addresses free. The console's E-mail page lists them, each with its records and what each is for; `GET`, `POST /email/identities`, `GET`, `DELETE /email/identities/<identity>` and `POST /email/identities/<identity>/verify` in FF's API.
+
+**Sending,** `SendEmail` at the SES endpoint or `POST /email/messages` in FF's API (`ff email send`), from an address the account proved or one at a domain it proved, whose DKIM key signs it; 50 recipients and 10 MB at most; each recipient counting against the plan's quotas, 200 a day and 1 a second on beta, as SES counts them. The message is queued in FF's database and answered with its ID at once; the backend hands it to the server of customers' mail over SMTP with STARTTLS, signed with the domain's key, its envelope's sender `b-<message ID>@bounces.mail.<domain>`. A server that refuses for now is tried again 30 s, 2, 10 and 30 minutes later, then hourly, for a day; one that refuses for good fails it, and `ff email messages` (`GET /email/messages`) says each recipient's fate in the receiving server's words: sent, bounced, failed, complained of, or kept off by the suppression list. Messages are kept 30 days.
+
+**From a function,** nothing to set: its pods get its own key, the region and `AWS_ENDPOINT_URL_SESV2`, as they get the S3 front door's and the SQS endpoint's, so that `new SESv2Client({})` (`@aws-sdk/client-sesv2` in the function's package) and `boto3.client("sesv2")` work as they are. The backend gives functions the endpoint only when it knows where they reach it: `FF_SES_FUNCTION_ENDPOINT` and `FF_SES_FUNCTION_CIDRS`, with the development cluster the same gateway as for buckets (`http://172.18.0.1:3005`). **Port 25 is closed to every function,** whatever its internet access, so that no code sends around the quotas; 465 and 587 stay open, to a mail service of the customer's own, as on AWS.
+
+**Reputation, as SES keeps it:** a new account is in the sandbox, as on SES: it sends only to the addresses and domains it proved, until FF's operator lets it out in the admin app, once the account says what it sends. A bounce for good, or a complaint, puts the address on the account's suppression list, which no mail of the account's reaches again (`ff email suppressions`, `GET`, `PUT`, `DELETE /email/suppressions/<address>`). Over the last 14 days, of 100 recipients at least, past 5% of bounces for good or 0.1% of complaints the account is reviewed, past 10% or 0.5% its sending stops, as SES's do, and FF's operator is told; only the operator turns it on again. `ff email account` (`GET /email/account`, SES's `GetAccount`) says where the account stands: in the sandbox or not, on or paused, its standing, what it sent of its quotas in the last 24 hours. Every member reads the account's mail; owners and developers add identities and send; an API key needs `email:read` and `email:write`. The audit log names each `email.identity.create`, `email.identity.verify`, `email.identity.delete`, `email.suppression.put`, `email.suppression.delete`, the operator's `account.email`, and the review's `email.sending.enforce`.
+
+**Billed as SES bills:** each message's recipients, a suppressed one too, at 0.10 US$ a thousand, and its attachments at 0.12 US$ a GB, SES's prices in the book's dinars, with no free tier. `GET /usage` gives each domain's and address's month, its CSV a line each (`attachment_bytes`), the statement a table of them. Without credit, the account's sends wait for credit (`SendingPausedException`; 402 in FF's API), its identities and messages read as ever; a suspended account's are refused; a closed account's mail goes at its data deletion date, its domains' keys with it. `GET /email/metrics` gives a point an hour, as CloudWatch names SES's: `Send`, `Delivery`, `Bounce` and `Complaint` (Sum), and `Reputation.BounceRate` and `Reputation.ComplaintRate` (Average), the shares of the last 14 days' recipients; an alarm on them watches the account's mail.
+
+**The way out:** SES with the same domains, its own DKIM keys published beside FF's so that both sign while you move, the suppression list copied, and the code unchanged but its endpoint: [`cli/templates/export/data/ses.md`](../cli/templates/export/data/ses.md). In French: [Le courrier de vos applications](fr/courrier.md).
+
+### A cache
+
+A Valkey server of its own for each cache, as Amazon ElastiCache for Valkey gives them ([ADR 0013](adr/0013-caches.md)): on a server of customers' caches apart from the cluster (setup's step 11), its memory the plan's, with the least recently used keys going past it, nothing on disk, TLS and a password. Any Redis or Valkey client reaches it.
+
+```bash
+ff caches create sessions --secret-for orders-api       # the console's Caches page does the same
+# sessions made: its address, shown this once (FF keeps no copy; `ff caches password sessions` makes a new one):
+# rediss://default:Hq7v…@10.199.0.11:6400
+# REDIS_URL set on orders-api
+redis-cli --tls --cacert hack/.cache-server/ca.crt -u 'rediss://default:Hq7v…@10.199.0.11:6400' PING
+ff caches get sessions                                  # its memory used, its connections
+```
+
+**Its address,** `rediss://default:<password>@<host>:<port>`, is in the answer that makes the cache (`POST /caches`, `{"name": "sessions"}`) and never again: FF keeps the password's SHA-256 alone. `ff caches password sessions` (`POST /caches/<name>/password`) makes a new one, shown once too; the connections under way keep theirs, as an ElastiCache AUTH token's rotation does. `--secret-for` sets the address as a secret of the functions named, `REDIS_URL` unless `--secret-name` says otherwise. A cache's name is ElastiCache's (1 to 40 lower-case letters, digits and hyphens, a letter first), the account's once; on the server it is a process of its own under a name of FF's, `fc-` and 24 characters, its port the first free one of `FF_CACHE_PORTS` (6400 to 6999). The plan sets how many and their memory: one cache of 64 MB on beta.
+
+**What it runs:** every command but those that would change the server, write to its disk or reach another (`CONFIG`, `DEBUG`, `MODULE`, `ACL` but `ACL WHOAMI`, `SAVE`, `BGSAVE`, `SHUTDOWN`, `REPLICAOF`, `MIGRATE`, `CLUSTER` and the like). Nothing is kept on disk: a process that starts again, or a server moved, starts empty. Keep in a database what must outlive it.
+
+**Functions reach it whatever their account's internet access:** one rule of their NetworkPolicy opens the server's ports. Its certificate is a public CA's in production; in development, functions trust the server's CA with the database server's, in the one file `NODE_EXTRA_CA_CERTS` names, and from this machine `--cacert hack/.cache-server/ca.crt` checks it. `createClient({ url: process.env.REDIS_URL })` with node-redis, or `redis.from_url(os.environ["REDIS_URL"])` in Python, the library in the function's package.
+
+**Measured every hour, billed as ElastiCache bills a node:** each hour, FF's agent on the server gives the backend the cache's memory, what its keys use, its connections, its hits, misses and evictions, into `cache_samples`. Each hour measured is billed by the GB-hour of the cache's memory, at ElastiCache for Valkey's price in the book's dinars (`cache.t4g.micro`'s, 0.0256 US$ a GB-hour), with no free tier; an hour the server never answers in isn't billed. `GET /usage`, the console's Usage page and `ff usage` show each cache's month. `GET /caches/<name>/metrics` gives a point an hour, as CloudWatch names ElastiCache's: `BytesUsedForCache` and `CurrConnections`, `CacheHits`, `CacheMisses` and `Evictions`; an alarm on them names the cache (`cacheName`). Every member reads the account's caches; owners and developers make, change and delete them; an API key needs `caches:read` and `caches:write`. The audit log names each `cache.create`, `cache.password` and `cache.delete`.
+
+**Suspended, out of credit, closed:** a suspended account's caches refuse its user and end its connections, their keys kept until it is active again; without credit, they go on, as databases do; a closed account's are deleted at its data deletion date. `ff caches delete sessions` (`DELETE /caches/<name>`) deletes one, with its keys.
+
+**The way out:** ElastiCache for Valkey with encryption in transit and an AUTH token, the same eviction, its address in the functions' environment on AWS Lambda; the keys aren't copied, a cache being a cache: [`cli/templates/export/data/elasticache.md`](../cli/templates/export/data/elasticache.md). In French: [Des caches](fr/caches.md).
+
 ### A small app, end to end
 
-[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: orders taken at a web address and kept in PostgreSQL, each order's receipt made in the background and kept in a bucket, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, and AWS's S3 and SQS clients, `@aws-sdk/client-s3` and `@aws-sdk/client-sqs`, makes its three functions. On FF it keeps its orders in one of FF's databases, its new orders in one of FF's queues and its receipts in one of FF's buckets, as it would in RDS, SQS and S3 on AWS: its functions reach all three with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL`, `RECEIPTS_QUEUE` and `RECEIPTS_BUCKET`. In development, functions get their own keys to buckets and queues once the backend knows where they reach its two front doors (`FF_STORAGE_FUNCTION_ENDPOINT` and `FF_SQS_FUNCTION_ENDPOINT`, in "Files in buckets" and "Queues, as Amazon SQS" above), and the customers' databases' server runs (setup's step 10).
+[`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: its page a static site, orders taken at a web address and kept in PostgreSQL, the latest listed from a cache, each order's receipt made in the background, kept in a bucket and e-mailed, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, `@redis/client`, a Valkey client, and AWS's S3, SQS and SES clients, `@aws-sdk/client-s3`, `@aws-sdk/client-sqs` and `@aws-sdk/client-sesv2`, makes its three functions; `site/` is its page. On FF it keeps its orders in one of FF's databases, the latest in one of FF's caches, its new orders in one of FF's queues and its receipts in one of FF's buckets, sends its mail through FF's SES endpoint, and its page is a site of a bucket of FF's, as it would use RDS, ElastiCache, SQS, S3, SES and S3 with CloudFront on AWS: its functions reach them all with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL`, `REDIS_URL`, `RECEIPTS_QUEUE`, `RECEIPTS_BUCKET` and `RECEIPTS_FROM`. In development, functions get their own keys to buckets, queues and mail once the backend knows where they reach its front doors (`FF_STORAGE_FUNCTION_ENDPOINT`, `FF_SQS_FUNCTION_ENDPOINT` and `FF_SES_FUNCTION_ENDPOINT`, in "Files in buckets", "Queues, as Amazon SQS" and "E-mail from apps" above), and the servers of customers' databases, caches and mail run (setup's steps 10 to 12).
 
 **The three functions.** From the app's folder; the second and the third have the same package, so nothing goes up again:
 
@@ -681,20 +773,42 @@ ff env set orders-nightly RECEIPTS_BUCKET=shop-receipts
 ff event-sources add new-orders orders-receipts --report-batch-item-failures
 ```
 
+**Its cache and its mail.** `ff caches create` makes the cache and sets its address as the API's and the night's `REDIS_URL`: the API keeps the latest orders there a minute, a new order clears them, and the night clears them when it removes some; without it, the list is read from the database each time. The receipts go from an address the account proved, or one at a domain it proved, and, in the sandbox, only to what it proved: a domain's records, or an address's link, which FF e-mails it (in development, to Mailpit at http://localhost:58025 when `FF_SMTP_URL` names it, else into the backend's log):
+
+```bash
+ff caches create orders-cache --secret-for orders-api --secret-for orders-nightly
+ff email add orders@example.tn                                # the sender; follow the link FF e-mails it
+ff email add me@example.tn                                    # a recipient, for the sandbox: the same
+ff env set orders-receipts RECEIPTS_FROM=orders@example.tn
+```
+
 **The web address.**
 
 ```bash
 ff url enable orders-api --auth none                          # its address: http://<id>.fn.localhost:3001/
-ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2}'
-# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"created_at":"…","receipt":"queued"}
-ff invoke orders-api --http GET /orders                       # or curl http://<id>.fn.localhost:3001/orders
+ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2, "email": "me@example.tn"}'
+# HTTP 201, then {"id":1,"item":"harissa","quantity":2,"email":"me@example.tn","created_at":"…","receipt":"queued"}
+curl -si http://<id>.fn.localhost:3001/orders | grep -i x-cache   # x-cache: miss, then hit for a minute
 ff invoke orders-api --http GET /orders/1/receipt             # a moment later: Order 1, 2 × harissa, and its time
 ff history orders-receipts                                    # the call that wrote it, its source sqs
+ff email messages                                             # the receipt, sent to me@example.tn
 ```
 
-Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the string the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after. The order is written first, then put in the queue, found by its name (`GetQueueUrl`) as on AWS: the answer doesn't wait for the receipt. A message that can't be sent leaves the order, with `"receipt": null` in the answer and a line in the log; without `RECEIPTS_QUEUE`, the handler writes the receipt itself, as the app did before it had a queue.
+Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the string the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after; it connects to the cache the same way, over TLS, and a cache it can't reach is logged and passed by, the database answering. `GET /orders` lists the latest without the addresses orders gave, since the page shows them to anyone. The order is written first, then put in the queue, found by its name (`GetQueueUrl`) as on AWS: the answer doesn't wait for the receipt. A message that can't be sent leaves the order, with `"receipt": null` in the answer and a line in the log; without `RECEIPTS_QUEUE`, the handler writes the receipt itself, as the app did before it had a queue.
 
-**The receipts, in the background.** `orders-receipts` reads the queue as Lambda's event source mapping for SQS reads one: FF calls `index.receipts` with SQS's event as soon as an order is sent, and it writes each order's receipt, `receipts/<id>.txt`, to the bucket. With `--report-batch-item-failures`, a receipt it couldn't write names its message in `batchItemFailures`: that message alone comes back, once the queue's visibility timeout ends, and the others are deleted. A message received twice writes the same receipt again, the same file, so a repeat changes nothing. To keep the orders whose receipt never can be written, give the queue a dead-letter queue (`ff queues create new-orders-dlq`, then `ff queues set new-orders --dead-letter-queue new-orders-dlq`), and an alarm on its `ApproximateNumberOfMessagesVisible`. With one of the account's keys, the AWS CLI reads a receipt as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
+**The receipts, in the background.** `orders-receipts` reads the queue as Lambda's event source mapping for SQS reads one: FF calls `index.receipts` with SQS's event as soon as an order is sent, and it writes each order's receipt, `receipts/<id>.txt`, to the bucket. With `--report-batch-item-failures`, a receipt it couldn't write names its message in `batchItemFailures`: that message alone comes back, once the queue's visibility timeout ends, and the others are deleted. Then it e-mails the receipt from `RECEIPTS_FROM` to the order's address, with `new SESv2Client({})`; a receipt SES refuses is logged, and its order and receipt kept, since a refusal doesn't change on a retry. A message received twice writes the same receipt again, the same file, and e-mails it again. To keep the orders whose receipt never can be written, give the queue a dead-letter queue (`ff queues create new-orders-dlq`, then `ff queues set new-orders --dead-letter-queue new-orders-dlq`), and an alarm on its `ApproximateNumberOfMessagesVisible`. With one of the account's keys, the AWS CLI reads a receipt as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
+
+**Its page, a site.** `site/` is a page of plain HTML and JavaScript: it lists the latest orders and sends new ones to the API, whose address it reads from `config.json`, written beside it at the deploy. Its bucket is a site, and the function URL lets the site's origin in (CORS):
+
+```bash
+ff buckets create shop-site                                   # a name of yours, as the receipts' bucket's
+printf '{"api": "%s"}\n' "$(ff url show orders-api --output json | jq -r .url.functionUrl)" > site/config.json
+ff sites deploy shop-site site                                # http://shop-site.site.localhost:3004
+ff url enable orders-api --auth none --cors-origin http://shop-site.site.localhost:3004 \
+  --cors-method GET --cors-method POST --cors-header content-type
+```
+
+Open http://shop-site.site.localhost:3004 in a browser: an order made there is in the list at once, the cache cleared by it.
 
 **The nightly report, called without waiting.**
 
@@ -711,7 +825,10 @@ The report counts the day before the event's `time`: set it to tomorrow's 02:00 
 ff delete orders-nightly --yes && ff delete orders-receipts --yes && ff delete orders-api --yes
 ff queues delete new-orders --yes                             # the queue, and its mapping with it
 ff db delete orders --yes                                     # the database, with its data
+ff caches delete orders-cache --yes                           # the cache, with its keys
 ff buckets delete shop-receipts --force --yes                 # the bucket, with its receipts
+ff buckets delete shop-site --force --yes                     # the page's bucket, its site with it
+ff email delete orders@example.tn --yes && ff email delete me@example.tn --yes
 ```
 
 **A database of your own, elsewhere,** works as well, through the same secret, once the account's internet access is on. A function never reaches a private address, FF's own network included, so in development `hack/k8s/app-database.sh up` runs a PostgreSQL that the cluster's functions reach as they would one on the internet: on a Docker network of its own in 198.18.0.0/15, the range set aside for tests, which the cluster's node joins (Docker 28 or later). It prints the database's address. FF's operator turns the account's internet access on in the admin dashboard, on the account's page (`PUT /admin/accounts/<id>/egress`); in development mode, with no operator, the database stands in, and the next deploy applies it to the account's namespace:
@@ -724,7 +841,7 @@ printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
 hack/k8s/app-database.sh down                               # afterwards: the database, with its data
 ```
 
-**In production** the database, the queue and the bucket are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on. The same folder runs on AWS Lambda with an RDS database, an SQS queue and an S3 bucket: `ff package` writes its zip, the function's role gives the clients their credentials, and the export kit's [`data/sqs.md`](../cli/templates/export/data/sqs.md) has the queue and its mapping.
+**In production** the database, the cache, the queue, the buckets and the mail are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on; the receipts go from a domain of yours, proved by its records, once FF's operator lets the account out of the sandbox. The same folder runs on AWS Lambda with an RDS database, an ElastiCache cache, an SQS queue, S3 buckets and SES, its page on S3 behind CloudFront: `ff package` writes its zip, the function's role gives the clients their credentials, and the export kit has the queue and its mapping ([`data/sqs.md`](../cli/templates/export/data/sqs.md)), the page ([`data/s3-website.md`](../cli/templates/export/data/s3-website.md)), the cache ([`data/elasticache.md`](../cli/templates/export/data/elasticache.md)) and the mail ([`data/ses.md`](../cli/templates/export/data/ses.md)).
 
 ## 4. Look inside the cluster
 

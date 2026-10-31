@@ -48,6 +48,15 @@ import { EventSourceMappings1792803225587 } from './1792803225587-EventSourceMap
 import { BucketNotifications1792810703773 } from './1792810703773-BucketNotifications';
 import { QueueBilling1792816013937 } from './1792816013937-QueueBilling';
 import { QueueMetrics1792820562033 } from './1792820562033-QueueMetrics';
+import { BucketWebsites1793323284403 } from './1793323284403-BucketWebsites';
+import { SiteTransfer1793323792268 } from './1793323792268-SiteTransfer';
+import { SiteDomains1793324361034 } from './1793324361034-SiteDomains';
+import { DeployKeys1793326500000 } from './1793326500000-DeployKeys';
+import { Caches1793331976259 } from './1793331976259-Caches';
+import { CacheMeasures1793333328301 } from './1793333328301-CacheMeasures';
+import { EmailIdentities1793336364006 } from './1793336364006-EmailIdentities';
+import { EmailMessages1793340758436 } from './1793340758436-EmailMessages';
+import { EmailBilling1793345460517 } from './1793345460517-EmailBilling';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -105,4 +114,13 @@ export const MIGRATIONS: Array<new () => object> = [
   BucketNotifications1792810703773,
   QueueBilling1792816013937,
   QueueMetrics1792820562033,
+  BucketWebsites1793323284403,
+  SiteTransfer1793323792268,
+  SiteDomains1793324361034,
+  DeployKeys1793326500000,
+  Caches1793331976259,
+  CacheMeasures1793333328301,
+  EmailIdentities1793336364006,
+  EmailMessages1793340758436,
+  EmailBilling1793345460517,
 ];

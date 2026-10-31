@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { DataSource, EntityManager } from 'typeorm';
+import { DataSource, EntityManager, Not } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
+import { Cache, CacheStatus } from '../caches/cache.entity';
 import { Database } from '../databases/database.entity';
 import { Function } from '../functions/entities/function.entity';
 import { webhookUrlProblem } from '../notifications/webhook-target';
@@ -17,6 +18,7 @@ export const alarmView = (alarm: Alarm): AlarmView => ({
   databaseId: alarm.databaseId,
   bucketName: alarm.bucket?.name ?? null,
   queueName: alarm.queue?.name ?? null,
+  cacheName: alarm.cache?.name ?? null,
   metric: alarm.metric,
   statistic: alarm.statistic,
   period: alarm.period,
@@ -34,7 +36,7 @@ export const alarmView = (alarm: Alarm): AlarmView => ({
   updatedAt: alarm.updatedAt,
 });
 
-/** What an alarm is: the rule, its name and its actions; a bucket or a queue by its ID, once its name is found. */
+/** What an alarm is: the rule, its name and its actions; a bucket, a queue or a cache by its ID, once its name is found. */
 type AlarmDefinition = Pick<
   Alarm,
   | 'name'
@@ -42,6 +44,7 @@ type AlarmDefinition = Pick<
   | 'databaseId'
   | 'bucketId'
   | 'queueId'
+  | 'cacheId'
   | 'metric'
   | 'statistic'
   | 'period'
@@ -53,7 +56,7 @@ type AlarmDefinition = Pick<
   | 'actions'
 >;
 
-/** An alarm's definition, from the request; the bucket's or the queue's ID comes once its name is found (AlarmsService.check). */
+/** An alarm's definition, from the request; the bucket's, the queue's or the cache's ID comes once its name is found (AlarmsService.check). */
 function definition(dto: AlarmDto): AlarmDefinition {
   return {
     name: dto.name.trim(),
@@ -61,6 +64,7 @@ function definition(dto: AlarmDto): AlarmDefinition {
     databaseId: dto.databaseId ?? null,
     bucketId: null,
     queueId: null,
+    cacheId: null,
     metric: dto.metric,
     statistic: dto.statistic,
     period: dto.period,
@@ -82,7 +86,7 @@ export class AlarmsService {
   ) {}
 
   async list(accountId: string): Promise<AlarmView[]> {
-    const alarms = await this.dataSource.getRepository(Alarm).find({ where: { accountId }, relations: { bucket: true, queue: true }, order: { createdAt: 'ASC', id: 'ASC' } });
+    const alarms = await this.dataSource.getRepository(Alarm).find({ where: { accountId }, relations: { bucket: true, queue: true, cache: true }, order: { createdAt: 'ASC', id: 'ASC' } });
     return alarms.map(alarmView);
   }
 
@@ -94,7 +98,7 @@ export class AlarmsService {
   async create(accountId: string, dto: AlarmDto): Promise<AlarmView> {
     const alarm = definition(dto);
     return this.dataSource.transaction(async (manager) => {
-      Object.assign(alarm, await this.check(manager, accountId, alarm, dto.bucketName ?? null, dto.queueName ?? null));
+      Object.assign(alarm, await this.check(manager, accountId, alarm, dto.bucketName ?? null, dto.queueName ?? null, dto.cacheName ?? null));
       // The account's row, locked: two creates at once can't both take the last place.
       await manager.query(`SELECT 1 FROM "accounts" WHERE "id" = $1 FOR UPDATE`, [accountId]);
       if ((await manager.getRepository(Alarm).countBy({ accountId })) >= MAX_ALARMS) throw new BadRequestException(`An account has at most ${MAX_ALARMS} alarms`);
@@ -109,7 +113,7 @@ export class AlarmsService {
     const alarm = definition(dto);
     return this.dataSource.transaction(async (manager) => {
       const before = await this.find(manager, accountId, id, true);
-      Object.assign(alarm, await this.check(manager, accountId, alarm, dto.bucketName ?? null, dto.queueName ?? null));
+      Object.assign(alarm, await this.check(manager, accountId, alarm, dto.bucketName ?? null, dto.queueName ?? null, dto.cacheName ?? null));
       await manager.getRepository(Alarm).update({ id, accountId }, { ...alarm, evaluatedAt: null });
       const changes = Object.fromEntries(
         Object.entries(alarm)
@@ -129,19 +133,20 @@ export class AlarmsService {
     });
   }
 
-  /** The account's alarm, with its bucket and queue; locked, without them, as a row locked can't be read with an outer join. */
+  /** The account's alarm, with its bucket, queue and cache; locked, without them, as a row locked can't be read with an outer join. */
   private async find(manager: EntityManager, accountId: string, id: string, lock = false): Promise<Alarm> {
     const alarm = await manager
       .getRepository(Alarm)
-      .findOne({ where: { id, accountId }, ...(lock ? { lock: { mode: 'pessimistic_write' as const } } : { relations: { bucket: true, queue: true } }) });
+      .findOne({ where: { id, accountId }, ...(lock ? { lock: { mode: 'pessimistic_write' as const } } : { relations: { bucket: true, queue: true, cache: true } }) });
     if (!alarm) throw new NotFoundException(`Alarm ${id} not found`);
     return alarm;
   }
 
   /**
-   * The rule's own problems, a function, database, bucket or queue the
-   * account doesn't have, and a webhook URL the notifications wouldn't take.
-   * Answers the IDs of the bucket and the queue it names, if it names one.
+   * The rule's own problems, a function, database, bucket, queue or cache
+   * the account doesn't have, and a webhook URL the notifications wouldn't
+   * take. Answers the IDs of the bucket, the queue and the cache it names, if
+   * it names one.
    */
   private async check(
     manager: EntityManager,
@@ -149,8 +154,9 @@ export class AlarmsService {
     alarm: AlarmRule & { actions: { webhookUrls: string[] } },
     bucketName: string | null,
     queueName: string | null,
-  ): Promise<{ bucketId: string | null; queueId: string | null }> {
-    const problem = alarmProblem({ ...alarm, bucketId: bucketName, queueId: queueName }) ?? alarm.actions.webhookUrls.map(webhookUrlProblem).find(Boolean);
+    cacheName: string | null,
+  ): Promise<{ bucketId: string | null; queueId: string | null; cacheId: string | null }> {
+    const problem = alarmProblem({ ...alarm, bucketId: bucketName, queueId: queueName, cacheId: cacheName }) ?? alarm.actions.webhookUrls.map(webhookUrlProblem).find(Boolean);
     if (problem) throw new BadRequestException(problem);
     if (alarm.functionId && !(await manager.getRepository(Function).existsBy({ id: alarm.functionId, accountId }))) {
       throw new NotFoundException(`Function with ID ${alarm.functionId} not found`);
@@ -170,6 +176,12 @@ export class AlarmsService {
       if (!queue) throw new NotFoundException(`The account has no queue ${queueName}`);
       queueId = queue.id;
     }
-    return { bucketId, queueId };
+    let cacheId: string | null = null;
+    if (cacheName) {
+      const cache = await manager.getRepository(Cache).findOne({ where: { name: cacheName, accountId, status: Not(CacheStatus.DELETING) }, select: { id: true } });
+      if (!cache) throw new NotFoundException(`The account has no cache ${cacheName}`);
+      cacheId = cache.id;
+    }
+    return { bucketId, queueId, cacheId };
   }
 }

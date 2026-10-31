@@ -26,6 +26,11 @@
 #     operator turns an account's databases off, its user kept out and its
 #     members told why, and on again; a closed account's user is kept out,
 #     then its database dropped with its data.
+#   - Customers' caches (ADR 0013), on the suite's own server: each account's
+#     own, their names each account's; another account gets 404 on every
+#     route, and the owner's password still works; a key needs caches:read and
+#     caches:write; a suspended account's cache refuses its user, then lets it
+#     in again, its keys kept; a closed account's is kept out, then deleted.
 #   - Buckets and queues, through the S3 front door and the SQS endpoint: each
 #     account's key reaches its own account's alone; another's bucket is
 #     AccessDenied, another's queue one that doesn't exist, by its URL or its
@@ -78,10 +83,13 @@ storage_port_oidc="$(free_port)"
 # And queues' SQS endpoint on a third, at http://127.0.0.1:<port>.
 sqs_port="$(free_port)"
 sqs_port_oidc="$(free_port)"
+# Mail's SES endpoint, on the development backend alone, which the accounts' keys are tried at.
+ses_port="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
-as_b() { http_at "$api" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_b"; }
+# B's calls are patient (below): its loop over every route makes more changes than its plan's 60 a minute.
+as_b() { patient http_at "$api" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_b"; }
 # The development header, which OIDC mode must ignore.
 anonymous() { http_at "$api_oidc" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_a"; }
 # with_token <token> <method> <path> [body] [curl option...]: through the guard.
@@ -104,16 +112,19 @@ upload_package() {
 }
 sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
 uri() { jq -rn --arg s "$1" '$s | @uri'; }
-# patiently <call…>: a change past the plan's 60 a minute answers 429, and is sent again once the wait it gives is over,
-# as a client does: each loop below makes more changes than that in a minute.
-patiently() {
-  "$@" >/dev/null
-  [ "$(status)" = 429 ] || return 0
-  local wait
-  wait="$(message | sed -nE 's/.*Retry after ([0-9]+) s\..*/\1/p')"
-  sleep "${wait:-60}"
-  "$@" >/dev/null
+# patient <call…>: a change past the plan's 60 a minute answers 429, and is sent again once the wait it gives is over,
+# as a client does: each loop below makes more changes than that in a minute. Prints the last answer's body.
+patient() {
+  local body wait
+  body="$("$@")"
+  if [ "$(status)" = 429 ]; then
+    wait="$(message | sed -nE 's/.*Retry after ([0-9]+) s\..*/\1/p')"
+    sleep "${wait:-60}"
+    body="$("$@")"
+  fi
+  printf '%s' "$body"
 }
+patiently() { patient "$@" >/dev/null; }
 # Routes anyone may call (@Public()): whether the process is alive, and whether it can serve, for the load balancer.
 public_routes=("GET /healthz" "GET /readyz")
 is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "$1" ] && return 0; done; return 1; }
@@ -213,6 +224,9 @@ e2e_dependencies keycloak mailpit
 e2e_cluster
 # Customers' databases (ADR 0008): the suite's own server, on 10.199.2.0/24, which no other run uses.
 e2e_data_db 10.199.2.0/24 10.199.2.10
+# Customers' caches (ADR 0013): the suite's own server, beside it.
+e2e_cache 10.199.2.11
+e2e_mail 10.199.2.12 10.199.2.13
 
 echo "== a webhook receiver, as a customer's: it records each request, and answers 204, or 500 on /fail"
 receiver_port="$(free_port)"
@@ -243,13 +257,14 @@ e2e_migrate "${e2e_base_env[@]}"
 # Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
 # Both send notifications every second, and may reach the receiver on this machine.
 notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
-e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api##*:}" \
+e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api##*:}" \
   FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" \
-  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port"
+  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port" \
+  FF_SES_PORT="$ses_port" FF_SES_BASE="http://127.0.0.1:$ses_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
-e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" PORT="${api_oidc##*:}" \
+e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
   FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
   FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
@@ -299,6 +314,24 @@ db_a="$(jq -r .id <<<"$database_a")"
 conn_a="$(jq -r .connectionString <<<"$database_a")"
 check "  ... which its connection string reaches, over TLS, as its own user" "$(jq -r .user <<<"$database_a")|t" \
   "$(data_db_psql "$conn_a" 'select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()')"
+cache_a="$(as_a POST /caches '{"name": "l5-sessions"}')"
+check "A makes a cache, its address with its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.url | startswith("rediss://default:"))"' <<<"$cache_a")"
+cache_url_a="$(jq -r .url <<<"$cache_a")"
+cache_port_a="$(jq -r .port <<<"$cache_a")"
+cache_cli "$cache_url_a" SET l5 a >/dev/null
+check "  ... which its address reaches, over TLS" a "$(cache_cli "$cache_url_a" GET l5)"
+identity_a="$(as_a POST /email/identities '{"identity": "Shop.L5.example.tn"}')"
+check "A adds a domain to send mail from, pending, with its DKIM record to publish" "201 shop.l5.example.tn PENDING true" \
+  "$(status) $(jq -r '"\(.identity) \(.status) \(.records[0].value | startswith("v=DKIM1; k=rsa; p="))"' <<<"$identity_a")"
+selector_a="$(jq -r .dkimSelector <<<"$identity_a")"
+suppression_a="$(as_a PUT /email/suppressions/gone@l5.example.tn '{"reason": "BOUNCE"}')"
+check "  ... and an address to its suppression list" "200 BOUNCE" "$(status) $(jq -r .reason <<<"$suppression_a")"
+# Its domain proved, as its DKIM record found would prove it (L4 publishes one): then a message from it.
+proved_domain() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc \
+  "UPDATE email_identities SET status = 'SUCCESS', verified_at = now() WHERE account_id = '$1' AND identity = '$2'" >/dev/null; }
+proved_domain "$account_a" shop.l5.example.tn
+message_a="$(as_a POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "A'"'"'s"}' | jq -r .messageId)"
+check "  ... and sends a message from it, once it is proved" 201 "$(status)"
 as_a POST /buckets '{"name": "l5-photos-a"}' >/dev/null
 check "A makes a bucket" 201 "$(status)"
 as_a POST /queues '{"name": "l5-orders-a"}' >/dev/null
@@ -310,8 +343,16 @@ check "  ... which A's function is mapped to, disabled: nothing reads the messag
 as_a POST /queues '{"name": "l5-events-a"}' >/dev/null
 as_a PUT /buckets/l5-photos-a/notifications "{\"queueConfigurations\": [{\"id\": \"l5\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
 check "  ... and A's bucket sends its deletions' events to a queue of A's" "200 l5" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
+as_a PUT /buckets/l5-photos-a/website '{"indexDocument": {"suffix": "index.html"}}' >/dev/null
+check "  ... and is a site" "200 index.html" "$(status) $(jq -r '.indexDocument.suffix' "$work/body")"
+as_a POST /buckets/l5-photos-a/website/domains '{"domain": "l5.example.tn"}' >/dev/null
+check "  ... with a domain of A's own, pending" "201 pending" "$(status) $(jq -r .status "$work/body")"
 # notified_by <as_…> <bucket>: the IDs of the bucket's notification configurations, as its own account reads them.
 notified_by() { "$1" GET "/buckets/$2/notifications" | jq -r '[.queueConfigurations[].id] | join(",")'; }
+# site_of <as_…> <bucket>: the index document of the bucket's site, as its own account reads it.
+site_of() { "$1" GET "/buckets/$2/website" | jq -r '.indexDocument.suffix'; }
+# site_domains_of <as_…> <bucket>: the domains of the bucket's site, as its own account reads them.
+site_domains_of() { "$1" GET "/buckets/$2/website/domains" | jq -r '[.[].domain] | join(",")'; }
 # kept_by <as_…> <queue>: the queue's name and its messages that can be received, as its own account reads them.
 kept_by() { "$1" GET "/queues/$2" | jq -r '"\(.name) \(.messages.available)"'; }
 # queue_body <route>: a body each queue route takes, so that only the queue's owner decides its answer.
@@ -352,6 +393,8 @@ path_for() {
   path="${path//\{userId\}/$missing}"
   path="${path//\{invocationId\}/$missing}"
   path="${path//\{domain\}/l5.example.tn}"
+  path="${path//\{identity\}/shop.l5.example.tn}" # a domain or an address to send mail from
+  path="${path//\{address\}/gone@l5.example.tn}"
   path="${path//\{scheduleId\}/$missing}"
   path="${path//\{month\}/$(date -u +%Y-%m)}"
   path="${path//\{name\}/l5-photos-a}" # a bucket's, or a queue's
@@ -387,8 +430,11 @@ body_for() {
     "POST /functions/{id}/event-sources") echo "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a\"}" ;;
     "PATCH /functions/{id}/secrets") echo '{"secrets": {"L5_SECRET": "l5"}}' ;;
     "POST /functions/{id}/url" | "PUT /functions/{id}/url") echo '{"authType": "NONE"}' ;;
-    "POST /functions/{id}/url/domains") echo '{"domain": "l5.example.tn"}' ;;
+    "POST /functions/{id}/url/domains" | "POST /buckets/{name}/website/domains") echo '{"domain": "l5.example.tn"}' ;;
     "POST /functions/{id}/schedules" | "PUT /functions/{id}/schedules/{scheduleId}") echo '{"name": "l5", "expression": "rate(1 hour)"}' ;;
+    "POST /email/identities") echo '{"identity": "shop.l5.example.tn"}' ;;
+    "PUT /email/suppressions/{address}") echo '{"reason": "BOUNCE"}' ;;
+    "POST /email/messages") echo '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "l5"}' ;;
     "POST /accounts") echo '{"name": "L5 second account", "useCase": "isolation tests"}' ;;
     "PATCH /accounts/{id}") echo '{"name": "taken over"}' ;;
     "PATCH /me") echo '{"locale": "fr-TN"}' ;;
@@ -400,6 +446,7 @@ body_for() {
     "PUT /admin/accounts/{id}/plan") echo '{"planId": "beta", "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/egress") echo '{"internetEgress": true, "reason": "l5 tries"}' ;;
     "PUT /admin/accounts/{id}/storage") echo '{"enabled": false, "reason": "l5 tries"}' ;;
+    "PUT /admin/accounts/{id}/email") echo '{"sendingEnabled": false, "reason": "l5 tries"}' ;;
     "POST /admin/accounts/{id}/credits") echo '{"kind": "promo", "amount": "1", "reason": "l5 tries", "idempotencyKey": "00000000-0000-4000-8000-000000000000"}' ;;
     "POST /admin/accounts/"*) echo '{"reason": "l5 tries"}' ;;
     "POST /admin/plans") echo '{"id": "l5-tries", "name": "L5 tries", "limits": {}, "reason": "l5 tries"}' ;;
@@ -571,10 +618,29 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B gets 404 for A's bucket's notifications" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
       check "  ... which A still has, as it set them" "l5 200" "$(notified_by as_a l5-photos-a) $(status)"
       ;;
+    "GET /buckets/{name}/website" | "PUT /buckets/{name}/website" | "DELETE /buckets/{name}/website")
+      as_b "$method" /buckets/l5-photos-a/website "$([ "$method" = PUT ] && echo '{"indexDocument": {"suffix": "stolen.html"}}' || true)" >/dev/null
+      check "$route: B gets 404 for A's bucket's site" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
+      check "  ... which A still has, as it set it" "index.html 200" "$(site_of as_a l5-photos-a) $(status)"
+      ;;
+    "GET /buckets/{name}/website/domains" | "POST /buckets/{name}/website/domains" | "POST /buckets/{name}/website/domains/{domain}/verify" | "DELETE /buckets/{name}/website/domains/{domain}")
+      as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
+      check "$route: B gets 404 for A's bucket's site's domains" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
+      check "  ... which A still has" "l5.example.tn 200" "$(site_domains_of as_a l5-photos-a) $(status)"
+      ;;
+    "POST /buckets/{name}/website/deploy-keys" | "DELETE /buckets/{name}/website/deploy-keys/{id}")
+      as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" >/dev/null
+      check "$route: B gets 404 for a deploy's key to A's bucket" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
+      ;;
     "GET /buckets/{name}/metrics")
       as_b GET /buckets/l5-photos-a/metrics >/dev/null
       check "$route: B gets 404 for A's bucket's metrics" '404 The account has no bucket l5-photos-a' "$(status) $(message)"
       check "  ... which A reads" "true 200" "$(as_a GET /buckets/l5-photos-a/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
+      ;;
+    "GET /buckets/{name}/website/metrics")
+      as_b GET /buckets/l5-photos-a/website/metrics >/dev/null
+      check "$route: B gets 404 for A's site's metrics" '404 The account has no bucket l5-photos-a' "$(status) $(message)"
+      check "  ... which A reads" "true 200" "$(as_a GET /buckets/l5-photos-a/website/metrics | jq '.metrics.Requests.Sum | type == "array"') $(status)"
       ;;
     "GET /queues")
       listed="$(as_b GET /queues | jq 'map(select(.name == "l5-orders-a")) | length')"
@@ -639,6 +705,75 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       database_now="$(as_a GET "/databases/$db_a")"
       check "  ... which A still has, its password unchanged" "200 active 1" "$(status) $(jq -r .status <<<"$database_now") $(data_db_psql "$conn_a" 'select 1')"
       ;;
+    "GET /caches")
+      listed="$(as_b GET /caches | jq --argjson port "$cache_port_a" 'map(select(.port == $port)) | length')"
+      check "$route: B's list doesn't show A's cache" "200 0" "$(status) $listed"
+      ;;
+    "POST /caches")
+      cache_b="$(as_b POST /caches '{"name": "l5-sessions"}')"
+      check "$route: B makes a cache of its own, of the name A's has: names are each account's" "201 true" \
+        "$(status) $([ "$(jq -r .port <<<"$cache_b")" != "$cache_port_a" ] && echo true || echo false)"
+      check "  ... which A's list doesn't show" 0 "$(as_a GET /caches | jq --argjson port "$(jq -r .port <<<"$cache_b")" 'map(select(.port == $port)) | length')"
+      as_b DELETE /caches/l5-sessions >/dev/null
+      check "  ... and which B deletes, A's own untouched" "204 a" "$(status) $(cache_cli "$cache_url_a" GET l5)"
+      ;;
+    "GET /email/identities")
+      listed="$(as_b GET /email/identities | jq 'map(select(.dkimSelector == "'"$selector_a"'")) | length')"
+      check "$route: B's list doesn't show A's domain" "200 0" "$(status) $listed"
+      ;;
+    "POST /email/identities")
+      patiently as_b POST /email/identities '{"identity": "shop.l5.example.tn"}'
+      check "$route: B adds the domain A has, with a DKIM key of its own: identities are each account's" "201 true" \
+        "$(status) $([ "$(jq -r .dkimSelector "$work/body")" != "$selector_a" ] && echo true || echo false)"
+      patiently as_b DELETE /email/identities/shop.l5.example.tn
+      check "  ... and which B deletes, A's own untouched" "204 $selector_a" "$(status) $(as_a GET /email/identities/shop.l5.example.tn | jq -r .dkimSelector)"
+      ;;
+    "GET /email/identities/{identity}" | "POST /email/identities/{identity}/verify" | "DELETE /email/identities/{identity}")
+      patiently as_b "$method" "${template//\{identity\}/shop.l5.example.tn}"
+      check "$route: B gets 404 for A's domain" "404 The account has no identity shop.l5.example.tn" "$(status) $(message)"
+      kept="$(as_a GET /email/identities/shop.l5.example.tn | jq -r .dkimSelector)"
+      check "  ... which A still has, its key unchanged" "200 $selector_a" "$(status) $kept"
+      ;;
+    "GET /email/account")
+      sending="$(as_b GET /email/account | jq -r .sentLast24Hours)"
+      check "$route: B reads its own sending, nothing of A's in it" "200 0" "$(status) $sending"
+      ;;
+    "GET /email/messages")
+      listed="$(as_b GET /email/messages | jq '.messages | length')"
+      check "$route: B's messages don't show A's" "200 0" "$(status) $listed"
+      ;;
+    "GET /email/metrics")
+      sent="$(as_b GET /email/metrics | jq '[.metrics.Send.Sum[]] | add')"
+      check "$route: B's mail's metrics count none of A's" "200 0" "$(status) $sent"
+      ;;
+    "POST /email/messages")
+      patiently as_b POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "B'"'"'s"}'
+      check "$route: B can't send from A's domain, which isn't B's" \
+        "400 Email address is not verified. The following identities failed the check in region TN-TUNIS-1: orders@shop.l5.example.tn" "$(status) $(message)"
+      check "  ... A's message still A's alone" "$message_a 1" "$(as_a GET /email/messages | jq -r '"\(.messages[0].messageId) \(.messages | length)"')"
+      ;;
+    "GET /email/suppressions")
+      listed="$(as_b GET /email/suppressions | jq '.suppressions | length')"
+      check "$route: B's list doesn't show A's address" "200 0" "$(status) $listed"
+      ;;
+    "PUT /email/suppressions/{address}")
+      patiently as_b PUT /email/suppressions/gone@l5.example.tn '{"reason": "COMPLAINT"}'
+      check "$route: B puts the address A has on its own list, A's reason untouched" "200 BOUNCE" \
+        "$(status) $(as_a GET /email/suppressions | jq -r '.suppressions[] | select(.address == "gone@l5.example.tn") | .reason')"
+      patiently as_b DELETE /email/suppressions/gone@l5.example.tn
+      check "  ... and which B takes off its list, A's still on A's" "204 1" "$(status) $(as_a GET /email/suppressions | jq '.suppressions | length')"
+      ;;
+    "DELETE /email/suppressions/{address}")
+      patiently as_b DELETE /email/suppressions/gone@l5.example.tn
+      check "$route: B gets 404 for A's address" "404 gone@l5.example.tn is not on the account's suppression list" "$(status) $(message)"
+      check "  ... which A's list still has" 1 "$(as_a GET /email/suppressions | jq '.suppressions | length')"
+      ;;
+    "GET /caches/{name}" | "DELETE /caches/{name}" | "POST /caches/{name}/password" | "GET /caches/{name}/metrics")
+      as_b "$method" "${template//\{name\}/l5-sessions}" >/dev/null
+      check "$route: B gets 404 for A's cache" "404 The account has no cache l5-sessions" "$(status) $(message)"
+      cache_now="$(as_a GET /caches/l5-sessions)"
+      check "  ... which A still has, its password unchanged" "200 active a" "$(status) $(jq -r .status <<<"$cache_now") $(cache_cli "$cache_url_a" GET l5)"
+      ;;
     "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
       as_b "$method" "/alarms/$alarm_a" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
       check "$route: B gets 404 for A's alarm" "404 Alarm $alarm_a not found" "$(status) $(message)"
@@ -646,7 +781,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... which A still has, unchanged" "200 l5 Errors $id" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
       ;;
     *'{'*)
-      as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
+      # B's changes in this loop are more than its plan's 60 a minute: those past them are sent patiently.
+      patiently as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")"
       check "$method $template: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
       ;;
     "GET /schedules/next-runs")
@@ -681,6 +817,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... nor A's bucket" "404 The account has no bucket l5-photos-a" "$(status) $(message)"
       as_b POST /alarms '{"name": "l5", "queueName": "l5-orders-a", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
       check "  ... nor A's queue" "404 The account has no queue l5-orders-a" "$(status) $(message)"
+      as_b POST /alarms '{"name": "l5", "cacheName": "l5-sessions", "metric": "BytesUsedForCache", "statistic": "Maximum", "period": 3600, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor A's cache" "404 The account has no cache l5-sessions" "$(status) $(message)"
       as_b POST /alarms "$(alarm_body)" >/dev/null
       check "  ... but makes its own account's alarm" 201 "$(status)"
       ;;
@@ -758,6 +896,11 @@ check "B's key can neither read nor set A's bucket's notifications, which A stil
   "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-notification-configuration --bucket l5-photos-a) \
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-notification-configuration --bucket l5-photos-a --notification-configuration '{}') \
 $(notified_by as_a l5-photos-a)"
+check "B's key can neither read, set nor remove A's bucket's site, which A still has" "refused AccessDenied refused AccessDenied refused AccessDenied index.html" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-website --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-website --bucket l5-photos-a --website-configuration '{"IndexDocument": {"Suffix": "stolen.html"}}') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-website --bucket l5-photos-a) \
+$(site_of as_a l5-photos-a)"
 as_b DELETE /buckets/l5-photos-b >/dev/null
 check "B deletes its own bucket" 204 "$(status)"
 
@@ -792,6 +935,31 @@ sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_b" >/dev/n
 check "each deletes its own queue" "http://127.0.0.1:$sqs_port/$account_a/l5-events-a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
   "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
 
+echo "== mail through the SES endpoint: each account's key reaches its own account's identities and sends from them alone"
+# ses_with <key ID> <secret> <aws sesv2 arguments…>: the answer's text, or refused with the error's name, as the CLI prints it.
+ses_with() {
+  local id=$1 secret=$2
+  shift 2
+  AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+    "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$ses_port" sesv2 "$@" --output text 2>"$work/ses.err" ||
+    echo "refused $(grep -oE 'An error occurred \([A-Za-z]+\)' "$work/ses.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"
+}
+check "B's key finds A's domain, made through FF's API, not there: each account's identities are its own" "refused NotFoundException" \
+  "$(ses_with "$key_b_id" "$key_b_secret" get-email-identity --email-identity shop.l5.example.tn --query IdentityType)"
+check "  ... nor deletes it: A's key reads it still" "refused NotFoundException DOMAIN" \
+  "$(ses_with "$key_b_id" "$key_b_secret" delete-email-identity --email-identity shop.l5.example.tn) $(ses_with "$key_a_id" "$key_a_secret" get-email-identity --email-identity shop.l5.example.tn --query IdentityType)"
+check "  ... nor reads A's suppressed address, nor takes it off A's list" "refused NotFoundException refused NotFoundException BOUNCE" \
+  "$(ses_with "$key_b_id" "$key_b_secret" get-suppressed-destination --email-address gone@l5.example.tn --query SuppressedDestination.Reason) \
+$(ses_with "$key_b_id" "$key_b_secret" delete-suppressed-destination --email-address gone@l5.example.tn) \
+$(ses_with "$key_a_id" "$key_a_secret" get-suppressed-destination --email-address gone@l5.example.tn --query SuppressedDestination.Reason)"
+check "ListEmailIdentities lists each key's own account's identities alone" "shop.l5.example.tn 0" \
+  "$(ses_with "$key_a_id" "$key_a_secret" list-email-identities --query 'EmailIdentities[].IdentityName') $(ses_with "$key_b_id" "$key_b_secret" list-email-identities --query 'length(EmailIdentities)')"
+ses_message='{"Simple": {"Subject": {"Data": "l5"}, "Body": {"Text": {"Data": "l5"}}}}'
+check "SendEmail: B's key can't send from A's domain, which isn't B's; A's key can, the message A's alone" "refused MessageRejected true 0" \
+  "$(ses_with "$key_b_id" "$key_b_secret" send-email --from-email-address orders@shop.l5.example.tn --destination ToAddresses=team@shop.l5.example.tn --content "$ses_message") \
+$([[ "$(ses_with "$key_a_id" "$key_a_secret" send-email --from-email-address orders@shop.l5.example.tn --destination ToAddresses=team@shop.l5.example.tn --content "$ses_message" --query MessageId)" =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false) \
+$(as_b GET /email/messages | jq '.messages | length')"
+
 echo "== nobody authenticated, through the guard, on every route (${#routes[@]})"
 for route in "${routes[@]}"; do
   method="${route%% *}"
@@ -815,7 +983,8 @@ token_2="$(keycloak_token ff-e2e "$user_2")"
 [ -n "$token_1" ] && [ "$token_1" != null ] && [ -n "$token_2" ] && [ "$token_2" != null ] ||
   fail "the users could not log in through ff-e2e"
 as_user_1() { with_token "$token_1" "$@"; }
-as_user_2() { with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: ${account_2:-}"; }
+# Account 2's calls are patient, as B's: its loop over every route makes more changes than its plan's 60 a minute.
+as_user_2() { patient with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: ${account_2:-}"; }
 
 me_1="$(as_user_1 GET /me)"
 check "the backend creates user 1 on the first call, with no account" "200 $user_1 []" \
@@ -887,6 +1056,19 @@ database_1="$(as_user_1 POST /databases '{"name": "l5-one"}')"
 check "account 1's owner makes a database" "201 active" "$(status) $(jq -r .status <<<"$database_1")"
 db_1="$(jq -r .id <<<"$database_1")"
 conn_1="$(jq -r .connectionString <<<"$database_1")"
+cache_1="$(as_user_1 POST /caches '{"name": "l5-one"}')"
+check "account 1's owner makes a cache" "201 active" "$(status) $(jq -r .status <<<"$cache_1")"
+cache_conn_1="$(jq -r .url <<<"$cache_1")"
+cache_port_1="$(jq -r .port <<<"$cache_1")"
+cache_cli "$cache_conn_1" SET l5 one >/dev/null
+identity_1="$(as_user_1 POST /email/identities '{"identity": "shop.l5.example.tn"}')"
+check "account 1's owner adds a domain to send mail from" "201 PENDING" "$(status) $(jq -r .status <<<"$identity_1")"
+selector_1="$(jq -r .dkimSelector <<<"$identity_1")"
+as_user_1 PUT /email/suppressions/gone@l5.example.tn '{"reason": "BOUNCE"}' >/dev/null
+check "  ... and an address to its suppression list" 200 "$(status)"
+proved_domain "$account_1" shop.l5.example.tn
+message_1="$(as_user_1 POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "account 1'"'"'s"}' | jq -r .messageId)"
+check "  ... and sends a message from it, once it is proved" 201 "$(status)"
 as_user_1 POST /buckets '{"name": "l5-photos-1"}' >/dev/null
 check "account 1's owner makes a bucket" 201 "$(status)"
 as_user_1 POST /queues '{"name": "l5-orders-1"}' >/dev/null
@@ -898,6 +1080,10 @@ check "  ... which its function is mapped to, disabled" 201 "$(status)"
 as_user_1 POST /queues '{"name": "l5-events-1"}' >/dev/null
 as_user_1 PUT /buckets/l5-photos-1/notifications "{\"queueConfigurations\": [{\"id\": \"l5-one\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_1:l5-events-1\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
 check "  ... and its bucket sends its deletions' events to a queue of its own" "200 l5-one" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
+as_user_1 PUT /buckets/l5-photos-1/website '{"indexDocument": {"suffix": "index.html"}, "singlePageApp": true}' >/dev/null
+check "  ... and is a single-page app's site" "200 true" "$(status) $(jq -r .singlePageApp "$work/body")"
+as_user_1 POST /buckets/l5-photos-1/website/domains '{"domain": "l5-one.example.tn"}' >/dev/null
+check "  ... with a domain of its own, pending" "201 pending" "$(status) $(jq -r .status "$work/body")"
 key_1_s3="$(as_user_1 POST /storage-keys '{}')"
 check "  ... and an access key to it" 201 "$(status)"
 key_1_s3_id="$(jq -r .id <<<"$key_1_s3")"
@@ -1058,10 +1244,31 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2 gets 404 for account 1's bucket's notifications" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
       check "  ... which account 1 still has, as it set them" "l5-one 200" "$(notified_by as_user_1 l5-photos-1) $(status)"
       ;;
+    "GET /buckets/{name}/website" | "PUT /buckets/{name}/website" | "DELETE /buckets/{name}/website")
+      as_user_2 "$method" /buckets/l5-photos-1/website "$([ "$method" = PUT ] && echo '{"indexDocument": {"suffix": "stolen.html"}}' || true)" >/dev/null
+      check "$route: account 2 gets 404 for account 1's bucket's site" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
+      check "  ... which account 1 still has, as it set it" "index.html 200" "$(site_of as_user_1 l5-photos-1) $(status)"
+      ;;
+    "GET /buckets/{name}/website/domains" | "POST /buckets/{name}/website/domains" | "POST /buckets/{name}/website/domains/{domain}/verify" | "DELETE /buckets/{name}/website/domains/{domain}")
+      path="${template//\{name\}/l5-photos-1}"
+      as_user_2 "$method" "${path//\{domain\}/l5-one.example.tn}" "$(body_for "$method" "$template")" >/dev/null
+      check "$route: account 2 gets 404 for account 1's bucket's site's domains" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
+      check "  ... which account 1 still has" "l5-one.example.tn 200" "$(site_domains_of as_user_1 l5-photos-1) $(status)"
+      ;;
+    "POST /buckets/{name}/website/deploy-keys" | "DELETE /buckets/{name}/website/deploy-keys/{id}")
+      path="${template//\{name\}/l5-photos-1}"
+      as_user_2 "$method" "${path//\{id\}/AKFF0000000000000000}" >/dev/null
+      check "$route: account 2 gets 404 for a deploy's key to account 1's bucket" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
+      ;;
     "GET /buckets/{name}/metrics")
       as_user_2 GET /buckets/l5-photos-1/metrics >/dev/null
       check "$route: account 2 gets 404 for account 1's bucket's metrics" '404 The account has no bucket l5-photos-1' "$(status) $(message)"
       check "  ... which account 1 reads" "true 200" "$(as_user_1 GET /buckets/l5-photos-1/metrics | jq '.metrics.AllRequests.Sum | type == "array"') $(status)"
+      ;;
+    "GET /buckets/{name}/website/metrics")
+      as_user_2 GET /buckets/l5-photos-1/website/metrics >/dev/null
+      check "$route: account 2 gets 404 for account 1's site's metrics" '404 The account has no bucket l5-photos-1' "$(status) $(message)"
+      check "  ... which account 1 reads" "true 200" "$(as_user_1 GET /buckets/l5-photos-1/website/metrics | jq '.metrics.Requests.Sum | type == "array"') $(status)"
       ;;
     "GET /queues")
       listed="$(as_user_2 GET /queues | jq 'map(select(.name == "l5-orders-1")) | length')"
@@ -1126,6 +1333,74 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       database_now="$(as_user_1 GET "/databases/$db_1")"
       check "  ... which account 1 still has, its password unchanged" "200 active 1" "$(status) $(jq -r .status <<<"$database_now") $(data_db_psql "$conn_1" 'select 1')"
       ;;
+    "GET /caches")
+      listed="$(as_user_2 GET /caches | jq --argjson port "$cache_port_1" 'map(select(.port == $port)) | length')"
+      check "$route: account 2's list doesn't show account 1's cache" "200 0" "$(status) $listed"
+      ;;
+    "POST /caches")
+      cache_2="$(as_user_2 POST /caches '{"name": "l5-one"}')"
+      check "$route: account 2 makes a cache of its own, of the name account 1's has" 201 "$(status)"
+      check "  ... which account 1's list doesn't show" 0 "$(as_user_1 GET /caches | jq --argjson port "$(jq -r .port <<<"$cache_2")" 'map(select(.port == $port)) | length')"
+      as_user_2 DELETE /caches/l5-one >/dev/null
+      check "  ... and which account 2 deletes, account 1's own untouched" "204 one" "$(status) $(cache_cli "$cache_conn_1" GET l5)"
+      ;;
+    "GET /email/identities")
+      listed="$(as_user_2 GET /email/identities | jq 'map(select(.dkimSelector == "'"$selector_1"'")) | length')"
+      check "$route: account 2's list doesn't show account 1's domain" "200 0" "$(status) $listed"
+      ;;
+    "POST /email/identities")
+      patiently as_user_2 POST /email/identities '{"identity": "shop.l5.example.tn"}'
+      check "$route: account 2 adds the domain account 1 has, with a DKIM key of its own: identities are each account's" "201 true" \
+        "$(status) $([ "$(jq -r .dkimSelector "$work/body")" != "$selector_1" ] && echo true || echo false)"
+      patiently as_user_2 DELETE /email/identities/shop.l5.example.tn
+      check "  ... and which account 2 deletes, account 1's own untouched" "204 $selector_1" "$(status) $(as_user_1 GET /email/identities/shop.l5.example.tn | jq -r .dkimSelector)"
+      ;;
+    "GET /email/identities/{identity}" | "POST /email/identities/{identity}/verify" | "DELETE /email/identities/{identity}")
+      patiently as_user_2 "$method" "${template//\{identity\}/shop.l5.example.tn}"
+      check "$route: account 2 gets 404 for account 1's domain" "404 The account has no identity shop.l5.example.tn" "$(status) $(message)"
+      kept="$(as_user_1 GET /email/identities/shop.l5.example.tn | jq -r .dkimSelector)"
+      check "  ... which account 1 still has, its key unchanged" "200 $selector_1" "$(status) $kept"
+      ;;
+    "GET /email/account")
+      sending="$(as_user_2 GET /email/account | jq -r .sentLast24Hours)"
+      check "$route: account 2 reads its own sending, nothing of account 1's in it" "200 0" "$(status) $sending"
+      ;;
+    "GET /email/messages")
+      listed="$(as_user_2 GET /email/messages | jq '.messages | length')"
+      check "$route: account 2's messages don't show account 1's" "200 0" "$(status) $listed"
+      ;;
+    "GET /email/metrics")
+      sent="$(as_user_2 GET /email/metrics | jq '[.metrics.Send.Sum[]] | add')"
+      check "$route: account 2's mail's metrics count none of account 1's" "200 0" "$(status) $sent"
+      ;;
+    "POST /email/messages")
+      patiently as_user_2 POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "account 2'"'"'s"}'
+      check "$route: account 2 can't send from account 1's domain, which isn't its own" \
+        "400 Email address is not verified. The following identities failed the check in region TN-TUNIS-1: orders@shop.l5.example.tn" "$(status) $(message)"
+      check "  ... account 1's message still its alone" "$message_1 1" "$(as_user_1 GET /email/messages | jq -r '"\(.messages[0].messageId) \(.messages | length)"')"
+      ;;
+    "GET /email/suppressions")
+      listed="$(as_user_2 GET /email/suppressions | jq '.suppressions | length')"
+      check "$route: account 2's list doesn't show account 1's address" "200 0" "$(status) $listed"
+      ;;
+    "PUT /email/suppressions/{address}")
+      patiently as_user_2 PUT /email/suppressions/gone@l5.example.tn '{"reason": "COMPLAINT"}'
+      check "$route: account 2 puts the address account 1 has on its own list, account 1's reason untouched" "200 BOUNCE" \
+        "$(status) $(as_user_1 GET /email/suppressions | jq -r '.suppressions[] | select(.address == "gone@l5.example.tn") | .reason')"
+      patiently as_user_2 DELETE /email/suppressions/gone@l5.example.tn
+      check "  ... and which account 2 takes off its list, account 1's still on account 1's" "204 1" "$(status) $(as_user_1 GET /email/suppressions | jq '.suppressions | length')"
+      ;;
+    "DELETE /email/suppressions/{address}")
+      patiently as_user_2 DELETE /email/suppressions/gone@l5.example.tn
+      check "$route: account 2 gets 404 for account 1's address" "404 gone@l5.example.tn is not on the account's suppression list" "$(status) $(message)"
+      check "  ... which account 1's list still has" 1 "$(as_user_1 GET /email/suppressions | jq '.suppressions | length')"
+      ;;
+    "GET /caches/{name}" | "DELETE /caches/{name}" | "POST /caches/{name}/password" | "GET /caches/{name}/metrics")
+      as_user_2 "$method" "${template//\{name\}/l5-one}" >/dev/null
+      check "$route: account 2 gets 404 for account 1's cache" "404 The account has no cache l5-one" "$(status) $(message)"
+      cache_now="$(as_user_1 GET /caches/l5-one)"
+      check "  ... which account 1 still has, its password unchanged" "200 active one" "$(status) $(jq -r .status <<<"$cache_now") $(cache_cli "$cache_conn_1" GET l5)"
+      ;;
     "GET /alarms/{id}" | "PUT /alarms/{id}" | "DELETE /alarms/{id}")
       as_user_2 "$method" "/alarms/$alarm_1" "$([ "$method" = PUT ] && alarm_body || true)" >/dev/null
       check "$route: account 2 gets 404 for account 1's alarm" "404 Alarm $alarm_1 not found" "$(status) $(message)"
@@ -1133,7 +1408,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... which account 1 still has, unchanged" "200 l5 Errors $fn_1" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
       ;;
     *'{'*)
-      as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
+      # Account 2's changes in this loop are more than its plan's 60 a minute: those past them are sent patiently.
+      patiently as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")"
       check "$method $template: 404, as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
       ;;
     "GET /schedules/next-runs")
@@ -1170,6 +1446,8 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... nor account 1's bucket" "404 The account has no bucket l5-photos-1" "$(status) $(message)"
       as_user_2 POST /alarms '{"name": "l5", "queueName": "l5-orders-1", "metric": "ApproximateNumberOfMessagesVisible", "statistic": "Maximum", "period": 60, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
       check "  ... nor account 1's queue" "404 The account has no queue l5-orders-1" "$(status) $(message)"
+      as_user_2 POST /alarms '{"name": "l5", "cacheName": "l5-one", "metric": "BytesUsedForCache", "statistic": "Maximum", "period": 3600, "comparison": "GreaterThanThreshold", "threshold": 0, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}' >/dev/null
+      check "  ... nor account 1's cache" "404 The account has no cache l5-one" "$(status) $(message)"
       ;;
     "POST /packages")
       upload_package "$api_oidc" "$work/package-b.zip" -H "Authorization: Bearer $token_2" -H "X-FF-Account: ${account_2:-}" >/dev/null
@@ -1243,6 +1521,14 @@ with_token "$key_1" GET /databases >/dev/null
 check "a key without databases:read can't list the account's databases" "403 This API key lacks the scope databases:read" "$(status) $(message)"
 with_token "$key_1" POST /databases '{"name": "by-key"}' >/dev/null
 check "nor make one without databases:write" "403 This API key lacks the scope databases:write" "$(status) $(message)"
+with_token "$key_1" GET /caches >/dev/null
+check "a key without caches:read can't list the account's caches" "403 This API key lacks the scope caches:read" "$(status) $(message)"
+with_token "$key_1" POST /caches '{"name": "by-key"}' >/dev/null
+check "nor make one without caches:write" "403 This API key lacks the scope caches:write" "$(status) $(message)"
+with_token "$key_1" GET /email/identities >/dev/null
+check "a key without email:read can't list the domains and addresses the account sends mail from" "403 This API key lacks the scope email:read" "$(status) $(message)"
+with_token "$key_1" POST /email/identities '{"identity": "by-key.l5.example.tn"}' >/dev/null
+check "nor add one without email:write" "403 This API key lacks the scope email:write" "$(status) $(message)"
 with_token "$key_1" GET /buckets >/dev/null
 check "a key without storage:read can't list the account's buckets" "403 This API key lacks the scope storage:read" "$(status) $(message)"
 with_token "$key_1" POST /buckets '{"name": "l5-by-key"}' >/dev/null
@@ -1347,7 +1633,7 @@ check "who can't reach account 1 any more" "404 Account $account_1 not found" "$
 echo "== the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create bucket.create queue.create event_source.create queue.create bucket.notifications storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create email.identity.create email.suppression.put bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
@@ -1400,6 +1686,8 @@ with_token "$operator_token" POST "/admin/accounts/$account_1/suspend" '{"reason
 check "the operator suspends account 1" 200 "$(status)"
 check "its function is scaled to zero at once" 0 \
   "$(kubectl -n "$(tenant_namespace "$account_1")" get deployment "fn-$fn_1" -o jsonpath='{.spec.replicas}')"
+check "its cache's user can't log in, the cache suspended with it (ADR 0013)" "true suspended" \
+  "$(cache_cli "$cache_conn_1" GET l5 | grep -q WRONGPASS && echo true || echo false) $(as_user_1 GET /caches/l5-one | jq -r .status)"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"one"}}' >/dev/null
 check "its owner can't invoke" "403 Your account is suspended" "$(status) $(message)"
 as_user_1 POST /functions "$(function_body l5-suspended)" >/dev/null
@@ -1417,6 +1705,7 @@ with_token "$operator_token" POST "/admin/accounts/$account_1/reactivate" '{"rea
 check "the operator reactivates it" 200 "$(status)"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"again"}}' >/dev/null
 check "and its function answers again, from a cold start" 201 "$(status)"
+check "and its cache lets its user in again, its keys kept" "one active" "$(cache_cli "$cache_conn_1" GET l5) $(as_user_1 GET /caches/l5-one | jq -r .status)"
 echo "== the function's logs (P-40; from the log store, P-43)"
 logged="$(as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"logs"}}')"
 logged_id="$(jq -r .id <<<"$logged")"
@@ -1486,17 +1775,22 @@ check "a plan that doesn't exist is refused" "404 Plan imaginary not found" "$(s
 # and how many ranges it keeps out (FF's own network, the cloud's metadata addresses); "none" when nowhere.
 internet_rule() { # <account>
   kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
-    jq -r '[.spec.egress[] | select(.ports == null) | .to[]?.ipBlock | select(.) | "\(.cidr) except \(.except | length)"] | if length == 0 then "none" else join(",") end'
+    jq -r '[.spec.egress[] | select(any(.to[]?; .ipBlock.cidr == "0.0.0.0/0")) |
+      "\(.to[0].ipBlock.cidr) except \(.to[0].ipBlock.except | length) on \([.ports[] | "\(.protocol) \(.port)-\(.endPort)"] | join(", "))"] |
+      if length == 0 then "none" else join(",") end'
 }
-# FF's services the account's functions reach whatever its internet access, each address and its one port.
+# FF's services the account's functions reach whatever its internet access, each address and its port, or its ports.
 service_rules() { # <account>
   kubectl -n "$(tenant_namespace "$1")" get networkpolicy ff-default-deny -o json |
-    jq -r '[.spec.egress[] | select(.ports != null and (.to | any(.ipBlock != null))) | "\(.to[].ipBlock.cidr):\(.ports[0].port)"] | join(",")'
+    jq -r '[.spec.egress[] | select(.ports != null and (.to | any(.ipBlock != null)) and all(.to[]; .ipBlock.cidr != "0.0.0.0/0")) |
+      "\(.to[].ipBlock.cidr):\(.ports[0].port)\(if .ports[0].endPort then "-\(.ports[0].endPort)" else "" end)"] | join(",")'
 }
 check "account 1's functions reach nothing beyond DNS on any port, as every account starts" none "$(internet_rule "$account_1")"
-check "but customers' database server, on its port only, whatever the account's internet access (ADR 0008)" "10.199.2.10/32:5432" "$(service_rules "$account_1")"
+check "but customers' database server and cache server, on their ports only, whatever the account's internet access (ADR 0008, ADR 0013)" \
+  "10.199.2.10/32:5432,10.199.2.11/32:6400-6999" "$(service_rules "$account_1")"
 egress="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/egress" '{"internetEgress": true, "reason": "l5: calls a payment API"}')"
-check "internet egress is turned on for account 1, in its NetworkPolicy at once, FF's network still kept out" "200 true 0.0.0.0/0 except 6" \
+check "internet egress is turned on for account 1, in its NetworkPolicy at once, FF's network still kept out, and SMTP's port 25" \
+  "200 true 0.0.0.0/0 except 6 on TCP 1-24, TCP 26-65535, UDP 1-65535" \
   "$(status) $(jq -r .account.internetEgress <<<"$egress") $(internet_rule "$account_1")"
 check "and account 2's functions still reach nothing beyond DNS" none "$(internet_rule "$account_2")"
 storage="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": false, "reason": "l5: files shared against the terms"}')"
@@ -1512,6 +1806,17 @@ check "  ... nor a bucket, and its keys answer AccountProblem, saying why" "403 
 with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": true, "reason": "l5: cleared with the owner"}' >/dev/null
 check "  ... on again: the user logs in, the key opens its bucket, and account 1's log names both, as FF's" "200 1 accepted account.storage,account.storage" \
   "$(status) $(data_db_psql "$conn_1" 'select 1') $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1) $(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action == "account.storage") | .action] | join(",")')"
+message_out='{"from": "orders@shop.l5.example.tn", "to": ["stranger@example.org"], "subject": "l5", "text": "to anyone"}'
+mail_out="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/email" '{"productionAccess": true, "reason": "l5: sends its receipts"}')"
+check "the operator lets account 1's mail out of the sandbox: it sends to an address it never proved" "200 false 201" \
+  "$(status) $(jq -r .sandbox <<<"$mail_out") $(as_user_1 POST /email/messages "$message_out" >/dev/null; status)"
+with_token "$operator_token" PUT "/admin/accounts/$account_1/email" '{"sendingEnabled": false, "reason": "l5: spam seen by a provider"}' >/dev/null
+sleep 1 # the Beta plan's rate: a message a second
+check "  ... pauses it: its mail refused, saying so; on again, taken; account 1's log names both, as FF's" \
+  "403 Sending is paused for this account: FF's operator stopped it, and says why. 201 account.email,account.email,account.email" \
+  "$(as_user_1 POST /email/messages "$message_out" >/dev/null; status) $(message) \
+$(with_token "$operator_token" PUT "/admin/accounts/$account_1/email" '{"sendingEnabled": true, "reason": "l5: a list cleaned"}' >/dev/null; as_user_1 POST /email/messages "$message_out" >/dev/null; status) \
+$(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action == "account.email") | .action] | join(",")')"
 plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
   "$(jq -cn --argjson limits "$beta_limits" '{limits: ($limits | .quota = {pods: 32, cpu: "16", memory: "16Gi"}), reason: "l5: pilots need more"}')")"
 check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \
@@ -1604,8 +1909,8 @@ first_book="$(jq -c '.[0].document' <<<"$books")"
 latest_book="$(jq -c '.[-1].document' <<<"$books")"
 starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
 with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5 tries"}')" >/dev/null
-check "a book after one with databases', buckets' and queues' prices is refused without them, each named" \
-  "400 11 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
+check "a book after one with databases', buckets', queues', caches' and mail's prices is refused without them, each named" \
+  "400 14 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
 created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
 check "the operator adds a book for next year from the latest: scheduled, made by the operator" "201 scheduled true" \
   "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"
@@ -1791,7 +2096,7 @@ check "and the grants, as FF's, with their reasons (P-74)" "credit.promo:FF:l5: 
   "$(jq -r '[.entries[] | select(.action | startswith("credit.")) | "\(.action):\(.actorLabel):\(.details.reason)"] | reverse | join("|")' <<<"$log_invoices")"
 by_account="$(with_token "$operator_token" GET "/admin/audit-log?accountId=$account_1")"
 check "the operator audit log, filtered by account 1, lists what was done to it, oldest to newest (P-76)" \
-  "200 account.approve account.suspend account.reactivate account.plan account.egress account.storage account.storage support.view_invocation support.view_code support.view_logs payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
+  "200 account.approve account.suspend account.reactivate account.plan account.egress account.storage account.storage account.email account.email account.email support.view_invocation support.view_code support.view_logs payment.record payment.withholding payment.record invoice.issue invoice.credit_note credit.promo credit.adjustment credit.promo payment.cancel payment.record" \
   "$(status) $(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$by_account")"
 actions="$(with_token "$operator_token" GET '/admin/audit-log?action=settings.update')"
 check "the operator audit log lists the change: who, what, from and to, and why (P-76)" \
@@ -1799,7 +2104,7 @@ check "the operator audit log lists the change: who, what, from and to, and why 
   "$(status) $(jq -r '.entries[0] | "\(.operator.email) \(.action) \(.details.changes.gracePeriodHours.from) \(.details.changes.gracePeriodHours.to) \(.reason)"' <<<"$actions")"
 all_actions="$(with_token "$operator_token" GET /admin/audit-log)"
 check "and, unfiltered, none of the customers' many actions: only the operator's" \
-  "200 26 account.approve,account.egress,account.plan,account.reactivate,account.storage,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update,support.view_code,support.view_invocation,support.view_logs" \
+  "200 29 account.approve,account.egress,account.email,account.plan,account.reactivate,account.storage,account.suspend,credit.adjustment,credit.promo,invoice.credit_note,invoice.issue,payment.cancel,payment.record,payment.withholding,plan.create,plan.update,price_book.create,price_book.delete,settings.update,support.view_code,support.view_invocation,support.view_logs" \
   "$(status) $(jq -r '"\(.entries | length) \([.entries[].action] | unique | join(","))"' <<<"$all_actions")"
 csv="$(with_token "$operator_token" GET /admin/audit-log '' -H 'accept: text/csv')"
 check "as CSV too" "200 at,operator_id,operator_email,action,account_id,resource,reason,ip,request_id,details true" \
@@ -1859,6 +2164,7 @@ as_user_1 GET "/functions/$fn_1" >/dev/null
 check "until then, its members still read its functions" 200 "$(status)"
 check "but its database's user can't log in any more (ADR 0008)" true \
   "$( (data_db_psql "$conn_1" 'select 1' || true) | grep -q 'is not permitted to log in' && echo true || echo false)"
+check "nor its cache's (ADR 0013)" true "$(cache_cli "$cache_conn_1" GET l5 | grep -q WRONGPASS && echo true || echo false)"
 # The notice period passes.
 sql "UPDATE accounts SET data_deletion_due_at = now() WHERE id = '$account_1'" >/dev/null
 deleted=""
@@ -1877,6 +2183,8 @@ check "its namespace is gone from the cluster, its code from object storage, and
   "$(kubectl get namespace "$ns_1" >/dev/null 2>&1 && echo true || echo false) $([ -z "$(archived "$fn_1/code.ts")" ] && echo empty || echo kept) $(store_lines "$ns_1")"
 check "its database is gone from the server, with its user" "0 0" \
   "$(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$(jq -r .database <<<"$database_1")') || ' ' || (select count(*) from pg_roles where rolname = '$(jq -r .user <<<"$database_1")')")"
+check "its cache is gone from the server, with its keys: its address answers no more" "0 true" \
+  "$(sql "SELECT count(*) FROM caches WHERE account_id = '$account_1'") $(cache_cli "$cache_conn_1" PING | grep -q 'Could not connect' && echo true || echo false)"
 check "its bucket is gone, with its files, from FF's records and the store, and its key opens nothing" "0 0 refused InvalidAccessKeyId" \
   "$(sql "SELECT count(*) FROM buckets WHERE account_id = '$account_1'") $(sql "SELECT count(*) FROM storage_keys WHERE account_id = '$account_1' AND revoked_at IS NULL") $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1)"
 check "its usage records, payments and invoices are kept, as the law requires" "$kept_1" \

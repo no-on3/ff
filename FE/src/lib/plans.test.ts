@@ -25,10 +25,15 @@ describe('planLimitRows', () => {
       ['Storage of the buckets', '5 GB together'],
       ['Requests to the buckets', '100 per second'],
       ['Largest file in one upload', '5 GB; more in parts'],
+      ['What your sites send out', '10 GB a month together'],
       ['Queues', '10'],
       ['Queues one function reads', '5'],
       ['Requests to the queues', '100 per second'],
       ['Messages waiting', '100 MB together, asynchronous calls included'],
+      ['Caches', '1'],
+      ['Memory of a cache', '64 MB; past it, the least recently used keys go'],
+      ['Domains to send mail from', '2'],
+      ['E-mails', '200 a day, 1 a second; each recipient one'],
     ]);
   });
 

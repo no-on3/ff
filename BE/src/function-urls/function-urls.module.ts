@@ -9,6 +9,7 @@ import { FunctionUrl } from '../functions/entities/function-url.entity';
 import { FunctionsModule } from '../functions/functions.module';
 import { MetricsModule } from '../metrics/metrics.module';
 import { PlansModule } from '../plans/plans.module';
+import { Bucket } from '../storage/bucket.entity';
 import { StorageModule } from '../storage/storage.module';
 import { CustomDomain } from './custom-domain.entity';
 import { CustomDomainsController } from './custom-domains.controller';
@@ -17,14 +18,16 @@ import { NodeDomainResolver } from './domain-check';
 import { FunctionUrlGateway } from './function-url.gateway';
 import { FunctionUrlsController } from './function-urls.controller';
 import { FunctionUrlsService } from './function-urls.service';
+import { SiteDomainsController } from './site-domains.controller';
 
 /**
  * Functions' URLs: their configuration and customers' own domains for them,
- * under the API, and the gateway that answers them on a port of its own.
+ * and for buckets' sites, under the API, and the gateway that answers them on a
+ * port of its own, handing a site's domain to the website server.
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([FunctionUrl, CustomDomain, Account]),
+    TypeOrmModule.forFeature([FunctionUrl, CustomDomain, Account, Bucket]),
     FunctionsModule,
     ApiKeysModule,
     AuditModule,
@@ -33,7 +36,7 @@ import { FunctionUrlsService } from './function-urls.service';
     PlansModule,
     StorageModule,
   ],
-  controllers: [FunctionUrlsController, CustomDomainsController],
+  controllers: [FunctionUrlsController, CustomDomainsController, SiteDomainsController],
   providers: [
     FunctionUrlsService,
     CustomDomainsService,

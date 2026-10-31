@@ -18,7 +18,9 @@
 # platform's own registry (Zot) and pulled by the node as the node is told to, which no tenant's code reaches;
 # a function with AWS's SDK and no setting writing to its account's bucket with its own key, at the fixed address
 # of the Service ff-storage; a queue made and read through the edge with AWS's SDK, and a function sending to it with
-# its own key at the same address; who reaches whom inside the cluster; and deploy.sh again, which changes nothing.
+# its own key at the same address; the bucket a site, at its host under the sites' domain over HTTPS through the edge,
+# and at a customer's own domain proved the same way; who reaches whom inside the cluster; and deploy.sh again, which
+# changes nothing.
 #   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
@@ -412,6 +414,30 @@ check "the domain reaches the function over HTTPS through the edge, its certific
 refused=0
 at_url blog.e2e-customer.tn >/dev/null 2>&1 || refused=$?
 check "a domain not proved gets no certificate: the handshake fails" true "$([ "$refused" -ne 0 ] && echo true || echo false)"
+
+echo "== a bucket's site, through the edge, and a customer's own domain for it"
+as "$token" /buckets/e2e-platform-files/website -X PUT -d '{"indexDocument": {"suffix": "index.html"}}' >/dev/null
+check "the customer makes the bucket a site, at its own host under the sites' domain" "200 https://e2e-platform-files.site.ff.test:$https_port" \
+  "$(status) $(jq -r .url "$work/body")"
+check "the function's file answers there over HTTPS, typed by its name, the site's certificate made on demand" \
+  "200 written by a Node.js function text/plain" \
+  "$(at_url e2e-platform-files.site.ff.test /from-node.txt) $(cat "$work/body") $(curl -sS --cacert "$work/root.crt" --resolve "e2e-platform-files.site.ff.test:$https_port:127.0.0.1" \
+    -o /dev/null -w '%{content_type}' "https://e2e-platform-files.site.ff.test:$https_port/from-node.txt" | cut -d';' -f1)"
+refused=0
+at_url e2e-platform-nosite.site.ff.test >/dev/null 2>&1 || refused=$?
+check "a host under the sites' domain that is no site gets no certificate: the handshake fails" true "$([ "$refused" -ne 0 ] && echo true || echo false)"
+added="$(as "$token" /buckets/e2e-platform-files/website/domains -d '{"domain": "docs.e2e-customer.tn"}')"
+check "the customer adds a domain of theirs to the site: pending, with the CNAME to make, to the site's host" "201 pending e2e-platform-files.site.ff.test" \
+  "$(status) $(jq -r '"\(.status) \(.records.cname[0].value)"' <<<"$added")"
+zone 3 "shop IN CNAME $url_host." "docs IN CNAME e2e-platform-files.site.ff.test."
+for _ in $(seq 1 60); do
+  [ "$(as "$token" /buckets/e2e-platform-files/website/domains/docs.e2e-customer.tn/verify -X POST | jq -r .status)" = verified ] && break
+  sleep 1
+done
+check "once its CNAME is made, the backend proves it" "200 verified" \
+  "$(status) $(jq -r 'if .status == "verified" then .status else "\(.status) (\(.checkError))" end' "$work/body")"
+check "the domain reaches the site over HTTPS through the edge, its certificate made on demand" "200 written by a Node.js function" \
+  "$(at_url docs.e2e-customer.tn /from-node.txt) $(cat "$work/body")"
 
 echo "== who reaches whom inside the cluster"
 kubectl create namespace e2e-probe >/dev/null

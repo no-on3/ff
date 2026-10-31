@@ -23,10 +23,16 @@ export interface PlanLimits {
   bucketStorageMb: number;
   storageRequestsPerSecond: number;
   maxObjectMb: number;
+  siteTransferGbPerMonth: number;
   queues: number;
   eventSourceMappingsPerFunction: number;
   queueRequestsPerSecond: number;
   queueStorageMb: number;
+  caches: number;
+  cacheMb: number;
+  emailIdentities: number;
+  emailsPerDay: number;
+  emailsPerSecond: number;
 }
 
 export interface Plan {
@@ -61,10 +67,16 @@ export const LIMIT_FIELDS: Array<{ path: [keyof PlanLimits] | ['quota', keyof Pl
   { path: ['bucketStorageMb'], label: 'Storage of the buckets', unit: 'MB, all together', kind: 'whole' },
   { path: ['storageRequestsPerSecond'], label: 'Requests to the buckets', unit: 'per second, all keys together', kind: 'whole' },
   { path: ['maxObjectMb'], label: 'Largest file in one upload', unit: 'MB, in one PutObject', kind: 'whole' },
+  { path: ['siteTransferGbPerMonth'], label: 'What sites send out', unit: 'GB a month, all together', kind: 'whole' },
   { path: ['queues'], label: 'Queues', unit: 'all together', kind: 'whole' },
   { path: ['eventSourceMappingsPerFunction'], label: 'Queues one function reads', unit: 'per function', kind: 'whole' },
   { path: ['queueRequestsPerSecond'], label: 'Requests to the queues', unit: 'per second, all keys together', kind: 'whole' },
   { path: ['queueStorageMb'], label: 'Messages waiting', unit: 'MB, all together, asynchronous calls included', kind: 'whole' },
+  { path: ['caches'], label: 'Caches', unit: 'all together', kind: 'whole' },
+  { path: ['cacheMb'], label: 'Memory of a cache', unit: 'MB, each', kind: 'whole' },
+  { path: ['emailIdentities'], label: 'Domains to send mail from', unit: 'all together, proved addresses apart', kind: 'whole' },
+  { path: ['emailsPerDay'], label: 'E-mails a day', unit: 'each recipient one', kind: 'whole' },
+  { path: ['emailsPerSecond'], label: 'E-mails a second', unit: 'at most', kind: 'whole' },
 ];
 
 const QUANTITY = /^\d+(\.\d+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$/;

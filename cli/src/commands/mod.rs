@@ -4,10 +4,12 @@ mod account;
 mod async_config;
 mod bucket_notifications;
 mod buckets;
+mod caches;
 mod completion;
 mod config;
 mod db;
 mod deploy;
+mod email;
 mod env;
 mod event_sources;
 mod functions;
@@ -19,13 +21,15 @@ mod package;
 mod queues;
 mod schedule;
 mod secrets;
+mod sites;
 mod url;
 mod version;
 mod whoami;
 
 use crate::cli::{
-    BucketKeysCommand, BucketsCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EnvCommand,
-    EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, UrlCommand,
+    BucketKeysCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EmailCommand,
+    EnvCommand, EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, SiteDomainsCommand,
+    SitesCommand, UrlCommand,
 };
 use crate::config::Settings;
 use crate::error::Error;
@@ -114,6 +118,69 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             db::password(&name, &secret.functions, &secret.secret_name, context)
         }
         Command::Db(DbCommand::Delete { name, yes }) => db::delete(&name, yes, context),
+        Command::Caches(CachesCommand::Create { name, secret }) => {
+            caches::create(&name, &secret.functions, &secret.secret_name, context)
+        }
+        Command::Caches(CachesCommand::List) => caches::list(context),
+        Command::Caches(CachesCommand::Get { name }) => caches::get(&name, context),
+        Command::Caches(CachesCommand::Password { name, secret }) => {
+            caches::password(&name, &secret.functions, &secret.secret_name, context)
+        }
+        Command::Caches(CachesCommand::Delete { name, yes }) => caches::delete(&name, yes, context),
+        Command::Email(EmailCommand::Identities) => email::identities(context),
+        Command::Email(EmailCommand::Add { identity }) => email::add(&identity, context),
+        Command::Email(EmailCommand::Get { identity }) => email::get(&identity, context),
+        Command::Email(EmailCommand::Verify { identity }) => email::verify(&identity, context),
+        Command::Email(EmailCommand::Delete { identity, yes }) => email::delete(&identity, yes, context),
+        Command::Email(EmailCommand::Account) => email::account(context),
+        Command::Email(EmailCommand::Send { from, to, cc, bcc, subject, text, html }) => email::send(
+            email::Send {
+                from: &from,
+                to: &to,
+                cc: &cc,
+                bcc: &bcc,
+                subject: &subject,
+                text: text.as_deref(),
+                html: html.as_deref(),
+            },
+            context,
+        ),
+        Command::Email(EmailCommand::Messages { limit }) => email::messages(limit, context),
+        Command::Email(EmailCommand::Suppressions) => email::suppressions(context),
+        Command::Email(EmailCommand::Suppress { address, reason }) => email::suppress(&address, &reason, context),
+        Command::Email(EmailCommand::Unsuppress { address }) => email::unsuppress(&address, context),
+        Command::Sites(SitesCommand::Deploy { bucket, folder, spa, no_spa, index_document, error_document, keep }) => {
+            let options = sites::DeployOptions {
+                single_page_app: if spa {
+                    Some(true)
+                } else if no_spa {
+                    Some(false)
+                } else {
+                    None
+                },
+                index_document,
+                error_document,
+                keep,
+            };
+            sites::deploy(&bucket, &folder, &options, context)
+        }
+        Command::Sites(SitesCommand::Get { bucket }) => sites::get(&bucket, context),
+        Command::Sites(SitesCommand::Remove { bucket, yes }) => sites::remove(&bucket, yes, context),
+        Command::Sites(SitesCommand::Metrics { bucket, period, since }) => {
+            sites::metrics(&bucket, period, &since, context)
+        }
+        Command::Sites(SitesCommand::Domains(SiteDomainsCommand::List { bucket })) => {
+            sites::domains_list(&bucket, context)
+        }
+        Command::Sites(SitesCommand::Domains(SiteDomainsCommand::Add { bucket, domain })) => {
+            sites::domains_add(&bucket, &domain, context)
+        }
+        Command::Sites(SitesCommand::Domains(SiteDomainsCommand::Verify { bucket, domain })) => {
+            sites::domains_verify(&bucket, &domain, context)
+        }
+        Command::Sites(SitesCommand::Domains(SiteDomainsCommand::Remove { bucket, domain, yes })) => {
+            sites::domains_remove(&bucket, &domain, yes, context)
+        }
         Command::Buckets(BucketsCommand::Create { name }) => buckets::create(&name, context),
         Command::Buckets(BucketsCommand::List) => buckets::list(context),
         Command::Buckets(BucketsCommand::Get { name }) => buckets::get(&name, context),

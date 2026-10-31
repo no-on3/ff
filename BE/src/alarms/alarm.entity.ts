@@ -1,5 +1,6 @@
 import { Check, Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
+import { Cache } from '../caches/cache.entity';
 import { Database } from '../databases/database.entity';
 import { Function } from '../functions/entities/function.entity';
 import { Queue } from '../queues/queue.entity';
@@ -14,9 +15,10 @@ export interface AlarmActions {
 
 /**
  * An alarm on a metric, as CloudWatch's: a function's, a database's, a
- * bucket's, a queue's, or the account's when it names none; evaluated every
- * minute, telling its actions when it goes into ALARM and when it leaves it.
- * It goes with its function, database, bucket or queue.
+ * bucket's, a queue's, a cache's, or the account's when it names none;
+ * evaluated every minute, telling its actions when it goes into ALARM and
+ * when it leaves it. It goes with its function, database, bucket, queue or
+ * cache.
  */
 @Entity('alarms')
 @Check(`"state" IN ('OK', 'ALARM', 'INSUFFICIENT_DATA')`)
@@ -70,6 +72,15 @@ export class Alarm {
   @ManyToOne(() => Queue, { onDelete: 'CASCADE', nullable: true })
   @JoinColumn({ name: 'queue_id' })
   queue?: Queue;
+
+  /** A customer's cache, for its memory, connections, hits, misses and evictions; null otherwise. */
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  cacheId: string | null;
+
+  @ManyToOne(() => Cache, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'cache_id' })
+  cache?: Cache;
 
   @Column({ type: 'text' })
   name: string;

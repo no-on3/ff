@@ -3,16 +3,23 @@ import { DataSource } from 'typeorm';
 import {
   AsyncRow,
   BucketMetricsView,
+  CacheMetricsView,
   DatabaseMetricsView,
+  EmailMetricsView,
   InstancesRow,
+  REPUTATION_DAYS,
   MetricsView,
   MetricsWindow,
   PeriodRow,
   QueueMetricsView,
+  SiteMetricsView,
   bucketMetricsView,
+  cacheMetricsView,
   databaseMetricsView,
+  emailMetricsView,
   metricsView,
   queueMetricsView,
+  siteMetricsView,
 } from './customer-metrics';
 
 /** A call that ran: measured by the runtime, and so in the duration's statistics. */
@@ -31,8 +38,9 @@ interface Scope {
  * its rate-limited invocations, its capacity samples and its asynchronous
  * calls' counts; of a customer's database, from its hourly samples; of a
  * customer's bucket, from its hourly samples and the front door's request
- * counts; and of a customer's queue, from its minute samples and its
- * requests' counts (customer-metrics.ts).
+ * counts; of a customer's queue, from its minute samples and its requests'
+ * counts; and of a customer's cache, from its hourly samples
+ * (customer-metrics.ts).
  */
 @Injectable()
 export class CustomerMetricsService {
@@ -118,11 +126,130 @@ export class CustomerMetricsService {
     );
   }
 
+  /** A bucket's site's, by the bucket's name, for its own account only: a bucket no longer a site still has its past visits. */
+  async forSite(accountId: string, name: string, window: MetricsWindow): Promise<SiteMetricsView> {
+    const [found] = await this.dataSource.query<Array<{ id: string }>>('SELECT "id" FROM "buckets" WHERE "name" = $1 AND "account_id" = $2', [name, accountId]);
+    if (!found) throw new NotFoundException(`The account has no bucket ${name}`);
+    return this.siteMetrics(accountId, found.id, window);
+  }
+
+  /** A bucket's site's, by the bucket's ID, as an alarm names it: the website server's counts of its visits alone. */
+  async siteMetrics(accountId: string, bucketId: string, window: MetricsWindow): Promise<SiteMetricsView> {
+    const periods = await this.dataSource.query<Array<Record<string, string>>>(
+      `SELECT floor(extract(epoch FROM "minute") / $3)::bigint * $3 AS "bucket", sum("requests")::text AS "requests", sum("bytes_out")::text AS "bytes_out",
+              sum("errors4xx")::text AS "errors4xx", sum("errors5xx")::text AS "errors5xx"
+         FROM "storage_request_counts"
+        WHERE "minute" >= $1 AND "minute" < $2 AND "account_id" = $4 AND "bucket_id" = $5 AND "class" = 'website'
+        GROUP BY 1`,
+      [window.start, window.end, window.period, accountId, bucketId],
+    );
+    return siteMetricsView(
+      window,
+      periods.map((row) => ({
+        bucket: Number(row.bucket),
+        requests: Number(row.requests),
+        bytesOut: Number(row.bytes_out),
+        errors4xx: Number(row.errors4xx),
+        errors5xx: Number(row.errors5xx),
+      })),
+    );
+  }
+
   /** A queue's, by its name, for its own account only: another account's queue, or one deleted, is not found. */
   async forQueue(accountId: string, name: string, window: MetricsWindow): Promise<QueueMetricsView> {
     const [found] = await this.dataSource.query<Array<{ id: string }>>(`SELECT "id" FROM "queues" WHERE "name" = $1 AND "account_id" = $2 AND "kind" = 'customer'`, [name, accountId]);
     if (!found) throw new NotFoundException(`The account has no queue ${name}`);
     return this.queueMetrics(accountId, found.id, window);
+  }
+
+  /** A cache's, by its name, for its own account only: another account's cache, or one deleted, is not found. */
+  async forCache(accountId: string, name: string, window: MetricsWindow): Promise<CacheMetricsView> {
+    const [found] = await this.dataSource.query<Array<{ id: string }>>(`SELECT "id" FROM "caches" WHERE "name" = $1 AND "account_id" = $2 AND "status" <> 'deleting'`, [
+      name,
+      accountId,
+    ]);
+    if (!found) throw new NotFoundException(`The account has no cache ${name}`);
+    return this.cacheMetrics(accountId, found.id, window);
+  }
+
+  /**
+   * A cache's, by its ID, as an alarm names it: each hour's sample, and the
+   * hits, misses and evictions in the hour, which the next hour's sample says
+   * (the window's last hour's too): the difference between the two when they
+   * come from the same process, all of the next one's when its process
+   * started between them. None without the next hour's sample: the hour now,
+   * or one the samples skipped. None found answers hours without a sample.
+   */
+  async cacheMetrics(accountId: string, cacheId: string, window: MetricsWindow): Promise<CacheMetricsView> {
+    const rows = await this.dataSource.query<Array<Record<string, string | null>>>(
+      `WITH s AS (
+         SELECT "hour", "bytes_used", "connections", "hits", "misses", "evictions",
+                lead("hour") OVER w = "hour" + interval '1 hour' AS "followed",
+                -- The same process as the next sample's: its start the same, to a few seconds, its counts not gone down.
+                abs(extract(epoch FROM lead("process_started_at") OVER w - "process_started_at")) < 5
+                  AND lead("hits") OVER w >= "hits" AND lead("misses") OVER w >= "misses" AND lead("evictions") OVER w >= "evictions" AS "continues",
+                lead("hits") OVER w AS "hits_after", lead("misses") OVER w AS "misses_after", lead("evictions") OVER w AS "evictions_after"
+           FROM "cache_samples"
+          WHERE "hour" >= $1 AND "hour" < $2::timestamptz + interval '1 hour' AND "account_id" = $4 AND "cache_id" = $5
+         WINDOW w AS (ORDER BY "hour"))
+       SELECT floor(extract(epoch FROM "hour") / $3)::bigint * $3 AS "bucket",
+              max("bytes_used") AS "bytes_max", avg("bytes_used") AS "bytes_avg", max("connections") AS "connections_max", avg("connections") AS "connections_avg",
+              sum(CASE WHEN NOT "followed" THEN NULL WHEN "continues" THEN "hits_after" - "hits" ELSE "hits_after" END) AS "hits",
+              sum(CASE WHEN NOT "followed" THEN NULL WHEN "continues" THEN "misses_after" - "misses" ELSE "misses_after" END) AS "misses",
+              sum(CASE WHEN NOT "followed" THEN NULL WHEN "continues" THEN "evictions_after" - "evictions" ELSE "evictions_after" END) AS "evictions"
+         FROM s
+        WHERE "hour" < $2
+        GROUP BY 1`,
+      [window.start, window.end, window.period, accountId, cacheId],
+    );
+    const count = (value: string | null) => (value === null ? null : Number(value));
+    return cacheMetricsView(
+      window,
+      rows.map((row) => ({
+        bucket: Number(row.bucket),
+        bytesMaximum: Number(row.bytes_max),
+        bytesAverage: Number(row.bytes_avg),
+        connectionsMaximum: Number(row.connections_max),
+        connectionsAverage: Number(row.connections_avg),
+        hits: count(row.hits),
+        misses: count(row.misses),
+        evictions: count(row.evictions),
+      })),
+    );
+  }
+
+  /**
+   * The account's mail's, a point an hour, from its messages' recipients
+   * (ADR 0012): the window's hours, and the 14 days before it that its
+   * reputation is judged on. Messages are kept 30 days, so an hour before that
+   * has none.
+   */
+  async emailMetrics(accountId: string, window: MetricsWindow): Promise<EmailMetricsView> {
+    const rows = await this.dataSource.query<Array<Record<string, string>>>(
+      `SELECT floor(extract(epoch FROM m."created_at") / $3)::bigint * $3 AS "bucket",
+              count(*) AS "send",
+              count(*) FILTER (WHERE r->>'status' IN ('SENT', 'COMPLAINED')) AS "delivery",
+              count(*) FILTER (WHERE r->>'status' IN ('BOUNCED', 'SUPPRESSED')) AS "bounce",
+              count(*) FILTER (WHERE r->>'status' = 'COMPLAINED') AS "complaint",
+              count(*) FILTER (WHERE r->>'status' IN ('SENT', 'BOUNCED', 'COMPLAINED')) AS "reached",
+              count(*) FILTER (WHERE r->>'status' = 'BOUNCED' AND r->>'permanent' = 'true') AS "hard"
+         FROM "email_messages" m, jsonb_array_elements(m."recipients") r
+        WHERE m."account_id" = $4 AND m."created_at" >= $1::timestamptz - make_interval(days => $5) AND m."created_at" < $2
+        GROUP BY 1`,
+      [window.start, window.end, window.period, accountId, REPUTATION_DAYS],
+    );
+    return emailMetricsView(
+      window,
+      rows.map((row) => ({
+        bucket: Number(row.bucket),
+        send: Number(row.send),
+        delivery: Number(row.delivery),
+        bounce: Number(row.bounce),
+        complaint: Number(row.complaint),
+        reached: Number(row.reached),
+        hardBounces: Number(row.hard),
+      })),
+    );
   }
 
   /** A queue's, by its ID, as an alarm names it: none found answers an empty, quiet queue. */

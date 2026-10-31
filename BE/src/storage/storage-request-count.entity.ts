@@ -12,7 +12,7 @@ import { bigintColumn } from '../database/bigint-column';
  */
 @Entity('storage_request_counts')
 @Index(['accountId', 'minute'])
-@Check(`"class" IN ('tier1', 'tier2', 'free')`)
+@Check(`"class" IN ('tier1', 'tier2', 'free', 'website')`)
 export class StorageRequestCount {
   @PrimaryColumn({ type: 'uuid' })
   bucketId: string;
@@ -21,9 +21,9 @@ export class StorageRequestCount {
   @PrimaryColumn({ type: 'timestamptz' })
   minute: Date;
 
-  /** tier1: PUT, COPY, POST and LIST; tier2: GET, HEAD and the rest; free: DELETE, an upload aborted. */
+  /** tier1: PUT, COPY, POST and LIST; tier2: GET, HEAD and the rest; free: DELETE, an upload aborted; website: a site's, billed as tier2. */
   @PrimaryColumn({ type: 'text' })
-  class: 'tier1' | 'tier2' | 'free';
+  class: 'tier1' | 'tier2' | 'free' | 'website';
 
   /** The process that counted them. */
   @PrimaryColumn({ type: 'uuid' })

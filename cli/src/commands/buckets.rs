@@ -69,6 +69,9 @@ struct CreatedKey {
     /// The SQS endpoint, AWS_ENDPOINT_URL_SQS, for the account's queues.
     #[serde(default)]
     sqs_endpoint: Option<String>,
+    /// The SES endpoint, AWS_ENDPOINT_URL_SESV2, for the account's mail.
+    #[serde(default)]
+    ses_endpoint: Option<String>,
     region: String,
 }
 
@@ -266,6 +269,9 @@ pub fn keys_create(buckets: &[String], queues: &[String], read_only: bool, conte
         );
         if let Some(sqs) = &made.sqs_endpoint {
             text.push_str(&format!("\nexport AWS_ENDPOINT_URL_SQS={sqs}"));
+        }
+        if let Some(ses) = made.ses_endpoint.as_ref().filter(|ses| !ses.is_empty()) {
+            text.push_str(&format!("\nexport AWS_ENDPOINT_URL_SESV2={ses}"));
         }
         text
     })

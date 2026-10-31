@@ -13,8 +13,8 @@ fn me(egress: bool) -> Value {
                            "plan": { "id": "beta", "name": "Beta", "limits": { "functions": 25, "memoryMb": 1024, "invokesPerSecond": 100,
                                                                              "databases": 1, "databaseStorageMb": 1024, "databaseConnections": 10,
                                                                              "buckets": 5, "bucketStorageMb": 5120, "storageRequestsPerSecond": 100, "maxObjectMb": 5120,
-                                                                             "queues": 10, "eventSourceMappingsPerFunction": 5, "queueRequestsPerSecond": 100,
-                                                                             "queueStorageMb": 100 } },
+                                                                             "siteTransferGbPerMonth": 10, "queues": 10, "eventSourceMappingsPerFunction": 5, "queueRequestsPerSecond": 100,
+                                                                             "queueStorageMb": 100, "caches": 1, "cacheMb": 64 } },
                            "internetEgress": egress, "dataDeletionDueAt": null, "dataDeletedAt": null }] })
 }
 
@@ -38,7 +38,8 @@ fn account_says_its_plan_and_whether_its_functions_reach_the_internet() {
         "account      123456789012 \"Acme\"\nstatus       active\nrole         developer\n\
          plan         Beta: 25 functions, 1024 MB of memory a function at most, 100 invocations a second, 1 database, 1024 MB a database, \
          10 sessions a database, 5 buckets, 5120 MB in the buckets, 100 requests to the buckets a second, 5120 MB a file in one upload, \
-         10 queues, 5 queues read by a function, 100 requests to the queues a second, 100 MB of messages waiting\n\
+         10 GB a month from the sites, 10 queues, 5 queues read by a function, 100 requests to the queues a second, 100 MB of messages waiting, \
+         1 cache, 64 MB a cache\n\
          internet     off: its functions reach FF's services only, and a call out fails; FF's operator turns it on\n",
     );
     ff(&dir)
@@ -135,6 +136,26 @@ fn usage_shows_each_queue_after_the_buckets_its_requests_as_sqs_bills_them_and_i
         text.contains(
             "total          15        3.14375     1           0.852\nQUEUE          REQUESTS  SENT  RECEIVED  COST\n\
              orders         18420     6140  6152      0.022\nold (deleted)  3         1     0         0.000\nestimated cost:"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn usage_shows_each_cache_after_the_queues_its_memory_by_the_hour_as_elasticache_bills_a_node() {
+    let mut month = usage();
+    month["caches"] = json!([
+        { "cacheId": "c1", "name": "sessions", "deleted": false, "hours": 312, "memoryMb": 64, "gbHours": "19.5", "gbMonths": "0.02621", "cost": "1.502" }
+    ]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "total          15        3.14375     1           0.852\nCACHE     MEMORY  HOURS  GB-HOURS  COST\n\
+             sessions  64 MB   312    19.5      1.502\nestimated cost:"
         ),
         "{text}"
     );
@@ -242,4 +263,26 @@ fn metrics_of_the_account_and_a_wrong_period() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("a period is 60, 300 or 3600 seconds"));
+}
+
+#[test]
+fn usage_shows_the_mail_after_the_caches_by_the_domain_or_address_it_went_from_as_ses_bills_it() {
+    let mut month = usage();
+    month["email"] = json!([
+        { "resourceId": "e1", "identity": "shop.example.tn", "deleted": false, "recipients": 1250, "attachmentBytes": 52_428_800, "cost": "0.376" },
+        { "resourceId": "e2", "identity": "ana@example.tn", "deleted": true, "recipients": 3, "attachmentBytes": 0, "cost": "0.001" }
+    ]);
+    let api = Server::start(vec![Reply::json(200, month)]);
+
+    let output = ff(&with_key(&api.url)).args(["usage", "--month", "2026-10"]).output().unwrap();
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "SENT FROM                 RECIPIENTS  ATTACHMENTS  COST\n\
+             shop.example.tn           1250        50 MB        0.376\n\
+             ana@example.tn (deleted)  3           -            0.001\nestimated cost:"
+        ),
+        "{text}"
+    );
 }

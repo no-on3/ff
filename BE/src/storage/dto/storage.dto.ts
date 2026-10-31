@@ -52,6 +52,9 @@ export class BucketView {
   @ApiProperty({ nullable: true, type: Date, description: 'The hour of its last measure; the next comes within the next hour' })
   measuredAt: Date | null;
 
+  @ApiProperty({ nullable: true, type: String, example: 'https://photos.site.ffunc.cloud', description: "Its site's address, public to read, once its website configuration is set; null for none" })
+  siteUrl: string | null;
+
   @ApiProperty()
   createdAt: Date;
 }
@@ -107,6 +110,27 @@ export class StorageKeyView {
   lastUsedAt: Date | null;
 }
 
+/** The answer to POST /buckets/:name/website/deploy-keys: a key to the bucket alone, for an hour, its secret shown this once. */
+export class CreatedDeployKey {
+  @ApiProperty({ example: 'shop' })
+  bucket: string;
+
+  @ApiProperty({ example: 'AKFF0123456789ABCDEF', description: 'AWS_ACCESS_KEY_ID' })
+  accessKeyId: string;
+
+  @ApiProperty({ example: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', description: 'AWS_SECRET_ACCESS_KEY: shown once, FF keeps it sealed' })
+  secretAccessKey: string;
+
+  @ApiProperty({ description: 'When it stops working: an hour after it was made' })
+  expiresAt: Date;
+
+  @ApiProperty({ example: 'https://s3.ffunc.cloud', description: 'The S3 endpoint it signs for' })
+  endpoint: string;
+
+  @ApiProperty({ example: 'tn-tunis-1' })
+  region: string;
+}
+
 /** The answer to POST /storage-keys: the only time its secret is shown. */
 export class CreatedStorageKey extends StorageKeyView {
   @ApiProperty({ example: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY', description: 'The secret access key, AWS_SECRET_ACCESS_KEY: shown once, FF keeps it sealed' })
@@ -117,6 +141,9 @@ export class CreatedStorageKey extends StorageKeyView {
 
   @ApiProperty({ example: 'https://sqs.ffunc.cloud', description: "The SQS endpoint to give them, AWS_ENDPOINT_URL_SQS, for the account's queues" })
   sqsEndpoint: string;
+
+  @ApiProperty({ example: 'https://email.ffunc.cloud', description: "The SES endpoint to give them, AWS_ENDPOINT_URL_SESV2, for the account's mail: a key that names buckets or queues doesn't reach it" })
+  sesEndpoint: string;
 
   @ApiProperty({ example: 'tn-tunis-1' })
   region: string;

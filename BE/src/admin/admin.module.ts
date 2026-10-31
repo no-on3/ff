@@ -6,7 +6,9 @@ import { Currency } from '../billing/currency.entity';
 import { PriceBook } from '../billing/price-book.entity';
 import { Membership } from '../accounts/entities/membership.entity';
 import { AuditModule } from '../audit/audit.module';
+import { CachesModule } from '../caches/caches.module';
 import { DatabasesModule } from '../databases/databases.module';
+import { EmailModule } from '../email/email.module';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
 import { Function } from '../functions/entities/function.entity';
 import { Schedule } from '../schedules/schedule.entity';
@@ -20,6 +22,8 @@ import { AdminAccountsController } from './admin-accounts.controller';
 import { AdminAccountsService } from './admin-accounts.service';
 import { AdminAuditController } from './admin-audit.controller';
 import { AdminCreditsService } from './admin-credits.service';
+import { AdminEmailController } from './admin-email.controller';
+import { AdminEmailService } from './admin-email.service';
 import { AdminInvoicesController } from './admin-invoices.controller';
 import { AdminPaymentsController, certificateBody } from './admin-payments.controller';
 import { AdminPlansController } from './admin-plans.controller';
@@ -39,7 +43,10 @@ import { QueuesModule } from '../queues/queues.module';
   imports: [
     TypeOrmModule.forFeature([Account, Membership, Function, FunctionInvocation, PriceBook, Currency, Schedule]),
     AuditModule,
+    CachesModule,
     DatabasesModule,
+    // An account's sending: its sandbox, its switch.
+    EmailModule,
     BillingModule,
     FunctionsModule,
     FunctionUrlsModule,
@@ -57,6 +64,7 @@ import { QueuesModule } from '../queues/queues.module';
     AdminSettingsController,
     AdminAuditController,
     AdminAccountsController,
+    AdminEmailController,
     AdminPlansController,
     AdminPricesController,
     AdminPaymentsController,
@@ -64,7 +72,7 @@ import { QueuesModule } from '../queues/queues.module';
     AdminSupportController,
     AdminStatsController,
   ],
-  providers: [AdminAccountsService, AdminCreditsService, AdminPricesService, AdminSupportService, AdminStatsService],
+  providers: [AdminAccountsService, AdminCreditsService, AdminEmailService, AdminPricesService, AdminSupportService, AdminStatsService],
 })
 export class AdminModule implements NestModule {
   /** A withholding certificate comes as the request's body (P-35). */

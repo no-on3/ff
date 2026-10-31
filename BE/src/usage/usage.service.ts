@@ -7,8 +7,10 @@ import { FunctionInvocation, InvocationStatus } from '../functions/entities/func
 import { PLATFORM_LIMITS } from '../plans/plan-limits';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 import { usageRecord } from './usage';
-import { BucketMonth, DatabaseMonth, QueueMonth, UsageAmountsView, UsageMonth } from './usage.dto';
-import { gbMonths, hoursIn } from '../billing/rating';
+import { BucketMonth, CacheMonth, DatabaseMonth, EmailMonth, QueueMonth, UsageAmountsView, UsageMonth } from './usage.dto';
+import { Decimal } from '../billing/decimal';
+import { BYTES_PER_GB, gbMonths, hoursIn } from '../billing/rating';
+import { EMAIL_RESOURCE_ID } from '../billing/usage-sql';
 import { coldStartSeconds, invocationSeconds, invocations } from '../monitoring/operator-metrics';
 
 /** The outcomes of a call that ran, measured by the runtime. */
@@ -46,9 +48,21 @@ const amounts = (row: UsageRow): UsageAmountsView => ({
 
 /**
  * The tables partitioned by month, written once and never changed: usage records, capacity samples, customers'
- * databases', buckets' and queues' samples, buckets' and queues' request counts, and functions' asynchronous calls'.
+ * databases', buckets', queues' and caches' samples, buckets' and queues' request counts, functions' asynchronous
+ * calls', and mail's billing records.
  */
-const MONTHLY_TABLES = ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'queue_samples', 'async_event_counts'];
+const MONTHLY_TABLES = [
+  'usage_records',
+  'capacity_samples',
+  'database_samples',
+  'bucket_samples',
+  'storage_request_counts',
+  'queue_request_counts',
+  'queue_samples',
+  'async_event_counts',
+  'cache_samples',
+  'email_sends',
+];
 
 /**
  * Usage records (client-readiness plan, P-20, D6): written once per
@@ -263,7 +277,7 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
                          (array_agg("size_bytes" ORDER BY "hour" DESC))[1] AS "size_bytes", (array_agg("objects" ORDER BY "hour" DESC))[1] AS "objects"
                     FROM "bucket_samples" WHERE "account_id" = $1 AND "hour" >= $2 AND "hour" < $3 GROUP BY "bucket_id"),
             r AS (SELECT "bucket_id", max("name") AS "name", coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0) AS "tier1",
-                         coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0) AS "tier2", sum("bytes_out") AS "bytes_out", sum("bytes_in") AS "bytes_in"
+                         coalesce(sum("requests") FILTER (WHERE "class" IN ('tier2', 'website')), 0) AS "tier2", sum("bytes_out") AS "bytes_out", sum("bytes_in") AS "bytes_in"
                     FROM "storage_request_counts" WHERE "account_id" = $1 AND "minute" >= $2 AND "minute" < $3 GROUP BY "bucket_id")
        SELECT coalesce(s."bucket_id", r."bucket_id") AS "id", coalesce(s."name", r."name") AS "name", b."id" IS NULL AS "deleted",
               coalesce(s."hours", 0) AS "hours", coalesce(s."byte_hours", 0)::text AS "byte_hours", coalesce(s."size_bytes", 0)::text AS "size_bytes",
@@ -315,6 +329,61 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
       requests: Number(row.requests),
       messagesSent: Number(row.sent),
       messagesReceived: Number(row.received),
+    }));
+  }
+
+  /**
+   * An account's mail in a month by the UTC calendar (ADR 0012), from its
+   * messages' billing records: by the domain or address it went from, its
+   * recipients and its attachments, each recipient's copy, as SES bills them.
+   * The most recipients first.
+   */
+  async monthlyEmail(accountId: string, month: string): Promise<EmailMonth[]> {
+    const [year, number] = month.split('-').map(Number);
+    const from = new Date(Date.UTC(year, number - 1, 1));
+    const to = new Date(Date.UTC(year, number, 1));
+    const rows = await this.records.manager.query<Array<{ id: string; identity: string; deleted: boolean; recipients: string; bytes: string }>>(
+      `SELECT s."id", s."identity", NOT EXISTS (SELECT 1 FROM "email_identities" i WHERE i."account_id" = s."account_id" AND i."identity" = s."identity") AS "deleted",
+              s."recipients", s."bytes"
+         FROM (SELECT ${EMAIL_RESOURCE_ID} AS "id", "account_id", "identity", sum("recipients")::text AS "recipients",
+                      sum("attachment_bytes"::bigint * "recipients")::text AS "bytes"
+                 FROM "email_sends"
+                WHERE "account_id" = $1 AND "sent_at" >= $2 AND "sent_at" < $3
+                GROUP BY "account_id", "identity") s
+        ORDER BY s."recipients"::bigint DESC, s."identity"`,
+      [accountId, from, to],
+    );
+    return rows.map((row) => ({ resourceId: row.id, identity: row.identity, deleted: row.deleted, recipients: Number(row.recipients), attachmentBytes: Number(row.bytes) }));
+  }
+
+  /**
+   * An account's caches in a month by the UTC calendar (ADR 0013), from their
+   * hourly samples: each one's hours measured, its memory at its latest
+   * sample, and its memory times its hours, as it is billed. The most
+   * GB-hours first.
+   */
+  async monthlyCaches(accountId: string, month: string): Promise<CacheMonth[]> {
+    const [year, number] = month.split('-').map(Number);
+    const from = new Date(Date.UTC(year, number - 1, 1));
+    const to = new Date(Date.UTC(year, number, 1));
+    const rows = await this.records.manager.query<Array<{ id: string; name: string; deleted: boolean; hours: number; byte_hours: string; memory_mb: number }>>(
+      `SELECT s."cache_id" AS "id", (array_agg(s."name" ORDER BY s."hour" DESC))[1] AS "name", bool_and(c."id" IS NULL) AS "deleted",
+              count(*)::int AS "hours", sum(s."memory_mb"::bigint * 1048576)::text AS "byte_hours", (array_agg(s."memory_mb" ORDER BY s."hour" DESC))[1] AS "memory_mb"
+         FROM "cache_samples" s
+         LEFT JOIN "caches" c ON c."id" = s."cache_id"
+        WHERE s."account_id" = $1 AND s."hour" >= $2 AND s."hour" < $3
+        GROUP BY s."cache_id"
+        ORDER BY sum(s."memory_mb") DESC, 2, 1`,
+      [accountId, from, to],
+    );
+    return rows.map((row) => ({
+      cacheId: row.id,
+      name: row.name,
+      deleted: row.deleted,
+      hours: row.hours,
+      memoryMb: row.memory_mb,
+      gbHours: Decimal.ratio(BigInt(row.byte_hours), BYTES_PER_GB).round(6).toString(),
+      gbMonths: gbMonths(BigInt(row.byte_hours), hoursIn(month)).round(6).toString(),
     }));
   }
 

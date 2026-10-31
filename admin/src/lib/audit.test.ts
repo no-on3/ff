@@ -66,6 +66,14 @@ describe('describeAction', () => {
 
   it("reads the account's databases, buckets and queues turned off or on", () => {
     expect(describeAction(entry({ action: 'account.storage', details: { reason: 'r', changes: { storageEnabled: { from: true, to: false } } } }))).toBe('Databases, buckets and queues: on → off');
+    expect(
+      describeAction(
+        entry({
+          action: 'account.email',
+          details: { reason: 'r', changes: { productionAccess: { from: false, to: true }, sendingEnabled: { from: true, to: false }, enforcementStatus: { from: 'SHUTDOWN', to: 'HEALTHY' } } },
+        }),
+      ),
+    ).toBe("Mail: in the sandbox → out of the sandbox; Sending: on → paused; Mail's standing: SHUTDOWN → HEALTHY");
   });
 
   it("reads a plan's change by each limit's name, its quota in one line (P-73)", () => {

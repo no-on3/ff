@@ -13,6 +13,7 @@ describe('the alarm form', () => {
       databaseId: null,
       bucketName: null,
       queueName: null,
+      cacheName: null,
       metric: 'Errors',
       statistic: 'Sum',
       period: 60,
@@ -60,8 +61,24 @@ describe('the alarm form', () => {
     const errors = { ...emptyForm('', '', 'photos'), name: 'Store errors' };
 
     expect(errors).toMatchObject({ functionId: '', databaseId: '', bucketName: 'photos', metric: '5xxErrors', statistic: 'Sum', period: 300 });
-    expect(metricsFor('', '', 'photos')).toEqual(['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded']);
+    expect(metricsFor('', '', 'photos')).toEqual([
+      'BucketSizeBytes',
+      'NumberOfObjects',
+      'AllRequests',
+      'GetRequests',
+      'PutRequests',
+      '4xxErrors',
+      '5xxErrors',
+      'BytesDownloaded',
+      'BytesUploaded',
+      'Requests',
+      '4xxErrorRate',
+      '5xxErrorRate',
+      'TotalErrorRate',
+    ]);
     expect(metricsFor('')).not.toContain('BucketSizeBytes');
+    // Its site's, as CloudFront's are named: a share of its visits, in percent.
+    expect(withMetric(errors, 'TotalErrorRate')).toMatchObject({ bucketName: 'photos', statistic: 'Average' });
     expect(toBody(errors)).toMatchObject({ functionId: null, databaseId: null, bucketName: 'photos', metric: '5xxErrors', period: 300 });
     expect(withMetric(errors, 'BucketSizeBytes')).toMatchObject({ bucketName: 'photos', statistic: 'Average' });
     expect([formProblem(errors), formProblem({ ...errors, bucketName: '' })]).toEqual([null, "5xxErrors is a bucket's: choose the bucket it watches"]);
@@ -95,6 +112,47 @@ describe('the alarm form', () => {
     expect(scopeOf(deadLetters)).toBe('queue:orders-dlq');
     expect(conditionText({ ...toBody(deadLetters), threshold: 0 })).toBe('ApproximateNumberOfMessagesVisible Maximum > 0 messages, in the last period of 1 minute');
     expect(formFromAlarm({ ...toBody(deadLetters), id: 'a', state: 'OK', stateReason: null, stateChangedAt: null, evaluatedAt: null, createdAt: '', updatedAt: '' } as Alarm).queueName).toBe('orders-dlq');
+  });
+
+  it("watches a cache's memory, connections, hits, misses or evictions, an hour at a time, by its name alone", () => {
+    const memory = { ...emptyForm('', '', '', '', 'sessions'), name: 'Memory', threshold: '60000000' };
+
+    expect(memory).toMatchObject({ functionId: '', databaseId: '', bucketName: '', queueName: '', cacheName: 'sessions', metric: 'BytesUsedForCache', statistic: 'Maximum', period: 3600 });
+    expect(metricsFor('', '', '', '', 'sessions')).toEqual(['BytesUsedForCache', 'CurrConnections', 'CacheHits', 'CacheMisses', 'Evictions']);
+    expect([metricsFor(''), metricsFor(FN)].some((metrics) => metrics.includes('Evictions'))).toBe(false);
+    expect(toBody(memory)).toMatchObject({ functionId: null, queueName: null, cacheName: 'sessions', metric: 'BytesUsedForCache', period: 3600 });
+    expect(withMetric(memory, 'Evictions')).toMatchObject({ cacheName: 'sessions', statistic: 'Sum', period: 3600 });
+    expect(conditionText({ ...toBody(memory), threshold: 60000000 })).toBe('BytesUsedForCache Maximum > 60000000 bytes, in the last period of 1 hour');
+    // The API's own refusals, said first: a cache named, its hour, a day at most.
+    expect([formProblem(memory), formProblem({ ...memory, cacheName: '' }), formProblem({ ...memory, period: 300 }), formProblem({ ...memory, evaluationPeriods: '25', datapointsToAlarm: '1' })]).toEqual([
+      null,
+      "BytesUsedForCache is a cache's: choose the cache it watches",
+      "A cache's metrics have a point an hour: the period is an hour",
+      'The periods judged look back more than a day: take fewer',
+    ]);
+    // Its scope goes as the select names it, to the cache and away from it.
+    expect(withScope({ ...emptyForm(FN), name: 'Hits' }, 'cache:sessions')).toMatchObject({ functionId: '', cacheName: 'sessions', metric: 'BytesUsedForCache', period: 3600 });
+    expect(withScope(memory, 'queue:orders')).toMatchObject({ cacheName: '', queueName: 'orders', metric: 'ApproximateNumberOfMessagesVisible' });
+    expect(scopeOf(memory)).toBe('cache:sessions');
+    expect(formFromAlarm({ ...toBody(memory), id: 'a', state: 'OK', stateReason: null, stateChangedAt: null, evaluatedAt: null, createdAt: '', updatedAt: '' } as Alarm).cacheName).toBe('sessions');
+  });
+
+  it("watches the account's mail, an hour at a time, naming nothing: a function's scope doesn't offer it", () => {
+    expect(metricsFor('')).toEqual(expect.arrayContaining(['Send', 'Bounce', 'Reputation.BounceRate', 'Reputation.ComplaintRate']));
+    expect(metricsFor(FN)).not.toContain('Bounce');
+    const bounces = withMetric({ ...emptyForm('', '', '', '', 'sessions'), name: 'Bounces' }, 'Reputation.BounceRate');
+
+    expect(bounces).toMatchObject({ functionId: '', databaseId: '', bucketName: '', queueName: '', cacheName: '', metric: 'Reputation.BounceRate', statistic: 'Average', period: 3600 });
+    expect(toBody(bounces)).toMatchObject({ functionId: null, cacheName: null, metric: 'Reputation.BounceRate', period: 3600 });
+    // The API's own refusals, said first: the account alone, its hour, a day at most.
+    expect([formProblem(bounces), formProblem({ ...bounces, functionId: FN }), formProblem({ ...bounces, period: 60 }), formProblem({ ...bounces, evaluationPeriods: '25', datapointsToAlarm: '1' })]).toEqual([
+      null,
+      "Reputation.BounceRate is the account's mail's: it watches the account",
+      "Mail's metrics have a point an hour: the period is an hour",
+      'The periods judged look back more than a day: take fewer',
+    ]);
+    // A function's scope takes it to that function's own metrics.
+    expect(withScope(bounces, FN)).toMatchObject({ functionId: FN, metric: 'Errors' });
   });
 
   it('changes scope with a metric the scope has: a database to the account, a function to a database', () => {

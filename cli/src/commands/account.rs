@@ -92,10 +92,18 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("bucketStorageMb", &|n| format!("{n} MB in the buckets"));
     add("storageRequestsPerSecond", &|n| format!("{n} requests to the buckets a second"));
     add("maxObjectMb", &|n| format!("{n} MB a file in one upload"));
+    add("siteTransferGbPerMonth", &|n| format!("{n} GB a month from the sites"));
     add("queues", &|n| if n == 1 { "1 queue".to_string() } else { format!("{n} queues") });
     add("eventSourceMappingsPerFunction", &|n| format!("{n} queues read by a function"));
     add("queueRequestsPerSecond", &|n| format!("{n} requests to the queues a second"));
     add("queueStorageMb", &|n| format!("{n} MB of messages waiting"));
+    add("caches", &|n| if n == 1 { "1 cache".to_string() } else { format!("{n} caches") });
+    add("cacheMb", &|n| format!("{n} MB a cache"));
+    add("emailIdentities", &|n| {
+        if n == 1 { "1 domain to send mail from".to_string() } else { format!("{n} domains to send mail from") }
+    });
+    add("emailsPerDay", &|n| format!("{n} e-mails a day"));
+    add("emailsPerSecond", &|n| format!("{n} e-mails a second"));
     lines
 }
 
@@ -154,6 +162,12 @@ struct Usage {
     /// Absent from an API before customers' queues.
     #[serde(default)]
     queues: Vec<QueueUsage>,
+    /// Absent from an API before customers' caches.
+    #[serde(default)]
+    caches: Vec<CacheUsage>,
+    /// Absent from an API before customers' mail.
+    #[serde(default)]
+    email: Vec<EmailUsage>,
     totals: Amounts,
     estimate: Option<Estimate>,
 }
@@ -193,6 +207,29 @@ struct QueueUsage {
     requests: u64,
     messages_sent: u64,
     messages_received: u64,
+    cost: Option<String>,
+}
+
+/// A domain's or an address's mail in the month, as SES bills it: its recipients, and its attachments by the GB.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmailUsage {
+    identity: String,
+    deleted: bool,
+    recipients: u64,
+    attachment_bytes: u64,
+    cost: Option<String>,
+}
+
+/// A cache's month, as its hourly measures counted it: its memory by the hour, as ElastiCache bills a node.
+#[derive(Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheUsage {
+    name: String,
+    deleted: bool,
+    hours: u32,
+    memory_mb: u32,
+    gb_hours: String,
     cost: Option<String>,
 }
 
@@ -330,8 +367,49 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
                 .collect();
             format!("\n{}", table(&["QUEUE", "REQUESTS", "SENT", "RECEIVED", "COST"], &rows))
         };
+        // As ElastiCache bills a node: its memory by the hour, whatever its keys use.
+        let caches = if usage.caches.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .caches
+                .iter()
+                .map(|cache| {
+                    vec![
+                        if cache.deleted { format!("{} (deleted)", cache.name) } else { cache.name.clone() },
+                        format!("{} MB", cache.memory_mb),
+                        cache.hours.to_string(),
+                        cache.gb_hours.clone(),
+                        cache.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["CACHE", "MEMORY", "HOURS", "GB-HOURS", "COST"], &rows))
+        };
+        // As SES bills it: each recipient, a suppressed one too, and attachments by the GB, each recipient's copy.
+        let email = if usage.email.is_empty() {
+            String::new()
+        } else {
+            let rows: Vec<Vec<String>> = usage
+                .email
+                .iter()
+                .map(|mail| {
+                    vec![
+                        if mail.deleted { format!("{} (deleted)", mail.identity) } else { mail.identity.clone() },
+                        mail.recipients.to_string(),
+                        if mail.attachment_bytes == 0 {
+                            "-".to_owned()
+                        } else {
+                            super::db::size(Some(mail.attachment_bytes))
+                        },
+                        mail.cost.clone().unwrap_or_default(),
+                    ]
+                })
+                .collect();
+            format!("\n{}", table(&["SENT FROM", "RECIPIENTS", "ATTACHMENTS", "COST"], &rows))
+        };
         format!(
-            "{}\n{}{databases}{buckets}{queues}\n{estimate}",
+            "{}\n{}{databases}{buckets}{queues}{caches}{email}\n{estimate}",
             usage.month,
             table(&["FUNCTION", "REQUESTS", "GB-SECONDS", "NOT BILLED", "COST"], &rows)
         )

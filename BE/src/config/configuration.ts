@@ -40,6 +40,10 @@ export const DEVELOPMENT_CREDENTIALS = {
   FF_OBJECT_STORE_SECRET_KEY: ['minioadmin', 'ffdevsecretkey-local-only'],
   // The development server of customers' databases (docker-compose.yml's data-db).
   FF_DATA_DB_ADMIN_PASSWORD: ['ff-data-admin-dev'],
+  // The development server of customers' caches (docker-compose.yml's cache).
+  FF_CACHE_AGENT_TOKEN: ['ff-cache-dev'],
+  // The development server of customers' mail (docker-compose.yml's mail).
+  FF_EMAIL_AGENT_TOKEN: ['ff-mail-dev'],
 } as const;
 
 const DEV_CORS_ORIGIN = 'http://localhost:5199';
@@ -52,6 +56,10 @@ export const DEV_FUNCTION_URL_BASE = 'http://fn.localhost:3001';
 export const DEV_STORAGE_BASE = 'http://s3.localhost:3002';
 /** Queues' SQS endpoint in development, which a queue's URL begins with: AWS's SDKs reach a queue at its URL. */
 export const DEV_SQS_BASE = 'http://localhost:3003';
+/** SES v2's endpoint in development, for customers' mail: AWS's SDKs reach it as AWS_ENDPOINT_URL_SESV2. */
+export const DEV_SES_BASE = 'http://localhost:3005';
+/** Sites in development: http://<bucket>.site.localhost:3004/, which every browser takes to this machine. */
+export const DEV_WEBSITE_BASE = 'http://site.localhost:3004';
 /** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
 const DEV_ADMIN_URL = 'http://localhost:5198';
 /** The console in development: invitation e-mails link to it (P-16). */
@@ -279,6 +287,11 @@ const storageBase = {
   test: functionUrlBase.test,
   expected: 'an origin whose host has a dot, such as https://s3.example.tn, at which a bucket is https://s3.example.tn/<bucket> and https://<bucket>.s3.example.tn',
 };
+/** Where sites live: a scheme, a host under which each site is <bucket>.<host>, and a port if any; no path. */
+const websiteBase = {
+  test: functionUrlBase.test,
+  expected: "an origin whose host has a dot, such as https://site.example.tn, under which a bucket's site is https://<bucket>.site.example.tn/",
+};
 /** Queues' SQS endpoint: a scheme, a host and a port if any; no path. A queue's URL is <endpoint>/<account>/<name>. */
 const sqsBase = {
   test: (v: string) => {
@@ -295,6 +308,16 @@ const sqsBase = {
 const functionSqsEndpoint = {
   test: sqsBase.test,
   expected: "an origin, such as http://10.43.0.251:3003, at which functions reach queues' SQS endpoint inside the cluster",
+};
+/** Customers' mail's SES v2 endpoint: a scheme, a host and a port if any; no path. */
+const sesBase = {
+  test: sqsBase.test,
+  expected: 'an origin, such as https://email.example.tn, which AWS\'s SDKs and CLI are given as AWS_ENDPOINT_URL_SESV2',
+};
+/** Where functions reach the SES endpoint inside the cluster: a scheme, a host and a port if any; no path. */
+const functionSesEndpoint = {
+  test: sqsBase.test,
+  expected: 'an origin, such as http://10.43.0.251:3005, at which functions reach the SES endpoint inside the cluster',
 };
 /**
  * Where functions reach buckets' S3 front door inside the cluster: a scheme, an IP address, and a port if any; no path.
@@ -317,6 +340,15 @@ const serverHost = {
   test: (v: string) => isIP(v) !== 0 || (v.length <= 253 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/i.test(v)),
   expected: 'a host name or an IP address, such as db.example.tn or 10.199.0.10',
 };
+/** A range of ports, as the server of customers' caches gives its caches theirs. */
+const portRange = {
+  test: (v: string) => {
+    const match = /^(\d+)-(\d+)$/.exec(v);
+    return match !== null && Number(match[1]) >= 1024 && Number(match[2]) <= 65535 && Number(match[1]) <= Number(match[2]);
+  },
+  expected: 'a range of ports from 1024 up, such as 6400-6999',
+};
+const httpsUrl = { test: (v: string) => isUrl(v, ['https:']), expected: 'an https:// URL' };
 /** A PostgreSQL role's name, as the backend's role is named. */
 const roleName = { test: (v: string) => /^[a-z_][a-z0-9_]{0,62}$/.test(v), expected: 'a PostgreSQL role name: lower-case letters, digits and underscores' };
 const emailAddress = { test: (v: string) => /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(v), expected: 'an e-mail address' };
@@ -459,6 +491,17 @@ const appShape = {
   // ff-system, on FF_SQS_PORT, as when the backend runs in the cluster).
   FF_SQS_FUNCTION_ENDPOINT: optionalText(functionSqsEndpoint),
   FF_SQS_FUNCTION_CIDRS: list(cidr),
+  // Customers' mail's SES v2 endpoint (ADR 0012): the port of its server, apart from the API's (0: none), and the
+  // endpoint customers give AWS's SDKs and CLI. Functions reach it with their own keys at the function endpoint, inside
+  // the cluster (unset: their pods get no AWS_ENDPOINT_URL_SESV2), their NetworkPolicy opening these addresses on its
+  // port (none: the backend's own pods in ff-system, on FF_SES_PORT).
+  FF_SES_PORT: integer(3005, 0, 65535),
+  FF_SES_BASE: text(DEV_SES_BASE, sesBase),
+  FF_SES_FUNCTION_ENDPOINT: optionalText(functionSesEndpoint),
+  FF_SES_FUNCTION_CIDRS: list(cidr),
+  // Sites: the port of the server that answers buckets' websites, apart from the API's (0: none), and where they live.
+  FF_WEBSITE_PORT: integer(3004, 0, 65535),
+  FF_WEBSITE_BASE: text(DEV_WEBSITE_BASE, websiteBase),
   // Customers' own domains: the edge's addresses, which a domain apex points to (none: not checked), and the DNS
   // servers that check domains' records (none: the system's).
   FF_EDGE_ADDRESSES: list(ipAddress),
@@ -486,6 +529,28 @@ const appShape = {
   FF_DATA_DB_ADMIN_PASSWORD: optionalSecret(),
   FF_DATA_DB_CIDRS: list(cidr),
   FF_DATA_DB_CA_FILE: optionalText(),
+  // Customers' caches (ADR 0013): their server as customers and functions reach it (unset: no caches, the API answers
+  // 503), the ports its caches take, its agent's API and the backend's token there; the addresses functions reach it
+  // at, for their NetworkPolicy; and the CA of its certificate when it isn't a public one, which functions' pods get too.
+  FF_CACHE_HOST: optionalText(serverHost),
+  FF_CACHE_PORTS: text('6400-6999', portRange),
+  FF_CACHE_AGENT_URL: optionalText(httpsUrl),
+  FF_CACHE_AGENT_TOKEN: optionalSecret(),
+  FF_CACHE_CIDRS: list(cidr),
+  FF_CACHE_CA_FILE: optionalText(),
+  // Customers' mail (ADR 0012): the host name of the server that sends it, which their return-path domains' MX records
+  // name and their SPF records allow; and FF's own return-path domain, an MX to that server, for a domain whose own
+  // isn't proved yet.
+  FF_EMAIL_MAIL_HOST: text('mail.localhost', serverHost),
+  FF_EMAIL_BOUNCE_DOMAIN: text('bounces.mail.localhost', serverHost),
+  // The server of customers' mail (ADR 0012, deploy/mail), as the backend reaches it: the host and port it hands their
+  // messages to, by SMTP over TLS, and its agent, which gives their bounces back (unset: the SES endpoint sends
+  // nothing); the CA of its certificate, when it isn't a public one.
+  FF_EMAIL_SMTP_HOST: optionalText(serverHost),
+  FF_EMAIL_SMTP_PORT: integer(25, 1, 65535),
+  FF_EMAIL_AGENT_URL: optionalText(httpsUrl),
+  FF_EMAIL_AGENT_TOKEN: optionalSecret(),
+  FF_EMAIL_CA_FILE: optionalText(),
 };
 
 const databaseSchema = z.object(databaseShape);
@@ -548,6 +613,29 @@ function appRules(env: AppEnv): string[] {
     for (const name of without) problems.push(`${name} is set, but FF_DATA_DB_HOST is not: it names customers' database server`);
   }
 
+  if (env.FF_CACHE_HOST) {
+    for (const name of ['FF_CACHE_AGENT_URL', 'FF_CACHE_AGENT_TOKEN'] as const) {
+      if (!env[name]) problems.push(`${name} is required when FF_CACHE_HOST is set: the backend tells the agent of customers' cache server what each cache is`);
+    }
+    if (env.FF_CACHE_CIDRS.length === 0) {
+      problems.push("FF_CACHE_CIDRS is required when FF_CACHE_HOST is set: functions reach customers' cache server only at these addresses, through their NetworkPolicy");
+    }
+  } else {
+    const without = (['FF_CACHE_AGENT_URL', 'FF_CACHE_AGENT_TOKEN', 'FF_CACHE_CA_FILE'] as const).filter((name) => env[name] !== undefined);
+    if (env.FF_CACHE_CIDRS.length > 0) without.push('FF_CACHE_CIDRS' as (typeof without)[number]);
+    for (const name of without) problems.push(`${name} is set, but FF_CACHE_HOST is not: it names customers' cache server`);
+  }
+
+  if (env.FF_EMAIL_SMTP_HOST) {
+    for (const name of ['FF_EMAIL_AGENT_URL', 'FF_EMAIL_AGENT_TOKEN'] as const) {
+      if (!env[name]) problems.push(`${name} is required when FF_EMAIL_SMTP_HOST is set: customers' bounces come back through the agent of their mail's server`);
+    }
+  } else {
+    for (const name of (['FF_EMAIL_AGENT_URL', 'FF_EMAIL_AGENT_TOKEN', 'FF_EMAIL_CA_FILE'] as const).filter((name) => env[name] !== undefined)) {
+      problems.push(`${name} is set, but FF_EMAIL_SMTP_HOST is not: it names the server of customers' mail`);
+    }
+  }
+
   if (env.FF_STORAGE_FUNCTION_ENDPOINT) {
     if (env.FF_STORAGE_PORT === 0) {
       problems.push("FF_STORAGE_FUNCTION_ENDPOINT is set, but FF_STORAGE_PORT is 0: functions' keys reach buckets through the S3 front door, which isn't running");
@@ -562,6 +650,14 @@ function appRules(env: AppEnv): string[] {
     }
   } else if (env.FF_SQS_FUNCTION_CIDRS.length > 0) {
     problems.push("FF_SQS_FUNCTION_CIDRS is set, but FF_SQS_FUNCTION_ENDPOINT is not: it names where functions reach queues' SQS endpoint");
+  }
+
+  if (env.FF_SES_FUNCTION_ENDPOINT) {
+    if (env.FF_SES_PORT === 0) {
+      problems.push("FF_SES_FUNCTION_ENDPOINT is set, but FF_SES_PORT is 0: functions' keys send mail through the SES endpoint, which isn't running");
+    }
+  } else if (env.FF_SES_FUNCTION_CIDRS.length > 0) {
+    problems.push('FF_SES_FUNCTION_CIDRS is set, but FF_SES_FUNCTION_ENDPOINT is not: it names where functions reach the SES endpoint');
   }
 
   if (env.FF_DEV_USER_ID !== undefined) {
@@ -630,6 +726,17 @@ function appRules(env: AppEnv): string[] {
     if (!env.FF_SQS_BASE.startsWith('https://')) {
       problems.push("FF_SQS_BASE must be an https:// origin when NODE_ENV=production, such as https://sqs.example.tn: queues' requests carry customers' messages");
     }
+    if (!env.FF_SES_BASE.startsWith('https://')) {
+      problems.push("FF_SES_BASE must be an https:// origin when NODE_ENV=production, such as https://email.example.tn: its requests carry customers' mail");
+    }
+    for (const name of ['FF_EMAIL_MAIL_HOST', 'FF_EMAIL_BOUNCE_DOMAIN'] as const) {
+      if (/(^|\.)localhost$/i.test(env[name])) {
+        problems.push(`${name} must be a public name when NODE_ENV=production, such as ${name === 'FF_EMAIL_MAIL_HOST' ? 'mail' : 'bounces.mail'}.example.tn: customers' domains' records name it`);
+      }
+    }
+    if (!env.FF_WEBSITE_BASE.startsWith('https://')) {
+      problems.push('FF_WEBSITE_BASE must be an https:// origin when NODE_ENV=production, such as https://site.example.tn: sites are served over TLS');
+    }
     if (!env.FF_STORAGE_BASE.startsWith('https://')) {
       problems.push("FF_STORAGE_BASE must be an https:// origin when NODE_ENV=production, such as https://s3.example.tn: buckets' requests carry customers' files");
     }
@@ -645,6 +752,12 @@ function appRules(env: AppEnv): string[] {
     }
     if (env.FF_DATA_DB_ADMIN_PASSWORD && (DEVELOPMENT_CREDENTIALS.FF_DATA_DB_ADMIN_PASSWORD as readonly string[]).includes(env.FF_DATA_DB_ADMIN_PASSWORD)) {
       problems.push('FF_DATA_DB_ADMIN_PASSWORD must not be the development default when NODE_ENV=production');
+    }
+    if (env.FF_CACHE_AGENT_TOKEN && (DEVELOPMENT_CREDENTIALS.FF_CACHE_AGENT_TOKEN as readonly string[]).includes(env.FF_CACHE_AGENT_TOKEN)) {
+      problems.push('FF_CACHE_AGENT_TOKEN must not be the development default when NODE_ENV=production');
+    }
+    if (env.FF_EMAIL_AGENT_TOKEN && (DEVELOPMENT_CREDENTIALS.FF_EMAIL_AGENT_TOKEN as readonly string[]).includes(env.FF_EMAIL_AGENT_TOKEN)) {
+      problems.push('FF_EMAIL_AGENT_TOKEN must not be the development default when NODE_ENV=production');
     }
     for (const name of Object.keys(DEV_SELLER) as Array<keyof typeof DEV_SELLER>) {
       if (env[name] === DEV_SELLER[name]) problems.push(`${name} must be set when NODE_ENV=production: pro-formas name the seller and where to pay (P-35)`);
@@ -700,7 +813,7 @@ function readCertificate(name: string, path: string): string {
 }
 
 /**
- * How functions reach one of FF's endpoints with their own keys, buckets' S3 front door or queues' SQS endpoint: at
+ * How functions reach one of FF's endpoints with their own keys, buckets' S3 front door, queues' SQS endpoint or mail's SES endpoint: at
  * the addresses named, on the endpoint's port; with none named, at the backend's own pods, on the server's port, which
  * the endpoint's Service forwards to. Nothing when functions aren't given the endpoint.
  */
@@ -736,6 +849,69 @@ function dataDbSettings(env: AppEnv): DataDbSettings | null {
     adminPassword: env.FF_DATA_DB_ADMIN_PASSWORD as string,
     cidrs: env.FF_DATA_DB_CIDRS,
     ...(env.FF_DATA_DB_CA_FILE ? { ca: readCertificate('FF_DATA_DB_CA_FILE', env.FF_DATA_DB_CA_FILE) } : {}),
+  };
+}
+
+export interface CacheSettings {
+  /** In caches' addresses: as customers and functions reach the server. */
+  host: string;
+  /** The ports its caches take, one each. */
+  ports: { first: number; last: number };
+  /** Its agent's API, which the backend tells what each cache is. */
+  agentUrl: string;
+  agentToken: string;
+  /** The addresses functions reach it at: their NetworkPolicy's rule. */
+  cidrs: string[];
+  /** The CA of its certificate (PEM), when it isn't a public one: the backend checks the agent against it, and functions get it. */
+  ca?: string;
+}
+
+function cacheSettings(env: AppEnv): CacheSettings | null {
+  if (!env.FF_CACHE_HOST) return null;
+  const [first, last] = env.FF_CACHE_PORTS.split('-').map(Number);
+  return {
+    host: env.FF_CACHE_HOST,
+    ports: { first, last },
+    agentUrl: (env.FF_CACHE_AGENT_URL as string).replace(/\/$/, ''),
+    agentToken: env.FF_CACHE_AGENT_TOKEN as string,
+    cidrs: env.FF_CACHE_CIDRS,
+    ...(env.FF_CACHE_CA_FILE ? { ca: readCertificate('FF_CACHE_CA_FILE', env.FF_CACHE_CA_FILE) } : {}),
+  };
+}
+
+/** Customers' mail's settings (ADR 0012), as the backend reads them. */
+export interface EmailSettings {
+  /** The server that sends it: its return-path domains' MX records name it. */
+  mailHost: string;
+  /** FF's own return-path domain, for a domain whose own isn't proved. */
+  bounceDomain: string;
+  domainResolvers: string[];
+  /** Where the backend hands it messages and takes their bounces back; null: nothing is sent. */
+  server: MailServerSettings | null;
+}
+
+/** The server of customers' mail (deploy/mail), as the backend reaches it. */
+export interface MailServerSettings {
+  smtpHost: string;
+  smtpPort: number;
+  /** Its agent's API, which gives the bounces back. */
+  agentUrl: string;
+  agentToken: string;
+  /** The CA of its certificate (PEM), when it isn't a public one: the backend checks the server against it. */
+  ca?: string;
+  /** Mail goes to it over TLS alone: always, but for the tests' stand-in server, which speaks plain SMTP. */
+  requireTls: boolean;
+}
+
+function mailServerSettings(env: AppEnv): MailServerSettings | null {
+  if (!env.FF_EMAIL_SMTP_HOST) return null;
+  return {
+    smtpHost: env.FF_EMAIL_SMTP_HOST,
+    smtpPort: env.FF_EMAIL_SMTP_PORT,
+    agentUrl: (env.FF_EMAIL_AGENT_URL as string).replace(/\/$/, ''),
+    agentToken: env.FF_EMAIL_AGENT_TOKEN as string,
+    ...(env.FF_EMAIL_CA_FILE ? { ca: readCertificate('FF_EMAIL_CA_FILE', env.FF_EMAIL_CA_FILE) } : {}),
+    requireTls: true,
   };
 }
 
@@ -778,6 +954,7 @@ export default function configuration(env: Env = process.env) {
   if (problems.length > 0) throw new ConfigurationError(problems);
   const production = parsed.NODE_ENV === 'production';
   const dataDb = dataDbSettings(parsed);
+  const cache = cacheSettings(parsed);
   return {
     nodeEnv: parsed.NODE_ENV,
     port: parsed.PORT,
@@ -886,6 +1063,27 @@ export default function configuration(env: Env = process.env) {
       // Where functions reach it with their own keys, inside the cluster; '': their pods get no AWS_ENDPOINT_URL_SQS.
       functionEndpoint: parsed.FF_SQS_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
     },
+    // Customers' mail (ADR 0012): the server that sends it, by its name, FF's own return path, and the DNS servers that
+    // check domains' records, as for customers' own domains.
+    email: {
+      mailHost: parsed.FF_EMAIL_MAIL_HOST.toLowerCase(),
+      bounceDomain: parsed.FF_EMAIL_BOUNCE_DOMAIN.toLowerCase(),
+      domainResolvers: parsed.FF_DOMAIN_RESOLVERS,
+      server: mailServerSettings(parsed),
+    },
+    // Customers' mail's SES v2 endpoint (ADR 0012): its server, the endpoint customers use, and the region it signs for.
+    ses: {
+      port: parsed.FF_SES_PORT,
+      base: parsed.FF_SES_BASE.replace(/\/$/, ''),
+      region: parsed.FF_REGION,
+      // Where functions reach it with their own keys, inside the cluster; '': their pods get no AWS_ENDPOINT_URL_SESV2.
+      functionEndpoint: parsed.FF_SES_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
+    },
+    // Buckets' sites: the server that answers them, and the origin under which each is <bucket>.<host>.
+    website: {
+      port: parsed.FF_WEBSITE_PORT,
+      base: parsed.FF_WEBSITE_BASE.replace(/\/$/, ''),
+    },
     // Functions' code images (ADR 0003): where they are pushed, and where nodes pull them from; none without a registry.
     codeImages: {
       registry: parsed.FF_CODE_REGISTRY?.replace(/\/$/, '') ?? '',
@@ -895,6 +1093,8 @@ export default function configuration(env: Env = process.env) {
     },
     // Customers' databases (ADR 0008): their server, the backend's role there, and how functions reach it; null without one.
     dataDb,
+    // Customers' caches (ADR 0013): their server, its agent, and how functions reach it; null without one.
+    cache,
     // What FF keeps encrypted at rest (functions' environments) is sealed with these keys, the first sealing.
     encryption: {
       keys: encryptionKeys(parsed.FF_ENCRYPTION_KEYS_FILE, production),
@@ -928,15 +1128,20 @@ export default function configuration(env: Env = process.env) {
       egressInternet: parsed.K8S_EGRESS_INTERNET,
       ingressAllowCidrs: parsed.K8S_INGRESS_ALLOW_CIDRS,
       logStoreDeleteKeyFile: parsed.K8S_LOG_STORE_DELETE_KEY_FILE,
-      // What functions reach of the platform whatever their account's internet access: customers' database server, and
-      // buckets' S3 front door.
+      // What functions reach of the platform whatever their account's internet access: customers' database server, the
+      // caches' ports of customers' cache server, buckets' S3 front door, queues' SQS endpoint and mail's SES endpoint.
       platformEgress: [
         ...(dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : []),
+        ...(cache ? [{ cidrs: cache.cidrs, port: cache.ports.first, endPort: cache.ports.last }] : []),
         ...functionEgress(parsed.FF_STORAGE_FUNCTION_ENDPOINT, parsed.FF_STORAGE_FUNCTION_CIDRS, parsed.FF_STORAGE_PORT),
         ...functionEgress(parsed.FF_SQS_FUNCTION_ENDPOINT, parsed.FF_SQS_FUNCTION_CIDRS, parsed.FF_SQS_PORT),
+        ...functionEgress(parsed.FF_SES_FUNCTION_ENDPOINT, parsed.FF_SES_FUNCTION_CIDRS, parsed.FF_SES_PORT),
       ],
-      // The CA of that server's certificate when it isn't a public one: functions' pods get it (none: '').
-      dataDbCa: dataDb?.ca ?? '',
+      // The CAs of those servers' certificates when they aren't public ones, the database server's and the cache
+      // server's together: functions' pods get them (none: '').
+      dataDbCa: [dataDb?.ca, cache?.ca]
+        .filter((ca): ca is string => !!ca)
+        .reduce((bundle, ca) => (bundle === '' || bundle.endsWith('\n') ? bundle + ca : `${bundle}\n${ca}`), ''),
     },
   };
 }

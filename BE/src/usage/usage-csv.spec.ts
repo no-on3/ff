@@ -27,31 +27,37 @@ describe('usage as CSV (P-22, P-30)', () => {
       },
     ],
     queues: [{ queueId: '3f1c9a2e-5b7d-4e8f-9a0b-1c2d3e4f5a6b', name: 'orders', deleted: false, requests: 18_420, messagesSent: 6_140, messagesReceived: 6_152, cost: '0.000' }],
+    caches: [{ cacheId: '9b2e4c1a-7d3f-4a6b-8c5e-0f1a2b3c4d5e', name: 'sessions', deleted: false, hours: 312, memoryMb: 64, gbHours: '19.5', gbMonths: '0.02621', cost: '1.502' }],
+    email: [{ resourceId: '5d41402a-bc4b-2a76-b971-9d911017c592', identity: 'shop.example.tn', deleted: false, recipients: 1_250, attachmentBytes: 52_428_800, cost: '0.376' }],
     totals: amounts,
     estimate: null,
   };
-  const HEADER = 'kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,throttled,platform_errors,lost,cost\r\n';
+  const HEADER = 'kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,attachment_bytes,throttled,platform_errors,lost,cost\r\n';
 
-  it("has a header, a line per function, then per database, per bucket and per queue, each with its estimated cost and the other kinds' columns empty, ends lines with CRLF, and leaves the total out", () => {
+  it("has a header, a line per function, then per database, per bucket, per queue, per cache and per identity's mail, each with its estimated cost and the other kinds' columns empty, ends lines with CRLF, and leaves the total out", () => {
     expect(usageCsv(view)).toBe(
       HEADER +
-        'function,3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f,"resize, ""fast""",false,3,1016,0.127,,,,,,1,0,2,0.008\r\n' +
-        `function,a7d4e2c1-6b3f-4d8e-9a1b-2c3d4e5f6a7b,"'=HYPERLINK(""http://x"")",true,3,1016,0.0008818359375,,,,,,1,0,2,0.000\r\n` +
-        'database,7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f,orders,false,,,,0.003182,,,,,,,,0.001\r\n' +
-        'bucket,0b6f3a1c-2d4e-4f5a-8b9c-1d2e3f4a5b6c,photos,true,,,,0.215231,2310,48920,2831155200,734003200,,,,0.108\r\n' +
+        'function,3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f,"resize, ""fast""",false,3,1016,0.127,,,,,,,1,0,2,0.008\r\n' +
+        `function,a7d4e2c1-6b3f-4d8e-9a1b-2c3d4e5f6a7b,"'=HYPERLINK(""http://x"")",true,3,1016,0.0008818359375,,,,,,,1,0,2,0.000\r\n` +
+        'database,7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f,orders,false,,,,0.003182,,,,,,,,,0.001\r\n' +
+        'bucket,0b6f3a1c-2d4e-4f5a-8b9c-1d2e3f4a5b6c,photos,true,,,,0.215231,2310,48920,2831155200,734003200,,,,,0.108\r\n' +
         // A queue's requests, SQS's, in the requests column.
-        'queue,3f1c9a2e-5b7d-4e8f-9a0b-1c2d3e4f5a6b,orders,false,18420,,,,,,,,,,,0.000\r\n',
+        'queue,3f1c9a2e-5b7d-4e8f-9a0b-1c2d3e4f5a6b,orders,false,18420,,,,,,,,,,,,0.000\r\n' +
+        // A cache's memory held, in GB-months as the others' storage: its 19.5 GB-hours over October's 744 hours.
+        'cache,9b2e4c1a-7d3f-4a6b-8c5e-0f1a2b3c4d5e,sessions,false,,,,0.02621,,,,,,,,,1.502\r\n' +
+        // Mail's recipients, SES's, in the requests column, and its attachments' bytes in their own.
+        'email,5d41402a-bc4b-2a76-b971-9d911017c592,shop.example.tn,false,1250,,,,,,,,52428800,,,,0.376\r\n',
     );
   });
 
   it('leaves the cost empty without a price book', () => {
     expect(usageCsv({ ...view, functions: [{ ...view.functions[0], cost: null }] }).split('\r\n')[1]).toBe(
-      'function,3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f,"resize, ""fast""",false,3,1016,0.127,,,,,,1,0,2,',
+      'function,3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f,"resize, ""fast""",false,3,1016,0.127,,,,,,,1,0,2,',
     );
   });
 
-  it('is just its header for a month without calls, databases, buckets or queues', () => {
-    expect(usageCsv({ ...view, functions: [], databases: [], buckets: [], queues: [] })).toBe(HEADER);
+  it('is just its header for a month without calls, databases, buckets, queues, caches or mail', () => {
+    expect(usageCsv({ ...view, functions: [], databases: [], buckets: [], queues: [], caches: [], email: [] })).toBe(HEADER);
   });
 
   it.each([

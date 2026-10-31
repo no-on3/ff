@@ -23,6 +23,8 @@ export type AuditAction =
   | 'support.view_invocation'
   | 'support.view_logs'
   | 'account.egress'
+  // An operator's change to an account's mail: out of the sandbox, paused, its standing cleared.
+  | 'account.email'
   // An operator turned the account's databases, buckets and queues off, or on again.
   | 'account.storage'
   | 'function.create'
@@ -55,11 +57,27 @@ export type AuditAction =
   | 'database.create'
   | 'database.password'
   | 'database.delete'
+  // A customer's cache: made, its password changed, deleted (ADR 0013).
+  | 'cache.create'
+  | 'cache.password'
+  | 'cache.delete'
+  // Customers' mail (ADR 0012): a domain or an address to send from, made, proved and deleted. An address put on the
+  // account's suppression list by it, or taken off. Its sending reviewed, then stopped, past SES's rates.
+  | 'email.identity.create'
+  | 'email.identity.verify'
+  | 'email.identity.delete'
+  | 'email.suppression.put'
+  | 'email.suppression.delete'
+  | 'email.sending.enforce'
   // A customer's bucket, made and deleted, and an access key to the account's buckets, made and revoked (ADR 0009).
   | 'bucket.create'
   | 'bucket.delete'
   // A bucket's notification configuration, set whole, through the S3 front door or FF's API.
   | 'bucket.notifications'
+  // A bucket's website configuration, set whole or removed, through the S3 front door or FF's API: it makes the bucket a site.
+  | 'bucket.website'
+  // A deploy's own key to a bucket, for an hour: `ff sites deploy` signs its uploads with it.
+  | 'bucket.deploy_key'
   | 'storage_key.create'
   | 'storage_key.delete'
   // A customer's queue, made, changed, purged and deleted through FF's API or the SQS endpoint's (ADR 0010).

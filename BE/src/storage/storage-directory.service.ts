@@ -49,10 +49,10 @@ export class StorageDirectory {
     return this.encryption.openJson<string>(key.secret, sealedFor(key.id));
   }
 
-  /** The key of that ID, unless it is revoked; null for any other. */
-  async key(accessKeyId: string): Promise<ActiveKey | null> {
+  /** The key of that ID, unless it is revoked or past its time; null for any other. */
+  async key(accessKeyId: string, now = new Date()): Promise<ActiveKey | null> {
     const key = await this.keys.findOneBy({ id: accessKeyId, revokedAt: IsNull() });
-    if (!key) return null;
+    if (!key || (key.expiresAt !== null && key.expiresAt <= now)) return null;
     return { id: key.id, accountId: key.accountId, functionId: key.functionId, buckets: key.buckets, queues: key.queues, readOnly: key.readOnly, secret: this.secretOf(key) };
   }
 

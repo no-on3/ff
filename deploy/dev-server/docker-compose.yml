@@ -1,8 +1,12 @@
 # What FF finds beside the cluster on its development server (README.md): its own PostgreSQL (the backend's and
-# Keycloak's databases), S3, a mail catcher, and the server of customers' databases. server.sh installs this file as
-# /data/ff/docker-compose.yml, beside the checkout in /data/ff/src, and writes /data/ff/.env, these variables.
-# No port is public: each listens on the Docker bridge's address on the host (FF_HOST_ADDRESS, docker0's), which
-# the cluster's pods reach and the internet doesn't; Mailpit's pages on the loopback alone, through SSH.
+# Keycloak's databases), S3, a mail catcher, and the servers of customers' databases, caches and mail. server.sh
+# installs this file as /data/ff/docker-compose.yml, beside the checkout in /data/ff/src, and writes /data/ff/.env,
+# these variables. No port is public: each listens on the Docker bridge's address on the host (FF_HOST_ADDRESS,
+# docker0's), which the cluster's pods reach and the internet doesn't; Mailpit's pages on the loopback alone, through
+# SSH. Customers' servers are on a network of their own, each at a fixed address there: Docker sends a connection to
+# docker0's address on to that one, which is the address the cluster's firewall sees, and functions' NetworkPolicy
+# opens (server.sh). server.sh builds their images itself, so that an install starts none of them again when nothing
+# of theirs changed (it says why).
 name: ff
 
 services:
@@ -33,7 +37,8 @@ services:
       - s3:/data
       - ./secrets/s3.json:/etc/seaweedfs/s3.json:ro
 
-  # Every e-mail FF and Keycloak send, kept here and sent nowhere: development only.
+  # Every e-mail FF and Keycloak send, and every one customers' mail server hands it, kept here and sent nowhere:
+  # development only.
   mail:
     image: axllent/mailpit:v1.31.4
     restart: unless-stopped
@@ -43,6 +48,10 @@ services:
     ports:
       - "${FF_HOST_ADDRESS:?}:1025:1025"
       - "127.0.0.1:8026:8025"
+    networks:
+      default:
+      customers:
+        ipv4_address: ${FF_MAILPIT_ADDRESS:?}
     volumes:
       - mail:/data
 
@@ -58,6 +67,9 @@ services:
       FF_DATA_DB_TLS_NAMES: "DNS:db.${FF_DOMAIN:?},IP:${FF_HOST_ADDRESS:?}"
     ports:
       - "${FF_HOST_ADDRESS:?}:5432:5432"
+    networks:
+      customers:
+        ipv4_address: ${FF_DATA_DB_ADDRESS:?}
     volumes:
       - data_db:/var/lib/postgresql
     healthcheck:
@@ -66,8 +78,72 @@ services:
       timeout: 3s
       retries: 30
 
+  # Customers' caches (deploy/cache): a Valkey process for each, on a port of FF_CACHE_PORTS, started by FF's agent,
+  # which takes the SHA-256 of the backend's token. Its certificate, as the database server's, from a CA it makes at
+  # its first start. Its agent answers without the token too, with a refusal: that is its health here, and server.sh
+  # checks it with the token.
+  cache:
+    build: src/deploy/cache
+    image: ff-cache:dev-server
+    restart: unless-stopped
+    environment:
+      FF_CACHE_AGENT_TOKEN_SHA256: ${FF_CACHE_AGENT_TOKEN_SHA256:?}
+      FF_CACHE_PORTS: ${FF_CACHE_PORTS:?}
+      FF_CACHE_TLS_NAMES: "DNS:cache.${FF_DOMAIN:?},IP:${FF_HOST_ADDRESS:?}"
+    ports:
+      - "${FF_HOST_ADDRESS:?}:6390:6390"
+      - "${FF_HOST_ADDRESS:?}:${FF_CACHE_PORTS:?}:${FF_CACHE_PORTS:?}"
+    networks:
+      customers:
+        ipv4_address: ${FF_CACHE_ADDRESS:?}
+    volumes:
+      - cache:/var/lib/ff-cache
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('node:https').get({host: '127.0.0.1', port: 6390, path: '/health', rejectUnauthorized: false}, (r) => process.exit(r.statusCode === 401 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # Customers' mail (deploy/mail): Postfix, which takes what the backend hands it and gives every message to Mailpit
+  # instead of its recipients' servers, and FF's agent, which gives back what bounced. The backend reaches it from
+  # the pods' network, which the cluster puts behind its own address on this network, the gateway's.
+  customer-mail:
+    build: src/deploy/mail
+    image: ff-mail:dev-server
+    restart: unless-stopped
+    environment:
+      FF_MAIL_AGENT_TOKEN_SHA256: ${FF_MAIL_AGENT_TOKEN_SHA256:?}
+      FF_MAIL_HOSTNAME: mail.${FF_DOMAIN:?}
+      FF_MAIL_RELAY_FROM: ${FF_CUSTOMERS_GATEWAY:?}/32
+      FF_MAIL_RELAYHOST: mail:1025
+      FF_MAIL_TLS_NAMES: "DNS:mail.${FF_DOMAIN:?},IP:${FF_HOST_ADDRESS:?}"
+    ports:
+      - "${FF_HOST_ADDRESS:?}:25:25"
+      - "${FF_HOST_ADDRESS:?}:6391:6391"
+    networks:
+      customers:
+        ipv4_address: ${FF_MAIL_ADDRESS:?}
+    volumes:
+      - customer_mail:/var/lib/ff-mail
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('node:https').get({host: '127.0.0.1', port: 6391, path: '/health', rejectUnauthorized: false}, (r) => process.exit(r.statusCode === 401 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+networks:
+  # Customers' database, cache and mail servers', and Mailpit's, to which the mail server hands every message: each at
+  # its own address, so that none takes another's.
+  customers:
+    ipam:
+      config:
+        - subnet: ${FF_CUSTOMERS_SUBNET:?}
+          gateway: ${FF_CUSTOMERS_GATEWAY:?}
+
 volumes:
   postgres:
   s3:
   mail:
   data_db:
+  cache:
+  customer_mail:

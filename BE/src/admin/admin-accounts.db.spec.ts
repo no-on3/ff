@@ -158,9 +158,17 @@ run('accounts, for operators (L2, P-71)', () => {
             : [],
       } as never,
       // Its buckets' rows and samples are read from the database itself; nothing here makes or empties a bucket in the store.
-      new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } })),
+      new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' } })),
       new CustomerQueues(ds, ds.getRepository(Queue)),
       new QueueStore(ds, { count: () => undefined } as never),
+      {
+        suspendAccount: async (accountId: string) => void databaseChanges.push(`caches suspend ${accountId}`),
+        reactivateAccount: async (accountId: string) => void databaseChanges.push(`caches reactivate ${accountId}`),
+        forOperator: async (accountId: string) =>
+          accountId === WITH_DATABASE
+            ? [{ name: 'sessions', serverName: 'fc-0123456789abcdef01234567', status: 'active', port: 6400, memoryMb: 64, bytesUsedForCache: 1_258_291, currConnections: 2, createdAt: new Date('2026-10-20T11:00:00Z'), host: 'cache.example.tn' }]
+            : [],
+      } as never,
     );
   });
 
@@ -262,7 +270,7 @@ run('accounts, for operators (L2, P-71)', () => {
       ['active', 'operator@ff.test', 'Use case checked'],
     ]);
     expect(page.balances).toEqual([]);
-    expect([page.databases, page.account.storageDisabledAt, page.account.storageDisabledReason]).toEqual([[], null, null]);
+    expect([page.databases, page.caches, page.account.storageDisabledAt, page.account.storageDisabledReason]).toEqual([[], [], null, null]);
     expect(page.credit).toEqual({
       currency: 'TND',
       balance: '0.000',
@@ -359,7 +367,8 @@ run('accounts, for operators (L2, P-71)', () => {
       scaled.length = 0;
       await service.changeStatus(id, 'reactivate', 'Owner removed the miner');
       expect([await statusOf(id), scaled]).toEqual(['active', [[warm.id, 2]]]);
-      expect(databaseChanges).toEqual([`suspend ${id}`, `reactivate ${id}`]);
+      // Its databases' and caches' users kept out, then let in again.
+      expect(databaseChanges).toEqual([`suspend ${id}`, `caches suspend ${id}`, `reactivate ${id}`, `caches reactivate ${id}`]);
     });
 
     it("keep the change when a function can't be scaled: the others are, and the minute's hold catches up", async () => {
@@ -395,7 +404,7 @@ run('accounts, for operators (L2, P-71)', () => {
 
       const page = await service.changeStatus(id, 'close', 'Owner asked');
 
-      expect([await statusOf(id), scaled, databaseChanges]).toEqual(['closed', [[left.id, 0]], [`suspend ${id}`]]);
+      expect([await statusOf(id), scaled, databaseChanges]).toEqual(['closed', [[left.id, 0]], [`suspend ${id}`, `caches suspend ${id}`]]);
       const due = page.account.dataDeletionDueAt as Date;
       expect(due.getTime() - before).toBeGreaterThanOrEqual(30 * DAY_MS);
       expect(due.getTime() - before).toBeLessThan(30 * DAY_MS + 60_000);
@@ -510,19 +519,22 @@ run('accounts, for operators (L2, P-71)', () => {
     await expect(service.setStorage('999999999999', false, 'Nobody')).rejects.toThrow('Account 999999999999 not found');
   });
 
-  it("shows the account's databases on its page, their names on the server, their size and sessions as the server counts them", async () => {
+  it("shows the account's databases and caches on its page, their names on the servers, their size, memory and connections as the servers count them", async () => {
     const page = await service.detail(await account({ status: AccountStatus.ACTIVE, id: WITH_DATABASE }));
 
     expect(page.databases).toEqual([
       { id: 'db-1', name: 'orders', database: 'ff_0123456789abcdef01234567', status: 'active', sizeBytes: 7_634_423, connections: 2, storageLimitMb: 1024, createdAt: new Date('2026-10-20T10:00:00Z') },
     ]);
+    expect(page.caches).toEqual([
+      { name: 'sessions', serverName: 'fc-0123456789abcdef01234567', status: 'active', port: 6400, memoryMb: 64, bytesUsedForCache: 1_258_291, currConnections: 2, createdAt: new Date('2026-10-20T11:00:00Z') },
+    ]);
   });
 
-  it("shows the account's buckets on its page, their names in the store, what each held at its last measure, and how full they are together", async () => {
+  it("shows the account's buckets on its page, their names in the store, what each held at its last measure, which are public sites, and how full they are together", async () => {
     const id = await account({ status: AccountStatus.ACTIVE });
     const [{ id: photos }] = await query<Array<{ id: string }>>(
-      `INSERT INTO buckets (account_id, name, store_name, created_at) VALUES ($1, $2, 'ff-0123456789abcdef0123456a', '2026-10-20T10:00:00Z') RETURNING id`,
-      [id, `photos-${id}`],
+      `INSERT INTO buckets (account_id, name, store_name, created_at, website) VALUES ($1, $2, 'ff-0123456789abcdef0123456a', '2026-10-20T10:00:00Z', $3) RETURNING id`,
+      [id, `photos-${id}`, JSON.stringify({ indexDocument: 'index.html', errorDocument: null, singlePageApp: false })],
     );
     await query(`INSERT INTO buckets (account_id, name, store_name, created_at) VALUES ($1, $2, 'ff-0123456789abcdef0123456b', '2026-10-21T10:00:00Z')`, [id, `zz-new-${id}`]);
     await query(`SELECT ff_ensure_month_partition('bucket_samples', '2026-10-01')`);
@@ -534,8 +546,8 @@ run('accounts, for operators (L2, P-71)', () => {
     const page = await service.detail(id);
 
     expect(page.buckets).toEqual([
-      { name: `photos-${id}`, storeName: 'ff-0123456789abcdef0123456a', status: 'active', sizeBytes: 161_480_253, objects: 1_204, measuredAt: new Date('2026-10-22T09:00:00Z'), createdAt: new Date('2026-10-20T10:00:00Z') },
-      { name: `zz-new-${id}`, storeName: 'ff-0123456789abcdef0123456b', status: 'active', sizeBytes: null, objects: null, measuredAt: null, createdAt: new Date('2026-10-21T10:00:00Z') },
+      { name: `photos-${id}`, storeName: 'ff-0123456789abcdef0123456a', status: 'active', sizeBytes: 161_480_253, objects: 1_204, measuredAt: new Date('2026-10-22T09:00:00Z'), site: true, createdAt: new Date('2026-10-20T10:00:00Z') },
+      { name: `zz-new-${id}`, storeName: 'ff-0123456789abcdef0123456b', status: 'active', sizeBytes: null, objects: null, measuredAt: null, site: false, createdAt: new Date('2026-10-21T10:00:00Z') },
     ]);
     expect(page.account.bucketStorageNotice).toBe(80);
   });

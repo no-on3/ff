@@ -84,6 +84,61 @@ export class DatabaseMetricsView {
   @ApiProperty({ type: DatabaseMetricSeries }) metrics: DatabaseMetricSeries;
 }
 
+class CacheStatisticSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: "The most of the hour's samples; null for an hour without one" }) Maximum: Array<number | null>;
+  @ApiProperty({ type: [Number], nullable: true, description: "The mean of the hour's samples; null for an hour without one" }) Average: Array<number | null>;
+}
+
+class CacheCountSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: "The hour's, from the next hour's sample less its own; null without both, as in the hour now" }) Sum: Array<number | null>;
+}
+
+class CacheMetricSeries {
+  @ApiProperty({ type: CacheStatisticSeries, description: "What its keys and their overhead use: INFO's used_memory" }) BytesUsedForCache: CacheStatisticSeries;
+  @ApiProperty({ type: CacheStatisticSeries, description: "Its connections, FF's own left out" }) CurrConnections: CacheStatisticSeries;
+  @ApiProperty({ type: CacheCountSeries, description: 'Reads that found their key' }) CacheHits: CacheCountSeries;
+  @ApiProperty({ type: CacheCountSeries, description: "Reads that didn't" }) CacheMisses: CacheCountSeries;
+  @ApiProperty({ type: CacheCountSeries, description: 'Keys it let go past its memory, the least recently used first' }) Evictions: CacheCountSeries;
+}
+
+class EmailCountSeries {
+  @ApiProperty({ type: [Number], description: "The hour's recipients, each counted in its message's hour; 0 for an hour without one" }) Sum: number[];
+}
+
+class EmailRateSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: 'A fraction, as SES gives it: over the 14 days that end with the hour; null without a recipient reached in them' })
+  Average: Array<number | null>;
+}
+
+class EmailMetricSeries {
+  @ApiProperty({ type: EmailCountSeries, description: 'Sent, each recipient one' }) Send: EmailCountSeries;
+  @ApiProperty({ type: EmailCountSeries, description: 'Taken by the receiving side, and not bounced since: complained of too' }) Delivery: EmailCountSeries;
+  @ApiProperty({ type: EmailCountSeries, description: 'Bounced, or kept off by the suppression list' }) Bounce: EmailCountSeries;
+  @ApiProperty({ type: EmailCountSeries, description: 'Complained of' }) Complaint: EmailCountSeries;
+  @ApiProperty({ type: EmailRateSeries, name: 'Reputation.BounceRate', description: 'Its recipients reached that bounced for good, as the enforcement judges it' })
+  'Reputation.BounceRate': EmailRateSeries;
+  @ApiProperty({ type: EmailRateSeries, name: 'Reputation.ComplaintRate', description: 'Its recipients reached that complained' })
+  'Reputation.ComplaintRate': EmailRateSeries;
+}
+
+/** The account's mail's metrics: a point an hour of the window, oldest first. */
+export class EmailMetricsView {
+  @ApiProperty({ example: 3600 }) period: number;
+  @ApiProperty() start: Date;
+  @ApiProperty({ description: 'Excluded' }) end: Date;
+  @ApiProperty({ type: [Date], description: "Each hour's start" }) timestamps: Date[];
+  @ApiProperty({ type: EmailMetricSeries }) metrics: EmailMetricSeries;
+}
+
+/** A cache's metrics: a point an hour of the window, oldest first. */
+export class CacheMetricsView {
+  @ApiProperty({ example: 3600 }) period: number;
+  @ApiProperty() start: Date;
+  @ApiProperty({ description: 'Excluded' }) end: Date;
+  @ApiProperty({ type: [Date], description: "Each hour's start" }) timestamps: Date[];
+  @ApiProperty({ type: CacheMetricSeries }) metrics: CacheMetricSeries;
+}
+
 class BucketStorageSeries {
   @ApiProperty({ type: [Number], nullable: true, description: "Its hour's measure, in each period of the hour; null in an hour it wasn't measured in" }) Average: Array<number | null>;
 }
@@ -111,6 +166,27 @@ export class BucketMetricsView {
   @ApiProperty({ description: 'Excluded' }) end: Date;
   @ApiProperty({ type: [Date], description: "Each period's start" }) timestamps: Date[];
   @ApiProperty({ type: BucketMetricSeries }) metrics: BucketMetricSeries;
+}
+
+class SiteShareSeries {
+  @ApiProperty({ type: [Number], nullable: true, description: "The period's share of the site's visits, in percent; null in a period without a visit" }) Average: Array<number | null>;
+}
+
+class SiteMetricSeries {
+  @ApiProperty({ type: BucketRequestSeries, description: "The site's visits that the website server answered" }) Requests: BucketRequestSeries;
+  @ApiProperty({ type: BucketRequestSeries, description: 'The bytes of the bodies it sent them' }) BytesDownloaded: BucketRequestSeries;
+  @ApiProperty({ type: SiteShareSeries, description: 'The share of them answered 4xx' }) '4xxErrorRate': SiteShareSeries;
+  @ApiProperty({ type: SiteShareSeries, description: 'The share of them answered 5xx' }) '5xxErrorRate': SiteShareSeries;
+  @ApiProperty({ type: SiteShareSeries, description: 'The share of them answered 4xx or 5xx' }) TotalErrorRate: SiteShareSeries;
+}
+
+/** GET /buckets/:name/website/metrics: a site's visits, as CloudWatch names a CloudFront distribution's metrics. */
+export class SiteMetricsView {
+  @ApiProperty({ enum: PERIODS }) period: number;
+  @ApiProperty() start: Date;
+  @ApiProperty({ description: 'Excluded' }) end: Date;
+  @ApiProperty({ type: [Date], description: "Each period's start" }) timestamps: Date[];
+  @ApiProperty({ type: SiteMetricSeries }) metrics: SiteMetricSeries;
 }
 
 class QueueGaugeSeries {

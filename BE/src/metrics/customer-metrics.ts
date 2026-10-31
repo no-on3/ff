@@ -206,6 +206,149 @@ export function databaseMetricsView(window: MetricsWindow, rows: DatabaseHourRow
   return view;
 }
 
+/** A cache's metrics have a point an hour: its samples' (ADR 0013). */
+export const CACHE_PERIOD = 3600;
+
+/**
+ * A customer's cache's metrics, as CloudWatch names ElastiCache's: what its
+ * keys use (BytesUsedForCache) and its connections (CurrConnections), from
+ * its hour's sample; and its hits, misses and evictions in the hour
+ * (CacheHits, CacheMisses, Evictions), from its sample to the next hour's,
+ * all of the next one's own when its process started again between them. An
+ * hour without a sample has none: null; its counts are null too without the
+ * next hour's, as in the hour now.
+ */
+export interface CacheMetricsView {
+  period: number;
+  start: Date;
+  end: Date;
+  timestamps: Date[];
+  metrics: {
+    BytesUsedForCache: { Maximum: Array<number | null>; Average: Array<number | null> };
+    CurrConnections: { Maximum: Array<number | null>; Average: Array<number | null> };
+    CacheHits: { Sum: Array<number | null> };
+    CacheMisses: { Sum: Array<number | null> };
+    Evictions: { Sum: Array<number | null> };
+  };
+}
+
+/** An hour's samples of a cache, as the query gives them: their most and their mean, and the hour's counts, null without the next hour's sample. */
+export interface CacheHourRow {
+  bucket: number;
+  bytesMaximum: number;
+  bytesAverage: number;
+  connectionsMaximum: number;
+  connectionsAverage: number;
+  hits: number | null;
+  misses: number | null;
+  evictions: number | null;
+}
+
+/** The series of the window, a point an hour, null where the cache wasn't sampled. */
+export function cacheMetricsView(window: MetricsWindow, rows: CacheHourRow[]): CacheMetricsView {
+  const byBucket = new Map(rows.map((row) => [row.bucket, row]));
+  const view: CacheMetricsView = {
+    period: window.period,
+    start: window.start,
+    end: window.end,
+    timestamps: [],
+    metrics: {
+      BytesUsedForCache: { Maximum: [], Average: [] },
+      CurrConnections: { Maximum: [], Average: [] },
+      CacheHits: { Sum: [] },
+      CacheMisses: { Sum: [] },
+      Evictions: { Sum: [] },
+    },
+  };
+  const m = view.metrics;
+  for (let bucket = window.start.getTime() / 1000; bucket < window.end.getTime() / 1000; bucket += window.period) {
+    const row = byBucket.get(bucket);
+    view.timestamps.push(new Date(bucket * 1000));
+    m.BytesUsedForCache.Maximum.push(row ? row.bytesMaximum : null);
+    m.BytesUsedForCache.Average.push(row ? Math.round(row.bytesAverage) : null);
+    m.CurrConnections.Maximum.push(row ? row.connectionsMaximum : null);
+    m.CurrConnections.Average.push(row ? round3(row.connectionsAverage) : null);
+    m.CacheHits.Sum.push(row ? row.hits : null);
+    m.CacheMisses.Sum.push(row ? row.misses : null);
+    m.Evictions.Sum.push(row ? row.evictions : null);
+  }
+  return view;
+}
+
+/** Mail's metrics have a point an hour (ADR 0012), as caches' do. */
+export const EMAIL_PERIOD = 3600;
+/** The days a reputation rate is judged on, as FF's enforcement judges it: those of the last 14. */
+export const REPUTATION_DAYS = 14;
+
+/**
+ * An account's mail's metrics, as CloudWatch names SES's, a point an hour from
+ * its messages, each recipient one, counted in its message's hour: sent
+ * (Send), taken by the receiving side and not bounced since, complaints
+ * included (Delivery), bounced or kept off by the suppression list (Bounce),
+ * complained of (Complaint). And its reputation at each hour's end, over the
+ * 14 days before it, as FF's enforcement judges it: the share of the
+ * recipients its mail reached that bounced for good, and that complained, a
+ * fraction as SES gives it (Reputation.BounceRate, Reputation.ComplaintRate);
+ * null without a recipient reached in those days.
+ */
+export interface EmailMetricsView {
+  period: number;
+  start: Date;
+  end: Date;
+  timestamps: Date[];
+  metrics: {
+    Send: { Sum: number[] };
+    Delivery: { Sum: number[] };
+    Bounce: { Sum: number[] };
+    Complaint: { Sum: number[] };
+    'Reputation.BounceRate': { Average: Array<number | null> };
+    'Reputation.ComplaintRate': { Average: Array<number | null> };
+  };
+}
+
+/** An hour's recipients, as the query counts them: what became of them, and those its reputation is judged on. */
+export interface EmailHourRow {
+  bucket: number;
+  send: number;
+  delivery: number;
+  bounce: number;
+  complaint: number;
+  /** Reached: taken, bounced or complained of, as the enforcement counts them. */
+  reached: number;
+  /** Bounced for good. */
+  hardBounces: number;
+}
+
+/** The series of the window, a point an hour; the rows reach 14 days before it, for the rates. */
+export function emailMetricsView(window: MetricsWindow, rows: EmailHourRow[]): EmailMetricsView {
+  const byBucket = new Map(rows.map((row) => [row.bucket, row]));
+  const view: EmailMetricsView = {
+    period: window.period,
+    start: window.start,
+    end: window.end,
+    timestamps: [],
+    metrics: { Send: { Sum: [] }, Delivery: { Sum: [] }, Bounce: { Sum: [] }, Complaint: { Sum: [] }, 'Reputation.BounceRate': { Average: [] }, 'Reputation.ComplaintRate': { Average: [] } },
+  };
+  const m = view.metrics;
+  const days = REPUTATION_DAYS * 86_400;
+  for (let bucket = window.start.getTime() / 1000; bucket < window.end.getTime() / 1000; bucket += window.period) {
+    const row = byBucket.get(bucket);
+    view.timestamps.push(new Date(bucket * 1000));
+    m.Send.Sum.push(row?.send ?? 0);
+    m.Delivery.Sum.push(row?.delivery ?? 0);
+    m.Bounce.Sum.push(row?.bounce ?? 0);
+    m.Complaint.Sum.push(row?.complaint ?? 0);
+    // The 14 days that end with the hour.
+    const end = bucket + window.period;
+    const judged = rows.filter((one) => one.bucket >= end - days && one.bucket < end);
+    const reached = judged.reduce((sum, one) => sum + one.reached, 0);
+    const rate = (count: (one: EmailHourRow) => number) => (reached === 0 ? null : Math.round((judged.reduce((sum, one) => sum + count(one), 0) / reached) * 1e6) / 1e6);
+    m['Reputation.BounceRate'].Average.push(rate((one) => one.hardBounces));
+    m['Reputation.ComplaintRate'].Average.push(rate((one) => one.complaint));
+  }
+  return view;
+}
+
 /** The request metrics a bucket has, each period's Sum, as CloudWatch names S3's. */
 export const BUCKET_REQUEST_METRICS = ['AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'] as const;
 export type BucketRequestMetric = (typeof BUCKET_REQUEST_METRICS)[number];
@@ -255,6 +398,61 @@ export function bucketMetricsView(window: MetricsWindow, hours: BucketHourRow[],
     view.metrics.BucketSizeBytes.Average.push(measure ? measure.sizeBytes : null);
     view.metrics.NumberOfObjects.Average.push(measure ? measure.objects : null);
     for (const metric of BUCKET_REQUEST_METRICS) view.metrics[metric].Sum.push(period?.[metric] ?? 0);
+  }
+  return view;
+}
+
+/** A site's metrics, as CloudWatch names a CloudFront distribution's: its visits and their bytes, each period's Sum; the shares of them that failed, in percent. */
+export const SITE_METRICS = ['Requests', 'BytesDownloaded', '4xxErrorRate', '5xxErrorRate', 'TotalErrorRate'] as const;
+export type SiteMetric = (typeof SITE_METRICS)[number];
+/** Of them, the shares, each period's Average. */
+export const SITE_RATES = ['4xxErrorRate', '5xxErrorRate', 'TotalErrorRate'] as const;
+export type SiteRate = (typeof SITE_RATES)[number];
+
+/**
+ * A bucket's site's metrics, as CloudWatch names a CloudFront distribution's
+ * (ADR 0011), from the website server's counts by the minute: its visits
+ * (Requests) and the bytes they sent (BytesDownloaded), each period's Sum, a
+ * quiet period's 0; and the share of the visits answered 4xx, 5xx and either,
+ * in percent, each period's Average, null in a period without a visit. The
+ * bucket's own metrics count its site's visits among its requests.
+ */
+export interface SiteMetricsView {
+  period: Period;
+  start: Date;
+  end: Date;
+  timestamps: Date[];
+  metrics: { Requests: { Sum: number[] }; BytesDownloaded: { Sum: number[] } } & Record<SiteRate, { Average: Array<number | null> }>;
+}
+
+/** A period's visits to a site, as the query sums them; a quiet period has no row. */
+export interface SitePeriodRow {
+  bucket: number;
+  requests: number;
+  bytesOut: number;
+  errors4xx: number;
+  errors5xx: number;
+}
+
+/** The series of the window, a point per period: zeros where quiet, the shares null where there was no visit. */
+export function siteMetricsView(window: MetricsWindow, periods: SitePeriodRow[]): SiteMetricsView {
+  const byPeriod = new Map(periods.map((row) => [row.bucket, row]));
+  const view: SiteMetricsView = {
+    period: window.period,
+    start: window.start,
+    end: window.end,
+    timestamps: [],
+    metrics: { Requests: { Sum: [] }, BytesDownloaded: { Sum: [] }, '4xxErrorRate': { Average: [] }, '5xxErrorRate': { Average: [] }, TotalErrorRate: { Average: [] } },
+  };
+  const share = (part: number, all: number) => (all === 0 ? null : round3((100 * part) / all));
+  for (let start = window.start.getTime() / 1000; start < window.end.getTime() / 1000; start += window.period) {
+    const { requests = 0, bytesOut = 0, errors4xx = 0, errors5xx = 0 } = byPeriod.get(start) ?? {};
+    view.timestamps.push(new Date(start * 1000));
+    view.metrics.Requests.Sum.push(requests);
+    view.metrics.BytesDownloaded.Sum.push(bytesOut);
+    view.metrics['4xxErrorRate'].Average.push(share(errors4xx, requests));
+    view.metrics['5xxErrorRate'].Average.push(share(errors5xx, requests));
+    view.metrics.TotalErrorRate.Average.push(share(errors4xx + errors5xx, requests));
   }
   return view;
 }

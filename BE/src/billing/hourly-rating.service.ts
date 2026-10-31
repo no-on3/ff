@@ -14,7 +14,7 @@ import { HOUR_MS, dueHours, settleMs, usageKey } from './rating-hours';
 import { FunctionUsage, hoursIn, rateMonth } from './rating';
 import { RatingRun } from './rating-run.entity';
 import { UsageCharge } from './usage-charge.entity';
-import { BILLED_CALL, RESOURCE_SUMS, ResourceRow, SAMPLE_SUMS, callSums, resourceUsage } from './usage-sql';
+import { BILLED_CALL, EMAIL_RESOURCE_ID, RESOURCE_SUMS, ResourceRow, SAMPLE_SUMS, callSums, resourceUsage } from './usage-sql';
 
 const MINUTE_MS = 60_000;
 /** One backend rates at a time: the others skip their turn (parent §4.3). */
@@ -33,8 +33,8 @@ interface HourlyRow {
 
 /**
  * The hourly rating (P-32, D9). Once an hour has settled, its usage is summed
- * into usage_hourly, its databases' and buckets' samples and its buckets' and
- * queues' requests into resource_usage_hourly, and each account that used
+ * into usage_hourly, its databases', buckets' and caches' samples, its
+ * buckets' and queues' requests and its mail into resource_usage_hourly, and each account that used
  * something in it is charged:
  * its month so far, rated with the books of P-30 and rounded once, less what
  * the month's earlier hours were charged. The free tier and the duration
@@ -165,12 +165,19 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
          FROM (SELECT "bucket_id", "account_id", "name", "size_bytes" FROM "bucket_samples" WHERE "hour" = $1) s
          FULL JOIN (SELECT "bucket_id", max("account_id") AS "account_id", max("name") AS "name",
                            coalesce(sum("requests") FILTER (WHERE "class" = 'tier1'), 0) AS "tier1",
-                           coalesce(sum("requests") FILTER (WHERE "class" = 'tier2'), 0) AS "tier2"
+                           coalesce(sum("requests") FILTER (WHERE "class" IN ('tier2', 'website')), 0) AS "tier2"
                       FROM "storage_request_counts" WHERE "minute" >= $1 AND "minute" < $3 GROUP BY "bucket_id") r
            ON r."bucket_id" = s."bucket_id"
         WHERE s."bucket_id" IS NOT NULL OR r."tier1" > 0 OR r."tier2" > 0
        ON CONFLICT DO NOTHING`,
       [hour, book.id, new Date(hour.getTime() + HOUR_MS)],
+    );
+    // Each cache sampled in the hour: its memory, the plan's, for one hour, as ElastiCache bills a node, and its name then.
+    await this.dataSource.query(
+      `INSERT INTO "resource_usage_hourly" ("account_id", "hour", "resource_id", "kind", "name", "price_book_id", "byte_hours", "hours", "tier1_requests", "tier2_requests")
+       SELECT "account_id", $1, "cache_id", 'cache', "name", $2, "memory_mb"::bigint * 1048576, 1, 0, 0 FROM "cache_samples" WHERE "hour" = $1
+       ON CONFLICT DO NOTHING`,
+      [hour, book.id],
     );
     // Each queue asked something billed in the hour: its requests as SQS bills them, and its name then. One that only
     // had FF's deletes after a function's batch costs nothing, and has no row.
@@ -179,6 +186,16 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
        SELECT max("account_id"), $1, "queue_id", 'queue', max("name"), $2, 0, 0, 0, 0, sum("requests")
          FROM "queue_request_counts" WHERE "minute" >= $1 AND "minute" < $3
         GROUP BY "queue_id" HAVING sum("requests") > 0
+       ON CONFLICT DO NOTHING`,
+      [hour, book.id, new Date(hour.getTime() + HOUR_MS)],
+    );
+    // Each domain or address that sent mail in the hour: its messages' recipients, each one, and their attachments,
+    // each recipient's copy, as SES bills them, under the identity's name.
+    await this.dataSource.query(
+      `INSERT INTO "resource_usage_hourly" ("account_id", "hour", "resource_id", "kind", "name", "price_book_id", "byte_hours", "hours", "tier1_requests", "tier2_requests", "requests", "bytes")
+       SELECT "account_id", $1, ${EMAIL_RESOURCE_ID}, 'email', "identity", $2, 0, 0, 0, 0, sum("recipients"), sum("attachment_bytes"::bigint * "recipients")
+         FROM "email_sends" WHERE "sent_at" >= $1 AND "sent_at" < $3
+        GROUP BY "account_id", "identity"
        ON CONFLICT DO NOTHING`,
       [hour, book.id, new Date(hour.getTime() + HOUR_MS)],
     );

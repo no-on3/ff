@@ -27,7 +27,7 @@ eval "$(ff buckets keys create --bucket photos | grep '^export ')"
 aws s3 cp ./chat.jpg s3://photos/2026/chat.jpg
 ```
 
-`ff buckets keys create` n'affiche le secret de la clé qu'à ce moment-là, sous la forme des quatre variables que lisent les outils d'AWS : `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` et `AWS_ENDPOINT_URL_S3`, l'adresse de FF. Avec elles, la CLI et les SDK d'AWS n'ont besoin d'aucune autre option. Seuls les propriétaires du compte voient, créent et révoquent les clés ; une clé révoquée est refusée aussitôt : `ff buckets keys revoke AKFF…`.
+`ff buckets keys create` n'affiche le secret de la clé qu'à ce moment-là, sous la forme des six variables que lisent les outils d'AWS : `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, et les adresses de FF pour S3, SQS et SES, `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL_SQS` et `AWS_ENDPOINT_URL_SESV2`. Avec elles, la CLI et les SDK d'AWS n'ont besoin d'aucune autre option. Seuls les propriétaires du compte voient, créent et révoquent les clés ; une clé révoquée est refusée aussitôt : `ff buckets keys revoke AKFF…`.
 
 ## Depuis une fonction
 

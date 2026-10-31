@@ -1,12 +1,13 @@
-import type { BucketMetricsView, BucketRequestMetric, DatabaseMetricsView, MetricsView, QueueMetricsView } from '../metrics/customer-metrics';
-import { DATABASE_PERIOD } from '../metrics/customer-metrics';
+import type { BucketMetricsView, BucketRequestMetric, CacheMetricsView, DatabaseMetricsView, EmailMetricsView, MetricsView, QueueMetricsView, SiteMetricsView } from '../metrics/customer-metrics';
+import { CACHE_PERIOD, DATABASE_PERIOD, EMAIL_PERIOD } from '../metrics/customer-metrics';
 
 /**
  * An alarm's rules, as CloudWatch's: a metric and its statistic over a
  * period, compared with a threshold, "M out of N" periods breaching, and what
  * a period without a datapoint counts as. The metrics are those of the
- * metrics API, a database's, a bucket's and a queue's among them, and two of
- * the account's money, read as they are.
+ * metrics API, a database's, a bucket's, a queue's, a cache's and the
+ * account's mail's among them, and two of the account's money, read as they
+ * are.
  */
 
 /** The metrics an alarm watches, and the statistics each has. */
@@ -35,6 +36,11 @@ export const STATISTICS = {
   '5xxErrors': ['Sum'],
   BytesDownloaded: ['Sum'],
   BytesUploaded: ['Sum'],
+  // A bucket's site's, as CloudWatch names a CloudFront distribution's: its visits, and the share of them that failed, in percent.
+  Requests: ['Sum'],
+  '4xxErrorRate': ['Average'],
+  '5xxErrorRate': ['Average'],
+  TotalErrorRate: ['Average'],
   // A customer's queue's, as CloudWatch names SQS's: its messages, sampled each minute, and its requests.
   ApproximateNumberOfMessagesVisible: ['Maximum', 'Average'],
   ApproximateNumberOfMessagesNotVisible: ['Maximum', 'Average'],
@@ -45,6 +51,19 @@ export const STATISTICS = {
   NumberOfMessagesDeleted: ['Sum'],
   NumberOfEmptyReceives: ['Sum'],
   SentMessageSize: ['Average', 'Maximum'],
+  // A customer's cache's, a point an hour, as CloudWatch names ElastiCache's: what its keys use, its connections, and its hour's hits, misses and evictions.
+  BytesUsedForCache: ['Maximum', 'Average'],
+  CurrConnections: ['Maximum', 'Average'],
+  CacheHits: ['Sum'],
+  CacheMisses: ['Sum'],
+  Evictions: ['Sum'],
+  // The account's mail's, a point an hour, as CloudWatch names SES's: its recipients sent, taken, bounced and complained of, and its reputation, a fraction.
+  Send: ['Sum'],
+  Delivery: ['Sum'],
+  Bounce: ['Sum'],
+  Complaint: ['Sum'],
+  'Reputation.BounceRate': ['Average'],
+  'Reputation.ComplaintRate': ['Average'],
   // The account's money, in the prices' currency, read as it is at each evaluation.
   Balance: ['Latest'],
   MonthToDateCharges: ['Latest'],
@@ -57,8 +76,21 @@ export const ALL_STATISTICS = [...new Set(Object.values(STATISTICS).flat())] as 
 export const BILLING_METRICS: readonly Metric[] = ['Balance', 'MonthToDateCharges'];
 /** A database's: the alarm names it, and judges hours. */
 export const DATABASE_METRICS: readonly Metric[] = ['DatabaseConnections', 'VolumeBytesUsed'];
-/** A bucket's: the alarm names it. */
-export const BUCKET_METRICS: readonly Metric[] = ['BucketSizeBytes', 'NumberOfObjects', 'AllRequests', 'GetRequests', 'PutRequests', '4xxErrors', '5xxErrors', 'BytesDownloaded', 'BytesUploaded'];
+/** A bucket's site's: the alarm names the bucket. */
+export const SITE_ALARM_METRICS: readonly Metric[] = ['Requests', '4xxErrorRate', '5xxErrorRate', 'TotalErrorRate'];
+/** A bucket's, its site's among them: the alarm names it. */
+export const BUCKET_METRICS: readonly Metric[] = [
+  'BucketSizeBytes',
+  'NumberOfObjects',
+  'AllRequests',
+  'GetRequests',
+  'PutRequests',
+  '4xxErrors',
+  '5xxErrors',
+  'BytesDownloaded',
+  'BytesUploaded',
+  ...SITE_ALARM_METRICS,
+];
 /** A queue's: the alarm names it. */
 export const QUEUE_METRICS: readonly Metric[] = [
   'ApproximateNumberOfMessagesVisible',
@@ -71,6 +103,12 @@ export const QUEUE_METRICS: readonly Metric[] = [
   'NumberOfEmptyReceives',
   'SentMessageSize',
 ];
+
+/** A cache's: the alarm names it, and judges hours. */
+export const CACHE_METRICS: readonly Metric[] = ['BytesUsedForCache', 'CurrConnections', 'CacheHits', 'CacheMisses', 'Evictions'];
+
+/** The account's mail's: account-wide, the alarm names nothing, and judges hours. */
+export const EMAIL_METRICS: readonly Metric[] = ['Send', 'Delivery', 'Bounce', 'Complaint', 'Reputation.BounceRate', 'Reputation.ComplaintRate'];
 
 export const COMPARISONS = ['GreaterThanThreshold', 'GreaterThanOrEqualToThreshold', 'LessThanThreshold', 'LessThanOrEqualToThreshold'] as const;
 export type Comparison = (typeof COMPARISONS)[number];
@@ -96,6 +134,8 @@ export interface AlarmRule {
   bucketId: string | null;
   /** The queue it names, if any. */
   queueId: string | null;
+  /** The cache it names, if any. */
+  cacheId: string | null;
   metric: Metric;
   statistic: Statistic;
   period: number;
@@ -126,6 +166,20 @@ export function alarmProblem(rule: AlarmRule): string | null {
     if (!rule.queueId || rule.functionId || rule.databaseId || rule.bucketId) return `${rule.metric} is a queue's: the alarm names a queueName, and no function, database or bucket`;
   } else if (rule.queueId) {
     return `A queueName goes with a queue's metrics only: ${QUEUE_METRICS.join(', ')}`;
+  }
+  if (CACHE_METRICS.includes(rule.metric)) {
+    if (!rule.cacheId || rule.functionId || rule.databaseId || rule.bucketId || rule.queueId) {
+      return `${rule.metric} is a cache's: the alarm names a cacheName, and no function, database, bucket or queue`;
+    }
+    if (rule.period !== CACHE_PERIOD) return `A cache's metrics have a point an hour: period must be ${CACHE_PERIOD}`;
+  } else if (rule.cacheId) {
+    return `A cacheName goes with a cache's metrics only: ${CACHE_METRICS.join(', ')}`;
+  }
+  if (EMAIL_METRICS.includes(rule.metric)) {
+    if (rule.functionId || rule.databaseId || rule.bucketId || rule.queueId || rule.cacheId) {
+      return `${rule.metric} is the account's mail's: the alarm names no function, database, bucket, queue or cache`;
+    }
+    if (rule.period !== EMAIL_PERIOD) return `Mail's metrics have a point an hour: period must be ${EMAIL_PERIOD}`;
   }
   if (BILLING_METRICS.includes(rule.metric)) {
     if (rule.functionId) return `${rule.metric} is the account's: a billing alarm names no function`;
@@ -211,6 +265,13 @@ export function bucketDatapointsOf(view: BucketMetricsView, metric: Metric, stat
   return requests.Sum;
 }
 
+/** A site's metric's datapoints, oldest first: its visits every period, a quiet one's 0; a share null where there was no visit. */
+export function siteDatapointsOf(view: SiteMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
+  if (metric === 'Requests' && statistic === 'Sum') return view.metrics.Requests.Sum;
+  if ((metric === '4xxErrorRate' || metric === '5xxErrorRate' || metric === 'TotalErrorRate') && statistic === 'Average') return view.metrics[metric].Average;
+  throw new Error(`${metric} ${statistic} isn't a site's metric`);
+}
+
 /** A queue's metric's datapoints, oldest first: its messages and their age every period, an empty queue's 0; the size of messages sent null where none was. */
 export function queueDatapointsOf(view: QueueMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
   const m = view.metrics;
@@ -230,6 +291,39 @@ export function queueDatapointsOf(view: QueueMetricsView, metric: Metric, statis
       return m.SentMessageSize[statistic as 'Average' | 'Maximum'];
     default:
       throw new Error(`${metric} isn't a queue's metric`);
+  }
+}
+
+/** A cache's metric's datapoints, oldest first: null for an hour it wasn't sampled in. */
+export function cacheDatapointsOf(view: CacheMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
+  const m = view.metrics;
+  switch (metric) {
+    case 'BytesUsedForCache':
+    case 'CurrConnections':
+      return m[metric][statistic as 'Maximum' | 'Average'];
+    case 'CacheHits':
+    case 'CacheMisses':
+    case 'Evictions':
+      return m[metric].Sum;
+    default:
+      throw new Error(`${metric} isn't a cache's metric`);
+  }
+}
+
+/** The account's mail's metric's datapoints, oldest first: an hour's count, 0 without a message; a rate, null without a recipient reached in its 14 days. */
+export function emailDatapointsOf(view: EmailMetricsView, metric: Metric): Array<number | null> {
+  const m = view.metrics;
+  switch (metric) {
+    case 'Send':
+    case 'Delivery':
+    case 'Bounce':
+    case 'Complaint':
+      return m[metric].Sum;
+    case 'Reputation.BounceRate':
+    case 'Reputation.ComplaintRate':
+      return m[metric].Average;
+    default:
+      throw new Error(`${metric} isn't mail's metric`);
   }
 }
 

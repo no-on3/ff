@@ -69,8 +69,10 @@ export class PostgresDataServer implements DataServer {
       user: settings.adminUser,
       password: settings.adminPassword,
       database: 'postgres',
-      // Always TLS, the certificate checked: against the server's CA when it isn't a public one.
-      ssl: settings.ca ? { ca: settings.ca, rejectUnauthorized: true } : { rejectUnauthorized: true },
+      // Always TLS, the certificate checked: against the server's CA when it isn't a public one, and for the host the
+      // backend connects to. node-postgres names a host to TLS only when it is a name: reached at its address, the
+      // server's certificate would be checked for "localhost".
+      ssl: { ...(settings.ca ? { ca: settings.ca } : {}), rejectUnauthorized: true, host: settings.adminHost },
       max: 4,
       connectionTimeoutMillis: 5_000,
       idleTimeoutMillis: 30_000,

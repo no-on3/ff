@@ -35,8 +35,14 @@
 # connection string over TLS as its own user, the plan's one database, a new
 # password, a function reaching it with its account's internet access off and
 # trusting its certificate, its hourly sample within a minute, then deleted
-# from the server. Then customers' buckets: made through the API, a name once
-# across FF, the plan's five; access keys, two at most, the secret once; then
+# from the server. Then a customer's cache on the run's own server of
+# customers' caches: made, its address over TLS as its own user, the plan's
+# memory with the least recently used keys going past it, the server's settings
+# refused, its process under a user of its own, the plan's one cache, a new
+# password, a function reaching it with its account's internet access off and
+# logging in, then deleted from the server. Then customers' buckets: made
+# through the API, a name once across FF, the plan's five; access keys, two at
+# most, the secret once; then
 # AWS's SDK for JavaScript v3, boto3 and the AWS CLI through the S3 front door,
 # only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in
 # parts, presigned URLs, a wrong signature, an expired URL, another account's
@@ -108,6 +114,11 @@ cluster_gateway="$(docker network inspect "k3d-$FF_CLUSTER_NAME" --format '{{ran
 # Customers' databases (ADR 0008): the run's own server, on 10.199.1.0/24, which no other run uses.
 data_db_address=10.199.1.10
 e2e_data_db 10.199.1.0/24 "$data_db_address"
+# Customers' caches (ADR 0013): the run's own server, beside it.
+cache_address=10.199.1.11
+e2e_cache "$cache_address"
+# Customers' mail (ADR 0012): the run's own server, beside them, handing what it sends to a stand-in for recipients'.
+e2e_mail 10.199.1.12 10.199.1.13
 
 echo "== backend"
 e2e_build
@@ -121,6 +132,10 @@ url_port="$(free_port)"
 storage_port="$(free_port)"
 # Queues' SQS endpoint on a third, at http://localhost:<port>; functions reach it at the cluster's gateway.
 sqs_port="$(free_port)"
+# Buckets' sites on a fourth, each at http://<bucket>.site.localhost:<port>, which curl takes to this machine.
+website_port="$(free_port)"
+# Customers' mail's SES endpoint on a fifth, at http://localhost:<port>; functions reach it at the cluster's gateway.
+ses_port="$(free_port)"
 # Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
 dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
@@ -130,7 +145,10 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_STORAGE_FUNCTION_ENDPOINT="http://$cluster_gateway:$storage_port" FF_STORAGE_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://localhost:$sqs_port"
   FF_SQS_FUNCTION_ENDPOINT="http://$cluster_gateway:$sqs_port" FF_SQS_FUNCTION_CIDRS="$cluster_gateway/32"
-  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}")
+  FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port"
+  FF_SES_PORT="$ses_port" FF_SES_BASE="http://localhost:$ses_port"
+  FF_SES_FUNCTION_ENDPOINT="http://$cluster_gateway:$ses_port" FF_SES_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
 (cd "$FF_REPO_ROOT/BE" && timeout 180 env "${be_env[@]}" NODE_ENV=production node dist/main.js) \
@@ -834,6 +852,83 @@ http DELETE "/databases/$db_id" >/dev/null
 check "a database deleted: 204, then 404, gone from the server with its user" "204 404 0 0" \
   "$(status) $(http GET "/databases/$db_id" >/dev/null; status) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$db_name') || ' ' || (select count(*) from pg_roles where rolname = '$db_name')")"
 
+echo "== customers' caches (ADR 0013)"
+made="$(http POST /caches '{"name": "e2e-sessions"}')"
+check "a cache is made: active, Valkey, the plan's 64 MB, its address with its password in the answer, TLS asked" "201 active Valkey 9.1 64 true true" \
+  "$(status) $(jq -r '. as $c | "\($c.status) \($c.engine) \($c.memoryMb) \($c.url == "rediss://default:\($c.password)@\($c.host):\($c.port)") \($c.address == "rediss://default@\($c.host):\($c.port)")"' <<<"$made")"
+cache_url="$(jq -r .url <<<"$made")"
+cache_server_name="$(env_q "SELECT server_name FROM caches WHERE name = 'e2e-sessions'")"
+check "the address reaches it over TLS, the server's certificate checked, as the customer's user" "OK two croissants default" \
+  "$(cache_cli "$cache_url" SET cart:42 'two croissants') $(cache_cli "$cache_url" GET cart:42) $(cache_cli "$cache_url" ACL WHOAMI)"
+memory="$(cache_cli "$cache_url" INFO memory | tr -d '\r')"
+check "its memory the plan's, the least recently used keys going past it; the server's settings none of the customer's" "67108864 allkeys-lru true" \
+  "$(sed -n 's/^maxmemory://p' <<<"$memory") $(sed -n 's/^maxmemory_policy://p' <<<"$memory") $(cache_cli "$cache_url" CONFIG SET maxmemory 1gb | grep -q NOPERM && echo true || echo false)"
+check "its process runs as a user of its own, never root" true \
+  "$([ "$(docker exec "$e2e_cache_container" sh -c 'for p in $(pgrep valkey-server); do stat -c %u /proc/$p; done')" -gt 20000 ] && echo true || echo false)"
+shown="$(http GET /caches/e2e-sessions)"
+check "GET shows the memory its keys use and its connections, never its password" "200 true true false false" \
+  "$(status) $(jq -r '"\(.bytesUsedForCache > 0) \(.currConnections | type == "number") \(has("password")) \(has("url"))"' <<<"$shown")"
+http POST /caches '{"name": "e2e-second"}' >/dev/null
+check "a second cache, past the beta plan's one, is refused" "400 The Beta plan allows 1 cache, and the account has 1: delete one first" "$(status) $(jq -r .message "$work/body")"
+http POST /caches '{"name": "Not_A_Name"}' >/dev/null
+check "a name ElastiCache wouldn't take is refused, saying what a name is" "400 name must be 1 to 40 lower-case letters, digits and hyphens, a letter first, no two hyphens in a row and none last, as AWS ElastiCache names its clusters" \
+  "$(status) $(jq -r '.message | if type == "array" then join("; ") else . end' "$work/body")"
+reset="$(http POST /caches/e2e-sessions/password)"
+new_cache_url="$(jq -r .url <<<"$reset")"
+check "a new password: the old one refused, the new one logs in, the keys kept" "200 true two croissants" \
+  "$(status) $(cache_cli "$cache_url" PING | grep -q WRONGPASS && echo true || echo false) $(cache_cli "$new_cache_url" GET cart:42)"
+probe='import * as tls from "node:tls";
+// The server of customers'"'"' caches, as a function reaches it: TLS to the cache'"'"'s port, its certificate checked, then AUTH and GET.
+export async function handler(event: { url: string }) {
+  const { hostname, port, password } = new URL(event.url);
+  const secret = decodeURIComponent(password);
+  return new Promise((resolve) => {
+    const socket = tls.connect({ host: hostname, port: Number(port) });
+    socket.setTimeout(3000, () => { socket.destroy(); resolve("timeout"); });
+    socket.once("error", (error) => resolve(error.message));
+    socket.once("secureConnect", () => {
+      if (!socket.authorized) { resolve(String(socket.authorizationError)); socket.destroy(); return; }
+      socket.write(`*3\r\n$4\r\nAUTH\r\n$7\r\ndefault\r\n$${secret.length}\r\n${secret}\r\n*2\r\n$3\r\nGET\r\n$7\r\ncart:42\r\n`);
+    });
+    let answer = "";
+    socket.on("data", (chunk) => {
+      answer += chunk.toString();
+      const got = /^\+OK\r\n\$\d+\r\n(.*)\r\n$/s.exec(answer);
+      if (got) { resolve(`trusted, logged in: ${got[1]}`); socket.destroy(); }
+      else if (answer.startsWith("-")) { resolve(answer.trim()); socket.destroy(); }
+    });
+  });
+}'
+probe_fn="$(http POST /functions "$(jq -n --arg code "$probe" '{name: "e2e-cache-probe", runtime: "nodejs", code: $code, memory: 128, timeout: 10}')" | jq -r .id)"
+check "a function reaches it, the account's internet access off, trusts its certificate and logs in with the address" '"trusted, logged in: two croissants"' \
+  "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg url "$new_cache_url" '{input: {url: $url}}')" | jq -c .output)"
+http DELETE "/functions/$probe_fn" >/dev/null
+# Every minute, each cache not measured yet in the hour is: a new one within a minute.
+cache_id="$(env_q "SELECT id FROM caches WHERE name = 'e2e-sessions'")"
+for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM cache_samples WHERE cache_id = '$cache_id'")" -ge 1 ] && break; sleep 1; done
+check "its hourly sample, within a minute: by its name, its memory the plan's, what its keys use as its server counts it" "e2e-sessions|64|t" \
+  "$(env_q "SELECT max(name), max(memory_mb), bool_and(bytes_used > 0) FROM cache_samples WHERE cache_id = '$cache_id'")"
+# Its metrics, as CloudWatch names ElastiCache's, a point an hour: this hour and the one before.
+cache_metrics="$(http GET "/caches/e2e-sessions/metrics?start=$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)")"
+check "its metrics, as CloudWatch names ElastiCache's: the memory its keys use as its latest sample says" \
+  "200 3600 $(env_q "SELECT bytes_used FROM cache_samples WHERE cache_id = '$cache_id' ORDER BY hour DESC LIMIT 1")" \
+  "$(status) $(jq -r '"\(.period) \([.metrics.BytesUsedForCache.Maximum[] | select(. != null)] | last)"' <<<"$cache_metrics")"
+check "  ... and none at all for another account's cache, or none" "404 The account has no cache e2e-none" \
+  "$(http GET /caches/e2e-none/metrics >/dev/null; status) $(jq -r .message "$work/body")"
+cache_alarm="$(http POST /alarms '{"name": "e2e-sessions memory", "cacheName": "e2e-sessions", "metric": "BytesUsedForCache", "statistic": "Maximum", "period": 3600, "comparison": "GreaterThanThreshold", "threshold": 60000000, "evaluationPeriods": 1, "datapointsToAlarm": 1, "actions": {"email": false, "webhookUrls": []}}')"
+check "an alarm watches its memory, an hour at a time, by its name" "201 e2e-sessions BytesUsedForCache 3600" "$(status) $(jq -r '"\(.cacheName) \(.metric) \(.period)"' <<<"$cache_alarm")"
+# Billed by the hour of its memory, as ElastiCache bills a node: each hour sampled, 64 MB.
+cache_month="$(http GET /usage | jq -c '.caches[] | select(.name == "e2e-sessions")')"
+check "GET /usage has its hours this month, its memory and its GB-hours, 64 MB an hour" "$(env_q "SELECT count(*) FROM cache_samples WHERE cache_id = '$cache_id'") 64 true false" \
+  "$(jq -r '"\(.hours) \(.memoryMb) \((.gbHours | tonumber) == .hours * 0.0625) \(.deleted)"' <<<"$cache_month")"
+http DELETE /caches/e2e-sessions >/dev/null
+check "a cache deleted: 204, then 404, gone from the server with its keys, its address answering no more" "204 404 404 true" \
+  "$(status) $(http GET /caches/e2e-sessions >/dev/null; status) \
+$(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/cache-ca.crt" -H 'Authorization: Bearer ff-cache-dev' "https://$cache_address:6390/caches/$cache_server_name") \
+$(cache_cli "$new_cache_url" PING | grep -q 'Could not connect' && echo true || echo false)"
+check "  ... its alarm with it; its month's usage kept, as a deleted cache's" "404 true" \
+  "$(http GET "/alarms/$(jq -r .id <<<"$cache_alarm")" >/dev/null; status) $(http GET /usage | jq -r '.caches[] | select(.name == "e2e-sessions") | .deleted')"
+
 echo "== customers' buckets (ADR 0009): the API, then AWS's own clients through the S3 front door"
 s3_endpoint="http://s3.localhost:$storage_port"
 made="$(http POST /buckets '{"name": "e2e-photos"}')"
@@ -846,7 +941,7 @@ store_s3() { AWS_ACCESS_KEY_ID=ffdevaccesskey AWS_SECRET_ACCESS_KEY=ffdevsecretk
   "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$FF_S3_PORT" "$@"; }
 if command -v aws >/dev/null; then aws_cli=(aws); else
   aws_cli=(docker run --rm --network host -v "$work:$work" -w "$work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION
-    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS amazon/aws-cli:2.34.32)
+    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS -e AWS_ENDPOINT_URL_SESV2 amazon/aws-cli:2.34.32)
 fi
 # held <command…>: whether the store has the bucket, as head-bucket answers.
 held() { "$@" >/dev/null 2>&1 && echo held || echo gone; }
@@ -921,6 +1016,7 @@ check "aws: 100 MB up in parts and down again, byte for byte" "104857600 0" \
   "$(aws_ff s3api head-object --bucket e2e-photos --key cli/big.bin --query ContentLength --output text) $(cmp -s "$work/big.bin" "$work/big.out"; echo $?)"
 aws_ff s3api get-object --bucket e2e-photos --key cli/big.bin --range bytes=0-9 "$work/range.out" >/dev/null
 check "aws: a range" "$(head -c 10 "$work/big.bin" | od -An -tx1 | tr -d ' \n')" "$(od -An -tx1 "$work/range.out" | tr -d ' \n')"
+rm -rf "$work/site" "$work/site-back"
 mkdir -p "$work/site/css" "$work/site-back"
 printf '<h1>Ahlan</h1>' >"$work/site/index.html"
 printf 'body {}' >"$work/site/css/main.css"
@@ -1126,6 +1222,7 @@ check "a Python function, boto3.client(\"sqs\") as on Lambda: the URL from outsi
 check "their pods get the SQS endpoint inside the cluster with their own key, through the Secret" \
   "http://$cluster_gateway:$sqs_port $(function_secret "$node_sqs" AWS_ACCESS_KEY_ID)" \
   "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SQS) $(env_q "SELECT id FROM storage_keys WHERE function_id = '$node_sqs' AND revoked_at IS NULL")"
+check "  ... and the SES endpoint for the account's mail, as AWS_ENDPOINT_URL_SESV2" "http://$cluster_gateway:$ses_port" "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SESV2)"
 http PUT "/functions/$python_sqs" '{"environment": {"AWS_ENDPOINT_URL_SQS": "https://sqs.us-east-1.amazonaws.com"}}' >/dev/null
 check "a function can't point it elsewhere: AWS_ENDPOINT_URL_SQS is FF's" "400 AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues" \
   "$(status) $(jq -r '.message | join("; ")' "$work/body")"
@@ -1263,9 +1360,83 @@ check "the audit log names the change, under the CLI's key" "bucket.notification
   "$(env_q "SELECT action || ' ' || actor FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-notify' AND action = 'bucket.notifications' ORDER BY at DESC LIMIT 1")"
 http DELETE "/functions/$upload_fn" >/dev/null
 http DELETE "/buckets/e2e-notify?force=true" >/dev/null
+
+echo "== buckets' sites, as S3's website endpoint answers them: a built site synced with the AWS CLI, then visited"
+site_url="http://e2e-site.site.localhost:$website_port"
+# page <path> [curl options…]: the site's answer to a browser, its status and the error's code, as S3's error page says
+# it under its own title, or else its page's title.
+page() {
+  local path=$1 code
+  shift
+  curl -s -o "$work/page.html" -w '%{http_code}' "$@" "$site_url$path"
+  code="$(grep -oE 'Code: [A-Za-z]+' "$work/page.html" | head -1 | sed 's/Code: //')"
+  echo " ${code:-$(grep -oE '<title>[^<]*' "$work/page.html" | head -1 | sed 's/<title>//')}"
+}
+http POST /buckets '{"name": "e2e-site"}' >/dev/null
+# A built site of its own, apart from the folder the S3 checks above synced.
+rm -rf "$work/www"
+mkdir -p "$work/www/assets" "$work/www/docs"
+printf '<!doctype html><title>e2e shop</title>' >"$work/www/index.html"
+printf '<!doctype html><title>e2e docs</title>' >"$work/www/docs/index.html"
+printf '<!doctype html><title>e2e missing</title>' >"$work/www/404.html"
+printf 'console.log("e2e")' >"$work/www/assets/app-3c9d.js"
+s3n s3 sync "$work/www" s3://e2e-site --only-show-errors
+printf 'body { color: navy }' >"$work/untyped.css"
+s3n s3api put-object --bucket e2e-site --key untyped.css --body "$work/untyped.css" >/dev/null
+check "a bucket is no site before its website configuration" "404 NoSuchWebsiteConfiguration" "$(page /)"
+s3n s3 website s3://e2e-site --index-document index.html --error-document 404.html
+check "the AWS CLI makes it a site, as S3's; FF's API reads the same, with its address" "index.html 404.html index.html $site_url false" \
+  "$(s3n s3api get-bucket-website --bucket e2e-site | jq -r '"\(.IndexDocument.Suffix) \(.ErrorDocument.Key)"') \
+$(http GET /buckets/e2e-site/website | jq -r '"\(.indexDocument.suffix) \(.url) \(.singlePageApp)"')"
+check "a browser gets its index, a folder's, a folder named without its slash redirected, a missing page its error document with 404" \
+  "200 e2e shop|200 e2e docs|302 $site_url/docs/|404 e2e missing" \
+  "$(page /)|$(page /docs/)|$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$site_url/docs")|$(page /no/such/page)"
+check "an asset as the CLI typed it, a file uploaded without a type typed by its name, neither ever sniffed" "javascript text/css; charset=utf-8 nosniff" \
+  "$(curl -s -o /dev/null -w '%{content_type}' "$site_url/assets/app-3c9d.js" | grep -o javascript) $(curl -s -o /dev/null -w '%{content_type}' "$site_url/untyped.css") \
+$(curl -sI "$site_url/" | tr -d '\r' | sed -n 's/^x-content-type-options: //Ip')"
+etag="$(curl -sI "$site_url/assets/app-3c9d.js" | tr -d '\r' | sed -n 's/^etag: //Ip')"
+check "  ... the store's ETag, so that a browser that has the file gets 304, and a range 206" "304 206 console" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H "If-None-Match: $etag" "$site_url/assets/app-3c9d.js") \
+$(curl -s -o "$work/part" -w '%{http_code}' -H 'Range: bytes=0-6' "$site_url/assets/app-3c9d.js") $(cat "$work/part")"
+check "a path that climbs out of the site refused, never another bucket's file; a POST refused" "400 InvalidURI|405 MethodNotAllowed" \
+  "$(page /../e2e-photos/x --path-as-is)|$(page / -X POST)"
+# at_domain's page: its status and its title, or the error's code, as page says them.
+domain_page() { echo "$(at_domain "$@") $(grep -oE '<title>[^<]*|Code: [A-Za-z]+' "$work/url-body" | head -1 | sed 's/<title>//; s/Code: //')"; }
+added="$(http POST /buckets/e2e-site/website/domains '{"domain": "Docs.E2E-Customer.tn"}')"
+check "a domain of the customer's for the site, added pending, with the CNAME to make: to the site's host" "201 docs.e2e-customer.tn pending e2e-site.site.localhost" \
+  "$(status) $(jq -r '"\(.domain) \(.status) \(.records.cname[0].value)"' <<<"$added")"
+check "before it is proved, the site doesn't answer there" 404 "$(at_domain docs.e2e-customer.tn)"
+zone 4 "docs IN CNAME e2e-site.site.localhost."
+for _ in $(seq 1 30); do
+  http POST /buckets/e2e-site/website/domains/docs.e2e-customer.tn/verify >/dev/null
+  [ "$(jq -r .status "$work/body")" = verified ] && break
+  sleep 1
+done
+check "once its CNAME is made, the check proves it, and the site answers there as at its own host" "verified 200 e2e docs|404 e2e missing" \
+  "$(jq -r .status "$work/body") $(domain_page docs.e2e-customer.tn /docs/)|$(domain_page docs.e2e-customer.tn /no/such/page)"
+check "the edge may get certificates for it, and for the site's own host; not for a bucket that is no site" "200 200 404" \
+  "$(asked docs.e2e-customer.tn) $(asked e2e-site.site.localhost) $(asked e2e-photos.site.localhost)"
+http PUT /buckets/e2e-site/website '{"indexDocument": {"suffix": "index.html"}, "errorDocument": {"key": "404.html"}, "singlePageApp": true}' >/dev/null
+check "FF's API makes it a single-page app's: its routes get its index with 200" "200 true 200 e2e shop" "$(status) $(jq -r .singlePageApp "$work/body") $(page /orders/42)"
+check "the audit log names each change: the CLI's under its key, the API's" "bucket.website access_key:$queue_key_id bucket.website" \
+  "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-site' AND action = 'bucket.website'")"
+s3n s3api delete-bucket-website --bucket e2e-site
+check "DeleteBucketWebsite makes it no site again, its files kept" "404 NoSuchWebsiteConfiguration 5" \
+  "$(page /) $(s3n s3 ls s3://e2e-site --recursive | wc -l)"
 for _ in $(seq 150); do [ "$(http GET "/alarms/$waiting_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
 check "the alarm fires once a minute has sampled the two messages waiting, naming the queue" "ALARM e2e-waiting true" \
   "$(http GET "/alarms/$waiting_alarm" | jq -r '"\(.state) \(.queueName) \(.stateReason | test("breaching ApproximateNumberOfMessagesVisible Maximum > 1"))"')"
+site_visits() { env_q "SELECT coalesce(sum(requests), 0) || ' ' || coalesce(sum(gets), 0) || ' ' || coalesce(sum(bytes_out), 0) FROM storage_request_counts WHERE name = 'e2e-site' AND class = 'website'"; }
+# Each minute, the website server writes the minutes that are over, as the front door does: the visits within two.
+for _ in $(seq 150); do [ "$(site_visits | cut -d' ' -f1)" -ge 12 ] && break; sleep 1; done
+check "the site's visits counted in its minutes once written, apart from S3's requests, with what they sent" "true true" \
+  "$(site_visits | awk '{ print ($1 >= 12 && $2 >= 10) ? "true" : "false", ($3 > 0) ? "true" : "false" }')"
+since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
+check "its metrics, as CloudWatch names a CloudFront distribution's: the visits and their bytes, and a share of them answered 4xx" "true true true" \
+  "$(http GET "/buckets/e2e-site/website/metrics?period=3600&start=$since" | jq -r '"\([.metrics.Requests.Sum[]] | add >= 12) \([.metrics.BytesDownloaded.Sum[]] | add > 0) \([.metrics."4xxErrorRate".Average[] | select(. != null)] | max > 0)"')"
+http DELETE "/buckets/e2e-site?force=true" >/dev/null
+check "the site's domain gone with its bucket: it answers nothing there" "404 0" \
+  "$(at_domain docs.e2e-customer.tn) $(env_q "SELECT count(*) FROM custom_domains WHERE domain = 'docs.e2e-customer.tn'")"
 since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
 for _ in $(seq 90); do [ "$(http GET "/queues/e2e-waiting/metrics?period=3600&start=$since" | jq '[.metrics.NumberOfMessagesSent.Sum[]] | add')" = 2 ] && break; sleep 1; done
 check "its metrics, as CloudWatch names SQS's: the two messages sampled waiting, the two sent as counted, three bytes each at most" "2 2 3" \
@@ -1276,6 +1447,120 @@ as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
 check "the queues deleted, their messages with them" "0 0" \
   "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"
 http DELETE "/storage-keys/$queue_key_id" >/dev/null
+
+echo "== customers' mail (ADR 0012): identities and the suppression list, with AWS's CLI through the SES endpoint"
+ses_endpoint="http://localhost:$ses_port"
+mail_key="$(http POST /storage-keys '{}')"
+check "a new key's answer names the SES endpoint, AWS_ENDPOINT_URL_SESV2" "$ses_endpoint" "$(jq -r .sesEndpoint <<<"$mail_key")"
+mail_key_id="$(jq -r .id <<<"$mail_key")"
+mail_key_secret="$(jq -r .secretAccessKey <<<"$mail_key")"
+# The AWS CLI, its endpoint from AWS_ENDPOINT_URL_SESV2 alone, as a function's environment gives it, and no setting of
+# this machine's; as the other account with AWS_KEY and AWS_SECRET.
+aws_ses() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$mail_key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$mail_key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 \
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_SESV2="$ses_endpoint" "${aws_cli[@]}" sesv2 "$@" --output json; }
+as_other_ses() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
+# outcome_ses <command…>: accepted, or refused with the error's name, as the CLI prints it.
+outcome_ses() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE 'An error occurred \([A-Za-z]+\)' "$work/aws.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"; }
+check "the AWS CLI makes a domain an identity, with a DKIM key of FF's, as SES's own DKIM brought in: pending, its one token the selector" \
+  "DOMAIN false PENDING EXTERNAL 1" \
+  "$(aws_ses create-email-identity --email-identity Shop.E2E-Customer.tn | jq -r '"\(.IdentityType) \(.VerifiedForSendingStatus) \(.DkimAttributes.Status) \(.DkimAttributes.SigningAttributesOrigin) \(.DkimAttributes.Tokens | length)"')"
+http GET /email/identities/shop.e2e-customer.tn >/dev/null
+selector="$(jq -r .dkimSelector "$work/body")"
+check "FF's API gives the records to publish: its DKIM key's, and its return path's MX, to the mail server" \
+  "200 $selector._domainkey.shop.e2e-customer.tn bounces.mail.shop.e2e-customer.tn 10 mail.localhost" \
+  "$(status) $(jq -r '"\(.records[] | select(.purpose == "DKIM") | .name) \(.records[] | select(.purpose == "MAIL_FROM") | "\(.name) \(.value)")"' "$work/body")"
+# A TXT record's strings are 255 characters at most: the key's record split in a few, as DNS providers store it.
+dkim_strings="$(jq -r '.records[] | select(.purpose == "DKIM") | .value' "$work/body" | fold -w 200 | sed 's/.*/"&"/' | tr '\n' ' ')"
+zone 5 "docs IN CNAME e2e-site.site.localhost." "$selector._domainkey.shop IN TXT $dkim_strings" "bounces.mail.shop IN MX 10 mail.localhost."
+for _ in $(seq 1 30); do
+  http POST /email/identities/shop.e2e-customer.tn/verify >/dev/null
+  [ "$(jq -r .status "$work/body")" = SUCCESS ] && break
+  sleep 1
+done
+check "once its records are published, a check proves it, its return path too" "SUCCESS true true" \
+  "$(jq -r '"\(.status) \(.sendingEnabled) \(.mailFromVerified)"' "$work/body")"
+check "  ... as the AWS CLI reads it back" "true SUCCESS SUCCESS" \
+  "$(aws_ses get-email-identity --email-identity shop.e2e-customer.tn | jq -r '"\(.VerifiedForSendingStatus) \(.DkimAttributes.Status) \(.MailFromAttributes.MailFromDomainStatus)"')"
+check "  ... the same domain again, refused as SES does" "refused AlreadyExistsException" "$(outcome_ses aws_ses create-email-identity --email-identity shop.e2e-customer.tn)"
+check "an address is made an identity, pending until its link is followed" "EMAIL_ADDRESS false" \
+  "$(aws_ses create-email-identity --email-identity Orders@E2E-Customer.tn | jq -r '"\(.IdentityType) \(.VerifiedForSendingStatus)"')"
+# No SMTP server here: FF's own mail is written to the backend's log, the link with it.
+for _ in $(seq 1 10); do
+  token="$(grep -oE '/verify\?token=[A-Za-z0-9_-]{32}' "$work/backend.log" | tail -1 | cut -d= -f2)"
+  [ -n "$token" ] && break
+  sleep 1
+done
+check "  ... the link FF e-mails it proves it, once: a second visit finds nothing" "200 true 404" \
+  "$(curl -s -o "$work/verify.html" -w '%{http_code}' "$ses_endpoint/verify?token=$token") $(grep -q 'orders@e2e-customer.tn' "$work/verify.html" && echo true || echo false) \
+$(curl -s -o /dev/null -w '%{http_code}' "$ses_endpoint/verify?token=$token")"
+check "  ... and the CLI lists both, proved" "orders@e2e-customer.tn:true shop.e2e-customer.tn:true" \
+  "$(aws_ses list-email-identities | jq -r '[.EmailIdentities[] | "\(.IdentityName):\(.SendingEnabled)"] | join(" ")')"
+check "another account's key finds none of them" "refused NotFoundException 0" \
+  "$(outcome_ses as_other_ses aws_ses get-email-identity --email-identity shop.e2e-customer.tn) $(as_other_ses aws_ses list-email-identities | jq '.EmailIdentities | length')"
+check "the account's sending as GetAccount says it: the plan's quotas, SES's doubles as the AWS CLI prints them, in the sandbox" "200.0 1.0 false true" \
+  "$(aws_ses get-account | jq -r '"\(.SendQuota.Max24HourSend) \(.SendQuota.MaxSendRate) \(.ProductionAccessEnabled) \(.SendingEnabled)"')"
+aws_ses put-suppressed-destination --email-address Gone@E2E-Customer.tn --reason BOUNCE >/dev/null
+check "an address put on the suppression list, read back by the CLI and FF's API" "gone@e2e-customer.tn BOUNCE gone@e2e-customer.tn" \
+  "$(aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn | jq -r '"\(.SuppressedDestination.EmailAddress) \(.SuppressedDestination.Reason)"') $(http GET /email/suppressions | jq -r '.suppressions[0].address')"
+aws_ses delete-suppressed-destination --email-address gone@e2e-customer.tn >/dev/null
+check "  ... and taken off" "refused NotFoundException" "$(outcome_ses aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn)"
+check "the audit log names each change to the domain, the CLI's under its key" "email.identity.create access_key:$mail_key_id email.identity.verify" \
+  "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'email-identity:shop.e2e-customer.tn'")"
+
+echo "== customers' mail sent (ADR 0012): through the run's mail server, signed with the domain's key, its bounces back"
+simple_content='{"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}'
+sent_id="$(aws_ses send-email --from-email-address 'Shop <news@shop.e2e-customer.tn>' \
+  --destination 'ToAddresses=orders@e2e-customer.tn,bounce-me@shop.e2e-customer.tn' --content "$simple_content" | jq -r .MessageId)"
+check "the AWS CLI sends a message from the proved domain, to the proved address and to one at the domain: SES's MessageId" true \
+  "$([[ $sent_id =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false)"
+for _ in $(seq 1 30); do [ "$(received_count)" -ge 1 ] && break; sleep 1; done
+received 1 >"$work/received-1.eml"
+check "  ... the mail server, taking it over TLS, hands it on, its envelope's sender its return path, which names it" \
+  "b-$sent_id@bounces.mail.shop.e2e-customer.tn orders@e2e-customer.tn true" \
+  "$(received_envelope 1 | jq -r '"\(.from) \(.to | join(","))"') $(grep -q 'with ESMTPS' "$work/received-1.eml" && echo true || echo false)"
+# mailauth, at a release at least two weeks old (7.3.0, 2026-10-10), checks the signature as a mailbox provider would.
+[ -d "$work/js/node_modules/mailauth" ] || npm install --prefix "$work/js" --no-audit --no-fund --silent mailauth@7.3.0 >/dev/null
+# dkim_of <message>: its signature's result, domain and selector; then the same, its subject changed on the way.
+dkim_of() { MODULES="$work/js" DNS="127.0.0.1:$dns_port" node "$FF_REPO_ROOT/hack/lib/dkim-verify.mjs" "$1" | paste -sd' '; }
+check "  ... signed with the domain's DKIM key, its record found in the DNS as a provider looks it up; changed on the way, it fails" \
+  "pass shop.e2e-customer.tn $selector fail shop.e2e-customer.tn $selector" "$(dkim_of "$work/received-1.eml")"
+# The stand-in refused bounce-me as a mailbox that doesn't exist: the mail server's bounce goes to the return path, its
+# own mailbox, whence its agent gives it to the backend within 10 s.
+fates() { http GET /email/messages | jq -r --arg id "$1" '[.messages[] | select(.messageId == $id) | .recipients[].status] | join(" ")'; }
+for _ in $(seq 1 60); do [ "$(fates "$sent_id")" = "SENT BOUNCED" ] && break; sleep 1; done
+check "  ... the refused address's bounce comes back through the server's agent: that recipient bounced, the other sent" "SENT BOUNCED" "$(fates "$sent_id")"
+check "  ... its address on the suppression list, as SES puts it, naming the message" "BOUNCE $sent_id" \
+  "$(aws_ses get-suppressed-destination --email-address bounce-me@shop.e2e-customer.tn | jq -r '"\(.SuppressedDestination.Reason) \(.SuppressedDestination.Attributes.MessageId)"')"
+http POST /email/messages '{"from": "news@shop.e2e-customer.tn", "to": ["bounce-me@shop.e2e-customer.tn"], "subject": "Again", "text": "Hello again"}' >/dev/null
+again_id="$(jq -r .messageId "$work/body")"
+check "FF's API sends one too: to an address on the list, it is kept off, done at once, never handed on" "201 SENT SUPPRESSED 1" \
+  "$(status) $(http GET /email/messages | jq -r --arg id "$again_id" '.messages[] | select(.messageId == $id) | "\(.status) \(.recipients[0].status)"') $(received_count)"
+sleep 1 # the Beta plan's rate: a message a second
+raw="$(printf 'From: Shop <news@shop.e2e-customer.tn>\r\nTo: orders@e2e-customer.tn\r\nSubject: Raw\r\nMessage-ID: <raw-e2e@shop.e2e-customer.tn>\r\n\r\nHello from a raw message.\r\n' | base64 -w0)"
+aws_ses send-email --content "{\"Raw\": {\"Data\": \"$raw\"}}" >/dev/null
+for _ in $(seq 1 30); do [ "$(received_count)" -ge 2 ] && break; sleep 1; done
+received 2 >"$work/received-2.eml"
+check "a raw message, its sender and recipient from its header as the AWS CLI sends it: handed on, its own Message-ID, signed" \
+  "orders@e2e-customer.tn true pass shop.e2e-customer.tn $selector fail shop.e2e-customer.tn $selector" \
+  "$(received_envelope 2 | jq -r '.to | join(",")') $(grep -q '^Message-ID: <raw-e2e@shop.e2e-customer.tn>' "$work/received-2.eml" && echo true || echo false) $(dkim_of "$work/received-2.eml")"
+sleep 1
+check "a message from an address the account hasn't proved is refused, as SES refuses it" "refused MessageRejected" \
+  "$(outcome_ses aws_ses send-email --from-email-address someone@unproved.tn --destination ToAddresses=orders@e2e-customer.tn --content "$simple_content")"
+check "  ... and in the sandbox, one to an address it hasn't proved" "refused MessageRejected" \
+  "$(outcome_ses aws_ses send-email --from-email-address news@shop.e2e-customer.tn --destination ToAddresses=stranger@example.org --content "$simple_content")"
+check "GetAccount counts what the account sent in the last day, each recipient once, the one kept off too" 4.0 \
+  "$(aws_ses get-account | jq -r .SendQuota.SentLast24Hours)"
+check "GET /email/metrics counts its recipients as CloudWatch names SES's metrics: sent, taken, bounced or kept off, complained of" "4 2 2 0" \
+  "$(http GET /email/metrics | jq -r '[.metrics.Send.Sum, .metrics.Delivery.Sum, .metrics.Bounce.Sum, .metrics.Complaint.Sum] | map(add | tostring) | join(" ")')"
+check "  ... and its reputation over 14 days: one of the three recipients its mail reached bounced for good, none complained" "0.333333 0" \
+  "$(http GET /email/metrics | jq -r '[.metrics."Reputation.BounceRate".Average, .metrics."Reputation.ComplaintRate".Average] | map(map(select(. != null)) | last | tostring) | join(" ")')"
+check "GET /usage bills it by its domain, as SES bills it: each recipient once, the one kept off too, no attachment" "shop.e2e-customer.tn 4 0 false" \
+  "$(http GET /usage | jq -r '.email[] | "\(.identity) \(.recipients) \(.attachmentBytes) \(.deleted)"')"
+aws_ses delete-email-identity --email-identity orders@e2e-customer.tn >/dev/null
+http DELETE /email/identities/shop.e2e-customer.tn >/dev/null
+check "both deleted, one through the CLI, one through FF's API, their keys with them" "204 0" "$(status) $(env_q "SELECT count(*) FROM email_identities WHERE account_id = '$tenant'")"
+check "  ... the domain's mail stays in GET /usage, said deleted, as billed" "true 4" "$(http GET /usage | jq -r '.email[] | "\(.deleted) \(.recipients)"')"
+http DELETE "/storage-keys/$mail_key_id" >/dev/null
 
 echo "== plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account
@@ -1441,15 +1726,15 @@ check "the bucket, deleted earlier, keeps its month: its hours measured, GB-mont
   "$(jq -r --arg id "$photos_id" '.buckets[] | select(.bucketId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \(.gbMonths) \(.tier1Requests) \(.tier2Requests) \(.bytesDownloaded) \(.bytesUploaded) \(.bytesDownloaded > 0 and .bytesUploaded > 0) \(.cost)"' <<<"$usage")"
 csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
 check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
-  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,throttled,platform_errors,lost,cost|true|true|true" \
-  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,0\.000$" && echo true || echo false)"
+  "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,attachment_bytes,throttled,platform_errors,lost,cost|true|true|true" \
+  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,,0\.000$" && echo true || echo false)"
 cli_queue_id="$(env_q "SELECT DISTINCT queue_id FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-cli-orders'")"
 cli_counted="$(env_q "SELECT sum(requests) || ' ' || sum(sent) || ' ' || sum(received) FROM queue_request_counts WHERE queue_id = '$cli_queue_id'")"
 check "the AWS CLI's queue, deleted earlier, keeps its month: its requests as SQS bills them, its messages sent and received, as counted, at nothing before the book that prices queues" \
   "true e2e-cli-orders $cli_counted 0.000" \
   "$(jq -r --arg id "$cli_queue_id" '.queues[] | select(.queueId == $id) | "\(.deleted) \(.name) \(.requests) \(.messagesSent) \(.messagesReceived) \(.cost)"' <<<"$usage")"
 check "  ... in the CSV, its requests in the requests column" true \
-  "$(tr -d '\r' <<<"$csv" | grep -qE "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,0\.000$" && echo true || echo false)"
+  "$(tr -d '\r' <<<"$csv" | grep -qE "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,,0\.000$" && echo true || echo false)"
 check "a function's batches counted as received: the five, then the two again; the three handled deleted" "7 3" \
   "$(env_q "SELECT sum(received) || ' ' || sum(deleted) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")"
 empty="$(http GET '/usage?month=2001-01')"

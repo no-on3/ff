@@ -1,6 +1,7 @@
 import { EventFormat, Runtime } from '../../functions/entities/function.entity';
 import {
   BLOCKED_EGRESS_CIDRS,
+  INTERNET_PORTS,
   DATA_DB_CA_DIR,
   DATA_DB_CA_SECRET,
   cpuMillicores,
@@ -273,6 +274,15 @@ describe('Kubernetes manifests', () => {
       expect(BLOCKED_EGRESS_CIDRS).toEqual(
         expect.arrayContaining(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '127.0.0.0/8']),
       );
+    });
+
+    it("never opens the internet's port 25, so that mail goes through the SES endpoint alone; every other port, TCP and UDP", () => {
+      const ports: Array<{ protocol: string; port: number; endPort: number }> = (networkPolicyManifest('ff-t-abc', settings(), true) as any).spec.egress[1].ports;
+      const open = (protocol: string, port: number) => ports.some((rule) => rule.protocol === protocol && rule.port <= port && port <= rule.endPort);
+
+      expect(ports).toBe(INTERNET_PORTS);
+      expect([open('TCP', 25), open('TCP', 24), open('TCP', 26), open('TCP', 1), open('TCP', 65535)]).toEqual([false, true, true, true, true]);
+      expect([open('TCP', 443), open('TCP', 465), open('TCP', 587), open('UDP', 25), open('UDP', 443)]).toEqual([true, true, true, true, true]);
     });
 
     // Each account's own setting, which the operator turns on; the platform's setting cuts every account off.

@@ -14,6 +14,8 @@ import {
   draftDocument,
   earliestStart,
   formFrom,
+  pricesCaches,
+  pricesEmail,
   pricesQueues,
   pricesStorage,
   queueTierLabel,
@@ -361,6 +363,38 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
                     ));
                   })()}
                   <Field id="freeQueueRequests" label="Free queue requests, a month" value={form.storage.freeQueueRequests} onChange={(freeQueueRequests) => setStorage({ freeQueueRequests })} />
+                </div>
+              </fieldset>
+            )}
+            {pricesCaches(latest.document) && (
+              <fieldset className="space-y-3">
+                <legend className="text-sm font-medium text-gray-700">Customers' caches, as AWS ElastiCache prices a node's memory</legend>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {(() => {
+                    const currency = form.mode === 'aws' ? 'US$' : 'TND';
+                    const given = form.mode === 'aws' ? form.storage.usd : form.storage.tnd;
+                    const change = (cacheGbHour: string) => setStorage(form.mode === 'aws' ? { usd: { ...given, cacheGbHour } } : { tnd: { ...given, cacheGbHour } });
+                    return <Field id="cacheGbHour" label={`Cache memory, per GB-hour, ${currency}`} value={given.cacheGbHour} onChange={change} />;
+                  })()}
+                </div>
+              </fieldset>
+            )}
+            {pricesEmail(latest.document) && (
+              <fieldset className="space-y-3">
+                <legend className="text-sm font-medium text-gray-700">Customers' mail, as AWS SES prices it: each recipient, and attachments by the GB</legend>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {(() => {
+                    const currency = form.mode === 'aws' ? 'US$' : 'TND';
+                    const given = form.mode === 'aws' ? form.storage.usd : form.storage.tnd;
+                    const change = (field: 'emailRecipientsPerThousand' | 'emailAttachmentsGb') => (value: string) =>
+                      setStorage(form.mode === 'aws' ? { usd: { ...given, [field]: value } } : { tnd: { ...given, [field]: value } });
+                    return (
+                      <>
+                        <Field id="emailRecipientsPerThousand" label={`E-mail, per 1,000 recipients, ${currency}`} value={given.emailRecipientsPerThousand} onChange={change('emailRecipientsPerThousand')} />
+                        <Field id="emailAttachmentsGb" label={`E-mail attachments, per GB, ${currency}`} value={given.emailAttachmentsGb} onChange={change('emailAttachmentsGb')} />
+                      </>
+                    );
+                  })()}
                 </div>
               </fieldset>
             )}

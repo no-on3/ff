@@ -57,9 +57,10 @@ describe("a function's secrets", () => {
 });
 
 describe("a variable's name", () => {
-  it("is FF's when FF sets it, with the function's own key: its account's buckets and queues", () => {
+  it("is FF's when FF sets it, with the function's own key: its account's buckets, queues and mail", () => {
     expect(nameProblem('AWS_ENDPOINT_URL_S3')).toBe("AWS_ENDPOINT_URL_S3 is reserved: FF sets it, with the function's own key to its account's buckets");
     expect(nameProblem('AWS_ENDPOINT_URL_SQS')).toBe("AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues");
+    expect(nameProblem('AWS_ENDPOINT_URL_SESV2')).toBe("AWS_ENDPOINT_URL_SESV2 is reserved: FF sets it, with the function's own key to its account's mail");
   });
 
   it('is anyone\'s otherwise, a name every object inherits too, such as constructor', () => {

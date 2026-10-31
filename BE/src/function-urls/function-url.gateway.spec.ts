@@ -2,13 +2,14 @@
  * L1: the function URL gateway through real HTTP, as callers reach it: the
  * request's host finds its URL, the caller and the account are checked, the
  * call counts against the plan's rate, the function gets AWS Lambda's event,
- * and its return value is the answer. The services behind it are stand-ins;
- * the rate's count is the throttler's own storage.
+ * and its return value is the answer; a site's own domain goes to the website
+ * server. The services behind it are stand-ins; the rate's count is the
+ * throttler's own storage.
  */
 import { Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ThrottlerStorageService } from '@nestjs/throttler';
-import { IncomingHttpHeaders, request as httpRequest } from 'node:http';
+import { IncomingHttpHeaders, ServerResponse, request as httpRequest } from 'node:http';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { Principal } from '../auth/principal';
 import { InsufficientCreditException } from '../billing/credit-policy';
@@ -61,6 +62,9 @@ describe('the function URL gateway (L1)', () => {
   const urls = new Map<string, FunctionUrl>();
   /** Customers' verified domains, each to its function. */
   const domains = new Map<string, string>();
+  /** Customers' verified domains for sites, each to its bucket, a site or no longer one. */
+  const siteDomains = new Map<string, { name: string; website: object | null }>();
+  const websites = { serve: jest.fn(), allowsCertificate: jest.fn() };
   const functions = { findOne: jest.fn(), call: jest.fn() };
   const apiKeys = { authenticate: jest.fn() };
   const credit = { admit: jest.fn() };
@@ -105,6 +109,12 @@ describe('the function URL gateway (L1)', () => {
     jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     urls.clear();
     domains.clear();
+    siteDomains.clear();
+    websites.serve.mockImplementation(async (_request: unknown, response: ServerResponse, bucket: string) => {
+      response.writeHead(200, { 'content-type': 'text/html' });
+      response.end(`the site of ${bucket}`);
+    });
+    websites.allowsCertificate.mockImplementation(async (domain: string) => domain === 'docs.site.localhost');
     for (const row of [urlRow(PUBLIC, UrlAuthType.NONE), urlRow(PRIVATE, UrlAuthType.AWS_IAM), urlRow(WITH_CORS, UrlAuthType.NONE, CORS)]) urls.set(row.urlId, row);
     output = { statusCode: 200, body: 'ok' };
     functions.findOne.mockImplementation(async (accountId: string, id: string) => ({
@@ -128,7 +138,14 @@ describe('the function URL gateway (L1)', () => {
         forUrlId: async (urlId: string) => urls.get(urlId) ?? null,
         forFunction: async (functionId: string) => [...urls.values()].find((url) => url.functionId === functionId) ?? null,
       } as never,
-      { forHost: async (host: string) => (domains.has(host) ? { domain: host, functionId: domains.get(host) } : null) } as never,
+      {
+        forHost: async (host: string) =>
+          domains.has(host)
+            ? { domain: host, functionId: domains.get(host) }
+            : siteDomains.has(host)
+              ? { domain: host, functionId: null, bucketId: `b-${siteDomains.get(host)!.name}`, bucket: siteDomains.get(host) }
+              : null,
+      } as never,
       functions as never,
       apiKeys as never,
       credit as never,
@@ -137,6 +154,7 @@ describe('the function URL gateway (L1)', () => {
       accounts as never,
       throttler,
       { allowsCertificate: async (domain: string) => ['s3.localhost', 'photos.s3.localhost'].includes(domain.toLowerCase()) } as never,
+      websites as never,
     );
     port = (await gateway.listen(0, '127.0.0.1')).port;
   });
@@ -444,6 +462,32 @@ describe('the function URL gateway (L1)', () => {
       const ask = (domain: string) => send('', `/tls/allowed?domain=${domain}`, { headers: { host: 'ff-backend.ff-system.svc.cluster.local:3001' } });
 
       expect([(await ask('shop.example.tn')).status, (await ask('pending.example.tn')).status]).toEqual([200, 404]);
+    });
+
+    it("hands a site's domain to the website server, with its bucket, whatever the path", async () => {
+      siteDomains.set('docs.example.tn', { name: 'docs', website: { indexDocument: 'index.html' } });
+
+      const answer = await onDomain('Docs.Example.TN:443', '/tls/allowed?domain=anything.example');
+
+      expect([answer.status, answer.body.toString()]).toEqual([200, 'the site of docs']);
+      expect(websites.serve).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'docs');
+      expect(functions.call).not.toHaveBeenCalled();
+    });
+
+    it("gets a site's domain a certificate once verified, as a site's own host, and not before", async () => {
+      siteDomains.set('docs.example.tn', { name: 'docs', website: { indexDocument: 'index.html' } });
+      const ask = (domain: string) => send('', `/tls/allowed?domain=${domain}`, { headers: { host: 'ff-backend.ff-system.svc.cluster.local:3001' } });
+
+      expect([(await ask('docs.example.tn')).status, (await ask('docs.site.localhost')).status, (await ask('nosite.site.localhost')).status]).toEqual([200, 200, 404]);
+      expect(websites.serve).not.toHaveBeenCalled();
+    });
+
+    it('serves nothing, and gets no certificate, at the domain of a bucket no longer a site', async () => {
+      siteDomains.set('old.example.tn', { name: 'old', website: null });
+      const ask = (domain: string) => send('', `/tls/allowed?domain=${domain}`, { headers: { host: 'ff-backend.ff-system.svc.cluster.local:3001' } });
+
+      expect([(await onDomain('old.example.tn')).status, (await ask('old.example.tn')).status]).toEqual([404, 404]);
+      expect(websites.serve).not.toHaveBeenCalled();
     });
   });
 
