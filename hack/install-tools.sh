@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Installs pinned kubectl and k3d into hack/bin/ (git-ignored) after verifying
-# the SHA-256 checksums each project publishes, and Rust for the ff command where
-# there is none, or none recent enough: rustup and the pinned toolchain into
+# the SHA-256 checksums each project publishes, and the ff command's Rust toolchain
+# (cli/rust-toolchain.toml's) through rustup, the PATH's, or one installed into
 # hack/.rust/ (git-ignored), rustup-init's checksum verified too; hack/ci.sh uses
-# it from there. Idempotent: tools already at the pinned version, or a Rust at
-# least as recent, are left alone. Nothing is installed system-wide.
+# it from there. Idempotent: tools already at the pinned version are left alone,
+# and so is a Rust at least as recent where there is no rustup to pin it with.
+# Nothing is installed system-wide.
 #   hack/install-tools.sh [kubectl] [k3d] [rust]     (all three without an argument)
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.37.1}"
 K3D_VERSION="${K3D_VERSION:-v5.9.0}"
-# The ff command's toolchain: cli/Cargo.toml's rust-version is the least it builds with.
-RUST_VERSION="${RUST_VERSION:-1.91.0}"
-
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The ff command's toolchain, which rustup uses in cli/; RUSTUP_TOOLCHAIN, rustup's own setting, overrides it.
+RUST_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo_root/cli/rust-toolchain.toml")}"
 bin_dir="$repo_root/hack/bin"
 mkdir -p "$bin_dir"
 
@@ -72,13 +72,20 @@ install_k3d() {
   echo "installed k3d $K3D_VERSION (sha256 verified)"
 }
 
-# Rust: the one on the PATH if it is at least RUST_VERSION, else the pinned one in hack/.rust.
+# Rust: the toolchain through rustup, the PATH's or hack/.rust's; without rustup, the PATH's Rust if it is at least
+# that version; else rustup and the toolchain into hack/.rust.
 install_rust() {
-  local rust_dir="$repo_root/hack/.rust" installed
+  local rust_dir="$repo_root/hack/.rust" installed log
   [ -x "$rust_dir/cargo/bin/cargo" ] && export PATH="$rust_dir/cargo/bin:$PATH" RUSTUP_HOME="$rust_dir/rustup" CARGO_HOME="$rust_dir/cargo"
+  if command -v rustup >/dev/null; then
+    log="$(rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy --no-self-update 2>&1)" ||
+      { echo "$log" >&2; return 1; }
+    echo "Rust $(cd "$repo_root/cli" && rustc --version | cut -d' ' -f2), the toolchain $RUST_TOOLCHAIN, through rustup"
+    return
+  fi
   installed="$(rustc --version 2>/dev/null | cut -d' ' -f2 || true)"
-  if [ -n "$installed" ] && [ "$(printf '%s\n%s\n' "$RUST_VERSION" "$installed" | sort -V | head -1)" = "$RUST_VERSION" ]; then
-    echo "Rust $installed already installed"
+  if [ -n "$installed" ] && [ "$(printf '%s\n%s\n' "$RUST_TOOLCHAIN" "$installed" | sort -V | head -1)" = "$RUST_TOOLCHAIN" ]; then
+    echo "Rust $installed already installed, without rustup to pin $RUST_TOOLCHAIN with"
     return
   fi
   local triple
@@ -93,11 +100,11 @@ install_rust() {
   verify "$tmp/rustup-init" "$(curl -fsSL --retry 3 "$base/rustup-init.sha256" | awk '{ print $1 }')"
   chmod +x "$tmp/rustup-init"
   RUSTUP_HOME="$rust_dir/rustup" CARGO_HOME="$rust_dir/cargo" "$tmp/rustup-init" -y --no-modify-path --profile minimal \
-    --default-toolchain "$RUST_VERSION" --component rustfmt,clippy >/dev/null
+    --default-toolchain "$RUST_TOOLCHAIN" --component rustfmt,clippy >/dev/null
   if [ "$os" = linux ]; then
     RUSTUP_HOME="$rust_dir/rustup" CARGO_HOME="$rust_dir/cargo" "$rust_dir/cargo/bin/rustup" target add "${triple%%-*}-unknown-linux-musl" >/dev/null
   fi
-  echo "installed Rust $RUST_VERSION in hack/.rust (rustup-init sha256 verified)"
+  echo "installed Rust $RUST_TOOLCHAIN in hack/.rust (rustup-init sha256 verified)"
 }
 
 [ $# -gt 0 ] || set -- kubectl k3d rust

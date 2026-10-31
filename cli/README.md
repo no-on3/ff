@@ -166,7 +166,7 @@ An error goes to stderr: `error: <message>`, the API's own when it refused, and 
 
 ## Build and test
 
-Rust 1.91 or later (`rustup`; `hack/install-tools.sh rust` installs it in `hack/.rust` where there is none recent enough), from this folder:
+Rust 1.91.0, which `rust-toolchain.toml` names: rustup installs it on first use in this folder, so that a laptop and the CI server lint with the same clippy (`hack/install-tools.sh rust` installs rustup and it in `hack/.rust` where there is no rustup; `RUSTUP_TOOLCHAIN=stable` tries the newest). From this folder:
 
 ```bash
 cargo build --release --locked                                    # target/release/ff

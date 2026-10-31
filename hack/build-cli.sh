@@ -7,8 +7,9 @@
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# The toolchain the CLI is tested with, Alpine's, for musl; pinned to a release at least two weeks old when chosen.
-RUST_IMAGE="${RUST_IMAGE:-rust:1.91.0-alpine3.22}"
+# The toolchain the CLI is tested with, cli/rust-toolchain.toml's, in Alpine's image, for musl; Alpine pinned to a
+# release at least two weeks old when chosen.
+RUST_IMAGE="${RUST_IMAGE:-rust:$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/cli/rust-toolchain.toml")-alpine3.22}"
 target=x86_64-unknown-linux-musl
 dist="$repo/cli/target/dist"
 binary="ff-linux-x86_64"
