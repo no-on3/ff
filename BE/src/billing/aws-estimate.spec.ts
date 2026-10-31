@@ -11,7 +11,7 @@ import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
 import { withCachePrices } from '../migrations/1793333328301-CacheMeasures';
 import { withEmailPrices } from '../migrations/1793345460517-EmailBilling';
 import { withEstimatePrices } from '../migrations/1793486079752-AwsEstimatePrices';
-import { AwsExtraPrices, ExtraCosts, ExtraUsage, awsExtraPrices, extraCosts, tiered } from './aws-estimate';
+import { AwsExtraPrices, ExtraCosts, ExtraUsage, awsExtraPrices, awsMonth, extraCosts, lineText, logsOf, tiered } from './aws-estimate';
 import { Decimal } from './decimal';
 import { BookPrices, awsBookPrices, priceDocumentSchema, readTiers } from './price-book';
 import { ResourceUsage, rateMonth } from './rating';
@@ -139,5 +139,80 @@ describe("the estimate at AWS's prices (L1)", () => {
 
     expect([d('4'), d('10'), d('25'), d('50')].map((quantity) => tiered(quantity, tiers, d('5')).toString())).toEqual(['0', '5', '12.5', '20']);
     expect(tiered(d('50'), tiers).toString()).toBe('25');
+  });
+
+  describe('a month, line by line', () => {
+    const resource = (resourceId: string, kind: ResourceUsage['kind'], parts: Partial<ResourceUsage>): ResourceUsage => ({
+      resourceId,
+      kind,
+      byteHours: 0n,
+      hours: 0n,
+      tier1Requests: 0n,
+      tier2Requests: 0n,
+      requests: 0n,
+      bytes: 0n,
+      ...parts,
+    });
+
+    it("prices FF's counts at AWS's, each service alone with AWS's free tier, then what AWS bills that FF doesn't, worked by hand", () => {
+      // A month of 720 hours. Lambda's example of a mobile backend, its 1,000 cold starts of 500 ms each at 1,536 MB too;
+      // a database of 1 GB all month and one of 30 GB for half of it, a cache, a bucket of 10 GB, 3 million queue requests,
+      // 2,000 recipients of mail; 150 GB out, 1 GB of logs kept half the month, a site within CloudFront's free tier, and
+      // a NAT gateway all month.
+      const backend = { functionId: 'backend', onDemand: { requests: 3_000_000n, mbMs: 3_000_000n * 120n * 1536n }, provisioned: { requests: 0n, mbMs: 0n }, provisionedMbMs: 0n, reservedMbMs: 0n };
+      const lines = awsMonth(
+        AT_AWS,
+        PRICES,
+        {
+          functions: [backend],
+          initMbMs: new Map([['backend', 1_000n * 500n * 1536n]]),
+          resources: [
+            resource('orders', 'database', { byteHours: GIB * 720n, hours: 720n }),
+            resource('archive', 'database', { byteHours: 30n * GIB * 360n, hours: 360n }),
+            resource('sessions', 'cache', { byteHours: (GIB / 2n) * 720n, hours: 720n }),
+            resource('receipts', 'bucket', { byteHours: 10n * GIB * 720n, hours: 720n, tier1Requests: 2_000n, tier2Requests: 20_000n }),
+            resource('orders-queue', 'queue', { requests: 3_000_000n }),
+            resource('shop.example.tn', 'email', { requests: 2_000n }),
+          ],
+          traffic: { dataOutGb: d('150'), logsIngestedGb: d('1'), logsStoredGbMonths: d('0.5'), siteDataOutGb: d('100'), siteRequests: 1_000_000n, natGatewayHours: 720, natGatewayGb: Decimal.ZERO },
+        },
+        720,
+      );
+
+      expect(Object.fromEntries(Object.entries(lines).map(([line, cost]) => [line, cost.toString()]))).toEqual({
+        functions: '2.733338', // as Lambda's own example
+        databaseStorage: '1.84', // (1 + 30 × 360 ÷ 720) GB-months × $0.115
+        buckets: '0.248', // 10 GB-months × $0.023, 2,000 PUT × $0.005 and 20,000 GET × $0.0004 per 1,000
+        queues: '0.8', // (3M − the free million) × $0.40 per million
+        mail: '0.2', // 2,000 × $0.10 per 1,000
+        coldStarts: '0.012500025', // 750 GB-s past the free tier × $0.0000166667
+        databaseInstances: '19.465', // 1,080 hours × $0.016, and the first database's 19 GB-months short of RDS's 20 GB × $0.115
+        cacheNodes: '9.216', // 720 hours × $0.0128
+        dataOut: '4.5', // 50 GB past the free 100 × $0.09
+        logs: '0.515', // 1 GB × $0.50, 0.5 GB-month × $0.03
+        cloudFront: '0', // within its free tier
+        natGateway: '36', // 720 hours × ($0.045 + its address's $0.005)
+      });
+    });
+
+    it("counts a month's logs at 1 KB a call, kept as many of its days as the plan keeps them, all of it at most", () => {
+      const shown = ({ ingestedGb, storedGbMonths }: ReturnType<typeof logsOf>) => [ingestedGb.toString(), storedGbMonths.toString()];
+
+      // 1,048,576 calls of 1 KB: 1 GB, kept 15 days of 30, or 45 of 30.
+      expect([shown(logsOf(1_048_576n, 15, 30)), shown(logsOf(1_048_576n, 45, 30)), shown(logsOf(0n, 14, 31))]).toEqual([
+        ['1', '0.5'],
+        ['1', '1'],
+        ['0', '0'],
+      ]);
+    });
+
+    it("names each line, and says what each line of what AWS bills that FF doesn't assumes, the plan's days of logs included", () => {
+      expect(lineText('functions', 14)).toEqual({ label: 'AWS Lambda: requests and duration', assumption: null });
+      expect(lineText('logs', 14).assumption).toContain('kept 14 days as the plan keeps them');
+      expect(lineText('databaseInstances', 14)).toEqual({
+        label: 'RDS for PostgreSQL: a db.t4g.micro for each database',
+        assumption: "The smallest instance, in one zone, for each database's hours, with the 20 GB of gp3 storage RDS bills at least",
+      });
+    });
   });
 });

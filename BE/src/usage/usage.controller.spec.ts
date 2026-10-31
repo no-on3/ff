@@ -12,9 +12,10 @@ import { Principal } from '../auth/principal';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
 import { Decimal } from '../billing/decimal';
 import { AccountEstimate, PricingService } from '../billing/pricing.service';
+import { AwsEstimateService } from './aws-estimate.service';
 import { usageCsv } from './usage-csv';
 import { UsageController } from './usage.controller';
-import { BucketMonth, CacheMonth, DatabaseMonth, EmailMonth, MonthlyUsageView, QueueMonth, UsageMonth } from './usage.dto';
+import { AwsEstimateView, BucketMonth, CacheMonth, DatabaseMonth, EmailMonth, MonthlyUsageView, QueueMonth, UsageMonth } from './usage.dto';
 import { UsageService } from './usage.service';
 
 const ACCOUNT = '000000000001';
@@ -116,6 +117,8 @@ describe('GET /usage (L1, P-22, P-30)', () => {
   const monthlyEmail = jest.fn(async () => EMAIL);
   const functionNames = jest.fn(async () => new Map([[WARM, 'warm']]));
   const estimate = jest.fn(async (): Promise<AccountEstimate | null> => ESTIMATE);
+  const AT_AWS: AwsEstimateView = { currency: 'TND', usdRate: '3.0080', usdRateDate: '2026-10-14', region: 'us-east-1', pricesReadOn: ['2026-10-17', '2026-10-31'], priceBook: 'book-2', months: [] };
+  const awsEstimate = jest.fn(async (): Promise<AwsEstimateView> => AT_AWS);
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -123,6 +126,7 @@ describe('GET /usage (L1, P-22, P-30)', () => {
       providers: [
         { provide: UsageService, useValue: { monthly, monthlyDatabases, monthlyBuckets, monthlyQueues, monthlyCaches, monthlyEmail, functionNames } },
         { provide: PricingService, useValue: { estimate } },
+        { provide: AwsEstimateService, useValue: { estimate: awsEstimate } },
       ],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -212,5 +216,39 @@ describe('GET /usage (L1, P-22, P-30)', () => {
     expect(res.headers.get('content-type')).toBe('text/csv; charset=utf-8');
     expect(res.headers.get('content-disposition')).toBe(`attachment; filename="ff-usage-${ACCOUNT}-2026-09.csv"`);
     expect(await res.text()).toBe(usageCsv(PRICED));
+  });
+
+  describe("GET /usage/aws-estimate: the last months at AWS's prices", () => {
+    it('lets every member read it, viewers included, as GET /usage, and a key with usage:read', () => {
+      const reflector = new Reflector();
+      const handler = UsageController.prototype.awsEstimate;
+
+      expect([reflector.get(ROLES, handler), reflector.get(ACTIVE_ACCOUNT, handler), reflector.get(SCOPE, handler)]).toEqual([undefined, undefined, 'usage:read']);
+    });
+
+    it("estimates the caller's account's last three months, leaving nothing out, without a query", async () => {
+      const res = await fetch(`${baseUrl}/usage/aws-estimate`);
+
+      expect([res.status, await res.json()]).toEqual([200, AT_AWS]);
+      expect(awsEstimate.mock.calls).toEqual([[ACCOUNT, 3, []]]);
+    });
+
+    it("takes how many months, and the lines of what AWS bills that FF doesn't to leave out, comma-separated", async () => {
+      expect((await fetch(`${baseUrl}/usage/aws-estimate?months=12&without=natGateway,%20logs`)).status).toBe(200);
+      expect(awsEstimate).toHaveBeenLastCalledWith(ACCOUNT, 12, ['natGateway', 'logs']);
+    });
+
+    it("refuses months outside 1 to 12, and a line to leave out that isn't one of what AWS bills that FF doesn't", async () => {
+      for (const query of ['months=0', 'months=13', 'months=two', 'months=1.5']) {
+        const res = await fetch(`${baseUrl}/usage/aws-estimate?${query}`);
+        expect([query, res.status, (await res.json()).message]).toEqual([query, 400, ['months must be a whole number from 1 to 12']]);
+      }
+      const res = await fetch(`${baseUrl}/usage/aws-estimate?without=functions,logs`);
+      expect([res.status, (await res.json()).message]).toEqual([
+        400,
+        ['without names lines of coldStarts, databaseInstances, cacheNodes, dataOut, logs, cloudFront, natGateway, comma-separated'],
+      ]);
+      expect(awsEstimate).not.toHaveBeenCalled();
+    });
   });
 });

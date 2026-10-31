@@ -44,6 +44,7 @@ import { PlatformSettingsService } from './admin/platform-settings.service';
 import { UsageController } from './usage/usage.controller';
 import { PlansService } from './plans/plans.service';
 import { PricingService } from './billing/pricing.service';
+import { AwsEstimateService } from './usage/aws-estimate.service';
 import { BillingController } from './billing/billing.controller';
 import { BillingService } from './billing/billing.service';
 import { ProFormasController } from './billing/payments/pro-formas.controller';
@@ -150,6 +151,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
           }),
         },
         { provide: PricingService, useValue: succeeding(PricingService, { estimate: async () => null }) },
+        { provide: AwsEstimateService, useValue: succeeding(AwsEstimateService) },
         { provide: PlatformSettingsService, useValue: succeeding(PlatformSettingsService) },
         { provide: AuditService, useValue: succeeding(AuditService, { operatorActions: async () => ({ entries: [], next: null }) }) },
         { provide: AdminAccountsService, useValue: succeeding(AdminAccountsService) },

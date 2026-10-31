@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, Matches } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsIn, IsOptional, Matches } from 'class-validator';
+import { COUNTED_LINES, EXTRA_LINES, EstimateLine } from '../billing/aws-estimate';
 
 /** A month by the UTC calendar, as YYYY-MM. */
 export const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -304,3 +306,100 @@ export type CacheMonth = Omit<CacheUsageView, 'cost'>;
 
 /** A domain's or an address's mail in a month as UsageService reads it from its billing records, before it is priced. */
 export type EmailMonth = Omit<EmailUsageView, 'cost'>;
+
+/** The most months GET /usage/aws-estimate takes. */
+export const MAX_ESTIMATE_MONTHS = 12;
+
+/** GET /usage/aws-estimate's query. */
+export class AwsEstimateQuery {
+  @ApiPropertyOptional({ example: 3, minimum: 1, maximum: MAX_ESTIMATE_MONTHS, description: 'How many months: this one so far, and those before it; 3 without it' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsIn(
+    Array.from({ length: MAX_ESTIMATE_MONTHS }, (_unused, index) => index + 1),
+    { message: `months must be a whole number from 1 to ${MAX_ESTIMATE_MONTHS}` },
+  )
+  months?: number;
+
+  @ApiPropertyOptional({
+    type: String,
+    example: 'natGateway,logs',
+    description: `What AWS bills that FF doesn't, left out of the totals, comma-separated: ${EXTRA_LINES.join(', ')}`,
+  })
+  @IsOptional()
+  @Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.split(',').map((line) => line.trim()).filter(Boolean) : value))
+  @IsIn([...EXTRA_LINES], { each: true, message: `without names lines of ${EXTRA_LINES.join(', ')}, comma-separated` })
+  without?: string[];
+}
+
+/** A line of the estimate at AWS's prices: what FF counts, or what AWS bills that FF doesn't. */
+export class AwsEstimateLineView {
+  @ApiProperty({ enum: [...COUNTED_LINES, ...EXTRA_LINES], example: 'functions' })
+  line: EstimateLine;
+
+  @ApiProperty({ example: 'AWS Lambda: requests and duration', description: 'What it is, as AWS bills it' })
+  label: string;
+
+  @ApiProperty({ example: '2.73', description: 'In US$, rounded to the cent' })
+  usd: string;
+
+  @ApiProperty({ example: '8.222', description: "In the price book's currency, at its US$ rate, rounded to its minor unit" })
+  amount: string;
+
+  @ApiProperty({ description: "Of what AWS bills that FF doesn't: an estimate of its own, which the query's without leaves out" })
+  extra: boolean;
+
+  @ApiProperty({ description: "Left out of the month's totals, as the query's without asked" })
+  leftOut: boolean;
+
+  @ApiProperty({ nullable: true, type: String, description: "What a line of what AWS bills that FF doesn't assumes; null for FF's own counts" })
+  assumption: string | null;
+}
+
+/** A month at AWS's prices, from what FF counted. */
+export class AwsEstimateMonthView {
+  @ApiProperty({ example: '2026-10' })
+  month: string;
+
+  @ApiProperty({ nullable: true, type: Date, description: 'This month: up to now; null for a month that is over' })
+  until: Date | null;
+
+  @ApiProperty({ example: 3_000_000, description: 'The calls billed, as AWS Lambda bills them' })
+  requests: number;
+
+  @ApiProperty({ type: [AwsEstimateLineView], description: "FF's counts at AWS's prices, then what AWS bills that FF doesn't" })
+  lines: AwsEstimateLineView[];
+
+  @ApiProperty({ example: '13.97', description: 'Every line not left out, in US$: the exact sum, rounded once' })
+  totalUsd: string;
+
+  @ApiProperty({ example: '42.022', description: "The same in the price book's currency, at its US$ rate" })
+  total: string;
+
+  @ApiProperty({ nullable: true, type: String, example: '8.222', description: "The same month at FF's prices, as GET /usage estimates it; null without a price book for the month" })
+  ffTotal: string | null;
+}
+
+/** GET /usage/aws-estimate: the last months at AWS's prices, an estimate, with the prices' dates. */
+export class AwsEstimateView {
+  @ApiProperty({ example: 'TND', description: 'The currency of each amount but the US$ ones' })
+  currency: string;
+
+  @ApiProperty({ example: '3.0080', description: "The price book's US$ rate: the currency's units per US$" })
+  usdRate: string;
+
+  @ApiProperty({ nullable: true, type: String, example: '2026-10-14', description: 'The day of that rate' })
+  usdRateDate: string | null;
+
+  @ApiProperty({ example: 'us-east-1', description: "AWS's region whose prices these are" })
+  region: string;
+
+  @ApiProperty({ type: [String], example: ['2026-10-17', '2026-10-31'], description: "The first and the last day FF read AWS's prices on" })
+  pricesReadOn: string[];
+
+  @ApiProperty({ description: "The price book whose AWS prices these are: the newest that records what AWS bills that FF doesn't" })
+  priceBook: string;
+
+  @ApiProperty({ type: [AwsEstimateMonthView], description: 'Oldest first; this month, so far, last' })
+  months: AwsEstimateMonthView[];
+}

@@ -4,9 +4,10 @@ import type { Response } from 'express';
 import { Principal } from '../auth/principal';
 import { RequireScope } from '../auth/route-rules';
 import { PricingService } from '../billing/pricing.service';
+import { AwsEstimateService } from './aws-estimate.service';
 import { usageCsv, wantsCsv } from './usage-csv';
 import { unlisted, withEstimate } from './usage-estimate';
-import { MonthlyUsageView, UsageQuery } from './usage.dto';
+import { AwsEstimateQuery, AwsEstimateView, MonthlyUsageView, UsageQuery } from './usage.dto';
 import { UsageService, monthOf } from './usage.service';
 
 /**
@@ -20,6 +21,7 @@ export class UsageController {
   constructor(
     private readonly usage: UsageService,
     private readonly pricing: PricingService,
+    private readonly awsEstimates: AwsEstimateService,
   ) {}
 
   @Get()
@@ -53,5 +55,18 @@ export class UsageController {
     response.setHeader('content-type', 'text/csv; charset=utf-8');
     response.setHeader('content-disposition', `attachment; filename="ff-usage-${principal.accountId}-${view.month}.csv"`);
     return usageCsv(view);
+  }
+
+  @Get('aws-estimate')
+  @RequireScope('usage:read')
+  @ApiOperation({
+    summary: "The last months' usage at AWS's prices: an estimate",
+    description:
+      "Each month's usage as FF counted it, this month's so far, priced at AWS's US$ list prices in US East (N. Virginia), as the newest price book records them with the days they were read, with the free tier AWS gives every account every month: Lambda's requests and duration, RDS's storage, S3's, SQS's and SES's. Then what AWS bills that FF doesn't, each line with what it assumes, which `without` leaves out of the totals: the calls' start-up time, an RDS instance for each database, an ElastiCache node for each cache, data out, Lambda's logs, CloudFront for the sites, a NAT gateway. In US$, and in the book's currency at its US$ rate; beside each month, what FF's prices make of it. An estimate, not a quote.",
+  })
+  @ApiResponse({ status: 200, type: AwsEstimateView })
+  @ApiResponse({ status: 404, description: "No price book records AWS's prices of what FF doesn't bill" })
+  awsEstimate(@Principal() principal: Principal, @Query() query: AwsEstimateQuery): Promise<AwsEstimateView> {
+    return this.awsEstimates.estimate(principal.accountId, query.months ?? 3, query.without ?? []);
   }
 }

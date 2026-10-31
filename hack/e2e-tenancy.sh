@@ -589,6 +589,13 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B reads its own usage, which never counts A's function" "200 0" \
         "$(status) $(jq --arg id "$id" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_b")"
       ;;
+    "GET /usage/aws-estimate")
+      # A's function was called this month; B called nothing.
+      estimate_b="$(as_b GET /usage/aws-estimate)"
+      estimate_status="$(status)"
+      check "$route: B's estimate at AWS's prices never counts A's calls" "200 0 true" \
+        "$estimate_status $(jq '[.months[].requests] | add' <<<"$estimate_b") $(as_a GET /usage/aws-estimate | jq '.months[-1].requests > 0')"
+      ;;
     "GET /metrics")
       # A's function was called in the last hour; B called nothing.
       metrics_b="$(as_b GET /metrics)"
@@ -1225,6 +1232,12 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       usage_2="$(as_user_2 GET /usage)"
       check "$route: account 2's usage never counts account 1's function" "200 0" \
         "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_2")"
+      ;;
+    "GET /usage/aws-estimate")
+      estimate_2="$(as_user_2 GET /usage/aws-estimate)"
+      estimate_status="$(status)"
+      check "$route: account 2's estimate at AWS's prices never counts account 1's calls" "200 0 true" \
+        "$estimate_status $(jq '[.months[].requests] | add' <<<"$estimate_2") $(as_user_1 GET /usage/aws-estimate | jq '.months[-1].requests > 0')"
       ;;
     "GET /metrics")
       metrics_2="$(as_user_2 GET /metrics)"
