@@ -81,10 +81,11 @@
 # named an image the registry never had, rolled out with its package's.
 # What waits on the clock (a schedule's runs, a sample taken each minute, counts
 # written a minute at a time, the reaper's minute) is started in its section and
-# read a few sections on, in a section of its own (schedules_ran, async_metrics,
-# databases_sampled, caches_sampled, sites_counted, usage_lost), so that its
-# minute passes while the sections between run: what it checks is the same, a
-# real minute of the product's, and a section run alone waits as long as before.
+# read a few sections on, in a section of its own (schedules_ran, buckets_room,
+# async_metrics, databases_sampled, caches_sampled, sites_counted, usage_lost),
+# so that its minute passes while the sections between run: what it checks is
+# the same, a real minute of the product's, and a section run alone waits as
+# long as before.
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
@@ -1063,10 +1064,12 @@ for _ in $(seq 1 150); do
 done
 check "a run that fails is the schedule's call, its outcome on the schedule" "schedule:1:ERROR error" \
   "$(run_attempts "$first_run" | cut -d' ' -f1) $(settled_schedules "$failing_sched_fn" | jq -r '.[0].lastOutcome')"
-# The retry's wait: its start, less the failure's end; the worker claims what is due every second.
+# The retry's wait: its start, less the failure's end. The worker claims what has come due at its next pass, every 5 s
+# (FF_ASYNC_INTERVAL_SECONDS), so a retry due a minute after its failure starts within 65 s of it, and its attempt a
+# moment after.
 retry_wait="$(env_q "SELECT extract(epoch FROM r.created_at - f.updated_at) FROM function_invocations f JOIN function_invocations r ON r.request_id = f.request_id AND r.attempt = 2 WHERE f.request_id = '$first_run' AND f.attempt = 1")"
 check "  ... retried as an asynchronous call is, a minute after its failure, under the run's request ID" "a minute schedule:1:ERROR schedule:2:ERROR" \
-  "$(awk -v s="${retry_wait:-0}" 'BEGIN { print (s >= 59.5 && s < 65) ? "a minute" : s " s" }') $(run_attempts "$first_run" | cut -d' ' -f1,2)"
+  "$(awk -v s="${retry_wait:-0}" 'BEGIN { print (s >= 59.5 && s < 70) ? "a minute" : s " s" }') $(run_attempts "$first_run" | cut -d' ' -f1,2)"
 http DELETE "/functions/$failing_sched_fn" >/dev/null
 http DELETE "/functions/$sched_fn" >/dev/null
 check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
@@ -1188,11 +1191,7 @@ check "its buckets past the plan's storage together: an upload waits for room, A
   "$(storage_notice) $(grep -q AccountProblem <<<"$full" && echo true || echo false) $(grep -q 'its buckets hold the 1 MB its E2E files plan gives them' <<<"$full" && echo true || echo false)"
 check "  ... a read and a delete go on" "accepted accepted" \
   "$(as_other_s3 outcome aws_ff s3 cp s3://e2e-theirs/one.bin "$work/one.out") $(as_other_s3 outcome aws_ff s3 rm s3://e2e-theirs/two.bin)"
-# A full account is measured every minute: room made, its uploads go in again within one.
-for _ in $(seq 75); do [ "$(storage_notice)" != 100 ] && break; sleep 1; done
-check "  ... and once there is room, within a minute, the upload goes in" "0 accepted" \
-  "$(storage_notice) $(as_other_s3 outcome aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin)"
-sql "UPDATE accounts SET plan_id = 'beta' WHERE id = '$other'"
+# Room made: the next minute's measure lets its uploads in again, read in buckets_room, the queues' section on.
 for _ in $(seq 150); do [ "$(http GET "/alarms/$bucket_alarm" | jq -r .state)" = ALARM ] && break; sleep 1; done
 check "an alarm on its 4xx errors fires once the minute is counted, naming the bucket" "ALARM e2e-photos true" \
   "$(http GET "/alarms/$bucket_alarm" | jq -r '"\(.state) \(.bucketName) \(.stateReason | test("breaching 4xxErrors Sum > 0"))"')"
@@ -1389,6 +1388,17 @@ check "the audit log names each change of a queue, whichever way it came: the CL
   "$(env_q "SELECT string_agg(action || ' ' || actor, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource IN ('queue:e2e-cli-orders', 'queue:e2e-api-orders') AND (resource = 'queue:e2e-api-orders' OR action = 'queue.create')")"
 }
 section_def queues section_queues keys
+
+section_buckets_room() {
+section "customers' buckets: the full account's room, made in their section, measured a minute on"
+# A full account is measured every minute: room made, its uploads go in again within one, which the queues' section
+# passes.
+for _ in $(seq 75); do [ "$(storage_notice)" != 100 ] && break; sleep 1; done
+check "the other account's buckets, room made in them, take its upload again within a minute" "0 accepted" \
+  "$(storage_notice) $(as_other_s3 outcome aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin)"
+sql "UPDATE accounts SET plan_id = 'beta' WHERE id = '$other'"
+}
+section_def buckets_room section_buckets_room buckets
 
 section_mappings() {
 section "functions reading queues, as Lambda's event source mappings: a batch, a partial batch failure, the dead-letter queue"
