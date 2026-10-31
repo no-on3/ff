@@ -93,8 +93,7 @@ ses_port="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
-# B's calls are patient (below): its loop over every route makes more changes than its plan's 60 a minute.
-as_b() { patient http_at "$api" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_b"; }
+as_b() { http_at "$api" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_b"; }
 # The development header, which OIDC mode must ignore.
 anonymous() { http_at "$api_oidc" "$1" "$2" "${3:-}" -H "X-FF-Dev-Account: $account_a"; }
 # with_token <token> <method> <path> [body] [curl option...]: through the guard.
@@ -104,8 +103,12 @@ with_token() {
   http_at "$api_oidc" "$method" "$path" "$body" -H "Authorization: Bearer $token" "$@"
 }
 message() { jq -r .message "$work/body"; }
+# sql <statements>: run in FF's database, nothing printed. sql_value <query> [psql option...]: its rows, unaligned,
+# without a header.
+sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
+sql_value() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA "${@:2}" -c "$1"; }
 # What waits in a function's queue: its asynchronous calls.
-waiting_for() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "SELECT count(*) FROM queue_messages WHERE function_id = '$1'"; }
+waiting_for() { sql_value "SELECT count(*) FROM queue_messages WHERE function_id = '$1'"; }
 # Its messages joined, for an answer that lists them.
 messages() { jq -r '.message | if type == "array" then join("; ") else . end' "$work/body"; }
 # upload_package <base URL> <zip> [curl arguments]: POST /packages, the zip as the body; its answer, its status in $work/status.
@@ -117,19 +120,6 @@ upload_package() {
 }
 sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
 uri() { jq -rn --arg s "$1" '$s | @uri'; }
-# patient <call…>: a change past the plan's 60 a minute answers 429, and is sent again once the wait it gives is over,
-# as a client does: each loop below makes more changes than that in a minute. Prints the last answer's body.
-patient() {
-  local body wait
-  body="$("$@")"
-  if [ "$(status)" = 429 ]; then
-    wait="$(message | sed -nE 's/.*Retry after ([0-9]+) s\..*/\1/p')"
-    sleep "${wait:-60}"
-    body="$("$@")"
-  fi
-  printf '%s' "$body"
-}
-patiently() { patient "$@" >/dev/null; }
 # Routes anyone may call (@Public()): whether the process is alive, and whether it can serve, for the load balancer.
 public_routes=("GET /healthz" "GET /readyz")
 is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "$1" ] && return 0; done; return 1; }
@@ -191,7 +181,7 @@ mail_to() {
 # grant <account> <millimes> <key>: promotional credit, written as one balanced ledger transaction
 # (P-31), before the operator logs in; the operator's own grants have their section (P-74).
 grant() {
-  "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -v ON_ERROR_STOP=1 -qc "
+  sql "
     INSERT INTO ledger_accounts (account_id, type, currency) VALUES ('$1', 'wallet', 'TND') ON CONFLICT DO NOTHING;
     INSERT INTO ledger_accounts (type, currency) VALUES ('promotional_credit', 'TND') ON CONFLICT DO NOTHING;
     INSERT INTO ledger_transactions (kind, idempotency_key) VALUES ('promo', '$3');
@@ -199,7 +189,7 @@ grant() {
       SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN $2 ELSE -$2 END
         FROM ledger_transactions t, ledger_accounts a
        WHERE t.idempotency_key = '$3' AND a.currency = 'TND'
-         AND (a.account_id = '$1' OR (a.account_id IS NULL AND a.type = 'promotional_credit'));" >/dev/null
+         AND (a.account_id = '$1' OR (a.account_id IS NULL AND a.type = 'promotional_credit'));"
 }
 # fetch_pdf <base URL> <path> [curl option...]: GETs a document into $work/file.pdf, its headers into $work/headers, printing its status and content type.
 fetch_pdf() {
@@ -255,8 +245,7 @@ snapshot() {
 }
 
 # proved_domain <account> <domain>: the domain marked proved, as its DKIM record found would prove it.
-proved_domain() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc \
-  "UPDATE email_identities SET status = 'SUCCESS', verified_at = now() WHERE account_id = '$1' AND identity = '$2'" >/dev/null; }
+proved_domain() { sql "UPDATE email_identities SET status = 'SUCCESS', verified_at = now() WHERE account_id = '$1' AND identity = '$2'"; }
 
 # notified_by <as_…> <bucket>: the IDs of the bucket's notification configurations, as its own account reads them.
 notified_by() { "$1" GET "/buckets/$2/notifications" | jq -r '[.queueConfigurations[].id] | join(",")'; }
@@ -286,7 +275,8 @@ alarm_body() {
     statistic: "Sum", period: 60, comparison: "GreaterThanThreshold", threshold: 1000, evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: []}}'
 }
 
-# path_for <template> <method> <function ID> <account ID> [key ID]: the path, with its required query parameters filled in.
+# path_for <template> <method> <function ID> <account ID> [key ID]: the path, with its required query parameters filled in,
+# which route_queries has from the API's document.
 path_for() {
   local template=$1 method=$2 path name params=()
   case $template in
@@ -302,12 +292,12 @@ path_for() {
   path="${path//\{identity\}/shop.l5.example.tn}" # a domain or an address to send mail from
   path="${path//\{address\}/gone@l5.example.tn}"
   path="${path//\{scheduleId\}/$missing}"
-  path="${path//\{month\}/$(date -u +%Y-%m)}"
+  [[ $path != *'{month}'* ]] || path="${path//\{month\}/$(date -u +%Y-%m)}"
   path="${path//\{name\}/l5-photos-a}" # a bucket's, or a queue's
   path="${path//\{receiptHandle\}/bm90LWEtaGFuZGxl}"
   path="${path//\{uuid\}/$missing}" # an event source mapping's, which each loop names itself
   [[ $path != *'{'* ]] || fail "$method $template: no value for its path parameter"
-  while read -r name; do
+  for name in ${route_queries["$method $template"]:-}; do
     case $name in
       start) params+=("start=$(date -u -d '-1 hour' +%Y-%m-%dT%H:%M:%SZ)") ;;
       end) params+=("end=$(date -u +%Y-%m-%dT%H:%M:%SZ)") ;;
@@ -315,8 +305,7 @@ path_for() {
       expression) params+=("expression=rate(1%20hour)") ;;
       *) fail "$method $template: no value for its required query parameter $name" ;;
     esac
-  done < <(jq -r --arg path "$template" --arg method "${method,,}" \
-    '.paths[$path][$method].parameters // [] | .[] | select(.in == "query" and .required) | .name' <<<"$document")
+  done
   local IFS='&'
   printf '%s%s' "$path" "${params:+?${params[*]}}"
 }
@@ -372,8 +361,7 @@ s3_with() {
 
 as_user_1() { with_token "$token_1" "$@"; }
 
-# Account 2's calls are patient, as B's: its loop over every route makes more changes than its plan's 60 a minute.
-as_user_2() { patient with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: ${account_2:-}"; }
+as_user_2() { with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: ${account_2:-}"; }
 
 # plus_millimes <amount> <millimes>: the amount, as the API writes TND, plus that many millimes.
 plus_millimes() { node -e 'const [a, m] = process.argv.slice(1); console.log(((Math.round(Number(a) * 1000) + Number(m)) / 1000).toFixed(3))' "$1" "$2"; }
@@ -506,11 +494,22 @@ check "a function that doesn't exist answers 404" "404 Function with ID $missing
 as_a GET /functions '' -H 'X-FF-Dev-Account: 12345' >/dev/null
 check "a malformed X-FF-Dev-Account is refused" 400 "$(status)"
 
-# Every route of the OpenAPI document, as "METHOD /path/{param}".
+# Every route of the OpenAPI document, as "METHOD /path/{param}", and the query parameters each requires, read once:
+# the loops below call every route, and the document is too large to read again for each.
 document="$(curl -sS "$api/api-json")"
-mapfile -t routes < <(jq -r '.paths | to_entries[] | .key as $path | .value | to_entries[]
-  | select(.key | IN("get", "put", "post", "delete", "patch")) | "\(.key | ascii_upcase) \($path)"' <<<"$document")
+routes=()
+declare -gA route_queries=()
+while IFS=$'\t' read -r route queries; do
+  routes+=("$route")
+  route_queries[$route]="$queries"
+done < <(jq -r '.paths | to_entries[] | .key as $path | .value | to_entries[] | select(.key | IN("get", "put", "post", "delete", "patch"))
+  | "\(.key | ascii_upcase) \($path)\t\([.value.parameters // [] | .[] | select(.in == "query" and .required) | .name] | join(" "))"' <<<"$document")
 [ "${#routes[@]}" -gt 0 ] || fail "the OpenAPI document lists no routes"
+# The loops make more changes in a minute than a plan allows, and the rate limit would hold each a minute: the accounts
+# they run as, B and 2, are on a plan of the test's own, with beta's limits but that one.
+sql "INSERT INTO plans (id, name, limits) SELECT 'l5-loops', 'L5 loops', limits || '{\"writesPerMinute\": 10000}' FROM plans WHERE id = 'beta'"
+as_b GET /me >/dev/null # development mode makes B's account on its first call
+sql "UPDATE accounts SET plan_id = 'l5-loops' WHERE id = '$account_b'"
 
 needs_user="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage accounts"
 needs_user_for_keys="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage API keys"
@@ -779,14 +778,14 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B's list doesn't show A's domain" "200 0" "$(status) $listed"
       ;;
     "POST /email/identities")
-      patiently as_b POST /email/identities '{"identity": "shop.l5.example.tn"}'
+      as_b POST /email/identities '{"identity": "shop.l5.example.tn"}' >/dev/null
       check "$route: B adds the domain A has, with a DKIM key of its own: identities are each account's" "201 true" \
         "$(status) $([ "$(jq -r .dkimSelector "$work/body")" != "$selector_a" ] && echo true || echo false)"
-      patiently as_b DELETE /email/identities/shop.l5.example.tn
+      as_b DELETE /email/identities/shop.l5.example.tn >/dev/null
       check "  ... and which B deletes, A's own untouched" "204 $selector_a" "$(status) $(as_a GET /email/identities/shop.l5.example.tn | jq -r .dkimSelector)"
       ;;
     "GET /email/identities/{identity}" | "POST /email/identities/{identity}/verify" | "DELETE /email/identities/{identity}")
-      patiently as_b "$method" "${template//\{identity\}/shop.l5.example.tn}"
+      as_b "$method" "${template//\{identity\}/shop.l5.example.tn}" >/dev/null
       check "$route: B gets 404 for A's domain" "404 The account has no identity shop.l5.example.tn" "$(status) $(message)"
       kept="$(as_a GET /email/identities/shop.l5.example.tn | jq -r .dkimSelector)"
       check "  ... which A still has, its key unchanged" "200 $selector_a" "$(status) $kept"
@@ -804,7 +803,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B's mail's metrics count none of A's" "200 0" "$(status) $sent"
       ;;
     "POST /email/messages")
-      patiently as_b POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "B'"'"'s"}'
+      as_b POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "B'"'"'s"}' >/dev/null
       check "$route: B can't send from A's domain, which isn't B's" \
         "400 Email address is not verified. The following identities failed the check in region TN-TUNIS-1: orders@shop.l5.example.tn" "$(status) $(message)"
       check "  ... A's message still A's alone" "$message_a 1" "$(as_a GET /email/messages | jq -r '"\(.messages[0].messageId) \(.messages | length)"')"
@@ -814,14 +813,14 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B's list doesn't show A's address" "200 0" "$(status) $listed"
       ;;
     "PUT /email/suppressions/{address}")
-      patiently as_b PUT /email/suppressions/gone@l5.example.tn '{"reason": "COMPLAINT"}'
+      as_b PUT /email/suppressions/gone@l5.example.tn '{"reason": "COMPLAINT"}' >/dev/null
       check "$route: B puts the address A has on its own list, A's reason untouched" "200 BOUNCE" \
         "$(status) $(as_a GET /email/suppressions | jq -r '.suppressions[] | select(.address == "gone@l5.example.tn") | .reason')"
-      patiently as_b DELETE /email/suppressions/gone@l5.example.tn
+      as_b DELETE /email/suppressions/gone@l5.example.tn >/dev/null
       check "  ... and which B takes off its list, A's still on A's" "204 1" "$(status) $(as_a GET /email/suppressions | jq '.suppressions | length')"
       ;;
     "DELETE /email/suppressions/{address}")
-      patiently as_b DELETE /email/suppressions/gone@l5.example.tn
+      as_b DELETE /email/suppressions/gone@l5.example.tn >/dev/null
       check "$route: B gets 404 for A's address" "404 gone@l5.example.tn is not on the account's suppression list" "$(status) $(message)"
       check "  ... which A's list still has" 1 "$(as_a GET /email/suppressions | jq '.suppressions | length')"
       ;;
@@ -838,8 +837,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... which A still has, unchanged" "200 l5 Errors $id" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
       ;;
     *'{'*)
-      # B's changes in this loop are more than its plan's 60 a minute: those past them are sent patiently.
-      patiently as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")"
+      as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
       ;;
     "GET /schedules/next-runs")
@@ -900,31 +898,31 @@ for type in Event DryRun; do
   check "POST /functions/{id}/invoke as $type: B's call of A's function answers as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
 done
 check "  ... and nothing of B's waits in A's function's queue" 0 "$(waiting_for "$id")"
-patiently as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a" '{destinationConfig: {onFailure: {destination: $arn}}}')"
+as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
 check "B can't name A's function as the destination of its own function's calls" \
   "400 destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_b:function:l5-a" "$(status) $(message)"
 # A's queue, as the SQS endpoint makes one: a row of FF's database.
-"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "INSERT INTO queues (account_id, name, kind) VALUES ('$account_a', 'l5-records', 'customer')" >/dev/null
-patiently as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')"
+sql "INSERT INTO queues (account_id, name, kind) VALUES ('$account_a', 'l5-records', 'customer')"
+as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
 check "  ... nor A's queue" \
   "400 destinationConfig.onFailure.destination must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_b:l5-records" "$(status) $(message)"
-patiently as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')"
+as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
 check "  ... which, under its own account's ARN, is no queue of B's" \
   '400 destinationConfig.onFailure.destination: the account has no queue named "l5-records"' "$(status) $(message)"
-"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "DELETE FROM queues WHERE account_id = '$account_a' AND name = 'l5-records'" >/dev/null
-patiently as_b POST "/functions/$own/event-sources" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a" '{eventSourceArn: $arn}')"
+sql "DELETE FROM queues WHERE account_id = '$account_a' AND name = 'l5-records'"
+as_b POST "/functions/$own/event-sources" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a" '{eventSourceArn: $arn}')" >/dev/null
 check "B can't have its own function read A's queue" \
   "400 eventSourceArn must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_b:l5-orders-a" "$(status) $(message)"
-patiently as_b POST "/functions/$own/event-sources" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-orders-a" '{eventSourceArn: $arn}')"
+as_b POST "/functions/$own/event-sources" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-orders-a" '{eventSourceArn: $arn}')" >/dev/null
 check "  ... which, under its own account's ARN, is no queue of B's" '400 eventSourceArn: the account has no queue named "l5-orders-a"' "$(status) $(message)"
 check "  ... and A's message is still there, not received" "l5-orders-a 1 200" "$(kept_by as_a l5-orders-a) $(status)"
-patiently as_b PUT /buckets/l5-photos-b/notifications "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" '{queueConfigurations: [{queueArn: $arn, events: ["s3:ObjectCreated:*"]}]}')"
+as_b PUT /buckets/l5-photos-b/notifications "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" '{queueConfigurations: [{queueArn: $arn, events: ["s3:ObjectCreated:*"]}]}')" >/dev/null
 check "B's bucket can't send its events to A's queue" \
   "400 InvalidArgument: A destination must be a queue of the bucket's account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" "$(status) $(message)"
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
-patiently as_b DELETE "/functions/$own"
+as_b DELETE "/functions/$own" >/dev/null
 check "B deletes its own function" 200 "$(status)"
-patiently as_b DELETE "/databases/$db_b"
+as_b DELETE "/databases/$db_b" >/dev/null
 check "B deletes its own database" 204 "$(status)"
 }
 section_def dev_routes section_dev_routes account_a
@@ -1070,6 +1068,7 @@ check "a pending account can't deploy" \
   "403 Your account is waiting for approval: you can deploy and invoke functions once it is approved" "$(status) $(message)"
 account_2="$(with_token "$token_2" POST /accounts '{"name": "L5 two"}' | jq -r .id)"
 check "user 2 creates an account" 201 "$(status)"
+sql "UPDATE accounts SET plan_id = 'l5-loops' WHERE id = '$account_2'" # for its loop over every route, as B's
 e2e_namespaces+=("$(tenant_namespace "$account_1")" "$(tenant_namespace "$account_2")")
 operator_token="$(keycloak_token ff-admin "$operator_email" "$operator_password")"
 queue="$(with_token "$operator_token" GET '/admin/accounts?status=pending')"
@@ -1414,14 +1413,14 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2's list doesn't show account 1's domain" "200 0" "$(status) $listed"
       ;;
     "POST /email/identities")
-      patiently as_user_2 POST /email/identities '{"identity": "shop.l5.example.tn"}'
+      as_user_2 POST /email/identities '{"identity": "shop.l5.example.tn"}' >/dev/null
       check "$route: account 2 adds the domain account 1 has, with a DKIM key of its own: identities are each account's" "201 true" \
         "$(status) $([ "$(jq -r .dkimSelector "$work/body")" != "$selector_1" ] && echo true || echo false)"
-      patiently as_user_2 DELETE /email/identities/shop.l5.example.tn
+      as_user_2 DELETE /email/identities/shop.l5.example.tn >/dev/null
       check "  ... and which account 2 deletes, account 1's own untouched" "204 $selector_1" "$(status) $(as_user_1 GET /email/identities/shop.l5.example.tn | jq -r .dkimSelector)"
       ;;
     "GET /email/identities/{identity}" | "POST /email/identities/{identity}/verify" | "DELETE /email/identities/{identity}")
-      patiently as_user_2 "$method" "${template//\{identity\}/shop.l5.example.tn}"
+      as_user_2 "$method" "${template//\{identity\}/shop.l5.example.tn}" >/dev/null
       check "$route: account 2 gets 404 for account 1's domain" "404 The account has no identity shop.l5.example.tn" "$(status) $(message)"
       kept="$(as_user_1 GET /email/identities/shop.l5.example.tn | jq -r .dkimSelector)"
       check "  ... which account 1 still has, its key unchanged" "200 $selector_1" "$(status) $kept"
@@ -1439,7 +1438,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2's mail's metrics count none of account 1's" "200 0" "$(status) $sent"
       ;;
     "POST /email/messages")
-      patiently as_user_2 POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "account 2'"'"'s"}'
+      as_user_2 POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "account 2'"'"'s"}' >/dev/null
       check "$route: account 2 can't send from account 1's domain, which isn't its own" \
         "400 Email address is not verified. The following identities failed the check in region TN-TUNIS-1: orders@shop.l5.example.tn" "$(status) $(message)"
       check "  ... account 1's message still its alone" "$message_1 1" "$(as_user_1 GET /email/messages | jq -r '"\(.messages[0].messageId) \(.messages | length)"')"
@@ -1449,14 +1448,14 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: account 2's list doesn't show account 1's address" "200 0" "$(status) $listed"
       ;;
     "PUT /email/suppressions/{address}")
-      patiently as_user_2 PUT /email/suppressions/gone@l5.example.tn '{"reason": "COMPLAINT"}'
+      as_user_2 PUT /email/suppressions/gone@l5.example.tn '{"reason": "COMPLAINT"}' >/dev/null
       check "$route: account 2 puts the address account 1 has on its own list, account 1's reason untouched" "200 BOUNCE" \
         "$(status) $(as_user_1 GET /email/suppressions | jq -r '.suppressions[] | select(.address == "gone@l5.example.tn") | .reason')"
-      patiently as_user_2 DELETE /email/suppressions/gone@l5.example.tn
+      as_user_2 DELETE /email/suppressions/gone@l5.example.tn >/dev/null
       check "  ... and which account 2 takes off its list, account 1's still on account 1's" "204 1" "$(status) $(as_user_1 GET /email/suppressions | jq '.suppressions | length')"
       ;;
     "DELETE /email/suppressions/{address}")
-      patiently as_user_2 DELETE /email/suppressions/gone@l5.example.tn
+      as_user_2 DELETE /email/suppressions/gone@l5.example.tn >/dev/null
       check "$route: account 2 gets 404 for account 1's address" "404 gone@l5.example.tn is not on the account's suppression list" "$(status) $(message)"
       check "  ... which account 1's list still has" 1 "$(as_user_1 GET /email/suppressions | jq '.suppressions | length')"
       ;;
@@ -1473,8 +1472,7 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... which account 1 still has, unchanged" "200 l5 Errors $fn_1" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
       ;;
     *'{'*)
-      # Account 2's changes in this loop are more than its plan's 60 a minute: those past them are sent patiently.
-      patiently as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")"
+      as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: 404, as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
       ;;
     "GET /schedules/next-runs")
@@ -1535,7 +1533,7 @@ for type in Event DryRun; do
   check "POST /functions/{id}/invoke as $type: account 2's call of account 1's function answers as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
 check "  ... and nothing of account 2's waits in account 1's function's queue" 0 "$(waiting_for "$fn_1")"
-patiently as_user_2 PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_1:function:l5-one" '{destinationConfig: {onSuccess: {destination: $arn}}}')"
+as_user_2 PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_1:function:l5-one" '{destinationConfig: {onSuccess: {destination: $arn}}}')" >/dev/null
 check "account 2 can't name account 1's function as the destination of its own function's calls" \
   "400 destinationConfig.onSuccess.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_2:function:l5-one" "$(status) $(message)"
 check "account 1's function, history and limits are unchanged" "$before_1" "$(snapshot as_user_1 "$fn_1")"
@@ -1622,13 +1620,11 @@ for route in "${routes[@]}"; do
   with_token "$key_1" "${route%% *}" "${route#* }" "$(body_for "${route%% *}" "${route#* }")" >/dev/null
   check "a key can't call $route (P-70)" "403 API keys can't call the admin routes" "$(status) $(message)"
 done
-# Account 2's changes in its user's loop above count against its plan's 60 a minute: its key's past them are sent
-# patiently.
 for route in "${routes[@]}"; do
   method="${route%% *}"
   template="${route#* }"
   case $template in /functions/*) ;; *) continue ;; esac
-  patiently with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")"
+  with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
   check "account 2's key on $route: 404" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
 }
@@ -1737,9 +1733,8 @@ check "a change without a reason is refused" \
 changed="$(with_token "$operator_token" PUT /admin/settings '{"settings": {"gracePeriodHours": 48}, "reason": "l5: pilot customers asked"}')"
 check "with a reason, it is made" "200 48" "$(status) $(jq -r .settings.gracePeriodHours <<<"$changed")"
 check "and the audit log keeps who, why, and what it replaced" "operator@ff.test|l5: pilot customers asked|24|48" \
-  "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F '|' -c \
-    "SELECT actor_label, details->>'reason', details->'changes'->'gracePeriodHours'->>'from', details->'changes'->'gracePeriodHours'->>'to'
-       FROM audit_log WHERE action = 'settings.update' AND actor LIKE 'operator:%'")"
+  "$(sql_value "SELECT actor_label, details->>'reason', details->'changes'->'gracePeriodHours'->>'from', details->'changes'->'gracePeriodHours'->>'to'
+       FROM audit_log WHERE action = 'settings.update' AND actor LIKE 'operator:%'" -F '|')"
 }
 section_def admin section_admin backends
 
@@ -1758,12 +1753,12 @@ check "account 1's page has its own balance, 5.000 TND (P-31)" '200 [{"currency"
 page_balance_2="$(with_token "$operator_token" GET "/admin/accounts/$account_2")"
 check "and account 2's page its own, 7.000 TND, as a string to the millime" '200 [{"currency":"TND","balance":"7.000"}]' "$(status) $(jq -c .balances <<<"$page_balance_2")"
 # 3.000 TND of usage on account 1's 5.000: 40% left, past 50% of the last credit (P-33).
-"${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -v ON_ERROR_STOP=1 -qc "
+sql "
   INSERT INTO ledger_accounts (type, currency) VALUES ('revenue', 'TND') ON CONFLICT DO NOTHING;
   WITH t AS (INSERT INTO ledger_transactions (kind, idempotency_key) VALUES ('usage', 'usage:l5-1') RETURNING id)
   INSERT INTO ledger_entries (transaction_id, ledger_account_id, amount_minor)
   SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN -3000 ELSE 3000 END FROM t, ledger_accounts a
-   WHERE a.currency = 'TND' AND (a.account_id = '$account_1' OR (a.account_id IS NULL AND a.type = 'revenue'));" >/dev/null
+   WHERE a.currency = 'TND' AND (a.account_id = '$account_1' OR (a.account_id IS NULL AND a.type = 'revenue'));"
 for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep '^Your FF credit' >/dev/null && break; sleep 0.5; done
 check "account 1's owner gets the low-balance e-mail, through the ledger's NOTIFY (P-33)" \
   "Your FF credit is down to 50%: $(as_user_1 GET "/accounts/$account_1" | jq -r .name)|2.000 TND" \
@@ -1919,7 +1914,7 @@ section "metrics, from the usage records the bill is made of"
 since="$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)"
 metrics_1="$(as_user_1 GET "/functions/$fn_1/metrics?period=3600&start=$since")"
 metrics_status="$(status)"
-recorded_1="$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c \
+recorded_1="$(sql_value \
   "SELECT count(*) FROM usage_records WHERE function_id = '$fn_1' AND status <> 'throttled' AND started_at >= date_trunc('hour', '$since'::timestamptz)")"
 check "the function's Invocations, by the hour, are its usage records' calls, exactly" "200 $recorded_1 true" \
   "$metrics_status $(jq -r '[.metrics.Invocations[]] | add' <<<"$metrics_1") $(jq '[.metrics.Duration.p50[] | select(. != null)] | length > 0' <<<"$metrics_1")"
@@ -2062,7 +2057,7 @@ check "account 1's balance now has the whole credit, $before_transfer + 50.000 T
 for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep '^The share withheld' >/dev/null && break; sleep 0.5; done
 check "and its owner an e-mail that says so" "The share withheld at source was added: L5 one" "$(mail_to "$user_1" | head -1)"
 check "the reason reached the audit log as typed, accents and all" "l5: certificat de retenue reçu" \
-  "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "SELECT details->>'reason' FROM audit_log WHERE action = 'payment.withholding'")"
+  "$(sql_value "SELECT details->>'reason' FROM audit_log WHERE action = 'payment.withholding'")"
 download="$(curl -sS -o "$work/downloaded.pdf" -w '%{http_code} %{content_type}' -H "Authorization: Bearer $operator_token" "$api_oidc/admin/payments/$pf_1/withholding-certificate")"
 check "the operator downloads the certificate as it was added" "200 application/pdf true" \
   "$download $(cmp -s "$work/certificate.pdf" "$work/downloaded.pdf" && echo true || echo false)"
@@ -2070,7 +2065,7 @@ upload "/admin/payments/$pf_1/withholding-certificate" "$work/certificate.pdf" "
 check "a second certificate is refused" "409 The certificate for $ref_1 was added on $today" "$(status) $(message)"
 check "the ledger has both postings: the transfer (bank, VAT, wallet), then the certificate (receivable, wallet)" \
   "provider_clearing:-58608 vat_payable:9500 wallet:49108 wallet:892 withholding_receivable:-892" \
-  "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "
+  "$(sql_value "
     SELECT string_agg(a.type || ':' || e.amount_minor, ' ' ORDER BY t.idempotency_key, a.type)
       FROM ledger_entries e JOIN ledger_accounts a ON a.id = e.ledger_account_id JOIN ledger_transactions t ON t.id = e.transaction_id
      WHERE t.idempotency_key IN ('transfer:$pf_1', 'withholding:$pf_1')")"
@@ -2244,8 +2239,6 @@ section_overview() {
 section "the overview: the platform at a glance, for the operator"
 overview="$(with_token "$operator_token" GET /admin/stats/overview)"
 check "the operator reads it" 200 "$(status)"
-# sql <query>: one value, from the test's database.
-sql_value() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
 check "the approvals waiting, as many as the queue lists" \
   "$(with_token "$operator_token" GET '/admin/accounts?status=pending' | jq '.accounts | length')" "$(jq .accounts.pendingApprovals <<<"$overview")"
 check "today's calls, as the usage records count them" \
@@ -2263,14 +2256,13 @@ section_def overview section_overview admin
 section_closing() {
 section "closing an account: its functions, their history and logs deleted once its notice period has passed"
 # Last, as it deletes account 1's data. By now it has a function, calls, log lines, usage, payments and invoices.
-sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
 # How many lines the log store keeps of a namespace, over all it keeps.
 store_lines() {
   kubectl get --raw "/api/v1/namespaces/ff-system/services/victoria-logs:http/proxy/select/logsql/query?query=$(jq -rn --arg q "{namespace=\"$1\"} | stats count() as n" '$q | @uri')" |
     jq -r '.n // "0"'
 }
 ns_1="$(tenant_namespace "$account_1")"
-kept_1="$(sql "SELECT (SELECT count(*) FROM usage_records WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM payments WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM invoices WHERE account_id = '$account_1')")"
+kept_1="$(sql_value "SELECT (SELECT count(*) FROM usage_records WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM payments WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM invoices WHERE account_id = '$account_1')")"
 check "account 1 has usage records, payments and invoices, its function's code, namespace and log lines" "true true true" \
   "$(awk '{ print ($1 > 0) && ($2 > 0) && ($3 > 0) ? "true" : "false" }' <<<"$kept_1") $([ -n "$(archived "$fn_1/code.ts")" ] && echo true || echo false) $(kubectl get namespace "$ns_1" >/dev/null 2>&1 && [ "$(store_lines "$ns_1")" -gt 0 ] && echo true || echo false)"
 closed="$(with_token "$operator_token" POST "/admin/accounts/$account_1/close" '{"reason": "l5: the customer left"}')"
@@ -2286,7 +2278,7 @@ check "but its database's user can't log in any more (ADR 0008)" true \
   "$( (data_db_psql "$conn_1" 'select 1' || true) | grep 'is not permitted to log in' >/dev/null && echo true || echo false)"
 check "nor its cache's (ADR 0013)" true "$(cache_cli "$cache_conn_1" GET l5 | grep WRONGPASS >/dev/null && echo true || echo false)"
 # The notice period passes.
-sql "UPDATE accounts SET data_deletion_due_at = now() WHERE id = '$account_1'" >/dev/null
+sql "UPDATE accounts SET data_deletion_due_at = now() WHERE id = '$account_1'"
 deleted=""
 for _ in $(seq 1 90); do
   deleted="$(with_token "$operator_token" GET "/admin/accounts/$account_1" | jq -r '.account.dataDeletedAt // empty')"
@@ -2298,17 +2290,17 @@ listed_1="$(as_user_1 GET /functions | jq -c .)"
 listed_status="$(status)"
 as_user_1 GET "/functions/$fn_1" >/dev/null
 check "its functions are gone, with their history; the account itself stays, readable" "200 [] 404 0" \
-  "$listed_status $listed_1 $(status) $(sql "SELECT count(*) FROM function_invocations WHERE function_id = '$fn_1'")"
+  "$listed_status $listed_1 $(status) $(sql_value "SELECT count(*) FROM function_invocations WHERE function_id = '$fn_1'")"
 check "its namespace is gone from the cluster, its code from object storage, and its lines from the log store" "false empty 0" \
   "$(kubectl get namespace "$ns_1" >/dev/null 2>&1 && echo true || echo false) $([ -z "$(archived "$fn_1/code.ts")" ] && echo empty || echo kept) $(store_lines "$ns_1")"
 check "its database is gone from the server, with its user" "0 0" \
   "$(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$(jq -r .database <<<"$database_1")') || ' ' || (select count(*) from pg_roles where rolname = '$(jq -r .user <<<"$database_1")')")"
 check "its cache is gone from the server, with its keys: its address answers no more" "0 true" \
-  "$(sql "SELECT count(*) FROM caches WHERE account_id = '$account_1'") $(cache_cli "$cache_conn_1" PING | grep 'Could not connect' >/dev/null && echo true || echo false)"
+  "$(sql_value "SELECT count(*) FROM caches WHERE account_id = '$account_1'") $(cache_cli "$cache_conn_1" PING | grep 'Could not connect' >/dev/null && echo true || echo false)"
 check "its bucket is gone, with its files, from FF's records and the store, and its key opens nothing" "0 0 refused InvalidAccessKeyId" \
-  "$(sql "SELECT count(*) FROM buckets WHERE account_id = '$account_1'") $(sql "SELECT count(*) FROM storage_keys WHERE account_id = '$account_1' AND revoked_at IS NULL") $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1)"
+  "$(sql_value "SELECT count(*) FROM buckets WHERE account_id = '$account_1'") $(sql_value "SELECT count(*) FROM storage_keys WHERE account_id = '$account_1' AND revoked_at IS NULL") $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1)"
 check "its usage records, payments and invoices are kept, as the law requires" "$kept_1" \
-  "$(sql "SELECT (SELECT count(*) FROM usage_records WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM payments WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM invoices WHERE account_id = '$account_1')")"
+  "$(sql_value "SELECT (SELECT count(*) FROM usage_records WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM payments WHERE account_id = '$account_1') || ' ' || (SELECT count(*) FROM invoices WHERE account_id = '$account_1')")"
 check "its owner reads in its audit log what FF deleted, as FF" "function.delete:function:$fn_1:FF account.data_delete:account:$account_1:FF" \
   "$(as_user_1 GET '/audit-log?limit=5' | jq -r '[.entries[] | select(.action == "function.delete" or .action == "account.data_delete") | "\(.action):\(.resource):\(.actorLabel)"] | reverse | join(" ")')"
 check "and GET /me says when it was done" "$deleted" "$(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .dataDeletedAt')"

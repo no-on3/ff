@@ -49,5 +49,6 @@ d6b35baee2313b05035542fe86b825cfa8e6d80e:hack/spikes/cache/valkey.sh:generic-api
 7b40ee9fd31cc819b3a8398d2d6b363de50f50c9:deploy/cache/README.md:generic-api-key:8
 
 # "Authorization: Bearer ff-cache-dev": the development cache server's own token (docker-compose.yml), which
-# production refuses.
+# production refuses; the second where its check moved, to a section of its own.
 7b40ee9fd31cc819b3a8398d2d6b363de50f50c9:hack/e2e.sh:curl-auth-header:903
+eeac5b66167ddd553bc86087553e1ac4528d3c3d:hack/e2e.sh:curl-auth-header:1775
