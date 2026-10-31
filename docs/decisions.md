@@ -60,7 +60,8 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 - **Still to change:** T-01 to T-05.
 
 **66. The pipeline's fixes reach `master` once T-01 to T-05 pass on the branch's run:** `feat/step-5` merged into `master` and pushed then, so that the nightly run turns green before the step ends; the step's work goes on on the branch, merged again at its end. ✅ Your answer: as recommended.
-- **Still to change:** the merge after T-05.
+- **Changed already:** merged on 2026-10-31, without a checkout, once T-01 to T-05 had passed on the branch's run, with T-09 (the nightly's new shape, a push of documents alone, the advisories and the tools each night) proven by runs on the branch too; `master`'s push after it is the pipeline's first run there since the split.
+- **Still to change:** step 5's own merge, at its end.
 
 **67. The nightly run: the platform's suite, and a job that tries the newest versions of the tools the tests pin;** the other jobs run on pushes and pull requests alone. ✅ Your answer: as recommended. It answers 39's question on GitHub's minutes: about 20 minutes a night, 600 a month, where the nightly took about 80 a night repeating every job, 2,400 a month, more than the free 2,000.
 - **Changed already:** T-09's first part: the five jobs a push runs skip on the schedule, and 39 says the measured minutes; its second, a push that changes only documents runs `static` alone, about 4 minutes, gitleaks among its steps now.
