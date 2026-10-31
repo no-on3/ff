@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Step 5's spike of what AWS's tools call (the step-5 plan's X-01, part 1): lambda-endpoint.mjs on a free port, fresh
 # for each client, recording every request; then the AWS CLI v2, AWS's SDK for JavaScript v3 and boto3, each through a
-# function's whole life with only the endpoint, the region and a key, as a customer's code would have them. Each
-# client's steps (one JSON line each, its errors as it shows them) and its requests land in hack/.spike-lambda/, and
-# analyze.py says, for each: the operations it called and in what order, how it signed their paths, its waiters'
-# polls, the reads after each change, what it made of a refusal, and the largest bodies.
-#   hack/spikes/lambda/run.sh [cli] [sdk] [boto3]       # all three without an argument; npm and pip fetch the SDKs once
+# function's whole life with only the endpoint, the region and a key, as a customer's code would have them; and
+# Terraform's AWS provider with OpenTofu and with Terraform's CLI, terraform/main.tf applied, planned again with
+# nothing to change, and destroyed. Each client's steps (one JSON line each, its errors as it shows them) and its
+# requests land in hack/.spike-lambda/, and analyze.py says, for each: the operations it called and how often, how it
+# signed their paths, its waiters' polls, what it made of a refusal, and the largest bodies.
+#   hack/spikes/lambda/run.sh [cli] [sdk] [boto3] [tofu] [terraform]    # all without an argument; the SDKs fetched once
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../../k8s/env.sh"
 
@@ -126,7 +127,30 @@ cli_flow() {
   cli_step "deletes: delete-function" delete-function --function-name "$name"
 }
 
-[ $# -gt 0 ] || set -- cli sdk boto3
+# Terraform's AWS provider, with OpenTofu or Terraform's CLI, from the mirror hack/install-tools.sh fills: main.tf in a
+# directory of its own, its log at DEBUG beside it, for the provider's retries.
+tf_step() { # <label> <command...>
+  local label="$1" started out status=0
+  shift
+  started="$(date +%s%3N)"
+  out="$("$@" 2>&1)" || status=$?
+  jq -cn --arg step "$label" --argjson status "$status" --argjson ms "$(($(date +%s%3N) - started))" --arg out "$out" \
+    'if $status == 0 then {step: $step, ok: true, ms: $ms} else {step: $step, ok: false, ms: $ms, exit: $status, shown: ($out | .[-1500:])} end'
+}
+tf_flow() { # <tofu|terraform>
+  local dir="$work/$1"
+  rm -rf "$dir" && mkdir -p "$dir" && cp "$here/terraform/main.tf" "$dir/"
+  local tf=("$FF_REPO_ROOT/hack/bin/$1" "-chdir=$dir") vars=(-var "endpoint=$endpoint" -var "name=spike-$1" -var "code=$work/code.zip")
+  export TF_CLI_CONFIG_FILE="$FF_REPO_ROOT/hack/.terraform/cli.tfrc" TF_IN_AUTOMATION=1 CHECKPOINT_DISABLE=1 TF_LOG=DEBUG TF_LOG_PATH="$dir/debug.log"
+  tf_step "$1 init" "${tf[@]}" init -input=false -no-color
+  tf_step "$1 apply" "${tf[@]}" apply -input=false -no-color -auto-approve "${vars[@]}"
+  tf_step "$1 plan, nothing to change" "${tf[@]}" plan -input=false -no-color -detailed-exitcode "${vars[@]}"
+  tf_step "$1 destroy" "${tf[@]}" destroy -input=false -no-color -auto-approve "${vars[@]}"
+  unset TF_LOG TF_LOG_PATH
+}
+
+[ $# -gt 0 ] || set -- cli sdk boto3 tofu terraform
+case " $* " in *" tofu "* | *" terraform "*) "$FF_REPO_ROOT/hack/install-tools.sh" tofu terraform aws-provider >/dev/null ;; esac
 for tool in "$@"; do
   echo "== $tool"
   endpoint_start "$tool"
@@ -134,7 +158,8 @@ for tool in "$@"; do
     cli) cli_flow ;;
     sdk) MODULES="$work/js/node_modules" ENDPOINT="$endpoint" CODE="$work/code.zip" BIG="$work/big.zip" NAME=spike-sdk node "$here/sdk-flow.mjs" ;;
     boto3) ENDPOINT="$endpoint" CODE="$work/code.zip" BIG="$work/big.zip" NAME=spike-boto3 "$work/venv/bin/python" "$here/boto3_flow.py" ;;
-    *) echo "unknown client $tool: cli, sdk or boto3" >&2; exit 2 ;;
+    tofu | terraform) tf_flow "$tool" ;;
+    *) echo "unknown client $tool: cli, sdk, boto3, tofu or terraform" >&2; exit 2 ;;
   esac >"$work/$tool.steps.jsonl"
   endpoint_stop
   jq -r '"  \(if .ok then "ok  " else "FAIL" end) \(.step)\(if .ok then "" else ": \(.shown | gsub("\n"; " ") | .[0:160])" end)"' "$work/$tool.steps.jsonl"

@@ -3,9 +3,11 @@
 The step-5 plan's X-01, part 1. `lambda-endpoint.mjs` is a minimal Lambda endpoint, Node.js's standard library alone: Lambda's REST API at its dated paths, Signature Version 4 for the service `lambda`, the 41 operations of the plan's D2 kept in memory, and every other operation refused in Lambda's error shape, saying it comes later. A function is `Pending` for 3 s after it is made and an update `InProgress` for 2 s, as Lambda's are, so that the clients' waiters poll. It records every request. `run.sh` starts one, fresh, for each client, and takes the client through a function's whole life: made, waited for, called (with its log's tail, and asynchronously), its code (6 MB) and settings changed, published, aliased and called by its alias and its alias's ARN, given a URL, a permission, an SQS mapping, async settings, a concurrency and tags, read in every way, refused once for an operation that comes later and once for a function that doesn't exist, and deleted. `analyze.py` reads the recordings.
 
 ```bash
-hack/spikes/lambda/run.sh               # the AWS CLI, AWS's SDK for JavaScript and boto3, about 3 minutes
-hack/spikes/lambda/run.sh sdk boto3     # some of them
+hack/spikes/lambda/run.sh               # the AWS CLI, AWS's SDK for JavaScript, boto3, OpenTofu and Terraform, about 5 minutes
+hack/spikes/lambda/run.sh sdk tofu      # some of them
 ```
+
+OpenTofu and Terraform's CLI apply `terraform/main.tf`, the resources the reference modules will hold for a function (the function published, an alias, a URL open to all, a permission, an SQS mapping, async settings), plan again, which must find nothing to change, and destroy it all; `hack/install-tools.sh` gives them their AWS provider from its mirror.
 
 Each client's steps and requests stay in `hack/.spike-lambda/` (`<client>.steps.jsonl`, `<client>.requests.jsonl`), with `summary.md`.
 
@@ -23,4 +25,11 @@ The AWS CLI 2.34.32 (`amazon/aws-cli`), AWS's SDK for JavaScript v3 (`@aws-sdk/c
 8. **The largest body** is the code: a 6 MB zip is 8.4 MB of JSON (base64), sent by all three with a `Content-Length`, never chunked. Lambda takes 50 MB zipped in a request, about 67 MB of JSON: the front door's body limit is that, for these two operations only.
 9. **Invoke:** the qualifier comes as `?Qualifier=live`, or inside the ARN in the path; `X-Amz-Log-Type: Tail` asks for `X-Amz-Log-Result`, the log's last 4 KB in base64, which all three decode; `X-Amz-Executed-Version` is read as `ExecutedVersion`; an asynchronous call is `X-Amz-Invocation-Type: Event`, answered `202` with no body.
 
-Still to run for part 1: Terraform's AWS provider with OpenTofu and with Terraform's CLI (the reference modules' resources, against this endpoint and FF's S3 and SQS front doors), and the SAM CLI's `sam build` and `sam validate --lint`. Parts 2 to 4 (versions on the dev cluster, keys that expire, SAM's YAML in Rust) are spikes of their own.
+Terraform's AWS provider 6.69.1, with OpenTofu 1.13.1 and with Terraform 1.16.6, the same 49 requests from both:
+
+10. **Apply, a plan with nothing to change, and destroy all went through,** once the endpoint answered two things as Lambda does, which are rules for FF's: **an alias with no other version's weight answers without a `RoutingConfig`** (an empty one is a change the provider wants to undo), and **async settings answer only what was set**, not Lambda's defaults (21,600 s and 2 retries, which the provider read as a change to make every time).
+11. **The provider calls fewer operations than D2 thought:** `CreateFunction`, then `GetFunction` until `Active`, then `ListVersionsByFunction` for the version it published; then the alias, the URL, the permissions, the async settings and the mapping, all at once, each read back once; to refresh, one read each; to destroy, the deletes at once, and `GetFunction` until 404. It reads tags and concurrency from `GetFunction`'s answer, and never called `GetFunctionCodeSigningConfig`, `ListTags` or `GetFunctionConcurrency` for these resources; they stay in D2, for the other clients.
+12. **Its waits:** for a function to be `Active`, a `GetFunction` at once and then every 5 s, so a function made by Terraform costs at least 5 s, however soon FF's is ready; for a mapping to be `Enabled`, and to be gone, `GetEventSourceMapping` at 0.2, 0.4, 0.8 and 1.6 s; nothing was refused or retried.
+13. **A URL open to all brings two permissions of the provider's own,** beside the configuration's: `FunctionURLAllowPublicAccess` (`lambda:InvokeFunctionUrl`, `FunctionUrlAuthType: NONE`) and `FunctionURLAllowInvokeAction` (`lambda:InvokeFunction` with `InvokedViaFunctionUrl: true`), AWS's rule for public URLs since 2025. FF's `AddPermission` takes both fields, and its URL answers only with them both, as Lambda's does.
+
+Still to run for part 1: the reference modules' queue and bucket against FF's S3 and SQS front doors, with the dev stack up, and the SAM CLI's `sam build` and `sam validate --lint`. Parts 2 to 4 (versions on the dev cluster, keys that expire, SAM's YAML in Rust) are spikes of their own.

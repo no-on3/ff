@@ -145,6 +145,12 @@ function publish(fn, description) {
 const hashOf = (config) => sha256hex(JSON.stringify(settings.map((field) => config[field])));
 const versionView = ({ configHash, ...shown }) => view(shown);
 const aliasView = (fn, alias) => ({ AliasArn: functionArn(fn.latest.FunctionName, alias.Name), ...alias });
+/** An alias's other versions' weights: none means no RoutingConfig in the answer at all. */
+function routing(alias, config) {
+  const weights = config?.AdditionalVersionWeights ?? {};
+  if (Object.keys(weights).length) alias.RoutingConfig = { AdditionalVersionWeights: weights };
+  else delete alias.RoutingConfig;
+}
 function policyOf(fn) {
   if (fn.policy.size === 0) throw notFound('The resource you requested does not exist.');
   return { Policy: JSON.stringify({ Version: '2012-10-17', Id: 'default', Statement: [...fn.policy.values()] }), RevisionId: fn.latest.RevisionId };
@@ -249,7 +255,8 @@ const routes = [
     const { fn } = find(m[1]);
     if (fn.aliases.has(input.Name)) throw conflict(`Alias already exists: ${functionArn(fn.latest.FunctionName, input.Name)}`);
     if (input.FunctionVersion !== '$LATEST' && !fn.versions.has(input.FunctionVersion)) throw notFound(`Function not found: ${functionArn(fn.latest.FunctionName, input.FunctionVersion)}`);
-    const alias = { Name: input.Name, FunctionVersion: input.FunctionVersion, Description: input.Description ?? '', RevisionId: randomUUID(), ...(input.RoutingConfig ? { RoutingConfig: input.RoutingConfig } : {}) };
+    const alias = { Name: input.Name, FunctionVersion: input.FunctionVersion, Description: input.Description ?? '', RevisionId: randomUUID() };
+    routing(alias, input.RoutingConfig);
     fn.aliases.set(input.Name, alias);
     return [201, aliasView(fn, alias)];
   }],
@@ -267,7 +274,8 @@ const routes = [
     const { fn } = find(m[1]);
     const alias = fn.aliases.get(decodeURIComponent(m[2]));
     if (!alias) throw notFound(`Alias not found: ${functionArn(fn.latest.FunctionName, decodeURIComponent(m[2]))}`);
-    for (const field of ['FunctionVersion', 'Description', 'RoutingConfig']) if (input[field] !== undefined) alias[field] = input[field];
+    for (const field of ['FunctionVersion', 'Description']) if (input[field] !== undefined) alias[field] = input[field];
+    if (input.RoutingConfig !== undefined) routing(alias, input.RoutingConfig);
     alias.RevisionId = randomUUID();
     return [200, aliasView(fn, alias)];
   }],
@@ -389,7 +397,8 @@ const routes = [
   }],
   ['PUT', /^\/2019-09-25\/functions\/([^/]+)\/event-invoke-config$/, 'PutFunctionEventInvokeConfig', (m, q, input) => {
     const { fn, qualifier } = find(m[1], q.get('Qualifier'));
-    const config = { FunctionArn: functionArn(fn.latest.FunctionName, qualifier ?? '$LATEST'), LastModified: now() / 1000, MaximumRetryAttempts: input.MaximumRetryAttempts ?? 2, MaximumEventAgeInSeconds: input.MaximumEventAgeInSeconds ?? 21600, DestinationConfig: input.DestinationConfig ?? { OnSuccess: {}, OnFailure: {} } };
+    const config = { FunctionArn: functionArn(fn.latest.FunctionName, qualifier ?? '$LATEST'), LastModified: now() / 1000, DestinationConfig: input.DestinationConfig ?? { OnSuccess: {}, OnFailure: {} } };
+    for (const field of ['MaximumRetryAttempts', 'MaximumEventAgeInSeconds']) if (input[field] !== undefined) config[field] = input[field];
     fn.invokeConfigs.set(qualifier ?? '$LATEST', config);
     return [200, config];
   }],
@@ -465,6 +474,7 @@ createServer((request, response) => {
     const record = {
       at: new Date().toISOString(), tool: toolOf(request.headers['user-agent']), method: request.method, path: (request.url ?? '/').split('?')[0], query: url.search.slice(1),
       contentType: request.headers['content-type'], transferEncoding: request.headers['transfer-encoding'], requestBytes: body.length,
+      ...(body.length && body.length < 4096 && /json/.test(request.headers['content-type'] ?? '') ? { requestBody: body.toString('utf8') } : {}),
     };
     let status = 500;
     let answer = null;
