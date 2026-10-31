@@ -34,8 +34,9 @@
 # without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; and ff local, in
 # Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
-# Removes its compose project, its namespaces and the backend on exit; keeps the cluster.
-#   hack/cli-e2e.sh
+# Removes its compose project, its namespaces and the backend on exit; keeps the cluster. Its sections run alone
+# too, with what they need (hack/lib/sections.sh): --list names them, --only and --from choose.
+#   hack/cli-e2e.sh [--list | --only <section>[,<section>…] | --from <section>]
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-cli-e2e
@@ -43,6 +44,9 @@ E2E_NAME=cli-e2e
 export FF_PG_PORT="${FF_CLI_E2E_PG_PORT:-55436}"
 export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-59007}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
+source "$FF_REPO_ROOT/hack/lib/sections.sh"
+sections_options "$@"
+set -- "${sections_rest[@]}"
 
 be_port="$(free_port)"
 api="http://127.0.0.1:$be_port"
@@ -50,6 +54,21 @@ account_a="$(random_account)"
 account_b="$(random_account)"
 e2e_namespaces+=("$(tenant_namespace "$account_a")" "$(tenant_namespace "$account_b")")
 
+# What more than one section uses: ff, its output kept.
+
+# ff <args...>: its stdout in $work/out, its stderr in $work/err, its exit code in $work/code.
+ff() {
+  local code=0
+  "$ff_bin" "$@" >"$work/out" 2>"$work/err" || code=$?
+  echo "$code" >"$work/code"
+}
+
+out() { cat "$work/out"; }
+err() { cat "$work/err"; }
+code() { cat "$work/code"; }
+
+section_stack() {
+section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
 e2e_dependencies
 e2e_cluster
 # This machine as the cluster's pods see it, the gateway of the cluster's Docker network: functions reach the S3 front
@@ -62,7 +81,10 @@ e2e_data_db 10.199.3.0/24 "$data_db_address"
 # recipients' servers, which keeps it.
 e2e_cache 10.199.3.11
 e2e_mail 10.199.3.12 10.199.3.13
+}
+section_def stack section_stack
 
+section_backend() {
 section "ff and the backend"
 (cd "$FF_REPO_ROOT/cli" && cargo build --release --locked -q)
 ff_bin="$FF_REPO_ROOT/cli/target/release/ff"
@@ -96,15 +118,6 @@ e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}"
 export FF_CONFIG_DIR="$work/ff"
 unset FF_TOKEN FF_ENDPOINT FF_ACCOUNT FF_PROFILE
 rm -rf "$FF_CONFIG_DIR"
-# ff <args...>: its stdout in $work/out, its stderr in $work/err, its exit code in $work/code.
-ff() {
-  local code=0
-  "$ff_bin" "$@" >"$work/out" 2>"$work/err" || code=$?
-  echo "$code" >"$work/code"
-}
-out() { cat "$work/out"; }
-err() { cat "$work/err"; }
-code() { cat "$work/code"; }
 # A file's SHA-256 in base64 and its size, as AWS Lambda's CodeSha256 and CodeSize give a function's code.
 file_facts() { python3 -c 'import base64, hashlib, sys; code = open(sys.argv[1], "rb").read(); print(base64.b64encode(hashlib.sha256(code).digest()).decode(), len(code))' "$1"; }
 
@@ -195,7 +208,10 @@ for example in hello.ts hello.py; do
   ff get "$name"
   check "and it is gone" 3 "$(code)"
 done
+}
+section_def backend section_backend stack
 
+section_failures() {
 section "failures"
 ff deploy "$FF_REPO_ROOT/examples/hello.py" --name cli-raises
 ff invoke cli-raises --data '{"name": "error"}'
@@ -244,7 +260,10 @@ ff --profile b list
 check "and another account none of them" "0 No function yet: \`ff deploy <file>\` makes one" "$(code) $(out)"
 for name in cli-raises cli-slow cli-broken; do ff delete "$name" --yes; done
 check "the last one deleted" "0 deleted cli-broken" "$(code) $(out)"
+}
+section_def failures section_failures backend
 
+section_environment() {
 section "environment variables: --env, ff env, and on this machine"
 printf 'import os\n\ndef handler(event, context):\n    return {"greeting": os.environ.get("GREETING", "none"), "token": os.environ.get("TOKEN", "none")}\n' >"$work/env-reader.py"
 ff deploy "$work/env-reader.py" --name cli-env --env GREETING=Ahlan
@@ -265,7 +284,10 @@ ff local invoke "$work/env-reader.py" --env GREETING=Local --raw
 check "ff local invoke --env gives the run its variables" "0 Local" "$(code) $(out | jq -r .greeting)"
 ff local invoke "$work/env-reader.py" --env FUNCTION_TIMEOUT=1
 check "and refuses the names the runtime sets itself, as the API does" "2 error: FUNCTION_TIMEOUT is reserved: AWS Lambda or FF's runtime sets it" "$(code) $(err)"
+}
+section_def environment section_environment backend
 
+section_secrets() {
 section "secrets: set from stdin, read by the function only"
 printf 'import os\n\ndef handler(event, context):\n    return {"password": os.environ.get("DB_PASSWORD", "none")}\n' >"$work/secret-reader.py"
 ff deploy "$work/secret-reader.py" --name cli-secrets
@@ -282,7 +304,10 @@ ff secrets unset cli-secrets DB_PASSWORD
 ff invoke cli-secrets --raw
 check "ff secrets unset removes it" "0 none" "$(code) $(out | jq -r .password)"
 ff delete cli-secrets --yes
+}
+section_def secrets section_secrets backend
 
+section_url() {
 section "a function's URL: ff url, ff invoke --http, ff domains"
 printf '%s\n' 'export async function handler(event: { rawPath: string; queryStringParameters?: Record<string, string> }) {' \
   '  return { statusCode: 200, headers: { "content-type": "text/plain" }, body: `Ahlan ${event.queryStringParameters?.name ?? "world"} at ${event.rawPath}` };' \
@@ -314,7 +339,10 @@ check "ff url disable deletes the URL" "0 cli-url's URL deleted: $address answer
 ff invoke cli-url --http GET /
 check "after which ff invoke --http has nowhere to call" "3 error: cli-url has no URL: \`ff url enable cli-url --auth none|key\` gives it one" "$(code) $(err)"
 ff delete cli-url --yes
+}
+section_def url section_url backend
 
+section_schedules() {
 section "schedules: ff schedule set, its run, list, disable, remove"
 ff deploy "$FF_REPO_ROOT/examples/hello.py" --name cli-sched
 ff schedule set cli-sched "rate(1 minute)" --input '{"name": "Schedule"}'
@@ -342,7 +370,10 @@ ff schedule remove cli-sched
 ff schedule list cli-sched
 check "ff schedule remove takes it away" "0 cli-sched has no schedule: \`ff schedule set cli-sched \"rate(1 hour)\"\` makes one" "$(code) $(out)"
 ff delete cli-sched --yes
+}
+section_def schedules section_schedules backend
 
+section_init() {
 section "ff init: a new function's folder, run locally, then deployed"
 for runtime in python nodejs; do
   name="cli-init-$runtime"
@@ -359,7 +390,10 @@ for runtime in python nodejs; do
   check "and answers on FF" "0 Hello Tunis" "$(code) $(out | sed '$d' | jq -r .message)"
   ff delete "$name" --yes
 done
+}
+section_def init section_init backend
 
+section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"
 # npm and pip fetch the libraries: this part needs the network, or their caches.
 node_pkg="$work/cli-pkg-node"
@@ -492,7 +526,10 @@ check "that zip's files, deployed as they are with --no-build, are the same pack
 ff invoke cli-pkg-ts --data '{"ms": 60000}'
 check "and run on FF as they would on Lambda" "0 1m" "$(code) $(out | sed '$d' | jq -r .took)"
 ff delete cli-pkg-ts --yes
+}
+section_def packages section_packages init
 
+section_small_app_db() {
 section "the small app with a database of its own on the internet: a package with a driver, a secret, a URL that writes there, a nightly schedule"
 # The app's database, as one on the internet would be (hack/k8s/app-database.sh), on a network of the test's own. No
 # bucket is named, so its orders go without receipts.
@@ -540,7 +577,10 @@ ff invoke orders-nightly --data "@$work/scheduled.json" --profile c
 check "which reports the day's order from the database" "0 $order_day 1 2 0" "$(code) $(out | sed '$d' | jq -r '"\(.day) \(.orders) \(.items) \(.removed)"')"
 ff delete orders-nightly --yes --profile c
 ff delete orders-api --yes --profile c
+}
+section_def small_app_db section_small_app_db backend
 
+section_databases() {
 section "a customer's database, with ff db: a function's secret, written by the app with its account's internet access off"
 ff deploy "$app" --name cli-db-orders --handler index.http
 check "the same app in account A, whose functions don't reach the internet" "0 created cli-db-orders (nodejs, 128 MB, 5 s): ACTIVE" \
@@ -577,7 +617,10 @@ ff db delete cli-orders --yes
 check "ff db delete drops it, with its data, its user gone" "0 deleted the database cli-orders, with its data 0" \
   "$(code) $(out) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select count(*) from pg_roles where rolname = '$(jq -rn --arg s "$new_conn" '$s | capture("//(?<u>[^:]+):").u')'")"
 ff delete cli-db-orders --yes
+}
+section_def databases section_databases small_app_db
 
+section_buckets() {
 section "buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
 ff buckets create My.Photos
 check "ff buckets create refuses a name AWS wouldn't take, before calling" "2 true" "$(code) $(err | grep "can't be a bucket's name" >/dev/null && echo true || echo false)"
@@ -641,7 +684,10 @@ ff buckets keys revoke "$key_id" --yes
 # The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
 refused="$(aws_with_key s3 ls 2>&1 || true)"
 check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
+}
+section_def buckets section_buckets backend
 
+section_sites() {
 section "a site, with ff sites: a built folder deployed with a deploy's own key, visited, deployed again changed"
 site_url="http://cli-site.site.localhost:$website_port"
 # visit <path> [curl options…]: the site's answer, its status and its page's title.
@@ -693,7 +739,10 @@ ff sites deploy cli-site "$work/dist" --output json
 check "  ... its files kept: a deploy finds them unchanged, and makes it a site again, no single-page app's unless told" "0 0 2 false" \
   "$(code) $(out | jq -r '"\(.uploaded | length) \(.unchanged) \(.singlePageApp)"')"
 ff buckets delete cli-site --force --yes
+}
+section_def sites section_sites backend
 
+section_queues() {
 section "queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
 ff queues create cli-orders.fifo
 check "ff queues create refuses a FIFO queue's name before calling" "2 true" "$(code) $(err | grep 'FIFO queues come later' >/dev/null && echo true || echo false)"
@@ -762,7 +811,10 @@ ff usage
 check "ff usage lists the queue's month after the buckets, deleted since: its requests as SQS bills them, the messages sent and received" "0 true" \
   "$(code) $(out | grep -E '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' >/dev/null && echo true || echo false)"
 ff buckets keys revoke "$queue_key" --yes
+}
+section_def queues section_queues buckets
 
+section_event_sources() {
 section "functions reading queues, with ff event-sources: the function given the queue's batches, the message it failed kept"
 # As a function written for Lambda answers: the messages it couldn't handle, by their IDs.
 cat >"$work/reader.ts" <<'TS'
@@ -800,7 +852,10 @@ check "ff event-sources remove removes it, the queue's messages staying" "0 remo
   "$(code) $(out) $("$ff_bin" queues get cli-work --output json | jq '.messages.available + .messages.inFlight') $("$ff_bin" event-sources list --function cli-reader --output json | jq length)"
 ff delete cli-reader --yes
 ff queues delete cli-work --yes
+}
+section_def event_sources section_event_sources backend
 
+section_notifications() {
 section "a bucket's notifications, with ff buckets notify: an upload with the AWS CLI runs a function with S3's event, a deletion goes to a queue"
 # As a function written for Lambda reads S3's event: each key form-decoded, a "+" a space.
 cat >"$work/on-upload.ts" <<'TS'
@@ -841,7 +896,10 @@ ff buckets keys revoke "$drop_key" --yes
 ff buckets delete cli-drop --force --yes
 ff queues delete cli-drop-events --yes
 ff delete cli-on-upload --yes
+}
+section_def notifications section_notifications buckets
 
+section_small_app() {
 section "the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
 # In account A, whose functions don't reach the internet: FF's database and cache, the S3 front door, the SQS and SES
 # endpoints, they do.
@@ -963,7 +1021,10 @@ ff db delete shop --yes
 ff delete shop-nightly --yes
 ff delete shop-receipts --yes
 ff delete shop-api --yes
+}
+section_def small_app section_small_app small_app_db buckets
 
+section_account() {
 section "the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts
 check "ff accounts lists account A, current" "0 * $account_a" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
@@ -984,7 +1045,10 @@ for _ in $(seq 150); do "$ff_bin" metrics --since 2h --output json 2>/dev/null |
 ff metrics --since 2h --period 3600
 check "  ... and its calls that didn't wait, as Lambda's metrics count them, cli-raises's dropped among them" "0 true" \
   "$(code) $(out | tail -1 | grep -E '; calls without waiting: ([2-9]|[1-9][0-9]+) kept, [1-9][0-9]* dropped' >/dev/null && echo true || echo false)"
+}
+section_def account section_account failures
 
+section_local() {
 section "ff local: on this machine, in Docker, as production runs it"
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }
 for example in hello.ts hello.py; do
@@ -1031,5 +1095,8 @@ check "a request there gets the function's answer, from Lambda's URL event" "200
 kill -INT "$starter"
 wait "$starter" 2>/dev/null || true
 check "and Ctrl-C removes its container too" 0 "$(leftover)"
+}
+section_def local section_local backend
 
+sections_run
 checks_done cli-e2e

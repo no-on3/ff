@@ -1372,7 +1372,7 @@ hack/k8s/test-it.sh                                      # the Kubernetes driver
 hack/k8s/test-logging-filter.sh                          # the log collector's configuration and filter, in its image, seconds
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions
 hack/e2e.sh                                              # the whole stack through the API, about 20 min
-hack/e2e.sh --only queues                                # one of its sections, after what it needs; --list names them, --from runs on from one
+hack/e2e.sh --only queues                                # one of its sections, after what it needs; --list names them, --from runs on from one, in each of the three
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 7 min
 hack/cli-e2e.sh                                          # the ff command on the stack, and in Docker, about 15 min
 hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
@@ -1381,7 +1381,7 @@ hack/e2e-platform.sh                                     # FF deployed from depl
 hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, the packages, about 2 min
 ```
 
-**The pipeline** runs them in stages, the same here as on the CI server (`.github/workflows/ci.yml`, one job a stage). A failed step is named and the next one runs, so that one run names every failed step, the console's linter's and clippy's alike; only a step the ones after it need, such as `npm ci` or the dev cluster's start, stops the run when it fails (`hack/lib/ci-steps.sh`, which `hack/test-ci-steps.sh` tests). A suite in a step goes on after a failed check and lists every one at its end, each with its section and the time it failed, and where a failure that left nothing after it able to pass stopped: the run, or in L4 its section alone, the sections that need it not run (`hack/lib/checks.sh`, which every suite shares, and `hack/lib/sections.sh`; `FF_FAIL_FAST=1` stops at the first, as before). `hack/.ci/report.md` lists each step with its result and its seconds, then the failed checks; on GitHub it is the job's summary:
+**The pipeline** runs them in stages, the same here as on the CI server (`.github/workflows/ci.yml`, one job a stage). A failed step is named and the next one runs, so that one run names every failed step, the console's linter's and clippy's alike; only a step the ones after it need, such as `npm ci` or the dev cluster's start, stops the run when it fails (`hack/lib/ci-steps.sh`, which `hack/test-ci-steps.sh` tests). A suite in a step goes on after a failed check and lists every one at its end, each with its section and the time it failed, and where a failure that left nothing after it able to pass stopped: the run, or in L4, L5 and the `ff` suite its section alone, the sections that need it not run (`hack/lib/checks.sh`, which every suite shares, and `hack/lib/sections.sh`; `FF_FAIL_FAST=1` stops at the first, as before). `hack/.ci/report.md` lists each step with its result and its seconds, then the failed checks; on GitHub it is the job's summary:
 
 ```bash
 hack/ci.sh static            # linters, types, builds, the docs, how-it-works.html's script, the shell scripts, the workflow, gitleaks, about 5 min

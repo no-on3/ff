@@ -55,8 +55,9 @@
 # A route without a rule here fails the suite, so a new route can't skip it.
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
 # compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
-# removed on exit with the namespaces.
-#   hack/e2e-tenancy.sh [--teardown]
+# removed on exit with the namespaces. Its sections run alone too, with what they
+# need (hack/lib/sections.sh): --list names them, --only and --from choose.
+#   hack/e2e-tenancy.sh [--teardown] [--list | --only <section>[,<section>…] | --from <section>]
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-e2e-tenancy
@@ -67,6 +68,9 @@ export FF_KEYCLOAK_PORT="${FF_E2E_TENANCY_KEYCLOAK_PORT:-58180}"
 export FF_MAIL_SMTP_PORT="${FF_E2E_TENANCY_MAIL_SMTP_PORT:-51026}"
 export FF_MAIL_UI_PORT="${FF_E2E_TENANCY_MAIL_UI_PORT:-58026}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
+source "$FF_REPO_ROOT/hack/lib/sections.sh"
+sections_options "$@"
+set -- "${sections_rest[@]}"
 [ "${1:-}" = "--teardown" ] && e2e_teardown=true
 
 account_a="$(random_account)"
@@ -220,58 +224,11 @@ approve() {
   done
 }
 
-e2e_dependencies keycloak mailpit
-e2e_cluster
-# Customers' databases (ADR 0008): the suite's own server, on 10.199.2.0/24, which no other run uses.
-e2e_data_db 10.199.2.0/24 10.199.2.10
-# Customers' caches (ADR 0013): the suite's own server, beside it.
-e2e_cache 10.199.2.11
-e2e_mail 10.199.2.12 10.199.2.13
+# What more than one section uses: helpers.
 
-section "a webhook receiver, as a customer's: it records each request, and answers 204, or 500 on /fail"
-receiver_port="$(free_port)"
-receiver="http://127.0.0.1:$receiver_port"
-cat >"$work/receiver.py" <<'PY'
-import json, sys
-from http.server import BaseHTTPRequestHandler, HTTPServer
-class Receiver(BaseHTTPRequestHandler):
-    def do_POST(self):
-        body = self.rfile.read(int(self.headers.get('content-length', 0))).decode()
-        with open(sys.argv[2], 'a') as out:
-            out.write(json.dumps({'path': self.path, 'headers': {k.lower(): v for k, v in self.headers.items()}, 'body': body}) + '\n')
-        self.send_response(500 if self.path == '/fail' else 204)
-        self.end_headers()
-    def log_message(self, *args):
-        pass
-HTTPServer(('127.0.0.1', int(sys.argv[1])), Receiver).serve_forever()
-PY
-: >"$work/webhooks.jsonl"
-python3 "$work/receiver.py" "$receiver_port" "$work/webhooks.jsonl" &
-e2e_pids+=("$!")
 # webhooks_to <path>: each request the receiver had on that path, a JSON object per line.
 webhooks_to() { jq -c --arg path "$1" 'select(.path == $path)' "$work/webhooks.jsonl"; }
 
-section "backends"
-e2e_build
-e2e_migrate "${e2e_base_env[@]}"
-# Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
-# Both send notifications every second, and may reach the receiver on this machine.
-notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
-e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api##*:}" \
-  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
-  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
-  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" \
-  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port" \
-  FF_SES_PORT="$ses_port" FF_SES_BASE="http://127.0.0.1:$ses_port"
-# Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
-e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api_oidc##*:}" \
-  FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
-  FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
-  FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
-  FF_FUNCTION_URL_PORT="$url_port_oidc" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port_oidc" \
-  FF_STORAGE_PORT="$storage_port_oidc" FF_STORAGE_BASE="http://s3.localhost:$storage_port_oidc" \
-  FF_SQS_PORT="$sqs_port_oidc" FF_SQS_BASE="http://127.0.0.1:$sqs_port_oidc"
-echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
 # call_url <function URL> [curl option...]: a GET of the URL; prints the status, and the body goes to $work/url-body.
 # --resolve takes the URL's host to this machine, whatever the system's resolver does with *.localhost.
 call_url() {
@@ -283,18 +240,9 @@ call_url() {
   curl -s -o "$work/url-body" -w '%{http_code}' --resolve "$host:${port%/}:127.0.0.1" "$@" "$url"
 }
 
-section "account A's function"
-code='export async function handler(event: { name?: string }) {
-  return { message: `Hello ${event.name ?? "world"}` };
-}'
+# function_body <name>: a Node.js function's body, with account A's code.
 function_body() { jq -cn --arg code "$code" --arg name "$1" '{name: $name, runtime: "nodejs", code: $code, memory: 128, timeout: 5}'; }
-created="$(as_a POST /functions "$(function_body l5-a)")"
-check "A creates a function" "201 ACTIVE" "$(status) $(jq -r .status <<<"$created")"
-id="$(jq -r .id <<<"$created")"
-as_a POST "/functions/$id/invoke" '{"input":{"name":"A"}}' >/dev/null
-check "A invokes it" 201 "$(status)"
-check "A's usage counts the call (P-22)" "1" \
-  "$(as_a GET /usage | jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | .requests')"
+
 # snapshot <caller> <function ID>: what another account's calls must not change.
 snapshot() {
   local caller=$1 fn=$2
@@ -304,57 +252,23 @@ snapshot() {
       minInstances: $fn.minInstances, maxInstances: $fn.maxInstances, invocations: $history.total,
       url: $url.functionUrl, urlAuthType: $url.authType}'
 }
-url_a="$(as_a POST "/functions/$id/url" '{"authType": "NONE"}' | jq -r .functionUrl)"
-check "A gives its function a URL" "201 true" "$(status) $([[ $url_a =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
-check "which anyone may call: its host reaches A's function" '200 {"message":"Hello world"}' "$(call_url "$url_a") $(cat "$work/url-body")"
-before="$(snapshot as_a "$id")"
-database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
-check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"
-db_a="$(jq -r .id <<<"$database_a")"
-conn_a="$(jq -r .connectionString <<<"$database_a")"
-check "  ... which its connection string reaches, over TLS, as its own user" "$(jq -r .user <<<"$database_a")|t" \
-  "$(data_db_psql "$conn_a" 'select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()')"
-cache_a="$(as_a POST /caches '{"name": "l5-sessions"}')"
-check "A makes a cache, its address with its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.url | startswith("rediss://default:"))"' <<<"$cache_a")"
-cache_url_a="$(jq -r .url <<<"$cache_a")"
-cache_port_a="$(jq -r .port <<<"$cache_a")"
-cache_cli "$cache_url_a" SET l5 a >/dev/null
-check "  ... which its address reaches, over TLS" a "$(cache_cli "$cache_url_a" GET l5)"
-identity_a="$(as_a POST /email/identities '{"identity": "Shop.L5.example.tn"}')"
-check "A adds a domain to send mail from, pending, with its DKIM record to publish" "201 shop.l5.example.tn PENDING true" \
-  "$(status) $(jq -r '"\(.identity) \(.status) \(.records[0].value | startswith("v=DKIM1; k=rsa; p="))"' <<<"$identity_a")"
-selector_a="$(jq -r .dkimSelector <<<"$identity_a")"
-suppression_a="$(as_a PUT /email/suppressions/gone@l5.example.tn '{"reason": "BOUNCE"}')"
-check "  ... and an address to its suppression list" "200 BOUNCE" "$(status) $(jq -r .reason <<<"$suppression_a")"
-# Its domain proved, as its DKIM record found would prove it (L4 publishes one): then a message from it.
+
+# proved_domain <account> <domain>: the domain marked proved, as its DKIM record found would prove it.
 proved_domain() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc \
   "UPDATE email_identities SET status = 'SUCCESS', verified_at = now() WHERE account_id = '$1' AND identity = '$2'" >/dev/null; }
-proved_domain "$account_a" shop.l5.example.tn
-message_a="$(as_a POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "A'"'"'s"}' | jq -r .messageId)"
-check "  ... and sends a message from it, once it is proved" 201 "$(status)"
-as_a POST /buckets '{"name": "l5-photos-a"}' >/dev/null
-check "A makes a bucket" 201 "$(status)"
-as_a POST /queues '{"name": "l5-orders-a"}' >/dev/null
-check "A makes a queue" 201 "$(status)"
-as_a POST /queues/l5-orders-a/messages '{"body": "A'"'"'s own"}' >/dev/null
-check "  ... and sends it a message" 201 "$(status)"
-mapping_a="$(as_a POST "/functions/$id/event-sources" "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a\", \"enabled\": false}" | jq -r .uuid)"
-check "  ... which A's function is mapped to, disabled: nothing reads the message" 201 "$(status)"
-as_a POST /queues '{"name": "l5-events-a"}' >/dev/null
-as_a PUT /buckets/l5-photos-a/notifications "{\"queueConfigurations\": [{\"id\": \"l5\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
-check "  ... and A's bucket sends its deletions' events to a queue of A's" "200 l5" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
-as_a PUT /buckets/l5-photos-a/website '{"indexDocument": {"suffix": "index.html"}}' >/dev/null
-check "  ... and is a site" "200 index.html" "$(status) $(jq -r '.indexDocument.suffix' "$work/body")"
-as_a POST /buckets/l5-photos-a/website/domains '{"domain": "l5.example.tn"}' >/dev/null
-check "  ... with a domain of A's own, pending" "201 pending" "$(status) $(jq -r .status "$work/body")"
+
 # notified_by <as_…> <bucket>: the IDs of the bucket's notification configurations, as its own account reads them.
 notified_by() { "$1" GET "/buckets/$2/notifications" | jq -r '[.queueConfigurations[].id] | join(",")'; }
+
 # site_of <as_…> <bucket>: the index document of the bucket's site, as its own account reads it.
 site_of() { "$1" GET "/buckets/$2/website" | jq -r '.indexDocument.suffix'; }
+
 # site_domains_of <as_…> <bucket>: the domains of the bucket's site, as its own account reads them.
 site_domains_of() { "$1" GET "/buckets/$2/website/domains" | jq -r '[.[].domain] | join(",")'; }
+
 # kept_by <as_…> <queue>: the queue's name and its messages that can be received, as its own account reads them.
 kept_by() { "$1" GET "/queues/$2" | jq -r '"\(.name) \(.messages.available)"'; }
+
 # queue_body <route>: a body each queue route takes, so that only the queue's owner decides its answer.
 queue_body() {
   case "$1" in
@@ -364,21 +278,12 @@ queue_body() {
     *) echo '' ;;
   esac
 }
-key_a="$(as_a POST /storage-keys '{}')"
-check "  ... and an access key to it, its secret in the answer" "201 true" "$(status) $(jq -r '.secretAccessKey | test("^[A-Za-z0-9+/]{40}$")' <<<"$key_a")"
-key_a_id="$(jq -r .id <<<"$key_a")"
-key_a_secret="$(jq -r .secretAccessKey <<<"$key_a")"
-missing="$(node -e "console.log(require('crypto').randomUUID())")"
-as_a GET "/functions/$missing" >/dev/null
-check "a function that doesn't exist answers 404" "404 Function with ID $missing not found" "$(status) $(message)"
-as_a GET /functions '' -H 'X-FF-Dev-Account: 12345' >/dev/null
-check "a malformed X-FF-Dev-Account is refused" 400 "$(status)"
 
-# Every route of the OpenAPI document, as "METHOD /path/{param}".
-document="$(curl -sS "$api/api-json")"
-mapfile -t routes < <(jq -r '.paths | to_entries[] | .key as $path | .value | to_entries[]
-  | select(.key | IN("get", "put", "post", "delete", "patch")) | "\(.key | ascii_upcase) \($path)"' <<<"$document")
-[ "${#routes[@]}" -gt 0 ] || fail "the OpenAPI document lists no routes"
+# alarm_body [function ID]: a valid alarm, on that function's errors, or on the account's calls without one.
+alarm_body() {
+  jq -cn --arg fn "${1:-}" '{name: "l5", functionId: (if $fn == "" then null else $fn end), metric: (if $fn == "" then "Invocations" else "Errors" end),
+    statistic: "Sum", period: 60, comparison: "GreaterThanThreshold", threshold: 1000, evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: []}}'
+}
 
 # path_for <template> <method> <function ID> <account ID> [key ID]: the path, with its required query parameters filled in.
 path_for() {
@@ -414,11 +319,7 @@ path_for() {
   local IFS='&'
   printf '%s%s' "$path" "${params:+?${params[*]}}"
 }
-# alarm_body [function ID]: a valid alarm, on that function's errors, or on the account's calls without one.
-alarm_body() {
-  jq -cn --arg fn "${1:-}" '{name: "l5", functionId: (if $fn == "" then null else $fn end), metric: (if $fn == "" then "Invocations" else "Errors" end),
-    statistic: "Sum", period: 60, comparison: "GreaterThanThreshold", threshold: 1000, evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: []}}'
-}
+
 # body_for <method> <template>: a valid body, so that only the account check can refuse the call.
 body_for() {
   case "$1 $2" in
@@ -458,12 +359,167 @@ body_for() {
     POST* | PUT* | PATCH*) echo '{}' ;;
   esac
 }
+
+# s3_with <key ID> <secret> <port> <aws s3 arguments…>: accepted, or refused with the S3 error's code, as the CLI prints it.
+s3_with() {
+  local id=$1 secret=$2 port=$3
+  shift 3
+  AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+    "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$port" "$@" >/dev/null 2>"$work/s3.err" && echo accepted ||
+    echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|NoSuchBucket)\)' "$work/s3.err" | head -1 | tr -d '()')"
+}
+
+as_user_1() { with_token "$token_1" "$@"; }
+
+# Account 2's calls are patient, as B's: its loop over every route makes more changes than its plan's 60 a minute.
+as_user_2() { patient with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: ${account_2:-}"; }
+
+# plus_millimes <amount> <millimes>: the amount, as the API writes TND, plus that many millimes.
+plus_millimes() { node -e 'const [a, m] = process.argv.slice(1); console.log(((Math.round(Number(a) * 1000) + Number(m)) / 1000).toFixed(3))' "$1" "$2"; }
+
+# transfer <received> <withheld>: a bank transfer received today, for the pro-forma whose reference was typed.
+transfer() { jq -cn --arg reference "$typed" --arg received "$1" --arg withheld "$2" --arg on "$today" \
+  '{reference: $reference, received: $received, withheld: $withheld, receivedOn: $on, bankReference: "VIR-L5-1", reason: "l5: statement of today"}'; }
+
+section_stack() {
+section "the stack: its database and object storage, Keycloak and Mailpit, the cluster, customers' database, cache and mail servers"
+e2e_dependencies keycloak mailpit
+e2e_cluster
+# Customers' databases (ADR 0008): the suite's own server, on 10.199.2.0/24, which no other run uses.
+e2e_data_db 10.199.2.0/24 10.199.2.10
+# Customers' caches (ADR 0013): the suite's own server, beside it.
+e2e_cache 10.199.2.11
+e2e_mail 10.199.2.12 10.199.2.13
+}
+section_def stack section_stack
+
+section_receiver() {
+section "a webhook receiver, as a customer's: it records each request, and answers 204, or 500 on /fail"
+receiver_port="$(free_port)"
+receiver="http://127.0.0.1:$receiver_port"
+cat >"$work/receiver.py" <<'PY'
+import json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+class Receiver(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get('content-length', 0))).decode()
+        with open(sys.argv[2], 'a') as out:
+            out.write(json.dumps({'path': self.path, 'headers': {k.lower(): v for k, v in self.headers.items()}, 'body': body}) + '\n')
+        self.send_response(500 if self.path == '/fail' else 204)
+        self.end_headers()
+    def log_message(self, *args):
+        pass
+HTTPServer(('127.0.0.1', int(sys.argv[1])), Receiver).serve_forever()
+PY
+: >"$work/webhooks.jsonl"
+python3 "$work/receiver.py" "$receiver_port" "$work/webhooks.jsonl" &
+e2e_pids+=("$!")
+}
+section_def receiver section_receiver stack
+
+section_backends() {
+section "backends"
+e2e_build
+e2e_migrate "${e2e_base_env[@]}"
+# Both backends share the database, so both hear the ledger's NOTIFY, and either may send a low-balance e-mail (P-33): both have the SMTP server.
+# Both send notifications every second, and may reach the receiver on this machine.
+notify_env=(FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
+e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api##*:}" \
+  FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$account_a" FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" "${notify_env[@]}" \
+  FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
+  FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" \
+  FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port" \
+  FF_SES_PORT="$ses_port" FF_SES_BASE="http://127.0.0.1:$ses_port"
+# Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
+e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api_oidc##*:}" \
+  FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
+  FF_SMTP_URL="smtp://localhost:$FF_MAIL_SMTP_PORT" FF_OPERATOR_EMAIL="$operator" FF_ADMIN_URL=http://localhost:5198 \
+  FF_RETENTION_INTERVAL_SECONDS=5 "${notify_env[@]}" \
+  FF_FUNCTION_URL_PORT="$url_port_oidc" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port_oidc" \
+  FF_STORAGE_PORT="$storage_port_oidc" FF_STORAGE_BASE="http://s3.localhost:$storage_port_oidc" \
+  FF_SQS_PORT="$sqs_port_oidc" FF_SQS_BASE="http://127.0.0.1:$sqs_port_oidc"
+echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
+}
+section_def backends section_backends stack
+
+section_account_a() {
+section "account A's function"
+code='export async function handler(event: { name?: string }) {
+  return { message: `Hello ${event.name ?? "world"}` };
+}'
+created="$(as_a POST /functions "$(function_body l5-a)")"
+check "A creates a function" "201 ACTIVE" "$(status) $(jq -r .status <<<"$created")"
+id="$(jq -r .id <<<"$created")"
+as_a POST "/functions/$id/invoke" '{"input":{"name":"A"}}' >/dev/null
+check "A invokes it" 201 "$(status)"
+check "A's usage counts the call (P-22)" "1" \
+  "$(as_a GET /usage | jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | .requests')"
+url_a="$(as_a POST "/functions/$id/url" '{"authType": "NONE"}' | jq -r .functionUrl)"
+check "A gives its function a URL" "201 true" "$(status) $([[ $url_a =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
+check "which anyone may call: its host reaches A's function" '200 {"message":"Hello world"}' "$(call_url "$url_a") $(cat "$work/url-body")"
+before="$(snapshot as_a "$id")"
+database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
+check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"
+db_a="$(jq -r .id <<<"$database_a")"
+conn_a="$(jq -r .connectionString <<<"$database_a")"
+check "  ... which its connection string reaches, over TLS, as its own user" "$(jq -r .user <<<"$database_a")|t" \
+  "$(data_db_psql "$conn_a" 'select current_user, ssl from pg_stat_ssl where pid = pg_backend_pid()')"
+cache_a="$(as_a POST /caches '{"name": "l5-sessions"}')"
+check "A makes a cache, its address with its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.url | startswith("rediss://default:"))"' <<<"$cache_a")"
+cache_url_a="$(jq -r .url <<<"$cache_a")"
+cache_port_a="$(jq -r .port <<<"$cache_a")"
+cache_cli "$cache_url_a" SET l5 a >/dev/null
+check "  ... which its address reaches, over TLS" a "$(cache_cli "$cache_url_a" GET l5)"
+identity_a="$(as_a POST /email/identities '{"identity": "Shop.L5.example.tn"}')"
+check "A adds a domain to send mail from, pending, with its DKIM record to publish" "201 shop.l5.example.tn PENDING true" \
+  "$(status) $(jq -r '"\(.identity) \(.status) \(.records[0].value | startswith("v=DKIM1; k=rsa; p="))"' <<<"$identity_a")"
+selector_a="$(jq -r .dkimSelector <<<"$identity_a")"
+suppression_a="$(as_a PUT /email/suppressions/gone@l5.example.tn '{"reason": "BOUNCE"}')"
+check "  ... and an address to its suppression list" "200 BOUNCE" "$(status) $(jq -r .reason <<<"$suppression_a")"
+# Its domain proved, as its DKIM record found would prove it (L4 publishes one): then a message from it.
+proved_domain "$account_a" shop.l5.example.tn
+message_a="$(as_a POST /email/messages '{"from": "orders@shop.l5.example.tn", "to": ["team@shop.l5.example.tn"], "subject": "l5", "text": "A'"'"'s"}' | jq -r .messageId)"
+check "  ... and sends a message from it, once it is proved" 201 "$(status)"
+as_a POST /buckets '{"name": "l5-photos-a"}' >/dev/null
+check "A makes a bucket" 201 "$(status)"
+as_a POST /queues '{"name": "l5-orders-a"}' >/dev/null
+check "A makes a queue" 201 "$(status)"
+as_a POST /queues/l5-orders-a/messages '{"body": "A'"'"'s own"}' >/dev/null
+check "  ... and sends it a message" 201 "$(status)"
+mapping_a="$(as_a POST "/functions/$id/event-sources" "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a\", \"enabled\": false}" | jq -r .uuid)"
+check "  ... which A's function is mapped to, disabled: nothing reads the message" 201 "$(status)"
+as_a POST /queues '{"name": "l5-events-a"}' >/dev/null
+as_a PUT /buckets/l5-photos-a/notifications "{\"queueConfigurations\": [{\"id\": \"l5\", \"queueArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a\", \"events\": [\"s3:ObjectRemoved:*\"]}]}" >/dev/null
+check "  ... and A's bucket sends its deletions' events to a queue of A's" "200 l5" "$(status) $(jq -r '.queueConfigurations[0].id' "$work/body")"
+as_a PUT /buckets/l5-photos-a/website '{"indexDocument": {"suffix": "index.html"}}' >/dev/null
+check "  ... and is a site" "200 index.html" "$(status) $(jq -r '.indexDocument.suffix' "$work/body")"
+as_a POST /buckets/l5-photos-a/website/domains '{"domain": "l5.example.tn"}' >/dev/null
+check "  ... with a domain of A's own, pending" "201 pending" "$(status) $(jq -r .status "$work/body")"
+key_a="$(as_a POST /storage-keys '{}')"
+check "  ... and an access key to it, its secret in the answer" "201 true" "$(status) $(jq -r '.secretAccessKey | test("^[A-Za-z0-9+/]{40}$")' <<<"$key_a")"
+key_a_id="$(jq -r .id <<<"$key_a")"
+key_a_secret="$(jq -r .secretAccessKey <<<"$key_a")"
+missing="$(node -e "console.log(require('crypto').randomUUID())")"
+as_a GET "/functions/$missing" >/dev/null
+check "a function that doesn't exist answers 404" "404 Function with ID $missing not found" "$(status) $(message)"
+as_a GET /functions '' -H 'X-FF-Dev-Account: 12345' >/dev/null
+check "a malformed X-FF-Dev-Account is refused" 400 "$(status)"
+
+# Every route of the OpenAPI document, as "METHOD /path/{param}".
+document="$(curl -sS "$api/api-json")"
+mapfile -t routes < <(jq -r '.paths | to_entries[] | .key as $path | .value | to_entries[]
+  | select(.key | IN("get", "put", "post", "delete", "patch")) | "\(.key | ascii_upcase) \($path)"' <<<"$document")
+[ "${#routes[@]}" -gt 0 ] || fail "the OpenAPI document lists no routes"
+
 needs_user="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage accounts"
 needs_user_for_keys="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage API keys"
 needs_user_for_members="400 Development mode acts as FF_DEV_ACCOUNT_ID, without a user: log in to manage members"
 no_operator="400 Development mode has no operator: the admin dashboard needs FF_AUTH_MODE=oidc and an operator's login"
 not_admin_client="403 The admin routes take a token issued to the admin dashboard (ff-admin)"
+}
+section_def account_a section_account_a backends receiver
 
+section_dev_routes() {
 section "development mode, account B, on every route (${#routes[@]})"
 grant "$account_a" 3000 "promo:l5-a"
 balance_a="$(as_a GET /billing/balance)"
@@ -869,19 +925,14 @@ patiently as_b DELETE "/functions/$own"
 check "B deletes its own function" 200 "$(status)"
 patiently as_b DELETE "/databases/$db_b"
 check "B deletes its own database" 204 "$(status)"
+}
+section_def dev_routes section_dev_routes account_a
 
+section_s3_keys() {
 section "buckets through the S3 front door: each account's key reaches its own account's buckets alone"
 if command -v aws >/dev/null; then aws_cli=(aws); else
   aws_cli=(docker run --rm --network host -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE amazon/aws-cli:2.34.32)
 fi
-# s3_with <key ID> <secret> <port> <aws s3 arguments…>: accepted, or refused with the S3 error's code, as the CLI prints it.
-s3_with() {
-  local id=$1 secret=$2 port=$3
-  shift 3
-  AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
-    "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$port" "$@" >/dev/null 2>"$work/s3.err" && echo accepted ||
-    echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|NoSuchBucket)\)' "$work/s3.err" | head -1 | tr -d '()')"
-}
 key_b_id="$(jq -r .id <<<"$key_b")"
 key_b_secret="$(jq -r .secretAccessKey <<<"$key_b")"
 check "A's key lists A's bucket, and B's key B's" "accepted accepted" \
@@ -903,7 +954,10 @@ $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-websit
 $(site_of as_a l5-photos-a)"
 as_b DELETE /buckets/l5-photos-b >/dev/null
 check "B deletes its own bucket" 204 "$(status)"
+}
+section_def s3_keys section_s3_keys dev_routes
 
+section_sqs_keys() {
 section "queues through the SQS endpoint: each account's key reaches its own account's queues alone"
 # sqs_with <key ID> <secret> <aws sqs arguments…>: the answer's text, or refused with the error's query code, as the CLI prints it.
 sqs_with() {
@@ -934,7 +988,10 @@ sqs_with "$key_a_id" "$key_a_secret" delete-queue --queue-url "$queue_a" >/dev/n
 sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_b" >/dev/null
 check "each deletes its own queue" "http://127.0.0.1:$sqs_port/$account_a/l5-events-a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
   "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
+}
+section_def sqs_keys section_sqs_keys s3_keys
 
+section_ses_keys() {
 section "mail through the SES endpoint: each account's key reaches its own account's identities and sends from them alone"
 # ses_with <key ID> <secret> <aws sesv2 arguments…>: the answer's text, or refused with the error's name, as the CLI prints it.
 ses_with() {
@@ -959,7 +1016,10 @@ check "SendEmail: B's key can't send from A's domain, which isn't B's; A's key c
   "$(ses_with "$key_b_id" "$key_b_secret" send-email --from-email-address orders@shop.l5.example.tn --destination ToAddresses=team@shop.l5.example.tn --content "$ses_message") \
 $([[ "$(ses_with "$key_a_id" "$key_a_secret" send-email --from-email-address orders@shop.l5.example.tn --destination ToAddresses=team@shop.l5.example.tn --content "$ses_message" --query MessageId)" =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false) \
 $(as_b GET /email/messages | jq '.messages | length')"
+}
+section_def ses_keys section_ses_keys s3_keys
 
+section_anonymous() {
 section "nobody authenticated, through the guard, on every route (${#routes[@]})"
 for route in "${routes[@]}"; do
   method="${route%% *}"
@@ -971,7 +1031,10 @@ for route in "${routes[@]}"; do
     check "$route: 401" 401 "$(status)"
   fi
 done
+}
+section_def anonymous section_anonymous account_a
 
+section_signup() {
 section "sign-up: Keycloak's form, e-mail verification through Mailpit, a pending account"
 user_1="l5-$account_a@ff.test"
 user_2="l5-$account_b@ff.test"
@@ -982,9 +1045,6 @@ token_1="$(keycloak_token ff-e2e "$user_1")"
 token_2="$(keycloak_token ff-e2e "$user_2")"
 [ -n "$token_1" ] && [ "$token_1" != null ] && [ -n "$token_2" ] && [ "$token_2" != null ] ||
   fail "the users could not log in through ff-e2e"
-as_user_1() { with_token "$token_1" "$@"; }
-# Account 2's calls are patient, as B's: its loop over every route makes more changes than its plan's 60 a minute.
-as_user_2() { patient with_token "$token_2" "$1" "$2" "${3:-}" -H "X-FF-Account: ${account_2:-}"; }
 
 me_1="$(as_user_1 GET /me)"
 check "the backend creates user 1 on the first call, with no account" "200 $user_1 []" \
@@ -1047,6 +1107,10 @@ pf_1="$(jq -r .id <<<"$proforma_1")"
 ref_1="$(jq -r .reference <<<"$proforma_1")"
 
 grant "$account_1" 5000 "promo:l5-1"
+}
+section_def signup section_signup account_a
+
+section_isolation() {
 section "account 2, on account 1's function and account, on every route (${#routes[@]})"
 alarm_1="$(as_user_1 POST /alarms "$(alarm_body "$fn_1")" | jq -r .id)"
 check "account 1's owner makes an alarm on its function's errors" 201 "$(status)"
@@ -1482,6 +1546,10 @@ check "naming account 1 in X-FF-Account: 404" "404 Account $account_1 not found"
 with_token "$token_2" GET /functions >/dev/null
 check "user 2, now in two accounts, must name one" \
   "400 This user belongs to several accounts: name one in the X-FF-Account header" "$(status) $(message)"
+}
+section_def isolation section_isolation signup s3_keys
+
+section_api_keys() {
 section "API keys"
 listed="$(with_token "$key_1" GET /functions | jq --arg id "$fn_1" 'map(select(.id == $id)) | length')"
 check "account 1's key lists its account's functions" "200 1" "$(status) $listed"
@@ -1562,6 +1630,10 @@ for route in "${routes[@]}"; do
   patiently with_token "$key_2" "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")"
   check "account 2's key on $route: 404" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
+}
+section_def api_keys section_api_keys isolation
+
+section_url_credentials() {
 section "a function URL that takes the account's credentials"
 url_1="$(as_user_1 POST "/functions/$fn_1/url" '{"authType": "AWS_IAM"}' | jq -r .functionUrl)"
 check "account 1 gives its function a URL that takes its account's API keys" "201 AWS_IAM" "$(status) $(as_user_1 GET "/functions/$fn_1/url" | jq -r .authType)"
@@ -1581,7 +1653,10 @@ as_user_1 DELETE "/functions/$fn_1/url" >/dev/null
 check "account 1 deletes the URL" 204 "$(status)"
 check "account 1's function was invoked twice more by its key, through the API and its URL, and is otherwise unchanged" \
   "$(jq -c '.invocations += 2' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
+}
+section_def url_credentials section_url_credentials api_keys
 
+section_members() {
 section "members (P-16): user 2 is invited into account 1"
 as_user_1 POST /members "$(jq -cn --arg email "$user_2" '{email: $email, role: "viewer"}')" >/dev/null
 check "account 1's owner invites user 2's address as a viewer" 201 "$(status)"
@@ -1629,7 +1704,10 @@ as_user_1 DELETE "/members/$user_2_id" >/dev/null
 check "the owner removes user 2" 200 "$(status)"
 as_member GET /functions >/dev/null
 check "who can't reach account 1 any more" "404 Account $account_1 not found" "$(status) $(message)"
+}
+section_def members section_members isolation
 
+section_audit() {
 section "the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
@@ -1643,7 +1721,10 @@ check "the approval is FF's, with the operator's reason, but neither their e-mai
   "$(jq -r '.entries[] | select(.action == "account.approve") | "\(.actor) \(.actorLabel) \(.ip) \(.details.reason)"' <<<"$log_1")"
 as_user_1 GET '/audit-log?limit=0' >/dev/null
 check "a page of nothing is refused" "400 limit must not be less than 1" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+}
+section_def audit section_audit members
 
+section_admin() {
 section "the admin routes (P-70): FF's operator"
 operator_token="$(keycloak_token ff-admin "$operator_email" "$operator_password")"
 settings="$(with_token "$operator_token" GET /admin/settings)"
@@ -1658,6 +1739,10 @@ check "and the audit log keeps who, why, and what it replaced" "operator@ff.test
   "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F '|' -c \
     "SELECT actor_label, details->>'reason', details->'changes'->'gracePeriodHours'->>'from', details->'changes'->'gracePeriodHours'->>'to'
        FROM audit_log WHERE action = 'settings.update' AND actor LIKE 'operator:%'")"
+}
+section_def admin section_admin backends
+
+section_operator_accounts() {
 section "the operator's accounts (P-71)"
 found="$(with_token "$operator_token" GET "/admin/accounts?q=$user_1")"
 check "the operator finds account 1 by its owner's e-mail" "200 $account_1" "$(status) $(jq -r '[.accounts[].id] | join(" ")' <<<"$found")"
@@ -1706,6 +1791,10 @@ check "the operator reactivates it" 200 "$(status)"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"again"}}' >/dev/null
 check "and its function answers again, from a cold start" 201 "$(status)"
 check "and its cache lets its user in again, its keys kept" "one active" "$(cache_cli "$cache_conn_1" GET l5) $(as_user_1 GET /caches/l5-one | jq -r .status)"
+}
+section_def operator_accounts section_operator_accounts admin isolation
+
+section_logs() {
 section "the function's logs (P-40; from the log store, P-43)"
 logged="$(as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"logs"}}')"
 logged_id="$(jq -r .id <<<"$logged")"
@@ -1821,7 +1910,10 @@ plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
   "$(jq -cn --argjson limits "$beta_limits" '{limits: ($limits | .quota = {pods: 32, cpu: "16", memory: "16Gi"}), reason: "l5: pilots need more"}')")"
 check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \
   "$(status) $(jq -r '"\(.quota.applied) \(.quota.failed)"' <<<"$plan_change") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
+}
+section_def logs section_logs isolation admin api_keys
 
+section_metrics() {
 section "metrics, from the usage records the bill is made of"
 since="$(date -u -d '-3 hours' +%Y-%m-%dT%H:%M:%SZ)"
 metrics_1="$(as_user_1 GET "/functions/$fn_1/metrics?period=3600&start=$since")"
@@ -1832,7 +1924,10 @@ check "the function's Invocations, by the hour, are its usage records' calls, ex
   "$metrics_status $(jq -r '[.metrics.Invocations[]] | add' <<<"$metrics_1") $(jq '[.metrics.Duration.p50[] | select(. != null)] | length > 0' <<<"$metrics_1")"
 as_user_1 GET "/functions/$fn_1/metrics?period=60&start=2026-01-01T00:00:00Z" >/dev/null
 check "a window of more points than an answer gives is refused, saying why" 400 "$(status)"
+}
+section_def metrics section_metrics isolation
 
+section_notifications() {
 section "notifications: a test to a webhook and the owners' e-mail, signed, delivered, tried again"
 # verify_signature <secret...> < hook: true when the hook carries a valid v1 by each secret given, as a receiver checks it.
 verify_signature() {
@@ -1877,7 +1972,10 @@ for _ in $(seq 1 40); do [ -n "$(webhooks_to /rotated)" ] && break; sleep 0.5; d
 check "its webhooks then carry a valid signature by each" true "$(verify_signature "$(jq -r .secret <<<"$rotated")" "$secret_1" <<<"$(webhooks_to /rotated | head -1)")"
 check "the rotation and the tests are in the account's audit log, never a secret" "notification.test webhook_secret.rotate false" \
   "$(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action | startswith("notification.") or startswith("webhook_secret.")) | .action] | unique | join(" ")') $(as_user_1 GET /audit-log | grep whsec_ >/dev/null && echo true || echo false)"
+}
+section_def notifications section_notifications signup
 
+section_support() {
 section "support: finding what a customer asks about, and its data only for a reason"
 found="$(with_token "$operator_token" GET "/admin/search?q=$logged_id")"
 check "the operator finds a call by its request ID: its function and account, in the history" "200 $fn_1 $account_1 true" \
@@ -1899,7 +1997,10 @@ looks="$(as_user_1 GET '/audit-log?limit=3')"
 check "its owner reads each look in the account's audit log, as FF's, with the reason" \
   "support.view_logs:FF:l5: its lines support.view_code:FF:l5: checking the handler support.view_invocation:FF:l5: the customer asked about this call" \
   "$(jq -r '[.entries[] | "\(.action):\(.actorLabel):\(.details.reason)"] | join(" ")' <<<"$looks")"
+}
+section_def support section_support admin logs
 
+section_price_books() {
 section "the operator's price books (P-73)"
 books="$(with_token "$operator_token" GET /admin/price-books)"
 check "the first price book is active: AWS's prices at the BCT's rate; the migrations' second, with databases' and buckets' prices, starts next month" \
@@ -1923,17 +2024,17 @@ with_token "$operator_token" DELETE "/admin/price-books/$(jq -r '.[0].id' <<<"$b
 check "the active book is never removed" 409 "$(status)"
 with_token "$operator_token" DELETE "/admin/price-books/$(jq -r .id <<<"$created")" '{"reason": "l5: not yet"}' >/dev/null
 check "a scheduled one is" "200 2" "$(status) $(with_token "$operator_token" GET /admin/price-books | jq length)"
+}
+section_def price_books section_price_books admin
+
+section_transfers() {
 section "bank transfers (P-35)"
 typed="$(tr 'A-Z' 'a-z' <<<"${ref_1//-/}")"
 found="$(with_token "$operator_token" GET "/admin/payments?reference=$typed")"
 check "the operator finds account 1's pro-forma by its reference, typed from the statement without dashes" "200 $pf_1 pending 59.500 $account_1" \
   "$(status) $(jq -r '[.payments[] | "\(.id) \(.status) \(.total) \(.accountId)"] | join(",")' <<<"$found")"
 before_transfer="$(as_user_1 GET /billing/balance | jq -r .balance)"
-# plus_millimes <amount> <millimes>: the amount, as the API writes TND, plus that many millimes.
-plus_millimes() { node -e 'const [a, m] = process.argv.slice(1); console.log(((Math.round(Number(a) * 1000) + Number(m)) / 1000).toFixed(3))' "$1" "$2"; }
 today="$(date -u +%F)"
-transfer() { jq -cn --arg reference "$typed" --arg received "$1" --arg withheld "$2" --arg on "$today" \
-  '{reference: $reference, received: $received, withheld: $withheld, receivedOn: $on, bankReference: "VIR-L5-1", reason: "l5: statement of today"}'; }
 with_token "$operator_token" POST /admin/bank-transfers "$(transfer 58.000 0.892)" >/dev/null
 check "a transfer that doesn't make the total is refused, naming the amounts" \
   "400 received 58.000 TND and withheld 0.892 TND make 58.892 TND, not the pro-forma's 59.500 TND" "$(status) $(message)"
@@ -1979,6 +2080,10 @@ log_payments="$(as_user_1 GET '/audit-log?limit=100')"
 check "and, in the account's audit log, who asked for it and FF's two credits, without the operator's address" \
   "billing.pro_forma:$user_1:true payment.record:FF:null payment.withholding:FF:null" \
   "$(jq -r '[.entries[] | select(.action == "billing.pro_forma" or (.action | startswith("payment."))) | "\(.action):\(.actorLabel):\(if .actor == "operator" then .ip else (.ip != null) end)"] | reverse | join(" ")' <<<"$log_payments")"
+}
+section_def transfers section_transfers admin signup
+
+section_invoices() {
 section "invoices (P-36)"
 last_month="$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)"
 last_day="$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%F)"
@@ -2023,6 +2128,10 @@ check "the owner downloads the month's usage statement" "200 application/pdf %PD
 check "the operator downloads the invoice too" "200 application/pdf" "$(fetch_pdf "$api_oidc" "/admin/invoices/$invoice_1/pdf" -H "Authorization: Bearer $operator_token")"
 documents_1="$(with_token "$operator_token" GET "/admin/invoices?accountId=$account_1")"
 check "and lists both documents of account 1" "200 AV-$year-000001,FAC-$year-000001" "$(status) $(jq -r '[.invoices[].number] | join(",")' <<<"$documents_1")"
+}
+section_def invoices section_invoices transfers
+
+section_grants() {
 section "credit grants (P-74)"
 new_key() { cat /proc/sys/kernel/random/uuid; }
 grant_body() { jq -cn --arg kind "$1" --arg amount "$2" --arg reason "$3" --arg key "$4" '{kind: $kind, amount: $amount, reason: $reason, idempotencyKey: $key}'; }
@@ -2059,6 +2168,10 @@ page_credit="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
 check "the account page has the credit: balance, state, this month's charges only rated in shadow mode, the threshold" \
   "200 $(plus_millimes "$balance_after_grant" -500) ok true $(date -u +%Y-%m) 0.000 100.000" \
   "$(status) $(jq -r '.credit | "\(.balance) \(.state.state) \(.shadowMode) \(.month) \(.debited) \(.largeCreditThreshold)"' <<<"$page_credit")"
+}
+section_def grants section_grants transfers
+
+section_cancel_proformas() {
 section "cancelling pro-formas (P-74)"
 dropped="$(as_user_1 POST /billing/pro-formas '{"credit": "30"}')"
 dropped_id="$(jq -r .id <<<"$dropped")"
@@ -2123,7 +2236,10 @@ with_token "$(keycloak_token admin-cli "$user_1")" GET /functions >/dev/null
 check "a token meant for another API (Keycloak's admin-cli client): 401" \
   "401 The token is not meant for this API" "$(status) $(message)"
 check "A's function, history and limits are still unchanged" "$before" "$(snapshot as_a "$id")"
+}
+section_def cancel_proformas section_cancel_proformas transfers
 
+section_overview() {
 section "the overview: the platform at a glance, for the operator"
 overview="$(with_token "$operator_token" GET /admin/stats/overview)"
 check "the operator reads it" 200 "$(status)"
@@ -2140,7 +2256,10 @@ check "the credit FF owes, as the wallets hold it, to the millime" \
 check "the invoices issued this month, the one above among them" \
   "$(sql_value "SELECT count(*) FROM invoices WHERE kind = 'invoice' AND issued_on >= date_trunc('month', now() AT TIME ZONE 'UTC')::date")" "$(jq .invoices.issued <<<"$overview")"
 check "and the last 7 days of capacity against billing" 7 "$(jq '.capacity | length' <<<"$overview")"
+}
+section_def overview section_overview admin
 
+section_closing() {
 section "closing an account: its functions, their history and logs deleted once its notice period has passed"
 # Last, as it deletes account 1's data. By now it has a function, calls, log lines, usage, payments and invoices.
 sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
@@ -2194,5 +2313,8 @@ check "its owner reads in its audit log what FF deleted, as FF" "function.delete
 check "and GET /me says when it was done" "$deleted" "$(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .dataDeletedAt')"
 check "another account's function and namespace are untouched" "true $before" \
   "$(kubectl get namespace "$(tenant_namespace "$account_a")" >/dev/null 2>&1 && echo true || echo false) $(snapshot as_a "$id")"
+}
+section_def closing section_closing isolation admin
 
+sections_run
 checks_done "$E2E_NAME"

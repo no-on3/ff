@@ -149,8 +149,10 @@ sections_run() {
     while IFS=$'\t' read -r sections_id sections_start; do sections_last[$sections_id]="$sections_start"; done <"$sections_times"
   fi
   if $sections_list; then
+    local sections_width=0
+    for sections_id in "${sections_order[@]}"; do [ ${#sections_id} -le "$sections_width" ] || sections_width=${#sections_id}; done
     for sections_id in "${sections_order[@]}"; do
-      printf '%-16s %6s  %s%s\n' "$sections_id" "${sections_last[$sections_id]:+${sections_last[$sections_id]} s}" \
+      printf '%-*s %6s  %s%s\n' "$sections_width" "$sections_id" "${sections_last[$sections_id]:+${sections_last[$sections_id]} s}" \
         "$(section_title "$sections_id")" "${sections_needs[$sections_id]:+  (needs: ${sections_needs[$sections_id]})}"
     done
     sections_quit 0
