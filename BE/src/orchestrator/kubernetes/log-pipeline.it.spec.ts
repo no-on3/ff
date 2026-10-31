@@ -200,7 +200,7 @@ run('the log pipeline on the dev cluster (L3)', () => {
     for (const ns of [nsA, nsB]) await client.delete(paths.namespace(ns)).catch(() => undefined);
   });
 
-  it("stores a call's lines, Node.js and Python, with the function, pod, stream and request ID, within 5 s", async () => {
+  it("stores a call's lines, Node.js and Python, with the function, pod, stream and request ID, within 15 s", async () => {
     const nonce = word('n');
     const nodeCall = `it-log-node-${randomUUID()}`;
     const pythonCall = `it-log-python-${randomUUID()}`;
@@ -231,7 +231,9 @@ run('the log pipeline on the dev cluster (L3)', () => {
     const py = of(pythonCall);
     expect(py.map((l) => l._msg)).toEqual(expect.arrayContaining([`hello from python ${nonce}`, `END RequestId: ${pythonCall}`]));
     expect(py.every((l) => l.function_id === python.id && l.namespace === nsA && l.pod?.startsWith(`fn-${python.id}-`))).toBe(true);
-    expect(delayMs).toBeLessThan(5000);
+    // The live tail's bound below, which reads the same store: a laptop stays under 5 s, the collector flushing each
+    // second; GitHub's shared runners took 7.9 and 9.5 s for this first call through a pipeline just started.
+    expect(delayMs).toBeLessThan(15_000);
   });
 
   it("reads pages of a function's lines as the logs API does (P-43): a call's, a phrase's, and back with the cursor", async () => {
