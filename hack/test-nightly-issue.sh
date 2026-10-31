@@ -12,11 +12,13 @@ on_exit 'rm -rf "$work"'
 mkdir "$work/bin"
 cat >"$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
-# Records each call; answers issue list from issues.json and run view from failed.log; keeps each body it is given.
+# Records each call; answers issue list from issues.json, a run's jobs from jobs.json and a job's log from logs/<id>;
+# keeps each body it is given.
 echo "$*" >>"$GH_WORK/calls"
 case "$1 $2" in
   'issue list') cat "$GH_WORK/issues.json" ;;
-  'run view') cat "$GH_WORK/failed.log" ;;
+  'api repos/'*/runs/*/jobs*) cat "$GH_WORK/jobs.json" ;;
+  'api --allow-escape-sequences') id="${3%/logs}"; cat "$GH_WORK/logs/${id##*/}" ;;
   'issue create' | 'issue comment')
     while [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" "$GH_WORK/body"; shift; done ;;
 esac
@@ -26,13 +28,17 @@ chmod +x "$work/bin/gh"
 run() { # <results JSON>
   : >"$work/calls"
   rm -f "$work/body"
-  PATH="$work/bin:$PATH" GH_WORK="$work" RESULTS="$1" RUN_ID=42 RUN_URL=https://example.test/runs/42 "$script"
+  PATH="$work/bin:$PATH" GH_WORK="$work" GH_REPO=owner/repo RESULTS="$1" RUN_ID=42 RUN_URL=https://example.test/runs/42 "$script"
 }
-tab=$'\t'
-printf '%s\n' "platform${tab}Run hack/ci.sh deps platform${tab}2026-10-30T08:53:50.0966175Z e2e-platform: FAILED. Pods:" \
-  "platform${tab}Run hack/ci.sh deps platform${tab}2026-10-30T08:53:50.8758444Z FAILED: FF deployed from deploy/k8s on a cluster of its own (475 s)" \
-  "security${tab}Run hack/ci.sh deps security${tab}2026-10-30T08:45:08.9811175Z   FAIL zod <4.6.6: high, a flaw" \
-  "security${tab}Run hack/ci.sh deps security${tab}2026-10-30T08:45:08.9856615Z FAILED: BE: no high or critical advisory (1 s)" >"$work/failed.log"
+# The run's jobs, two failed, and each one's log as GitHub's API serves it: a timestamp, then the line.
+echo '{"jobs": [{"id": 11, "name": "platform", "conclusion": "failure"}, {"id": 12, "name": "security", "conclusion": "failure"},
+  {"id": 13, "name": "static", "conclusion": "success"}]}' >"$work/jobs.json"
+mkdir "$work/logs"
+printf '%s\n' "2026-10-30T08:53:50.0966175Z e2e-platform: FAILED. Pods:" \
+  "2026-10-30T08:53:50.8758444Z FAILED: FF deployed from deploy/k8s on a cluster of its own (475 s)" >"$work/logs/11"
+printf '%s\n' "2026-10-30T08:45:08.9811175Z   FAIL zod <4.6.6: high, a flaw" \
+  "2026-10-30T08:45:08.9856615Z FAILED: BE: no high or critical advisory (1 s)" >"$work/logs/12"
+echo "2026-10-30T08:45:00.0000000Z FAILED: a successful job's line, never read" >"$work/logs/13"
 red='{"static": {"result": "success"}, "security": {"result": "failure"}, "cluster": {"result": "success"}, "platform": {"result": "failure"}}'
 green='{"static": {"result": "success"}, "security": {"result": "success"}, "platform": {"result": "success"}, "tools": {"result": "skipped"}}'
 
@@ -43,6 +49,8 @@ check "what failed, each line after its job, from hack/ci.sh's FAILED and the su
   "platform: FAILED: FF deployed from deploy/k8s on a cluster of its own (475 s)|security:   FAIL zod <4.6.6: high, a flaw|security: FAILED: BE: no high or critical advisory (1 s)" \
   "$(sed -n '/^```$/,/^```$/p' "$work/body" | grep -v '^```$' | paste -sd'|')"
 check "and the run's page" "1" "$(grep -c '^https://example.test/runs/42$' "$work/body")"
+check "read from each failed job's own log, a passed job's never read" "1 1 0" \
+  "$(grep -c 'jobs/11/logs$' "$work/calls") $(grep -c 'jobs/12/logs$' "$work/calls") $(grep -c 'jobs/13/logs' "$work/calls" || true)"
 
 echo '[{"number": 3, "title": "Something else"}, {"number": 7, "title": "The nightly run is red"}]' >"$work/issues.json"
 check "the next red night comments on the issue open, and opens no other" "nightly: red (security, platform), issue #7 commented" "$(run "$red")"
@@ -50,7 +58,7 @@ check "only that comment" "0 1" "$(grep -c '^issue create' "$work/calls") $(grep
 
 check "a job cancelled, as one past its time limit is, is red too" "nightly: red (cluster), issue #7 commented" \
   "$(run '{"static": {"result": "success"}, "cluster": {"result": "cancelled"}}')"
-: >"$work/failed.log"
+echo '{"jobs": []}' >"$work/jobs.json"
 check "a red night whose logs can't be read still opens or comments, without the section" "0" \
   "$(run "$red" >/dev/null && grep -c 'What failed' "$work/body")"
 

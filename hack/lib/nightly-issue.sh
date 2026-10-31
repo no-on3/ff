@@ -26,9 +26,17 @@ fi
 body="$(mktemp)"
 trap 'rm -f "$body"' EXIT
 # hack/ci.sh names the step that failed ("FAILED: <step>"), and the suites each check ("  FAIL <check>"): those lines
-# of the failed jobs' logs, each after its job's name, at most 30.
-reasons="$({ gh run view "$RUN_ID" --log-failed 2>/dev/null || true; } | grep -E 'FAILED: |  FAIL ' |
-  sed -E 's/^([^\t]*)\t[^\t]*\t[0-9TZ:.-]+ /\1: /' | head -30 || true)"
+# of the failed jobs' logs, each after its job's name, at most 30. Each job's log is read on its own, from the API: the
+# run's whole log is served only once the run has ended, and this job is part of it.
+failed_logs() {
+  local id name
+  gh api "repos/$GH_REPO/actions/runs/$RUN_ID/jobs?per_page=100" | jq -r '.jobs[] | select(.conclusion == "failure") | "\(.id)\t\(.name)"' |
+    while IFS=$'\t' read -r id name; do
+      gh api --allow-escape-sequences "repos/$GH_REPO/actions/jobs/$id/logs" | grep -E 'FAILED: |  FAIL ' |
+        awk -v job="$name" '{ sub(/^[0-9TZ:.-]+ /, ""); print job ": " $0 }' || true
+    done
+}
+reasons="$({ failed_logs 2>/dev/null || true; } | head -30)"
 {
   echo "The nightly run of $day failed: $red."
   echo
