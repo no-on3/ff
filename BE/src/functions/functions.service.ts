@@ -44,7 +44,7 @@ import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { SecretsView } from './dto/secrets.dto';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
-import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime, awsEndpointsOf } from './entities/function.entity';
 import { FunctionUrl } from './entities/function-url.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import {
@@ -77,7 +77,11 @@ import { logsQuery } from './logs-window';
 import { MAX_INPUT_BYTES } from './limits';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
-const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat'] as const;
+const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat', 'awsEndpoints'] as const;
+
+/** Whether a change sends a field another value than the function's: a list, such as its endpoints, by what it holds. */
+const sendsOther = (value: unknown, current: unknown): boolean =>
+  value !== undefined && (Array.isArray(value) && Array.isArray(current) ? value.join() !== current.join() : value !== current);
 
 /** The advisory lock the restore of lost code images holds: one backend runs it at a time. */
 const RESTORE_LOCK = `hashtext('ff_code_images_restore')`;
@@ -110,13 +114,14 @@ function viewOf(function_: Function, environment: FunctionEnvironmentValues): Fu
 /**
  * The function as the orchestrator runs it: its record, its code's image, and
  * what its process gets: its variables and secrets, and its key to its
- * account's buckets with the region and the endpoint, under names FF reserves.
- * A new key is a new version, as a new environment is: its ID joins the
- * environment's revision, so that the pods roll out with it.
+ * account's buckets with the region and the endpoints, under names FF
+ * reserves. A new key, or an endpoint more or less, is a new version, as a new
+ * environment is: the credentials' revision joins the environment's, so that
+ * the pods roll out with it.
  */
 export function workloadOf(function_: Function, environment: FunctionEnvironmentValues, codeImage: string, credentials?: FunctionCredentials): FunctionWorkload {
   const values = { ...processEnvironment(environment), ...credentials?.variables };
-  const revision = [environment.revision, credentials?.keyId].filter(Boolean).join('.');
+  const revision = [environment.revision, credentials?.revision].filter(Boolean).join('.');
   return { ...function_, environment: Object.keys(values).length > 0 ? { revision, values } : undefined, codeImage };
 }
 
@@ -279,6 +284,7 @@ export class FunctionsService {
     const function_ = this.functionsRepository.create({
       ...fields,
       handler,
+      awsEndpoints: awsEndpointsOf(fields.awsEndpoints),
       ...code,
       packageSha256,
       accountId,
@@ -473,6 +479,7 @@ export class FunctionsService {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
     const { environment: variables, ...changes } = updateFunctionDto;
+    if (changes.awsEndpoints) changes.awsEndpoints = awsEndpointsOf(changes.awsEndpoints);
     const handler = changes.handler ?? function_.handler;
     const runtime = changes.runtime ?? function_.runtime;
     // New code, inline or a package, with its handler; or the handler and runtime checked against the code there.
@@ -494,7 +501,7 @@ export class FunctionsService {
     const after = environmentChanges ? withVariables(before, variables) : before;
     if (environmentChanges) refuseCombined(after);
     const changed: string[] = (Object.keys(changes) as Array<keyof typeof changes>).filter(
-      (field) => changes[field] !== undefined && changes[field] !== function_[field],
+      (field) => sendsOther(changes[field], function_[field]),
     );
     if (environmentChanges) changed.push('environment');
     const fieldChanges: FieldChanges = code ? { ...changes, ...code } : changes;
@@ -564,7 +571,7 @@ export class FunctionsService {
     const newName = changes.name !== undefined && changes.name !== previousName ? changes.name : undefined;
     const environmentChanges = environment.after !== environment.before;
     const updated = { ...function_, ...changes };
-    const changesVersion = environmentChanges || ROLLOUT_FIELDS.some((field) => changes[field] !== undefined && changes[field] !== function_[field]);
+    const changesVersion = environmentChanges || ROLLOUT_FIELDS.some((field) => sendsOther(changes[field], function_[field]));
     // A function that isn't ACTIVE always rolls out, even unchanged, so the same code
     // can be retried after a passing failure (a full quota, a missing image).
     const repairing = function_.status !== FunctionStatus.ACTIVE;

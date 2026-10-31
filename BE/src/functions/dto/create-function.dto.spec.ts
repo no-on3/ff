@@ -1,5 +1,5 @@
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
-import { EventFormat, Runtime } from '../entities/function.entity';
+import { AwsEndpoint, EventFormat, Runtime } from '../entities/function.entity';
 import { CreateFunctionDto } from './create-function.dto';
 import { UpdateFunctionDto } from './update-function.dto';
 import { UpdateSecretsDto } from './secrets.dto';
@@ -226,6 +226,7 @@ describe('an update, as the API takes it', () => {
     ['memory', 'memory must be a number conforming to the specified constraints'],
     ['timeout', 'timeout must be a number conforming to the specified constraints'],
     ['eventFormat', 'eventFormat must be one of the following values: lambda, wrapped'],
+    ['awsEndpoints', 'awsEndpoints must be an array'],
   ])('refuses null for %s: no value, rather than "unchanged", which leaving it out says', async (field, message) => {
     expect(await validated(UpdateFunctionDto, { [field]: null })).toEqual(expect.arrayContaining([message]));
   });
@@ -256,6 +257,23 @@ describe("the event a function receives, as the API takes it", () => {
       expect(await pipe.transform({ input }, { type: 'body', metatype: InvokeFunctionDto })).toEqual({ input });
     }
     expect(await pipe.transform({}, { type: 'body', metatype: InvokeFunctionDto })).toEqual({});
+  });
+});
+
+describe('the endpoints FF gives a function, as the API takes them', () => {
+  const create = { name: 'hello', runtime: Runtime.NODEJS, code: 'exports.handler = async () => 1;', memory: 128, timeout: 5 };
+
+  it('takes any of s3, sqs and sesv2, on create and on update, none too, which leaves every service to AWS', async () => {
+    expect(await validated(CreateFunctionDto, { ...create, awsEndpoints: ['sqs', 's3'] })).toMatchObject({ awsEndpoints: [AwsEndpoint.SQS, AwsEndpoint.S3] });
+    expect(await validated(UpdateFunctionDto, { awsEndpoints: [] })).toMatchObject({ awsEndpoints: [] });
+    // Left out, the service gives every one.
+    expect(await validated(CreateFunctionDto, create)).toMatchObject({ awsEndpoints: undefined });
+  });
+
+  it('refuses a service FF gives no endpoint of, one named twice, and what is not a list', async () => {
+    expect(await validated(UpdateFunctionDto, { awsEndpoints: ['s3', 'lambda'] })).toEqual(['each value in awsEndpoints must be one of the following values: s3, sqs, sesv2']);
+    expect(await validated(UpdateFunctionDto, { awsEndpoints: ['sqs', 'sqs'] })).toEqual(["All awsEndpoints's elements must be unique"]);
+    expect(await validated(CreateFunctionDto, { ...create, awsEndpoints: 's3' })).toEqual(expect.arrayContaining(['awsEndpoints must be an array']));
   });
 });
 

@@ -33,6 +33,8 @@ aws s3 cp ./chat.jpg s3://photos/2026/chat.jpg
 
 Rien à régler : à son premier déploiement, une fonction reçoit sa propre clé, qui atteint tous les compartiments du compte, avec la région et l'adresse de FF dans son environnement. `new S3Client({})` en Node.js (`@aws-sdk/client-s3` dans le paquet de la fonction) et `boto3.client("s3")` en Python marchent tels quels, comme sur AWS Lambda avec un rôle. La clé est révoquée quand la fonction est supprimée.
 
+Pour passer à AWS un service à la fois, une fonction peut se passer de l'adresse de FF pour S3 : `awsEndpoints` sans `s3` (`{"awsEndpoints": ["sqs", "sesv2"]}`), et `AWS_ENDPOINT_URL_S3` disparaît de son environnement au déploiement que ce changement entraîne. Elle garde la clé et la région de FF pour ses files d'attente et son courrier : son code donne alors au client S3 une clé d'AWS, gardée en secret, et une région d'AWS.
+
 ## Sa vie
 
 - **Ce qu'il contient :** `ff buckets get photos`, ou sa page dans la console : ce qu'il contenait à sa dernière mesure et ses fichiers, ses adresses, ses dernières heures. FF mesure chaque compartiment toutes les heures.

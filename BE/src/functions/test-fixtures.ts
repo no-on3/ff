@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FindOperator } from 'typeorm';
-import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime, awsEndpointsOf } from './entities/function.entity';
 import { FunctionEnvironmentValues, NO_ENVIRONMENT, isEmpty } from './environment';
 import type { EnvironmentStore } from './environment.store';
 import { InlinePackage, inlinePackage } from './inline-package';
@@ -24,6 +24,7 @@ export const FUNCTION_DEFAULTS: Partial<Function> = {
   eventFormat: EventFormat.LAMBDA,
   packageType: PackageType.INLINE,
   handler: 'function.handler',
+  awsEndpoints: awsEndpointsOf(),
 };
 
 

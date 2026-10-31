@@ -29,7 +29,7 @@ import { Schedule } from '../schedules/schedule.entity';
 import { inlineCodeFacts } from './code-package';
 import { inlinePackage } from './inline-package';
 import { lambdaJavaScript } from './lambda-javascript';
-import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
+import { AwsEndpoint, EventFormat, Function, FunctionStatus, PackageType, Runtime, awsEndpointsOf } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { CodeImagesService } from '../packages/code-images.service';
 import { packageKey } from '../packages/package.entity';
@@ -104,6 +104,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       minInstances: 0,
       maxInstances: 3,
       scaleToZero: true,
+      awsEndpoints: awsEndpointsOf(),
       status: FunctionStatus.ACTIVE,
     }) as Function;
 
@@ -1738,7 +1739,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
     const KEY = 'AKFF7Q2MLKX4RTZB3W5N';
     const credentials = {
-      keyId: KEY,
+      revision: KEY,
       variables: {
         AWS_ACCESS_KEY_ID: KEY,
         AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
@@ -1769,6 +1770,39 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       expect(given()).toEqual([{ revision: KEY, values: credentials.variables }]);
       expect(environments.saved.has('fn-1')).toBe(false);
+    });
+
+    it('takes every endpoint unless the function names fewer, kept in their order, and gives the key the ones it takes', async () => {
+      functionKeys.credentialsFor.mockResolvedValue(credentials);
+
+      await service.create('user-1', dto);
+      await service.create('user-1', { ...dto, awsEndpoints: [AwsEndpoint.SESV2, AwsEndpoint.SQS] });
+
+      expect(functionsRepo.save.mock.calls.map(([fn]) => (fn as Function).awsEndpoints)).toEqual([
+        [AwsEndpoint.S3, AwsEndpoint.SQS, AwsEndpoint.SESV2],
+        [AwsEndpoint.S3, AwsEndpoint.SQS, AwsEndpoint.SESV2],
+        [AwsEndpoint.SQS, AwsEndpoint.SESV2],
+        [AwsEndpoint.SQS, AwsEndpoint.SESV2],
+      ]);
+      expect(functionKeys.credentialsFor.mock.calls.map(([fn]) => fn.awsEndpoints)).toEqual([
+        [AwsEndpoint.S3, AwsEndpoint.SQS, AwsEndpoint.SESV2],
+        [AwsEndpoint.SQS, AwsEndpoint.SESV2],
+      ]);
+    });
+
+    it('rolls out an update that leaves an endpoint out, its record saying so, and changes nothing for the same ones in another order', async () => {
+      functionKeys.credentialsFor.mockResolvedValue(credentials);
+      functionsRepo.findOne.mockImplementation(async () => activeFunction());
+
+      const left = await service.update('user-1', 'fn-1', { awsEndpoints: [AwsEndpoint.SQS, AwsEndpoint.S3] });
+      await service.update('user-1', 'fn-1', { awsEndpoints: [AwsEndpoint.SESV2, AwsEndpoint.SQS, AwsEndpoint.S3] });
+
+      expect(left.awsEndpoints).toEqual([AwsEndpoint.S3, AwsEndpoint.SQS]);
+      expect(orchestrator.update).toHaveBeenCalledTimes(1);
+      expect(functionKeys.credentialsFor).toHaveBeenCalledWith(expect.objectContaining({ awsEndpoints: [AwsEndpoint.S3, AwsEndpoint.SQS] }));
+      expect(audit.record.mock.calls.map(([event]) => event.details)).toEqual([
+        { changed: ['awsEndpoints'], awsEndpoints: [AwsEndpoint.S3, AwsEndpoint.SQS], outcome: 'live' },
+      ]);
     });
 
     it('goes with every rollout: an update, and the rollback of a failed one', async () => {
@@ -1803,10 +1837,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         expect(workloadOf(fn, environment, 'image').environment).toEqual({ revision: '0123456789abcdef', values: { TABLE: 'orders' } });
       });
 
-      it('makes a new key a new version, as a new environment is, and the same key and environment the same one', () => {
+      it("makes new credentials a new version, as a new environment is, and the same credentials and environment the same one", () => {
         const first = workloadOf(fn, environment, 'image', credentials).environment;
         const again = workloadOf(fn, environment, 'image', credentials).environment;
-        const newKey = workloadOf(fn, environment, 'image', { ...credentials, keyId: 'AKFFBBBBBBBBBBBBBBBB' }).environment;
+        const newKey = workloadOf(fn, environment, 'image', { ...credentials, revision: 'AKFFBBBBBBBBBBBBBBBB' }).environment;
 
         expect(first?.revision).toBe(`0123456789abcdef.${KEY}`);
         expect(again?.revision).toBe(first?.revision);

@@ -1,11 +1,11 @@
-import { IsString, IsEnum, IsNumber, IsObject, IsOptional, Matches, Min, Max, ValidateBy, ValidateIf } from 'class-validator';
+import { ArrayUnique, IsArray, IsString, IsEnum, IsNumber, IsObject, IsOptional, Matches, Min, Max, ValidateBy, ValidateIf } from 'class-validator';
 import { applyDecorators } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { MaxJsonBytes, MaxUtf8Bytes } from '../../common/byte-limits';
 import { PLATFORM_LIMITS } from '../../plans/plan-limits';
 import { MAX_CODE_BYTES, MAX_METADATA_BYTES } from '../limits';
 import { CODE_SHA256, CODE_SHA256_RULE, DEFAULT_HANDLER, MAX_HANDLER_LENGTH, handlerSyntaxProblem } from '../code-package';
-import { EventFormat, Runtime } from '../entities/function.entity';
+import { AWS_ENDPOINTS, AwsEndpoint, EventFormat, Runtime } from '../entities/function.entity';
 import { IsEnvironment, IsSecrets } from '../environment';
 
 /**
@@ -108,6 +108,21 @@ export class CreateFunctionDto {
   @ValidateIf((_dto, value) => value !== undefined)
   @IsEnum(EventFormat)
   eventFormat?: EventFormat;
+
+  @ApiPropertyOptional({
+    enum: AwsEndpoint,
+    isArray: true,
+    default: AWS_ENDPOINTS,
+    description:
+      "The services whose endpoint FF gives the function with its key to the account's buckets, queues and mail: s3, sqs and sesv2, " +
+      "as AWS_ENDPOINT_URL_S3, _SQS and _SESV2, every one by default. One left out reaches AWS's own, as a move to AWS goes, a service " +
+      "at a time: the code then gives that service's client an AWS key of its own, kept as a secret, and AWS's region. A change rolls out a new version",
+  })
+  @ValidateIf((_dto, value) => value !== undefined)
+  @IsArray()
+  @ArrayUnique()
+  @IsEnum(AwsEndpoint, { each: true })
+  awsEndpoints?: AwsEndpoint[];
 
   @ApiPropertyOptional({ description: 'Additional metadata: an object, 4 KB at most as JSON', type: 'object', additionalProperties: true })
   @IsOptional()

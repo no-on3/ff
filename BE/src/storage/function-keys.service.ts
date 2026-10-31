@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, IsNull, QueryFailedError, Repository } from 'typeorm';
+import { AWS_ENDPOINTS, AwsEndpoint } from '../functions/entities/function.entity';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey } from './storage-names';
@@ -9,11 +10,22 @@ import { newAccessKeyId, newSecretAccessKey } from './storage-names';
 /** PostgreSQL's unique_violation: another deploy of the function made its key meanwhile. */
 const UNIQUE_VIOLATION = '23505';
 
+/** The variable AWS's SDKs read each service's endpoint from. */
+const ENDPOINT_VARIABLES: Record<AwsEndpoint, string> = {
+  [AwsEndpoint.S3]: 'AWS_ENDPOINT_URL_S3',
+  [AwsEndpoint.SQS]: 'AWS_ENDPOINT_URL_SQS',
+  [AwsEndpoint.SESV2]: 'AWS_ENDPOINT_URL_SESV2',
+};
+
 /** What a function's pods get to reach its account's buckets, queues and mail, as AWS Lambda gives a function its role's credentials. */
 export interface FunctionCredentials {
-  /** The key's ID: a new key is a new version of what the function's process gets. */
-  keyId: string;
-  /** AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_DEFAULT_REGION, AWS_ENDPOINT_URL_S3, AWS_ENDPOINT_URL_SQS and AWS_ENDPOINT_URL_SESV2: AWS's SDKs read them all. */
+  /**
+   * What the process gets, as a version: the key's ID, and the endpoints given
+   * after a colon when they aren't all there are, none too; so that a new key,
+   * or an endpoint more or less, rolls out.
+   */
+  revision: string;
+  /** AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, AWS_DEFAULT_REGION, and AWS_ENDPOINT_URL_S3, _SQS and _SESV2 for the endpoints given: AWS's SDKs read them all. */
   variables: Record<string, string>;
 }
 
@@ -27,12 +39,14 @@ export interface FunctionCredentials {
  * for them, so that `new S3Client({})`, `new SQSClient({})`,
  * `new SESv2Client({})` and boto3's `s3`, `sqs` and `sesv2` work unchanged. Short-lived credentials, as a Lambda
  * role's are, wait for an STS of FF's. Never listed with the account's own
- * keys, nor counted against their two.
+ * keys, nor counted against their two. A function may leave an endpoint out
+ * (its awsEndpoints), to reach that service at AWS while FF serves the others:
+ * it still gets the key and the region, for those.
  */
 @Injectable()
 export class FunctionKeys {
   /** Where functions reach buckets' S3 front door, queues' SQS endpoint and mail's SES endpoint; '' for one they aren't given. */
-  private readonly endpoints: { s3: string; sqs: string; ses: string };
+  private readonly endpoints: Record<AwsEndpoint, string>;
   private readonly region: string;
 
   constructor(
@@ -41,31 +55,32 @@ export class FunctionKeys {
     config: ConfigService,
   ) {
     this.endpoints = {
-      s3: config.get<string>('storage.functionEndpoint') ?? '',
-      sqs: config.get<string>('sqs.functionEndpoint') ?? '',
-      ses: config.get<string>('ses.functionEndpoint') ?? '',
+      [AwsEndpoint.S3]: config.get<string>('storage.functionEndpoint') ?? '',
+      [AwsEndpoint.SQS]: config.get<string>('sqs.functionEndpoint') ?? '',
+      [AwsEndpoint.SESV2]: config.get<string>('ses.functionEndpoint') ?? '',
     };
     this.region = config.getOrThrow<string>('storage.region');
   }
 
   /**
-   * The function's key and the endpoints it reaches, the key made if it has
-   * none; undefined where FF gives functions no endpoint. A function
-   * deployed before an endpoint was given gets it at its next rollout.
+   * The function's key and the endpoints it reaches of those it takes, the key
+   * made if it has none; undefined where FF gives functions no endpoint. A
+   * function deployed before an endpoint was given gets it at its next rollout.
    */
-  async credentialsFor(fn: { id: string; accountId: string }): Promise<FunctionCredentials | undefined> {
-    if (!this.endpoints.s3 && !this.endpoints.sqs && !this.endpoints.ses) return undefined;
+  async credentialsFor(fn: { id: string; accountId: string; awsEndpoints: readonly AwsEndpoint[] }): Promise<FunctionCredentials | undefined> {
+    const offered = AWS_ENDPOINTS.filter((service) => this.endpoints[service]);
+    if (offered.length === 0) return undefined;
+    const given = offered.filter((service) => fn.awsEndpoints.includes(service));
     const key = (await this.keyOf(fn.id)) ?? (await this.make(fn));
     return {
-      keyId: key.id,
+      // The key's ID alone while the function takes every endpoint, as before one could be left out: no rollout for it.
+      revision: given.length === offered.length ? key.id : `${key.id}:${given.join(',')}`,
       variables: {
         AWS_ACCESS_KEY_ID: key.id,
         AWS_SECRET_ACCESS_KEY: key.secret,
         AWS_REGION: this.region,
         AWS_DEFAULT_REGION: this.region,
-        ...(this.endpoints.s3 ? { AWS_ENDPOINT_URL_S3: this.endpoints.s3 } : {}),
-        ...(this.endpoints.sqs ? { AWS_ENDPOINT_URL_SQS: this.endpoints.sqs } : {}),
-        ...(this.endpoints.ses ? { AWS_ENDPOINT_URL_SESV2: this.endpoints.ses } : {}),
+        ...Object.fromEntries(given.map((service) => [ENDPOINT_VARIABLES[service], this.endpoints[service]])),
       },
     };
   }

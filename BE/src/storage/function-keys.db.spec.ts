@@ -7,8 +7,9 @@ import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
+import { AwsEndpoint, awsEndpointsOf } from '../functions/entities/function.entity';
 import { Bucket } from './bucket.entity';
-import { FunctionKeys } from './function-keys.service';
+import { FunctionCredentials, FunctionKeys } from './function-keys.service';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { StorageKeysService } from './storage-keys.service';
@@ -30,7 +31,10 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
   let directory: StorageDirectory;
   let keys: FunctionKeys;
   const rowsOf = (functionId: string) => db.dataSource.getRepository(StorageKey).find({ where: { functionId }, order: { createdAt: 'ASC' } });
-  const fn = () => ({ id: randomUUID(), accountId: ACCOUNT });
+  const fn = () => ({ id: randomUUID(), accountId: ACCOUNT, awsEndpoints: awsEndpointsOf() });
+  /** The key's ID, as the pods get it. */
+  const keyOf = (credentials: FunctionCredentials | undefined) => credentials!.variables.AWS_ACCESS_KEY_ID;
+  const endpoints = (variables: Record<string, string>) => Object.keys(variables).filter((name) => name.startsWith('AWS_ENDPOINT_URL'));
 
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
@@ -52,9 +56,9 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
     const again = await keys.credentialsFor(function_);
 
     expect(first).toEqual({
-      keyId: expect.stringMatching(/^AKFF[A-Z2-7]{16}$/),
+      revision: keyOf(first),
       variables: {
-        AWS_ACCESS_KEY_ID: first!.keyId,
+        AWS_ACCESS_KEY_ID: expect.stringMatching(/^AKFF[A-Z2-7]{16}$/),
         AWS_SECRET_ACCESS_KEY: expect.stringMatching(/^[A-Za-z0-9+/]{40}$/),
         AWS_REGION: 'tn-tunis-1',
         AWS_DEFAULT_REGION: 'tn-tunis-1',
@@ -65,10 +69,10 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
     });
     expect(again).toEqual(first);
     const [row] = await rowsOf(function_.id);
-    expect(row).toMatchObject({ id: first!.keyId, accountId: ACCOUNT, functionId: function_.id, buckets: null, readOnly: false, revokedAt: null });
+    expect(row).toMatchObject({ id: keyOf(first), accountId: ACCOUNT, functionId: function_.id, buckets: null, readOnly: false, revokedAt: null });
     expect(JSON.stringify(row.secret)).not.toContain(first!.variables.AWS_SECRET_ACCESS_KEY);
     // The front door finds it as any key, and checks its signatures with that secret.
-    expect(await directory.key(first!.keyId)).toMatchObject({ accountId: ACCOUNT, functionId: function_.id, buckets: null, readOnly: false, secret: first!.variables.AWS_SECRET_ACCESS_KEY });
+    expect(await directory.key(keyOf(first))).toMatchObject({ accountId: ACCOUNT, functionId: function_.id, buckets: null, readOnly: false, secret: first!.variables.AWS_SECRET_ACCESS_KEY });
   });
 
   it('makes one key when two deploys of the function ask at once: the index keeps one that works', async () => {
@@ -76,7 +80,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
 
     const answers = await Promise.all([keys.credentialsFor(function_), keys.credentialsFor(function_), keys.credentialsFor(function_)]);
 
-    expect(new Set(answers.map((answer) => answer!.keyId)).size).toBe(1);
+    expect(new Set(answers.map(keyOf)).size).toBe(1);
     expect(new Set(answers.map((answer) => answer!.variables.AWS_SECRET_ACCESS_KEY)).size).toBe(1);
     expect(await rowsOf(function_.id)).toHaveLength(1);
     await expect(
@@ -91,11 +95,11 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
     await keys.revoke(function_.id);
     await keys.revoke(function_.id);
 
-    expect(await directory.key(made!.keyId)).toBeNull();
-    expect(await rowsOf(function_.id)).toEqual([expect.objectContaining({ id: made!.keyId, revokedAt: expect.any(Date) })]);
+    expect(await directory.key(keyOf(made))).toBeNull();
+    expect(await rowsOf(function_.id)).toEqual([expect.objectContaining({ id: keyOf(made), revokedAt: expect.any(Date) })]);
     // A function whose record outlived its removal gets a key of its own again at its next deploy.
     const next = await keys.credentialsFor(function_);
-    expect(next!.keyId).not.toBe(made!.keyId);
+    expect(keyOf(next)).not.toBe(keyOf(made));
     expect((await rowsOf(function_.id)).map((row) => row.revokedAt === null)).toEqual([false, true]);
   });
 
@@ -123,12 +127,40 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
     const buckets = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config(ENDPOINT, '', '')).credentialsFor(fn());
     const queues = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', SQS_ENDPOINT, '')).credentialsFor(fn());
     const mail = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', '', SES_ENDPOINT)).credentialsFor(fn());
-    const endpoints = (variables: Record<string, string>) => Object.keys(variables).filter((name) => name.startsWith('AWS_ENDPOINT_URL'));
 
     expect(endpoints(buckets!.variables)).toEqual(['AWS_ENDPOINT_URL_S3']);
-    expect(queues!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: queues!.keyId, AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT });
+    expect(queues!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(queues), AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT });
     expect(endpoints(queues!.variables)).toEqual(['AWS_ENDPOINT_URL_SQS']);
-    expect(mail!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: mail!.keyId, AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SESV2: SES_ENDPOINT });
+    expect(mail!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(mail), AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SESV2: SES_ENDPOINT });
     expect(endpoints(mail!.variables)).toEqual(['AWS_ENDPOINT_URL_SESV2']);
+    // Every endpoint there is, for a function that takes them all: no new version, as before endpoints could be left out.
+    expect([buckets!.revision, queues!.revision, mail!.revision]).toEqual([keyOf(buckets), keyOf(queues), keyOf(mail)]);
+  });
+
+  it('gives only the endpoints the function takes, with its key and region still, each change of them a new version of the same key', async () => {
+    const function_ = fn();
+
+    const every = await keys.credentialsFor(function_);
+    const queuesAndMail = await keys.credentialsFor({ ...function_, awsEndpoints: [AwsEndpoint.SQS, AwsEndpoint.SESV2] });
+    const none = await keys.credentialsFor({ ...function_, awsEndpoints: [] });
+
+    expect(endpoints(queuesAndMail!.variables)).toEqual(['AWS_ENDPOINT_URL_SQS', 'AWS_ENDPOINT_URL_SESV2']);
+    expect(queuesAndMail!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(every), AWS_SECRET_ACCESS_KEY: every!.variables.AWS_SECRET_ACCESS_KEY, AWS_REGION: 'tn-tunis-1' });
+    expect(endpoints(none!.variables)).toEqual([]);
+    expect(none!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(every), AWS_REGION: 'tn-tunis-1', AWS_DEFAULT_REGION: 'tn-tunis-1' });
+    expect([every!.revision, queuesAndMail!.revision, none!.revision]).toEqual([keyOf(every), `${keyOf(every)}:sqs,sesv2`, `${keyOf(every)}:`]);
+    expect(await rowsOf(function_.id)).toHaveLength(1);
+  });
+
+  it("counts only the endpoints FF has an address for: where it has the queues' alone, a function that takes them takes every one there is", async () => {
+    const queuesOnly = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', SQS_ENDPOINT, ''));
+    const function_ = fn();
+
+    const every = await queuesOnly.credentialsFor(function_);
+    const buckets = await queuesOnly.credentialsFor({ ...function_, awsEndpoints: [AwsEndpoint.S3, AwsEndpoint.SQS] });
+    const bucketsAlone = await queuesOnly.credentialsFor({ ...function_, awsEndpoints: [AwsEndpoint.S3] });
+
+    expect([every!.revision, buckets!.revision, bucketsAlone!.revision]).toEqual([keyOf(every), keyOf(every), `${keyOf(every)}:`]);
+    expect(endpoints(bucketsAlone!.variables)).toEqual([]);
   });
 });
