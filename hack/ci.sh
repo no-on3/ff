@@ -23,6 +23,8 @@
 #     l5      every route as another account (L5)
 #     cli     the ff command on the stack and in Docker
 #     images  the platform's images, run as the cluster runs them, and its manifests, without deploying them
+#   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last push's) and the lockfiles,
+#             checked again with the day's advisories, for an image or a package unchanged since its push: nightly
 #   platform  FF deployed from deploy/k8s on a cluster of its own (hack/e2e-platform.sh), about 15 minutes
 #   all       static, unit, db, security and cluster, one after the other
 # A failed step is reported and the next one runs, so that a run names every failed step, not only the first; a step
@@ -80,7 +82,7 @@ free_ports() {
 # the backend here needs its packages; the images build in Docker with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
   [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust" [db]=BE [security]=''
-  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust" [images]=BE [platform]=''
+  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust" [images]=BE [platform]='' [advisories]=''
 )
 stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[images]}"
 stage_uses[all]="${stage_uses[static]} ${stage_uses[unit]} ${stage_uses[db]} ${stage_uses[security]} ${stage_uses[cluster]}"
@@ -149,6 +151,7 @@ stage_static() {
   step "the suites' checks, on suites of their own" hack/test-checks.sh
   step "the pipeline's steps, on runs of their own" hack/test-ci-steps.sh
   step "a push of documents alone, told from one with code" hack/test-changes.sh
+  step "the nightly's SBOMs, the branch's last, against a stand-in gh" hack/test-last-sboms.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses
@@ -278,6 +281,30 @@ stage_security() {
   echo "SBOMs: $(cd "$ci_dir/sbom" && ls | paste -sd' ')"
 }
 
+scan_sbom() { # <image>: its SBOM, which the security stage wrote, scanned again with the day's advisories as the image was
+  local sbom="${1%%:*}.cdx.json"
+  if [ ! -f "$ci_dir/sbom/$sbom" ]; then
+    echo "no SBOM for $1 in hack/.ci/sbom: the security stage writes them, and the nightly takes the last push's" >&2
+    return 1
+  fi
+  docker run --rm "${as_me[@]}" -v "$ci_dir:/ci" "$TRIVY_IMAGE" sbom --cache-dir /ci/trivy-cache --quiet --severity HIGH,CRITICAL \
+    --ignore-unfixed --exit-code 1 --ignorefile /ci/trivyignore.yaml "/ci/sbom/$sbom"
+}
+
+# What the security stage checked, checked again without building anything: advisories come out every day, and an
+# image or a package unchanged since its push can have one by the next night.
+stage_advisories() {
+  mkdir -p "$ci_dir/trivy-cache"
+  cp "$repo/.trivyignore.yaml" "$ci_dir/trivyignore.yaml"
+  for dir in BE FE admin runtimes/nodejs; do
+    step "$dir: no high or critical advisory in what ships, but those accepted until a date (npm audit)" npm_audit "$dir"
+  done
+  local entry
+  for entry in "${IMAGES[@]}"; do
+    step "${entry%% *}: no fixed high or critical vulnerability in its SBOM, today (Trivy)" scan_sbom "${entry%% *}"
+  done
+}
+
 runtime_images() { # the tags the backend runs, which the cluster tests import
   docker build -q -t ff-runtime-nodejs:24-v3 runtimes/nodejs >/dev/null &&
     docker build -q -t ff-runtime-python:3.13-v3 runtimes/python >/dev/null
@@ -316,9 +343,9 @@ stage_platform() {
 ci_stages="$*"
 for stage in "$@"; do
   case "$stage" in
-    deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | images | platform) "stage_$stage" ;;
+    deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | images | advisories | platform) "stage_$stage" ;;
     all) stage_static; stage_unit; stage_db; stage_security; stage_cluster ;;
-    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), platform or all" >&2; exit 2 ;;
+    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), advisories, platform or all" >&2; exit 2 ;;
   esac
 done
 ci_done

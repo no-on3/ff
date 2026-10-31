@@ -224,10 +224,39 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # The branch's last SBOMs and the lockfiles checked again with the day's advisories (hack/ci.sh advisories): an image
+  # or a package unchanged since its push can have a new one, and the nightly builds no image.
+  advisories:
+    if: >-
+      github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.jobs == 'all' ||
+      inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',advisories,')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read # the SBOMs of the branch's last security job
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          lockfiles: '' # npm audit reads the lockfiles: nothing is installed
+      - run: hack/lib/last-sboms.sh "$GITHUB_REF_NAME" hack/.ci/sbom
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+      - run: hack/ci.sh deps advisories
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() # the report of its steps
+        with:
+          name: failure-${{ github.job }}
+          path: hack/.ci/report.md
+          retention-days: 7
+          if-no-files-found: ignore
+
   # A red nightly opens an issue, or comments on the one open, and a green one closes it (hack/lib/nightly-issue.sh):
   # GitHub itself e-mails only whoever last changed this file.
   nightly-report:
-    needs: [platform]
+    needs: [platform, advisories]
     if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.jobs == 'nightly')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
