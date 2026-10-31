@@ -1,0 +1,13 @@
+# Step 5's spike of reading a SAM template's YAML in Rust, as `ff deploy` will: CloudFormation's short tags kept as
+# the long forms they stand for, each value's line and column kept for messages. A crate of its own, outside the ff
+# command's, so that the command takes on no dependency before the spike chooses one.
+[package]
+name = "sam-yaml-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+# The template's own order kept, as a person wrote it and as messages list it.
+serde_json = { version = "1", features = ["preserve_order"] }
+yaml-rust2 = "0.13"

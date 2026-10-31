@@ -191,6 +191,8 @@ hack/.spike-lambda-tf/
 hack/.spike-versions/
 # hack/spikes/keys: the SDKs, the loads' calls, the backend's log and the results (step 5's spike)
 hack/.spike-keys/
+# hack/spikes/sam-yaml: the reader's build, cfn-flip, sam init's templates and home, the results (step 5's spike)
+hack/.spike-sam-yaml/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/

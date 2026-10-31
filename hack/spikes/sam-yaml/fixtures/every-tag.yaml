@@ -1,0 +1,54 @@
+# Every short tag CloudFormation has, in the forms its guide shows, and the scalars a template holds: the reader's JSON
+# must be cfn-flip's. Not a template to deploy: its values only have to be read.
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  Stage:
+    Type: String
+    AllowedValues: [dev, prod]
+    Default: dev
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+  IsNotProd: !Not [!Condition IsProd]
+  Both: !And [!Condition IsProd, !Equals [!Ref 'AWS::Region', eu-west-1]]
+  Either: !Or [!Condition IsProd, !Condition IsNotProd]
+Mappings:
+  Sizes:
+    dev: {Memory: 128}
+    prod: {Memory: 1024}
+Resources:
+  Fn:
+    Type: AWS::Serverless::Function
+    Properties:
+      MemorySize: !FindInMap [Sizes, !Ref Stage, Memory]
+      Timeout: 30
+      Description: !Sub
+        - '${Name} in ${AWS::Region}'
+        - Name: !Ref 'AWS::StackName'
+      Role: !GetAtt FnRole.Arn
+      Layers: !If [IsProd, [!ImportValue shared-layer], !Ref 'AWS::NoValue']
+      Environment:
+        Variables:
+          ZONE: !Select [0, !GetAZs '']
+          PARTS: !Join [',', !Split ['/', 'a/b/c']]
+          DB: !GetAtt Db.Endpoint.Address
+          USER_DATA: !Base64 'hello'
+          SUBNETS: !Join [',', !Cidr ['10.0.0.0/16', 4, 8]]
+          URL: !Sub 'https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/'
+          ENABLED: true
+          RATIO: 0.5
+          NOTHING: null
+          QUOTED: '10'
+          PORT: 8080
+          TEXT: |
+            two
+            lines
+          FOLDED: >
+            one
+            line
+  Other:
+    Type: AWS::S3::Bucket
+    Properties: !Transform {Name: AWS::Include, Parameters: {Location: 's3://bucket/y.yaml'}}
+Outputs:
+  Arn:
+    Value: !GetAtt [Fn, Arn]
+    Condition: IsProd

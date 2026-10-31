@@ -1,0 +1,19 @@
+# Plain scalars YAML 1.1 and 1.2 read otherwise: CloudFormation follows 1.1, as cfn-flip and the SAM CLI do (PyYAML),
+# so the reader must read them as 1.1 does.
+yes_lower: yes
+no_title: No
+on_upper: ON
+off_lower: off
+y_alone: y
+octal: 0755
+binary: 0b101
+hexadecimal: 0x1F
+base_60: 1:30
+base_60_point: 1:30.5
+underscores: 1_000
+exponent_with_its_sign: 1.0e+5
+exponent_without_a_point: 1e5
+exponent_without_its_sign: 1.0e5
+a_point_first: .5
+not_octal: 089
+a_date: 2010-09-09
