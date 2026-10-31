@@ -60,7 +60,7 @@ account_a="$(random_account)"
 account_b="$(random_account)"
 e2e_namespaces+=("$(tenant_namespace "$account_a")" "$(tenant_namespace "$account_b")")
 
-# What more than one section uses: ff, its output kept.
+# What more than one section uses: ff, its output kept, and FF's database.
 
 # ff <args...>: its stdout in $work/out, its stderr in $work/err, its exit code in $work/code.
 ff() {
@@ -72,6 +72,9 @@ ff() {
 out() { cat "$work/out"; }
 err() { cat "$work/err"; }
 code() { cat "$work/code"; }
+
+# sql <statement>: run on FF's database, its answer dropped.
+sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
 
 section_stack() {
 section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
@@ -133,6 +136,11 @@ ff config set endpoint "$api" --profile b
 ff config set dev_account "$account_b" --profile b
 ff whoami --output json
 check "ff whoami: development mode, acting as account A" "0 $account_a" "$(code) $(out | jq -r '.accounts[0].id')"
+# The sections run one after another, with no wait between them to spread their changes, and A's pass its plan's 60 a
+# minute, after which the rate limit holds the account a minute: A is on a plan of the test's own, with beta's limits
+# but that one.
+sql "INSERT INTO plans (id, name, limits) SELECT 'cli-e2e', 'CLI e2e', limits || '{\"writesPerMinute\": 10000}' FROM plans WHERE id = 'beta'"
+sql "UPDATE accounts SET plan_id = 'cli-e2e' WHERE id = '$account_a'"
 
 for example in hello.ts hello.py; do
   name="cli-${example/./-}"
@@ -559,7 +567,6 @@ export FF_APP_DB_NAME="$E2E_PROJECT-app-db" FF_APP_DB_SUBNET=198.18.1.0/24 FF_AP
 e2e_cleanups+=("$FF_REPO_ROOT/hack/k8s/app-database.sh down")
 database_url="$("$FF_REPO_ROOT/hack/k8s/app-database.sh" up)"
 app_db() { "$FF_REPO_ROOT/hack/k8s/app-database.sh" psql -tA "$@"; }
-sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
 account_c="$(random_account)"
 e2e_namespaces+=("$(tenant_namespace "$account_c")")
 ff config set endpoint "$api" --profile c
@@ -1078,8 +1085,10 @@ section "the account: who, its plan, what it used and owes, how its functions ra
 ff accounts
 check "ff accounts lists account A, current" "0 * $account_a" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
 ff account
-check "ff account says its plan, and that its functions don't reach the internet, as beta's" "0 Beta true" \
-  "$(code) $(out | sed -n 's/^plan *\([A-Za-z]*\):.*/\1/p') $(out | grep '^internet     off' >/dev/null && echo true || echo false)"
+check "ff account says its plan, the test's own, its rate among its limits, and that its functions don't reach the internet, as a new account's" \
+  "0 CLI e2e true true" \
+  "$(code) $(out | sed -n 's/^plan *\([^:]*\):.*/\1/p') $(out | grep '^plan .* 10000 changes a minute' >/dev/null && echo true || echo false) \
+$(out | grep '^internet     off' >/dev/null && echo true || echo false)"
 ff usage --output json
 check "ff usage counts this month's calls of the functions deleted since, by name, the asynchronous one among them" "0 5 true" \
   "$(code) $(out | jq -r '.functions[] | select(.functionName == "cli-hello-ts") | .requests') $(out | jq -r '[.functions[] | select(.functionName == "cli-hello-ts") | .deleted] | first')"
