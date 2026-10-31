@@ -129,7 +129,7 @@ docker run -d --name "$prefix-s3" --network "$network" -v "$work/s3.json:/etc/se
   server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=256 >/dev/null
 mail_port="$(free_port)"
 docker run -d --name "$prefix-mailpit" --network "$network" -p "127.0.0.1:$mail_port:8025" axllent/mailpit:v1.31.4 >/dev/null
-for _ in $(seq 1 60); do docker exec "$prefix-postgres" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 60); do docker exec "$prefix-postgres" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
 docker exec "$prefix-postgres" psql -U postgres -v ON_ERROR_STOP=1 -q \
   -c "CREATE USER ff PASSWORD '$ff_db'" -c "CREATE DATABASE ff OWNER ff" \
   -c "CREATE USER keycloak PASSWORD '$kc_db'" -c "CREATE DATABASE keycloak OWNER keycloak" >/dev/null

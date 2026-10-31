@@ -31,7 +31,7 @@ rm -rf "$work/pgmq" && mkdir "$work/pgmq"
 tar -xzf "$work/pgmq-$pgmq_version.tar.gz" -C "$work/pgmq" --strip-components=1 "pgmq-$pgmq_version/pgmq-extension/sql/pgmq.sql"
 
 docker run -d --name "$container" -e POSTGRES_PASSWORD=spike -p 127.0.0.1::5432 "$image" >/dev/null
-for _ in $(seq 60); do docker exec "$container" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
+for _ in $(seq 60); do docker exec "$container" pg_isready -h 127.0.0.1 -U postgres -q 2>/dev/null && break; sleep 1; done
 sleep 1
 port="$(docker port "$container" 5432 | head -1 | cut -d: -f2)"
 psql_in() { docker exec -i "$container" psql -U postgres -v ON_ERROR_STOP=1 -qAt "$@"; }

@@ -37,7 +37,7 @@ check "with its production dependencies only: no TypeScript, no ts-node, no Jest
 
 pg_port="$(free_port)"
 docker run -d --name "$prefix-db" -e POSTGRES_PASSWORD=images-test-password -e POSTGRES_DB=ff -p "127.0.0.1:$pg_port:5432" postgres:15-alpine >/dev/null
-for _ in $(seq 1 60); do docker exec "$prefix-db" pg_isready -U postgres -d ff >/dev/null 2>&1 && break; sleep 1; done
+for _ in $(seq 1 60); do docker exec "$prefix-db" pg_isready -h 127.0.0.1 -U postgres -d ff >/dev/null 2>&1 && break; sleep 1; done
 port="$(free_port)"
 metrics_port="$(free_port)"
 # Function URLs', buckets', queues' and mail's ports too: with host networking, a development backend here may hold the defaults.

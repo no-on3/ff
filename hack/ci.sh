@@ -111,6 +111,10 @@ workflow_lints() { # the CI server's workflow, its run: steps shellchecked
 # Under pipefail, grep -q's exit at its first match fails a writer that is still writing, and a match reads as none:
 # the images' test found its metrics on 2 nights of 4 that way. grep without -q reads everything; a file is safe.
 no_pipe_into_grep_q() { ! git grep -nE '\| *grep -[a-zA-Z]*q' -- '*.sh'; }
+# A fresh PostgreSQL's image runs a server on its socket alone while it initializes, then restarts it: a readiness check
+# on the socket can pass between the two and a client connect in the gap, as the ff suite's database did on 2026-10-31.
+# Over TCP, only the server that stays answers.
+postgres_waited_over_tcp() { ! git grep -nE '^[^#]*pg_isready' -- '*.sh' '*.yml' '*.yaml' | grep -v -- '-h 127.0.0.1'; }
 
 shell_scripts_parse() {
   local file
@@ -138,6 +142,7 @@ stage_static() {
   step "how-it-works.html: its script parses" how_it_works_parses
   step "shell scripts parse" shell_scripts_parse
   step "shell scripts: no pipe into grep -q, which pipefail turns into a race" no_pipe_into_grep_q
+  step "shell scripts and compose files: a fresh PostgreSQL waited for over TCP, not its socket" postgres_waited_over_tcp
   step "the CI workflow (actionlint)" workflow_lints
 }
 
@@ -187,7 +192,7 @@ stage_db() {
   docker run -d --name "$s3" -p 127.0.0.1::8333 -v "$ci_dir/s3.json:/etc/seaweedfs/s3.json:ro" "$SEAWEEDFS_IMAGE" \
     server -dir=/data -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json -master.volumeSizeLimitMB=64 >/dev/null
   s3_port="$(docker port "$s3" 8333/tcp | head -1 | sed 's/.*://')"
-  for _ in $(seq 1 60); do docker exec "$name" pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+  for _ in $(seq 1 60); do docker exec "$name" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done
   for _ in $(seq 1 60); do docker exec "$data" pg_isready -q -h 127.0.0.1 >/dev/null 2>&1 && break; sleep 1; done
   # SeaweedFS answers S3 once its volume server has joined: an anonymous request is refused then, with a status.
   for _ in $(seq 1 60); do [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$s3_port/")" != 000 ] && break; sleep 1; done

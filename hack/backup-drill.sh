@@ -78,7 +78,7 @@ docker run -d --name "$prefix-primary" --network "$network" --network-alias prim
 # psql_on <container> <database> <sql>: one value, or rows, as the drill reads them.
 psql_on() { docker exec "$1" psql -U postgres -d "$2" -v ON_ERROR_STOP=1 -qtA -c "$3"; }
 for _ in $(seq 1 60); do
-  [ "$(docker exec "$prefix-primary" pg_isready -U postgres -d ff 2>/dev/null)" ] && psql_on "$prefix-primary" ff 'SELECT 1' >/dev/null 2>&1 && break
+  [ "$(docker exec "$prefix-primary" pg_isready -h 127.0.0.1 -U postgres -d ff 2>/dev/null)" ] && psql_on "$prefix-primary" ff 'SELECT 1' >/dev/null 2>&1 && break
   sleep 1
 done
 check "it archives every segment, at least every 5 minutes" "on wal-g wal-push %p 5min" \
