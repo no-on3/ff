@@ -63,7 +63,8 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 - **Still to change:** the merge after T-05.
 
 **67. The nightly run: the platform's suite, and a job that tries the newest versions of the tools the tests pin;** the other jobs run on pushes and pull requests alone. ✅ Your answer: as recommended. It answers 39's question on GitHub's minutes: about 20 minutes a night, 600 a month, where the nightly took about 80 a night repeating every job, 2,400 a month, more than the free 2,000.
-- **Still to change:** T-09: the jobs' `if:`, the tools' job, 39's text with the measured minutes, and the heavy jobs skipped for a push that changes only the docs.
+- **Changed already:** T-09's first part: the five jobs a push runs skip on the schedule, and 39 says the measured minutes.
+- **Still to change:** T-09: the tools' job, and the heavy jobs skipped for a push that changes only the docs.
 
 ## 2026-10-30: step 4 started, its eleven choices as recommended
 
@@ -121,7 +122,7 @@ You said: "I bought ffunc.cloud, i want to use instead", then made its records f
 - **Still to change:** production's wildcard certificates. The edge asks for them by DNS-01 through RFC 2136, which OVH's DNS doesn't take (the questions at the end).
 
 **39. FF's repository is on GitHub: `no-on3/ff`.** ✅ Your answer, and "push to github". Public when you made it, private since, the same day.
-- **What it means:** GitHub runs the workflow already in `.github/workflows/ci.yml`, each stage of `hack/ci.sh` on GitHub's own machines. A private repository has 2,000 free minutes of them a month on GitHub Free, and the workflow's jobs may take up to 170 per push to `master`, by their time limits, and 215 a night, as the nightly run repeats every job, not the platform's alone (the questions at the end). The history pushed has no secret (gitleaks, every commit) and no trace of the server's address.
+- **What it means:** GitHub runs the workflow already in `.github/workflows/ci.yml`, each stage of `hack/ci.sh` on GitHub's own machines. A private repository has 2,000 free minutes of them a month on GitHub Free, each job billed in whole minutes. Measured on 2026-10-31, a push to `master` costs about 82 (seven jobs), and a nightly run that repeated every job 98, about 2,940 a month: since 67, the nightly runs the platform's suite alone, 16 with its report, about 480 a month. The history pushed has no secret (gitleaks, every commit) and no trace of the server's address.
 - **Changed already:** `master` pushed on 2026-10-24 (`2a381f4`), GitHub's default branch since.
 - **Still to change:** how the development server updates from it (the questions at the end).
 
