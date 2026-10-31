@@ -167,8 +167,10 @@ hack/.data-db/
 hack/.cache-server/
 # hack/k8s/mail-up.sh: the development mail server's CA, for the backend
 hack/.mail-server/
-# hack/install-tools.sh: Rust, where the machine has none recent enough
+# hack/install-tools.sh: Rust, where the machine has none recent enough; Terraform's AWS provider; the SAM CLI
 hack/.rust/
+hack/.terraform/
+hack/.sam/
 *.kubeconfig
 
 # End-to-end test work files (K-08)

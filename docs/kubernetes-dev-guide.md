@@ -25,7 +25,9 @@ hack/check-resources.sh            # thresholds: MIN_DOCKER_DISK_GB, MIN_REPO_DI
 ## Tools
 
 ```bash
-hack/install-tools.sh              # kubectl v1.37.1 + k3d v5.9.0 into hack/bin/, SHA-256 verified
+hack/install-tools.sh              # kubectl v1.37.1 + k3d v5.9.0 into hack/bin/, SHA-256 verified, and the ff command's Rust
+hack/install-tools.sh aws          # OpenTofu 1.13.1, Terraform 1.16.6, its AWS provider 6.69.1 and the SAM CLI 1.169.0 (cfn-lint
+                                   # 1.53.3 inside it), for the tests of AWS's way in and out: about 330 MB, SHA-256 verified
 ```
 
 Nothing is installed system-wide, and `~/.kube/config` is never touched. To use the tools and the cluster in your shell (bash or zsh):

@@ -47,7 +47,7 @@ git clone <repository-url> ff && cd ff
 hack/check-resources.sh
 ```
 
-**3. Install kubectl and k3d** into `hack/bin/`, with checksums verified.
+**3. Install kubectl and k3d** into `hack/bin/`, with checksums verified. `hack/install-tools.sh aws` adds the AWS tools the tests of AWS's way in and out drive (OpenTofu, Terraform's CLI and its AWS provider, the SAM CLI with cfn-lint): about 330 MB, needed only for those tests.
 
 ```bash
 hack/install-tools.sh
