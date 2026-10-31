@@ -90,3 +90,8 @@ vulnerabilities:
     paths: [usr/local/bin/wal-g]
     statement: >-
       Fixed in WAL-G 1.1; the binary reports a pseudo-version (v0.0.0-2026...), which the scanner reads as older.
+  - id: CVE-2026-116587
+    paths: [usr/local/bin/wal-g]
+    statement: >-
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with go-jose v4.1.4: a JWK with crafted RSA parameters makes its parser spend unbounded work. Here WAL-G reaches the second site's S3 with an access key, never a JWK, and serves nothing: accepted, not shown harmless, until a release built with go-jose 4.1.6 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
+    expired_at: 2026-11-20
