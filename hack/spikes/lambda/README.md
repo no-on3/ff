@@ -3,7 +3,7 @@
 The step-5 plan's X-01, part 1. `lambda-endpoint.mjs` is a minimal Lambda endpoint, Node.js's standard library alone: Lambda's REST API at its dated paths, Signature Version 4 for the service `lambda`, the 41 operations of the plan's D2 kept in memory, and every other operation refused in Lambda's error shape, saying it comes later. A function is `Pending` for 3 s after it is made and an update `InProgress` for 2 s, as Lambda's are, so that the clients' waiters poll. It records every request. `run.sh` starts one, fresh, for each client, and takes the client through a function's whole life: made, waited for, called (with its log's tail, and asynchronously), its code (6 MB) and settings changed, published, aliased and called by its alias and its alias's ARN, given a URL, a permission, an SQS mapping, async settings, a concurrency and tags, read in every way, refused once for an operation that comes later and once for a function that doesn't exist, and deleted. `analyze.py` reads the recordings.
 
 ```bash
-hack/spikes/lambda/run.sh               # the AWS CLI, AWS's SDK for JavaScript, boto3, OpenTofu and Terraform, about 5 minutes
+hack/spikes/lambda/run.sh               # the AWS CLI, AWS's SDK for JavaScript, boto3, OpenTofu, Terraform and the SAM CLI, about 5 minutes
 hack/spikes/lambda/run.sh sdk tofu      # some of them
 ```
 
@@ -32,4 +32,10 @@ Terraform's AWS provider 6.69.1, with OpenTofu 1.13.1 and with Terraform 1.16.6,
 12. **Its waits:** for a function to be `Active`, a `GetFunction` at once and then every 5 s, so a function made by Terraform costs at least 5 s, however soon FF's is ready; for a mapping to be `Enabled`, and to be gone, `GetEventSourceMapping` at 0.2, 0.4, 0.8 and 1.6 s; nothing was refused or retried.
 13. **A URL open to all brings two permissions of the provider's own,** beside the configuration's: `FunctionURLAllowPublicAccess` (`lambda:InvokeFunctionUrl`, `FunctionUrlAuthType: NONE`) and `FunctionURLAllowInvokeAction` (`lambda:InvokeFunction` with `InvokedViaFunctionUrl: true`), AWS's rule for public URLs since 2025. FF's `AddPermission` takes both fields, and its URL answers only with them both, as Lambda's does.
 
-Still to run for part 1: the reference modules' queue and bucket against FF's S3 and SQS front doors, with the dev stack up, and the SAM CLI's `sam build` and `sam validate --lint`. Parts 2 to 4 (versions on the dev cluster, keys that expire, SAM's YAML in Rust) are spikes of their own.
+The SAM CLI 1.169.0 (cfn-lint 1.53.3 inside it), on `sam/template.yaml`, a small app as SAM describes one (a function with a public URL, an SQS event and an alias published with each change, its queue, a bucket), every AWS endpoint pointed at the spike's:
+
+14. **It asks AWS nothing:** `sam validate`, `sam validate --lint` and `sam build` ran, and no request came. A template is checked and built offline.
+15. **`sam validate --lint` refuses a region outside AWS's list,** FF's among them: `Regions ['tn-tunis-1'] are unsupported`, cfn-lint's words. The region only picks the resources' specification the template is checked against, so the lint runs with one of AWS's (`--region eu-west-1`), and passes; FF's tools and documents say so wherever they lint a template.
+16. **`sam build` leaves `.aws-sam/build/`:** a folder for each function, its code and its `node_modules` (npm installed the function's one package in 2.4 s, with this machine's Node.js for `nodejs22.x`, without a word), and a template whose `CodeUri` names that folder. That is what `ff deploy` from a template (X-12) can take, as SAM's own deploy packages it.
+
+Still to run for part 1: the reference modules' queue and bucket against FF's S3 and SQS front doors, with the dev stack up. Parts 2 to 4 (versions on the dev cluster, keys that expire, SAM's YAML in Rust) are spikes of their own.

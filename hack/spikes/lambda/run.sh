@@ -3,10 +3,11 @@
 # for each client, recording every request; then the AWS CLI v2, AWS's SDK for JavaScript v3 and boto3, each through a
 # function's whole life with only the endpoint, the region and a key, as a customer's code would have them; and
 # Terraform's AWS provider with OpenTofu and with Terraform's CLI, terraform/main.tf applied, planned again with
-# nothing to change, and destroyed. Each client's steps (one JSON line each, its errors as it shows them) and its
+# nothing to change, and destroyed; and the SAM CLI's validate --lint and build of sam/template.yaml, every AWS
+# endpoint pointed at the spike's, to see whether they ask AWS anything. Each client's steps (one JSON line each, its errors as it shows them) and its
 # requests land in hack/.spike-lambda/, and analyze.py says, for each: the operations it called and how often, how it
 # signed their paths, its waiters' polls, what it made of a refusal, and the largest bodies.
-#   hack/spikes/lambda/run.sh [cli] [sdk] [boto3] [tofu] [terraform]    # all without an argument; the SDKs fetched once
+#   hack/spikes/lambda/run.sh [cli] [sdk] [boto3] [tofu] [terraform] [sam]    # all without an argument
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../../k8s/env.sh"
 
@@ -149,8 +150,25 @@ tf_flow() { # <tofu|terraform>
   unset TF_LOG TF_LOG_PATH
 }
 
-[ $# -gt 0 ] || set -- cli sdk boto3 tofu terraform
+# The SAM CLI on sam/template.yaml, in a copy: its build's output, and any call it makes to AWS, which the endpoint records.
+sam_flow() {
+  local dir="$work/sam" sam=("$FF_REPO_ROOT/hack/bin/sam")
+  rm -rf "$dir" && cp -r "$here/sam" "$dir"
+  export SAM_CLI_TELEMETRY=0 AWS_ENDPOINT_URL="$endpoint"
+  tf_step "sam validate --lint, FF's region" "${sam[@]}" validate --lint --template "$dir/template.yaml" --region "$AWS_REGION"
+  # cfn-lint reads the region for the resources' specification it checks against: any of AWS's, for a template.
+  tf_step "sam validate --lint, an AWS region" "${sam[@]}" validate --lint --template "$dir/template.yaml" --region eu-west-1
+  tf_step "sam validate" "${sam[@]}" validate --template "$dir/template.yaml" --region "$AWS_REGION"
+  tf_step "sam build" bash -c "cd '$dir' && '${sam[0]}' build --template template.yaml"
+  jq -cn --arg built "$(cd "$dir/.aws-sam/build" 2>/dev/null && find . -maxdepth 3 -not -path '*/node_modules/*' | sort | paste -sd' ')" \
+    --arg template "$(sed -n '/^Resources:/,/^Outputs:/p' "$dir/.aws-sam/build/template.yaml" 2>/dev/null | grep -E 'Type:|CodeUri:|Handler:' | tr -s ' ' | paste -sd'|')" \
+    '{step: "what sam build left", ok: ($built != ""), result: {files: $built, template: $template}}'
+  unset AWS_ENDPOINT_URL
+}
+
+[ $# -gt 0 ] || set -- cli sdk boto3 tofu terraform sam
 case " $* " in *" tofu "* | *" terraform "*) "$FF_REPO_ROOT/hack/install-tools.sh" tofu terraform aws-provider >/dev/null ;; esac
+case " $* " in *" sam "*) "$FF_REPO_ROOT/hack/install-tools.sh" sam >/dev/null ;; esac
 for tool in "$@"; do
   echo "== $tool"
   endpoint_start "$tool"
@@ -159,7 +177,8 @@ for tool in "$@"; do
     sdk) MODULES="$work/js/node_modules" ENDPOINT="$endpoint" CODE="$work/code.zip" BIG="$work/big.zip" NAME=spike-sdk node "$here/sdk-flow.mjs" ;;
     boto3) ENDPOINT="$endpoint" CODE="$work/code.zip" BIG="$work/big.zip" NAME=spike-boto3 "$work/venv/bin/python" "$here/boto3_flow.py" ;;
     tofu | terraform) tf_flow "$tool" ;;
-    *) echo "unknown client $tool: cli, sdk, boto3, tofu or terraform" >&2; exit 2 ;;
+    sam) sam_flow ;;
+    *) echo "unknown client $tool: cli, sdk, boto3, tofu, terraform or sam" >&2; exit 2 ;;
   esac >"$work/$tool.steps.jsonl"
   endpoint_stop
   jq -r '"  \(if .ok then "ok  " else "FAIL" end) \(.step)\(if .ok then "" else ": \(.shown | gsub("\n"; " ") | .[0:160])" end)"' "$work/$tool.steps.jsonl"

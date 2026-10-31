@@ -1,0 +1,37 @@
+# A small app as SAM describes one, for the spike's SAM CLI client (run.sh sam): a function with a public URL, an SQS
+# queue that feeds it and an alias published with each change, a bucket. What `sam validate --lint` and `sam build` make
+# of it, and whether either asks AWS anything, is the question.
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: The spike's small app
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Timeout: 10
+    MemorySize: 128
+Resources:
+  Orders:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: index.handler
+      AutoPublishAlias: live
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref Queue
+          BUCKET: !Ref Bucket
+      FunctionUrlConfig:
+        AuthType: NONE
+      Events:
+        FromQueue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Queue.Arn
+            BatchSize: 5
+  Queue:
+    Type: AWS::SQS::Queue
+  Bucket:
+    Type: AWS::S3::Bucket
+Outputs:
+  Url:
+    Value: !GetAtt OrdersUrl.FunctionUrl
