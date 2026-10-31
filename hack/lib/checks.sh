@@ -1,8 +1,9 @@
 # shellcheck shell=bash
 # The suites' checks, one way for all of them. A check prints ok or FAIL; a failed one is recorded with its section and
 # its time, and the suite goes on, so that one run reports every failure rather than the first. fail() is for what
-# nothing after it can pass without (the backend not starting): it ends the run. At exit, the suite's own cleanup runs
-# first (on_exit), then the failures are listed in order, last in the output, with where the run stopped if it did.
+# nothing after it can pass without (the backend not starting): it ends the run, or in a suite of sections
+# (hack/lib/sections.sh) its section, those that need it then not run. At exit, the suite's own cleanup runs first
+# (on_exit), then the failures are listed in order, last in the output, with where the run stopped if it did.
 #   source "$(dirname "${BASH_SOURCE[0]}")/lib/checks.sh"     then section, check, fail, on_exit, and checks_done last
 #   FF_FAIL_FAST=1              stops at the first failed check, as the suites did before, for a laptop
 #   FF_CHECKS_REPORT=<file>     also appends the failures there, in Markdown: hack/ci.sh's report, GitHub's summary
@@ -31,7 +32,7 @@ check() { # <description> <expected> <actual>
   fi
 }
 
-fail() { # <description>: recorded, and the run ends: what follows can't pass without it
+fail() { # <description>: recorded, and the run, or its section, ends: what follows can't pass without it
   checks_record "$1"
   checks_stopped="a failure nothing after it can pass without"
   exit 1

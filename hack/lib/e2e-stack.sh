@@ -167,7 +167,7 @@ e2e_cleanup() {
   for pid in "${e2e_pids[@]}"; do
     if kill -0 "$pid" 2>/dev/null; then
       kill "$pid"
-      wait "$pid" 2>/dev/null || true
+      e2e_gone "$pid"
     fi
   done
   for ns in "${e2e_namespaces[@]}"; do
@@ -182,6 +182,18 @@ e2e_cleanup() {
   fi
 }
 on_exit e2e_cleanup
+
+# e2e_gone <pid>: returns once the process is gone, after 30 s at most. A process a suite's section started is no child
+# of the shell after it, each section running in a subshell of its own (hack/lib/sections.sh), so wait can't tell when
+# it ends; the process is reaped by another, as an orphan. One that is a child is waited for: a zombie still answers.
+e2e_gone() {
+  local _
+  wait "$1" 2>/dev/null || true
+  for _ in $(seq 1 300); do
+    kill -0 "$1" 2>/dev/null || return 0
+    sleep 0.1
+  done
+}
 
 # http_at <base URL> <method> <path> [json-body] [curl option...]: prints the body;
 # the status code goes to $work/status. Extra options are passed to curl, e.g. -H 'x: y'.

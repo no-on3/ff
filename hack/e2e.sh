@@ -82,8 +82,9 @@
 # Removes its compose project (including its volumes),
 # its tenant namespace and the backend process on exit. Keeps the cluster
 # unless --teardown is given. K8S_RUNTIME_CLASS=gvisor runs every function in
-# gVisor (hack/k8s/gvisor-up.sh installs it).
-#   [K8S_RUNTIME_CLASS=gvisor] hack/e2e.sh [--teardown]
+# gVisor (hack/k8s/gvisor-up.sh installs it). Its sections run alone too, with what
+# they need (hack/lib/sections.sh): --list names them, --only and --from choose.
+#   [K8S_RUNTIME_CLASS=gvisor] hack/e2e.sh [--teardown] [--list | --only <section>[,<section>…] | --from <section>]
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-e2e
@@ -91,6 +92,9 @@ E2E_NAME=e2e
 export FF_PG_PORT="${FF_E2E_PG_PORT:-55432}"
 export FF_S3_PORT="${FF_E2E_S3_PORT:-59003}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
+source "$FF_REPO_ROOT/hack/lib/sections.sh"
+sections_options "$@"
+set -- "${sections_rest[@]}"
 [ "${1:-}" = "--teardown" ] && e2e_teardown=true
 
 be_port="${FF_E2E_BE_PORT:-$(free_port)}"
@@ -106,6 +110,53 @@ code_image_of() { kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.
 in_registry() { [[ "$1" == "$FF_REGISTRY_NAME:5000/ff-code/$tenant@sha256:"* ]] && echo true || echo false; }
 code_configmaps() { kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$1" -o name | wc -l; }
 
+# What more than one section uses: a function's code, and helpers.
+v1='export async function handler(event: { name?: string }) {
+  return { version: 1, message: `Hello ${event.name ?? "world"}` };
+}'
+
+# xs <n>: n x's, for bodies of a size.
+xs() { head -c "$1" /dev/zero | tr '\0' x; }
+
+# zip_of <zip> <name=text>...: a zip as zip tools make one, each file deflated, its names as given.
+zip_of() {
+  python3 - "$@" <<'PY'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as archive:
+    for entry in sys.argv[2:]:
+        name, text = entry.split('=', 1)
+        archive.writestr(name, text)
+PY
+}
+
+# upload <zip> [content type]: POST /packages with the file as the body; its answer, its status in $work/status.
+upload() { curl -sS -o "$work/body" -w '%{http_code}' -X POST -H "content-type: ${2:-application/zip}" --data-binary @"$1" "$api/packages" >"$work/status"; cat "$work/body"; }
+
+# sha256_of <file>: its SHA-256 in base64, as AWS Lambda's CodeSha256 gives it.
+sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
+
+# env_q <sql>: what FF's database holds, read with the stack's own PostgreSQL.
+env_q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
+
+echo_code='export const handler = async (event: unknown) => ({ event });'
+
+# sql <statement>: run on FF's database, its answer dropped.
+sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
+
+# q <sql>: one value, or a row with its columns separated by spaces.
+q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F ' ' -c "$1"; }
+
+# aws_cli: the AWS CLI, this machine's or its image's; each caller gives the key, the region and the endpoint.
+if command -v aws >/dev/null; then aws_cli=(aws); else
+  aws_cli=(docker run --rm --network host -v "$work:$work" -w "$work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION
+    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS -e AWS_ENDPOINT_URL_SESV2 amazon/aws-cli:2.34.32)
+fi
+
+# other: a second account, the one development mode's X-FF-Dev-Account header names: neither reaches what the other owns.
+other="$(random_account)"
+
+section_stack() {
+section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
 e2e_dependencies
 e2e_cluster
 # This machine as the cluster's pods see it, the gateway of the cluster's Docker network: functions reach the S3 front
@@ -119,7 +170,10 @@ cache_address=10.199.1.11
 e2e_cache "$cache_address"
 # Customers' mail (ADR 0012): the run's own server, beside them, handing what it sends to a stand-in for recipients'.
 e2e_mail 10.199.1.12 10.199.1.13
+}
+section_def stack section_stack
 
+section_backend() {
 section "backend"
 e2e_build
 # The operator's metrics on a port of their own, and the log as production writes it: one JSON object a line.
@@ -130,6 +184,7 @@ metrics_port="${FF_E2E_METRICS_PORT:-$(free_port)}"
 url_port="$(free_port)"
 # Buckets' S3 front door on another, at http://s3.localhost:<port>, each bucket at http://<bucket>.s3.localhost:<port> too.
 storage_port="$(free_port)"
+s3_endpoint="http://s3.localhost:$storage_port"
 # Queues' SQS endpoint on a third, at http://localhost:<port>; functions reach it at the cluster's gateway.
 sqs_port="$(free_port)"
 # Buckets' sites on a fourth, each at http://<bucket>.site.localhost:<port>, which curl takes to this machine.
@@ -168,11 +223,11 @@ check "the migrations run from the build" true \
 alarm_env=(FF_ALARM_INTERVAL_SECONDS=5 FF_ALARM_SETTLE_SECONDS=0 FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 check "backend answers on $api" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$api/functions")"
+}
+section_def backend section_backend stack
 
+section_scenario() {
 section "scenario (tenant $tenant → namespace $tenant_ns)"
-v1='export async function handler(event: { name?: string }) {
-  return { version: 1, message: `Hello ${event.name ?? "world"}` };
-}'
 created="$(http POST /functions "$(jq -n --arg code "$v1" '{name: "e2e-hello", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
 check "create returns 201" 201 "$(status)"
 check "function is ACTIVE once ready" ACTIVE "$(jq -r .status <<<"$created")"
@@ -258,7 +313,10 @@ check "its Deployment is removed from the cluster" true "$gone"
 check "its archive is removed from object storage" "" "$(archived "$id/code.ts")"
 http GET "/functions/$id" >/dev/null
 check "the function record is gone" 404 "$(status)"
+}
+section_def scenario section_scenario backend
 
+section_python() {
 section "python function"
 py='def handler(event, context):
     return {"message": "Hello " + event.get("name", "world"), "memory": context.memory_limit_in_mb}
@@ -286,10 +344,12 @@ check "a handler in another file than inline code's is refused, naming its file,
   "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$id" | jq -r .handler)"
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
+}
+section_def python section_python backend
 
+section_requests() {
 section "the API's request limits, and a function found by its name"
 # Bodies this large go through files: a command line's argument holds 128 KiB at most.
-xs() { head -c "$1" /dev/zero | tr '\0' x; }
 greeter='export async function handler(event: { name?: string }) {
   return { message: `Hello ${event.name ?? "world"}` };
 }'
@@ -336,21 +396,11 @@ check "any other body over 100 KB is refused with 413 and why, where the API ans
   "$(status) $(jq -r .message "$work/body") $(jq -r '.requestId | length == 36' "$work/body")"
 http DELETE "/functions/$large_id" >/dev/null
 check "delete returns 200" 200 "$(status)"
-
-section "a function's package"
-# zip_of <zip> <name=text>...: a zip as zip tools make one, each file deflated, its names as given.
-zip_of() {
-  python3 - "$@" <<'PY'
-import sys, zipfile
-with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED) as archive:
-    for entry in sys.argv[2:]:
-        name, text = entry.split('=', 1)
-        archive.writestr(name, text)
-PY
 }
-# upload <zip> [content type]: POST /packages with the file as the body; its answer, its status in $work/status.
-upload() { curl -sS -o "$work/body" -w '%{http_code}' -X POST -H "content-type: ${2:-application/zip}" --data-binary @"$1" "$api/packages" >"$work/status"; cat "$work/body"; }
-sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
+section_def requests section_requests backend
+
+section_package() {
+section "a function's package"
 zip_of "$work/package.zip" 'index.js=exports.handler = async () => require("./lib/greet")("e2e");' 'lib/greet.js=module.exports = (name) => "Hello " + name;'
 package_sha="$(sha256_of "$work/package.zip")"
 uploaded="$(upload "$work/package.zip")"
@@ -372,7 +422,10 @@ check "a package whose name leaves it is refused, saying which, and nothing is k
 upload "$work/package.zip" text/plain >/dev/null
 check "a body not sent as a zip is refused with 415" "415 Send the package as the body, a zip archive, with Content-Type: application/zip, not text/plain" \
   "$(status) $(jq -r .message "$work/body")"
+}
+section_def package section_package backend
 
+section_from_package() {
 section "a function made from a package"
 created="$(http POST /functions "$(jq -n --arg sha "$package_sha" '{name: "e2e-package", runtime: "nodejs", codeSha256: $sha, handler: "index.handler", memory: 128, timeout: 5}')")"
 check "a function made from the package is ACTIVE: zip, the package's hash and size, no inline code" \
@@ -434,11 +487,12 @@ check "a package with a native module built against glibc, as Lambda's are, runs
   '201 ACTIVE {"native":true,"matches":true}' \
   "$(status) $(jq -r .status <<<"$native") $(http POST "/functions/$(jq -r .id <<<"$native")/invoke" '{"input":{"password":"hunter2"}}' | jq -c .output)"
 http DELETE "/functions/$(jq -r .id <<<"$native")" >/dev/null
+}
+section_def from_package section_from_package package
 
+section_environment() {
 section "environment variables"
 # A variable of its own for the function: the sections below still read $id, the Python function's.
-# Read with the stack's own PostgreSQL: what the database holds of them.
-env_q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
 reader='export async function handler() { return { table: process.env.TABLE ?? null, tz: process.env.TZ }; }'
 created="$(http POST /functions "$(jq -n --arg code "$reader" '{name: "e2e-environment", runtime: "nodejs", code: $code, memory: 128, timeout: 5, environment: {TABLE: "orders"}}')")"
 check "a function created with a variable answers with it" "201 ACTIVE orders" "$(status) $(jq -r '"\(.status) \(.environment.TABLE)"' <<<"$created")"
@@ -464,7 +518,10 @@ check "the audit log names the variables changed, never their values" '{"added":
 http DELETE "/functions/$env_fn" >/dev/null
 check "deleting the function deletes its Secrets and its row" "200  0" \
   "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$env_fn" -o name) $(env_q "SELECT count(*) FROM function_environments WHERE function_id = '$env_fn'")"
+}
+section_def environment section_environment backend
 
+section_secrets() {
 section "secrets"
 # Variables whose values nobody reads back, read by a Python function as its variables.
 sec_reader='import os
@@ -505,9 +562,11 @@ check "the audit log names the secrets changed" '{"added":["API_TOKEN"],"changed
   "$(http GET /audit-log | jq -c --arg r "function:$sec_fn" '[.entries[] | select(.resource == $r and .action == "function.update")] | last | .details.secrets')"
 http DELETE "/functions/$sec_fn" >/dev/null
 check "deleting the function deletes its Secrets" "200 " "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$sec_fn" -o name)"
+}
+section_def secrets section_secrets backend
 
+section_event() {
 section "the event a function receives"
-echo_code='export const handler = async (event: unknown) => ({ event });'
 created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-event", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
 check "a new function gets AWS Lambda's event, the payload itself" "201 lambda" "$(status) $(jq -r .eventFormat <<<"$created")"
 event_fn="$(jq -r .id <<<"$created")"
@@ -526,7 +585,10 @@ check "switching it is an update, rolled out, after which it gets the payload it
 http PUT "/functions/$wrapped_fn" '{"eventFormat": "v2"}' >/dev/null
 check "an unknown format is refused" "400 eventFormat must be one of the following values: lambda, wrapped" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 for f in "$event_fn" "$wrapped_fn"; do http DELETE "/functions/$f" >/dev/null; done
+}
+section_def event section_event backend
 
+section_url() {
 section "a function's URL"
 url_code='export async function handler(event: any) {
   if (event.rawPath === "/fail") throw new Error("broken on purpose");
@@ -585,6 +647,10 @@ latest="$(http GET "/functions/$url_fn/invocations?limit=1" | jq -c '.invocation
 check "the call is in the history as the URL's, its credentials kept as ***" 'url *** null' \
   "$(jq -r '"\(.source) \(.input.headers.authorization) \(.input.cookies)"' <<<"$latest")"
 check "each call has its usage record, under its request ID" 1 "$(env_q "SELECT count(*) FROM usage_records WHERE request_id = '$url_call'")"
+}
+section_def url section_url backend
+
+section_url_domain() {
 section "a URL's own domain"
 zone_dir="$work/zones"
 mkdir -p "$zone_dir"
@@ -645,7 +711,10 @@ http DELETE "/functions/$url_fn/url" >/dev/null
 check "deleting the URL: its address answers 404 at once, and the function has none" "204 404 404" \
   "$(status) $(at_url GET / >/dev/null; url_status) $(http GET "/functions/$url_fn/url" >/dev/null; status)"
 http DELETE "/functions/$url_fn" >/dev/null
+}
+section_def url_domain section_url_domain url
 
+section_schedules() {
 section "a function on a schedule"
 created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-scheduled", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
 sched_fn="$(jq -r .id <<<"$created")"
@@ -701,7 +770,10 @@ check "  ... retried as an asynchronous call is, a minute after its failure, und
 http DELETE "/functions/$failing_sched_fn" >/dev/null
 http DELETE "/functions/$sched_fn" >/dev/null
 check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
+}
+section_def schedules section_schedules backend
 
+section_async() {
 section "asynchronous calls (ADR 0010)"
 async_code='export const handler = async (event: { fail?: boolean }, context: { awsRequestId: string }) => { if (event.fail) throw new Error("asked to fail"); return { got: event, requestId: context.awsRequestId }; };'
 async_fn="$(http POST /functions "$(jq -n --arg code "$async_code" '{name: "e2e-async", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
@@ -800,7 +872,10 @@ check "its metrics, as Lambda's: the five events kept, the three that ended with
 http DELETE "/functions/$records_fn" >/dev/null
 http DELETE "/functions/$async_fn" >/dev/null
 check "deleting the function deletes its queue" 0 "$(env_q "SELECT count(*) FROM queues WHERE function_id = '$async_fn'")"
+}
+section_def async section_async backend
 
+section_databases() {
 section "customers' databases (ADR 0008)"
 made="$(http POST /databases '{"name": "e2e-orders"}')"
 check "a database is made: active, the password and the connection string in the answer, TLS asked" "201 active true true" \
@@ -851,7 +926,10 @@ check "its hourly sample, within a minute: once in the hour, by its name, its si
 http DELETE "/databases/$db_id" >/dev/null
 check "a database deleted: 204, then 404, gone from the server with its user" "204 404 0 0" \
   "$(status) $(http GET "/databases/$db_id" >/dev/null; status) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$db_name') || ' ' || (select count(*) from pg_roles where rolname = '$db_name')")"
+}
+section_def databases section_databases backend
 
+section_caches() {
 section "customers' caches (ADR 0013)"
 made="$(http POST /caches '{"name": "e2e-sessions"}')"
 check "a cache is made: active, Valkey, the plan's 64 MB, its address with its password in the answer, TLS asked" "201 active Valkey 9.1 64 true true" \
@@ -928,9 +1006,11 @@ $(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/cache-ca.crt" -H 'Autho
 $(cache_cli "$new_cache_url" PING | grep 'Could not connect' >/dev/null && echo true || echo false)"
 check "  ... its alarm with it; its month's usage kept, as a deleted cache's" "404 true" \
   "$(http GET "/alarms/$(jq -r .id <<<"$cache_alarm")" >/dev/null; status) $(http GET /usage | jq -r '.caches[] | select(.name == "e2e-sessions") | .deleted')"
+}
+section_def caches section_caches backend
 
+section_buckets() {
 section "customers' buckets (ADR 0009): the API, then AWS's own clients through the S3 front door"
-s3_endpoint="http://s3.localhost:$storage_port"
 made="$(http POST /buckets '{"name": "e2e-photos"}')"
 check "a bucket is made: its endpoint, its own address, FF's region" "201 e2e-photos active $s3_endpoint http://e2e-photos.s3.localhost:$storage_port tn-tunis-1" \
   "$(status) $(jq -r '"\(.name) \(.status) \(.endpoint) \(.url) \(.region)"' <<<"$made")"
@@ -939,15 +1019,10 @@ photos_id="$(env_q "SELECT id FROM buckets WHERE name = 'e2e-photos'")"
 # The store itself, with FF's own credentials: what it really keeps.
 store_s3() { AWS_ACCESS_KEY_ID=ffdevaccesskey AWS_SECRET_ACCESS_KEY=ffdevsecretkey-local-only AWS_DEFAULT_REGION=us-east-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
   "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$FF_S3_PORT" "$@"; }
-if command -v aws >/dev/null; then aws_cli=(aws); else
-  aws_cli=(docker run --rm --network host -v "$work:$work" -w "$work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION
-    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS -e AWS_ENDPOINT_URL_SESV2 amazon/aws-cli:2.34.32)
-fi
 # held <command…>: whether the store has the bucket, as head-bucket answers.
 held() { "$@" >/dev/null 2>&1 && echo held || echo gone; }
 check "the store has it, under a name of FF's that says nothing of whose it is" "true held" \
   "$([[ "$store_name" =~ ^ff-[0-9a-f]{24}$ ]] && echo true || echo false) $(held store_s3 s3api head-bucket --bucket "$store_name")"
-other="$(random_account)"
 as_other() {
   local method=$1 path=$2 body=${3:-}
   shift $(($# < 3 ? $# : 3))
@@ -1154,7 +1229,10 @@ http DELETE "/buckets/e2e-photos?force=true" >/dev/null
 check "  ... which deletes its files, then the bucket, gone from the store too, and its alarm with it" "204 404 gone 404" \
   "$(status) $(http GET /buckets/e2e-photos >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$store_name") $(http GET "/alarms/$bucket_alarm" >/dev/null; status)"
 http DELETE "/storage-keys/$key_id" >/dev/null
+}
+section_def buckets section_buckets backend
 
+section_queues() {
 section "customers' queues (ADR 0010): AWS's own clients through the SQS endpoint, then functions with no setting"
 sqs_endpoint="http://localhost:$sqs_port"
 queue_key="$(http POST /storage-keys '{}')"
@@ -1272,7 +1350,10 @@ check "FF's API purges a queue, and deletes it, which the CLI then doesn't find"
 check "the audit log names each change of a queue, whichever way it came: the CLI's under its access key, the API's as its caller" \
   "queue.create access_key:$queue_key_id|queue.create dev|queue.purge dev|queue.delete dev" \
   "$(env_q "SELECT string_agg(action || ' ' || actor, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource IN ('queue:e2e-cli-orders', 'queue:e2e-api-orders') AND (resource = 'queue:e2e-api-orders' OR action = 'queue.create')")"
+}
+section_def queues section_queues buckets
 
+section_mappings() {
 section "functions reading queues, as Lambda's event source mappings: a batch, a partial batch failure, the dead-letter queue"
 aws_sqs create-queue --queue-name e2e-batch-dlq >/dev/null
 aws_sqs create-queue --queue-name e2e-batch --attributes "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$tenant:e2e-batch-dlq" \
@@ -1319,7 +1400,10 @@ check "  ... and deleted: the message stays" "204 1 []" "$(status) $(http GET /q
 check "the audit log names each change of the mapping" "event_source.create|event_source.update|event_source.delete" \
   "$(env_q "SELECT string_agg(action, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'event_source:$mapping_id'")"
 http DELETE "/functions/$batch_fn" >/dev/null
+}
+section_def mappings section_mappings queues
 
+section_notifications() {
 section "buckets' notifications, as S3's: an upload runs a function with S3's event, a deletion puts S3's event in a queue"
 # The AWS CLI on buckets with the queues' key, which reaches all the account's buckets and queues.
 s3n() { AWS_KEY="$queue_key_id" AWS_SECRET="$queue_key_secret" aws_ff "$@"; }
@@ -1360,7 +1444,10 @@ check "the audit log names the change, under the CLI's key" "bucket.notification
   "$(env_q "SELECT action || ' ' || actor FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-notify' AND action = 'bucket.notifications' ORDER BY at DESC LIMIT 1")"
 http DELETE "/functions/$upload_fn" >/dev/null
 http DELETE "/buckets/e2e-notify?force=true" >/dev/null
+}
+section_def notifications section_notifications mappings
 
+section_sites() {
 section "buckets' sites, as S3's website endpoint answers them: a built site synced with the AWS CLI, then visited"
 site_url="http://e2e-site.site.localhost:$website_port"
 # page <path> [curl options…]: the site's answer to a browser, its status and the error's code, as S3's error page says
@@ -1447,7 +1534,10 @@ as_other_sqs aws_sqs delete-queue --queue-url "$other_url"
 check "the queues deleted, their messages with them" "0 0" \
   "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"
 http DELETE "/storage-keys/$queue_key_id" >/dev/null
+}
+section_def sites section_sites notifications url_domain
 
+section_mail() {
 section "customers' mail (ADR 0012): identities and the suppression list, with AWS's CLI through the SES endpoint"
 ses_endpoint="http://localhost:$ses_port"
 mail_key="$(http POST /storage-keys '{}')"
@@ -1506,7 +1596,10 @@ aws_ses delete-suppressed-destination --email-address gone@e2e-customer.tn >/dev
 check "  ... and taken off" "refused NotFoundException" "$(outcome_ses aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn)"
 check "the audit log names each change to the domain, the CLI's under its key" "email.identity.create access_key:$mail_key_id email.identity.verify" \
   "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'email-identity:shop.e2e-customer.tn'")"
+}
+section_def mail section_mail buckets url_domain
 
+section_mail_sent() {
 section "customers' mail sent (ADR 0012): through the run's mail server, signed with the domain's key, its bounces back"
 simple_content='{"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}'
 sent_id="$(aws_ses send-email --from-email-address 'Shop <news@shop.e2e-customer.tn>' \
@@ -1561,7 +1654,10 @@ http DELETE /email/identities/shop.e2e-customer.tn >/dev/null
 check "both deleted, one through the CLI, one through FF's API, their keys with them" "204 0" "$(status) $(env_q "SELECT count(*) FROM email_identities WHERE account_id = '$tenant'")"
 check "  ... the domain's mail stays in GET /usage, said deleted, as billed" "true 4" "$(http GET /usage | jq -r '.email[] | "\(.deleted) \(.recipients)"')"
 http DELETE "/storage-keys/$mail_key_id" >/dev/null
+}
+section_def mail_sent section_mail_sent mail
 
+section_plans() {
 section "plans and rate limits (P-15)"
 # A small plan, assigned in SQL as the admin dashboard will (P-73), to an account
 # that development mode creates on its first call.
@@ -1573,7 +1669,6 @@ as_small() {
   shift $(($# < 3 ? $# : 3))
   http_at "$api" "$method" "$path" "$body" -H "X-FF-Dev-Account: $small" "$@"
 }
-sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
 as_small GET /functions >/dev/null
 sql "INSERT INTO plans (id, name, limits) SELECT 'e2e-small', 'E2E small', limits || '{\"functions\": 1, \"memoryMb\": 512, \"writesPerMinute\": 5, \"invokesPerSecond\": 2, \"quota\": {\"pods\": 5, \"cpu\": \"2\", \"memory\": \"2Gi\"}}' FROM plans WHERE id = 'beta'"
 sql "UPDATE accounts SET plan_id = 'e2e-small' WHERE id = '$small'"
@@ -1603,10 +1698,11 @@ for _ in 1 2 3; do as_small POST "/functions/$small_id/invoke" '{"input":{}}' >/
 check "invocations have their own rate: two a second, then 429" " 201 201 429" "$codes"
 http PUT "/functions/$small_id/scaling-config" '{"maxInstances": 1}' >/dev/null
 check "another account, from the same address, isn't slowed: its own count, and its function isn't found" 404 "$(status)"
+}
+section_def plans section_plans backend
 
+section_usage_records() {
 section "usage records (P-20)"
-# q <sql>: one value, or a row with its columns separated by spaces.
-q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -F ' ' -c "$1"; }
 meter='export async function handler(event: { sleepMs?: number; fail?: boolean }, context: { awsRequestId: string }) {
   if (event.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.sleepMs));
   if (event.fail) throw new Error("failed on purpose");
@@ -1663,7 +1759,7 @@ for _ in $(seq 1 50); do
 done
 check "a slow call is running" true "$([ -n "$lost" ] && echo true || echo false)"
 kill -9 "$be_pid"
-wait "$be_pid" 2>/dev/null || true # reaped quietly: bash would report "Killed"
+e2e_gone "$be_pid"
 wait "$call_pid" 2>/dev/null || true
 # Restarted at once, as a supervisor would. Its reaper marks the call LOST once the longest a call can
 # take has passed (2 × 3 s + a 1 s cold-start limit + 30 s), at the next run of the minute.
@@ -1681,7 +1777,10 @@ check "the history says why" "Lost: the backend restarted during the call, so it
   "$(http GET "/functions/$meter_id/invocations" | jq -r --arg id "$lost" '.invocations[] | select(.id == $id) | .error')"
 check "one record per invocation, none without one" "5 5" \
   "$(q "SELECT (SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'), (SELECT count(*) FROM usage_records WHERE function_id = '$meter_id')")"
+}
+section_def usage_records section_usage_records backend
 
+section_capacity() {
 section "capacity samples (P-21)"
 # The backends sampled every minute since the meter function was created: it has had a ready instance since its cold start.
 check "a sample a minute of the warm function: its instances, memory, account and minInstances" "t 1 128 $tenant 0" \
@@ -1689,7 +1788,10 @@ check "a sample a minute of the warm function: its instances, memory, account an
 report="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s capacity:report -- --days 1 2>&1)"
 check "the capacity report shows the account's day: capacity reserved, and capacity billed" true \
   "$(awk -v account="$tenant" '$2 == account && $3 != "0.000" && $5 != "0.000" { found = 1 } END { print found ? "true" : "false" }' <<<"$report")"
+}
+section_def capacity section_capacity usage_records
 
+section_usage() {
 section "usage API (P-22)"
 month="$(date -u +%Y-%m)"
 billed="status IN ('success', 'error', 'timeout')"
@@ -1742,7 +1844,10 @@ check "a month without calls is empty, and before the first price book, unpriced
   "$(status) $(jq -r '"\(.functions | length) \(.totals.requests) \(.estimate)"' <<<"$empty")"
 http GET '/usage?month=2026-13' >/dev/null
 check "a month that is not YYYY-MM is refused" "400 month must be a month as YYYY-MM, such as 2026-10" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
+}
+section_def usage section_usage usage_records python databases sites
 
+section_priced() {
 section "usage priced (P-30)"
 book="$(q "SELECT id FROM price_books ORDER BY valid_from LIMIT 1")"
 check "the month is priced in TND, with the first price book" "TND $book" "$(jq -r '.estimate | "\(.currency) \(.priceBooks | join(","))"' <<<"$usage")"
@@ -1755,7 +1860,10 @@ check "the free tier covers the month: usage, the free tier taking it all off, a
   "$(jq -r '.estimate | "\((.usage | tonumber) + (.freeTier | tonumber) == 0) \(.total)"' <<<"$usage")"
 check "and the CSV has each function's cost" true \
   "$(tr -d '\r' <<<"$csv" | grep "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" >/dev/null && echo true || echo false)"
+}
+section_def priced section_priced usage
 
+section_rating() {
 section "the hourly rating (P-32)"
 # As it started, the backend rated every hour since the first book that had settled: ended 33 minutes ago at least.
 balance="$(http GET /billing/balance)"
@@ -1771,7 +1879,10 @@ check "no transaction moved the balance: no debit in shadow mode" "200 0" "$(htt
 reconciliation="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s billing:reconcile 2>&1)" || true
 check "the reconciliation runs against the database: nobody used anything in the hours rated" "No account used anything." \
   "$(tail -1 <<<"$reconciliation")"
+}
+section_def rating section_rating backend
 
+section_balance() {
 section "the balance check (P-33)"
 # As an operator sets them in the admin dashboard (P-70); e2e has no operator, so SQL. No buffer, no grace period.
 sql "INSERT INTO platform_settings (key, value) VALUES ('billingShadowMode', 'false'), ('negativeBuffer', '\"0.000\"'), ('gracePeriodHours', '0')"
@@ -1797,7 +1908,10 @@ move "$tenant" 1000 topup provider_clearing "e2e:topup"
 http POST "/functions/$meter_id/invoke" '{"input":{}}' >/dev/null
 check "a top-up lets them in again at once: the ledger's NOTIFY refreshed the backend's cached balance" 201 "$(status)"
 sql "DELETE FROM platform_settings WHERE key IN ('billingShadowMode', 'negativeBuffer', 'gracePeriodHours')"
+}
+section_def balance section_balance usage_records
 
+section_alarms() {
 section "alarms: an error fires an alarm, a quiet minute recovers it, each change told to a webhook"
 receiver_port="$(free_port)"
 cat >"$work/receiver.py" <<'PY'
@@ -1864,7 +1978,10 @@ check "and the webhooks are among the account's deliveries, delivered" "2" \
 http DELETE "/alarms/$alarm_id" >/dev/null
 check "the alarm is deleted" 204 "$(status)"
 http DELETE "/functions/$alarmed_id" >/dev/null
+}
+section_def alarms section_alarms backend
 
+section_monitoring() {
 section "the operator's monitoring: readiness, the metrics on their own port, the log in JSON"
 http GET /readyz >/dev/null
 check "/readyz: ready, the database and the cluster both answering" "200 ready ok ok" \
@@ -1897,7 +2014,10 @@ print(bool(lines) and all({'time', 'level', 'message'} <= line.keys() for line i
       any('requestId' in line for line in queries))
 PY
 )"
+}
+section_def monitoring section_monitoring backend
 
+section_lost_images() {
 section "code images the registry lost, made again (CLI plan, C-29)"
 node="k3d-$FF_CLUSTER_NAME-server-0"
 registry="http://127.0.0.1:$FF_REGISTRY_PORT"
@@ -1928,7 +2048,7 @@ check "the registry lost a layer of the meter function's image; the node has nei
   "$(layer_status "$meter_image" "$meter_layer") $(on_node "$meter_image") $(on_node "$small_image") $(code_image_in "$small_ns" "$small_id")"
 # Restarted, as the runbook says after losing the registry: the retention job runs at the backend's start.
 kill "$restarted_pid"
-wait "$restarted_pid" 2>/dev/null || true
+e2e_gone "$restarted_pid"
 e2e_start_backend "$work/backend-restored.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 restored=""
 for _ in $(seq 1 180); do
@@ -1945,5 +2065,8 @@ check "a new pod of it starts on the node, which had no copy: pulled from the re
   "$(kubectl -n "$tenant_ns" rollout status deployment "fn-$meter_id" --timeout=120s >/dev/null 2>&1 && echo true || echo false) $(on_node "$meter_image")"
 check "the other function rolled out with its package's image, which its new pod pulled; its record as it was" "$small_image true true ACTIVE" \
   "$(code_image_in "$small_ns" "$small_id") $(kubectl -n "$small_ns" rollout status deployment "fn-$small_id" --timeout=120s >/dev/null 2>&1 && echo true || echo false) $(on_node "$small_image") $(as_small GET "/functions/$small_id" | jq -r .status)"
+}
+section_def lost_images section_lost_images plans usage_records
 
+sections_run
 checks_done e2e

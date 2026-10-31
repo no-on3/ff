@@ -110,9 +110,12 @@ cd BE && npm run migration:run && npm run start:dev
 ## End-to-end test
 
 ```bash
-hack/e2e.sh                # L4: the whole stack through the REST API (~3 min)
+hack/e2e.sh                # L4: the whole stack through the REST API (about 20 min)
 hack/e2e.sh --teardown     # … and delete the cluster afterwards
-hack/e2e-tenancy.sh        # L5: every route as another account and anonymously, a function's logs, then the operator's routes, bank transfers, invoices and credit grants, and last, closing an account and deleting its data (~3 min)
+hack/e2e.sh --list         # its sections: each one's id, its seconds on the last run, its title, what it needs
+hack/e2e.sh --only queues  # one section, after what it needs: the stack, the backend, buckets (about 6 min)
+hack/e2e.sh --from usage   # a section and every one after it, each after what it needs
+hack/e2e-tenancy.sh        # L5: every route as another account and anonymously, a function's logs, then the operator's routes, bank transfers, invoices and credit grants, and last, closing an account and deleting its data (about 7 min)
 ```
 
 The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
@@ -133,9 +136,13 @@ The script starts its own compose project (`ff-e2e`, ports 55432 and 59003), ens
 
 It checks the Kubernetes side at each step. On exit it removes its compose project, including its volumes, and its tenant namespace, and stops the backend. Other projects' containers and volumes are never touched.
 
+### A section alone
+
+L4's sections are functions that `hack/lib/sections.sh` runs in order, each in a subshell of its own, so that one that stops stops alone. What a section leaves, its variables and the functions it defines, reaches the sections after it as if they had run in one shell, and each names the sections it needs after its function (`section_def mappings section_mappings queues`): `--only` and `--from` run those first, so that a section run alone counts the checks it counts in the whole run. A section that needs one that stopped is listed as not run, and the others run; with `FF_FAIL_FAST=1`, the run ends at the first that stops. `--list` reads each section's seconds from `hack/.e2e/section-times`, which every run updates. A helper more than one section calls is defined before the first, so that a failure in it is reported at its line in the suite. `hack/test-sections.sh` tests the runner on suites of its own, in `hack/ci.sh static`.
+
 ### When a run fails
 
-Every suite goes on after a failed check and lists each one at its end, with its section and the time it failed (UTC): one run reports all its failures, not the first. A failure later in the same section is marked as after the one above, since it often follows from it. A failure that leaves nothing after it able to pass, such as the backend not starting, stops the run, and the list says where; so does a command that fails under `set -e`, with its line. `FF_FAIL_FAST=1 hack/e2e.sh` stops at the first failed check instead. A check never pipes into `grep -q`: the suites run under `pipefail`, and `grep -q`'s exit at its first match fails a writer still writing, so a match reads as none on some runs only (the images' test failed 2 nights of 4 that way); `… | grep pattern >/dev/null` reads everything, and `hack/ci.sh static` refuses the pipe. A suite waits for a fresh PostgreSQL over TCP (`pg_isready -h 127.0.0.1`): its image's first start runs a server on the socket alone, then restarts it, and a check on the socket can pass in between; `static` refuses that too. Every suite shares this, through `hack/lib/checks.sh`, which `hack/test-checks.sh` tests. `hack/ci.sh` does the same with its steps: a failed one is named and the next one runs, but for a step the ones after it need, such as the dev cluster's start (`hack/lib/ci-steps.sh`).
+Every suite goes on after a failed check and lists each one at its end, with its section and the time it failed (UTC): one run reports all its failures, not the first. A failure later in the same section is marked as after the one above, since it often follows from it. A failure that leaves nothing after it able to pass, such as the backend not starting, stops its section in L4 (see [A section alone](#a-section-alone)), and the run in a suite without sections; so does a command that fails under `set -e`, with its line. The list says where, and names each section not run for it. `FF_FAIL_FAST=1 hack/e2e.sh` stops at the first failed check instead. A check never pipes into `grep -q`: the suites run under `pipefail`, and `grep -q`'s exit at its first match fails a writer still writing, so a match reads as none on some runs only (the images' test failed 2 nights of 4 that way); `… | grep pattern >/dev/null` reads everything, and `hack/ci.sh static` refuses the pipe. A suite waits for a fresh PostgreSQL over TCP (`pg_isready -h 127.0.0.1`): its image's first start runs a server on the socket alone, then restarts it, and a check on the socket can pass in between; `static` refuses that too. Every suite shares this, through `hack/lib/checks.sh`, which `hack/test-checks.sh` tests. `hack/ci.sh` does the same with its steps: a failed one is named and the next one runs, but for a step the ones after it need, such as the dev cluster's start (`hack/lib/ci-steps.sh`).
 
 A failed suite leaves behind, in `hack/.ci/failure/<suite>/` (`hack/lib/evidence.sh`):
 
