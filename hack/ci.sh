@@ -23,10 +23,12 @@
 #     images  the platform's images, run as the cluster runs them
 #   platform  FF deployed from deploy/k8s on a cluster of its own (hack/e2e-platform.sh), about 15 minutes
 #   all       static, unit, db, security and cluster, one after the other
-# Each stage stops at its first failing step and names it; a suite in that step reports each of its failed checks,
-# not only the first. hack/.ci/report.md lists each step with its result and its seconds, and every failed check, and
-# GitHub shows it as the job's summary. Heavy steps run one at a time. FF_CI_JOBS=<n> caps the test
-# runners' and Rust's parallelism at n, for a machine others share; unset, each tool takes its own default.
+# A failed step is reported and the next one runs, so that a run names every failed step, not only the first; a step
+# that the steps after it need (npm ci, the dev cluster) stops the run when it fails; FF_FAIL_FAST=1 stops at the
+# first failure. A suite in a step reports each of its failed checks, not only the first. hack/.ci/report.md lists
+# each step with its result and its seconds, and every failed check, and GitHub shows it as the job's summary.
+# Heavy steps run one at a time. FF_CI_JOBS=<n> caps the test runners' and Rust's parallelism at n, for a machine
+# others share; unset, each tool takes its own default.
 #   hack/ci.sh <stage> [<stage> ...]
 #   FF_CI_JOBS=2 hack/ci.sh unit
 set -euo pipefail
@@ -41,38 +43,10 @@ SEAWEEDFS_IMAGE=chrislusf/seaweedfs:4.48
 ACTIONLINT_IMAGE=rhysd/actionlint:1.7.12
 ci_dir="$repo/hack/.ci"
 mkdir -p "$ci_dir"
-# The run's report: each step's row, then the suites' failed checks (hack/lib/checks.sh writes them, as Markdown).
-report="$ci_dir/report.md"
-steps_rows="$ci_dir/report-steps.md"
-export FF_CHECKS_REPORT="$ci_dir/report-checks.md"
-: >"$steps_rows"
-: >"$FF_CHECKS_REPORT"
 # What failed suites leave behind (hack/lib/evidence.sh): this run's alone.
 rm -rf "$ci_dir/failure"
-ci_failed_step=''
-ci_stages=''
-ci_outcome=''
-# Commands run at exit, whatever the stage: a stage adds what it starts beside the steps (stage_db's containers).
-ci_cleanups=()
-ci_exit() {
-  local status=$? command
-  for command in "${ci_cleanups[@]}"; do eval "$command" || true; done
-  {
-    if [ -n "$ci_failed_step" ]; then echo "## hack/ci.sh ${ci_stages}: failed at \"$ci_failed_step\""; else echo "## hack/ci.sh ${ci_stages}: ${ci_outcome:-stopped, exit status $status}"; fi
-    echo
-    if [ -s "$steps_rows" ]; then
-      echo '| Step | Result | Seconds |'
-      echo '|---|---|---|'
-      cat "$steps_rows"
-      echo
-    fi
-    cat "$FF_CHECKS_REPORT"
-  } >"$report"
-  # On GitHub, the job's summary page.
-  [ -z "${GITHUB_STEP_SUMMARY:-}" ] || cat "$report" >>"$GITHUB_STEP_SUMMARY"
-  [ ! -d "$ci_dir/failure" ] || echo "what the failed suites left behind: hack/.ci/failure/; the failed checks: hack/.ci/report.md" >&2
-}
-trap ci_exit EXIT
+# Each step run, timed and reported, and the run's report written at exit.
+source "$repo/hack/lib/ci-steps.sh"
 # The console's and the admin app's Vitest, then cargo's builds and test threads, at most FF_CI_JOBS at once.
 vitest_jobs=()
 if [ -n "${FF_CI_JOBS:-}" ]; then
@@ -84,21 +58,6 @@ if [ -x "$repo/hack/.rust/cargo/bin/cargo" ]; then
   export PATH="$repo/hack/.rust/cargo/bin:$PATH" RUSTUP_HOME="$repo/hack/.rust/rustup" CARGO_HOME="$repo/hack/.rust/cargo"
 fi
 
-# A step runs as an `if`'s condition, where bash ignores `set -e`: a step of several commands checks each one.
-step() { # <name> <command...>: runs one step, timed; stops the stage when it fails
-  local name="$1" start=$SECONDS
-  shift
-  echo "== $name"
-  if "$@"; then
-    echo "   ok, $((SECONDS - start)) s"
-    echo "| $name | ok | $((SECONDS - start)) |" >>"$steps_rows"
-  else
-    echo "FAILED: $name ($((SECONDS - start)) s)" >&2
-    echo "| $name | **FAILED** | $((SECONDS - start)) |" >>"$steps_rows"
-    ci_failed_step="$name"
-    exit 1
-  fi
-}
 in_dir() { (cd "$1" && shift && "$@"); } # <directory> <command...>
 # The first of <n> ports in a row that nothing on this machine answers on.
 free_ports() {
@@ -117,9 +76,9 @@ free_ports() {
 
 stage_deps() {
   for dir in BE FE admin runtimes/nodejs; do
-    step "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund
+    prepare "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund
   done
-  step "Rust for the ff command" hack/install-tools.sh rust
+  prepare "Rust for the ff command" hack/install-tools.sh rust
 }
 
 # The page's one script, which a syntax error stops entirely (and with it every scenario).
@@ -156,6 +115,7 @@ stage_static() {
   step "npm audit's checker, on reports of each kind" hack/test-npm-audit.sh
   step "the nightly run's issue, against a stand-in gh" hack/test-nightly-issue.sh
   step "the suites' checks, on suites of their own" hack/test-checks.sh
+  step "the pipeline's steps, on runs of their own" hack/test-ci-steps.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses
@@ -299,8 +259,8 @@ runtime_images() { # the tags the backend runs, which the cluster tests import
 cluster_is_ready=false
 cluster_ready() { # the runtime images and the dev cluster, once a run: every stage below needs them
   $cluster_is_ready && return 0
-  step "the runtime images, built" runtime_images
-  step "the dev cluster, made or reused" hack/k8s/cluster-up.sh
+  prepare "the runtime images, built" runtime_images
+  prepare "the dev cluster, made or reused" hack/k8s/cluster-up.sh
   cluster_is_ready=true
 }
 stage_l3() {
@@ -316,7 +276,7 @@ stage_images() { cluster_ready; step "the platform's images, run as the cluster 
 stage_cluster() { stage_l3; stage_l4; stage_l5; stage_cli; stage_images; }
 
 stage_platform() {
-  step "kubectl and k3d, pinned and checked" hack/install-tools.sh
+  prepare "kubectl and k3d, pinned and checked" hack/install-tools.sh
   step "FF deployed from deploy/k8s on a cluster of its own" hack/e2e-platform.sh
 }
 
@@ -330,5 +290,4 @@ for stage in "$@"; do
     *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), platform or all" >&2; exit 2 ;;
   esac
 done
-ci_outcome=passed
-echo "ci: $* passed"
+ci_done
