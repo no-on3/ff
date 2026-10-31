@@ -1754,7 +1754,7 @@ check "the meter function's cost: its billed requests and GB-s at the book's pri
 check "the free tier covers the month: usage, the free tier taking it all off, and nothing to pay" "true 0.000" \
   "$(jq -r '.estimate | "\((.usage | tonumber) + (.freeTier | tonumber) == 0) \(.total)"' <<<"$usage")"
 check "and the CSV has each function's cost" true \
-  "$(tr -d '\r' <<<"$csv" | grep "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id " >/dev/null$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" && echo true || echo false)"
+  "$(tr -d '\r' <<<"$csv" | grep "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" >/dev/null && echo true || echo false)"
 
 section "the hourly rating (P-32)"
 # As it started, the backend rated every hour since the first book that had settled: ended 33 minutes ago at least.

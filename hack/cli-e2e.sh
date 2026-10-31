@@ -560,7 +560,7 @@ ff db list
 check "ff db list shows it available, its storage and sessions" "0 cli-orders available" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
 ff db get cli-orders --output json
 check "ff db get gives how to reach it, without its password" "0 $data_db_address false" \
-  "$(code) $(out | jq -r .host) $(out | grep "$(jq -rn --arg s " >/dev/null$db_conn" '$s | capture(":(?<p>[^:@]+)@").p')" && echo true || echo false)"
+  "$(code) $(out | jq -r .host) $(out | grep "$(jq -rn --arg s "$db_conn" '$s | capture(":(?<p>[^:@]+)@").p')" >/dev/null && echo true || echo false)"
 ff db password cli-orders --secret-for cli-db-orders --output json
 new_conn="$(out | jq -r .connectionString)"
 check "ff db password: the old string opens no session, the new one does, and the function has it" "0 true 1" \
@@ -604,7 +604,7 @@ check "the AWS CLI uploads with them and reads it back, AWS_ENDPOINT_URL_S3 its 
   "$uploaded $(aws_with_key s3 cp s3://cli-photos/hello.txt - 2>/dev/null)"
 ff buckets keys list
 check "ff buckets keys list names what it reaches, never its secret" "0 $key_id cli-photos false" \
-  "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }') $(out | grep "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' " >/dev/null$work/s3.env")" && echo true || echo false)"
+  "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }') $(out | grep "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" >/dev/null && echo true || echo false)"
 # Each minute, the backend measures every bucket not measured yet in the hour: this one within a minute.
 for _ in $(seq 75); do "$ff_bin" buckets get cli-photos --output json 2>/dev/null | jq -e '.measuredAt != null' >/dev/null && break; sleep 1; done
 ff buckets get cli-photos
