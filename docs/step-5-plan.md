@@ -2,13 +2,13 @@
 
 | | |
 |---|---|
-| **Status** | Proposed on 2026-10-30 with step 4's close (the [step-4 plan](step-4-plan.md), W-10), checked against the code the same day by a read-only survey (§1). **Waiting for you:** the fourteen choices of §9, each with a recommendation. As with every step, nothing of it is built until you confirm them; until then the [decision log](decisions.md) lists them among its questions. |
+| **Status** | Proposed on 2026-10-30 with step 4's close (the [step-4 plan](step-4-plan.md), W-10), checked against the code the same day by a read-only survey (§1). **Waiting for you:** the fourteen choices of §9, each with a recommendation. As with every step, nothing of it is built until you confirm them; until then the [decision log](decisions.md) lists them among its questions. Its [task list](step-5-tasks.md), made on 2026-10-31, keeps the order with each task split into its commits, beside the pipeline's tasks (the tests faster and split, every failing check reported) and the candidates for step 6. |
 | **Goal** | Step 5 of [What to build next](what-to-build-next.md) (§8): the "no lock-in" promise, in code. AWS's own tools work against FF with one endpoint setting: `aws lambda …`, AWS's SDKs and Terraform's AWS provider reach a Lambda API of FF's, signed as AWS signs requests. A function has versions and aliases. One SAM `template.yaml`, with its queues, buckets and schedules, deploys on FF with `ff deploy` and unchanged on AWS with `sam deploy`. And `ff export` writes what a move to AWS needs, with a cost estimate at AWS's prices from the account's real usage, while `ff doctor` lists what still points at FF |
 | **Parent plans** | [What to build next](what-to-build-next.md) §8 (the Lambda API with AWS's signing, versions and aliases, Terraform modules, the export kit, SAM events) and §10 (what every service needs); the [local markets and AWS portability plan](local-markets-and-aws-portability-plan.md): E-06 (the Lambda API, its §6.6), E-07 (functions' credentials and endpoints, §4.8), E-08 (Terraform and OpenTofu), E-09 (`ff export`, `ff doctor`, the cost estimate, §7), E-10 (SAM's events, its ADR-009), R-01 (versions and aliases, §6.5), §6.3 (invoke) and §6.9 (the differences, said plainly); the [CLI plan](cli-plan.md)'s C-30, C-32 and C-33 |
 | **Builds on** | The [step-1 plan](step-1-plan.md): packages and `ff package`, function URLs, schedules, AWS's events ([ADR 0007](adr/0007-function-events.md)); the [step-2 plan](step-2-plan.md): the S3 front door and its signature check ([ADR 0009](adr/0009-buckets.md)), the account's access keys and functions' own; the [step-3 plan](step-3-plan.md): the SQS endpoint, calls that don't wait and their settings, event source mappings, bucket notifications ([ADR 0010](adr/0010-queue.md)); the step-4 plan: the SES endpoint, whose paths are signed escaped twice ([ADR 0012](adr/0012-customer-mail.md)), deploy keys that expire, and the export kit's pages for sites, mail and caches |
 | **Decision records** | ADR 0014 (Lambda's API: its front door, its signatures and keys, which operations), ADR 0015 (versions and aliases: how a version runs), ADR 0016 (SAM templates on FF: where a template is read, and what a stack keeps), each from X-01's spikes |
 
-Task numbers start with X, for *exit*. The CLI plan keeps its own numbers: its C-30 (`ff deploy` from a SAM template), C-32 (`ff export`) and C-33 (`ff doctor`) are this plan's command-line parts.
+Task numbers start with X, for *exit*. The CLI plan keeps its own numbers: its C-30 (`ff deploy` from a SAM template), C-32 (`ff export`) and C-33 (`ff doctor`) are this plan's command-line parts. The pipeline's tasks, T-01 to T-11 (D15), added on 2026-10-31, are the step's first phase (§7): the [task list](step-5-tasks.md) keeps their parts and the measurements they answer; this plan's log (§11) keeps their evidence.
 
 ## 1. Where FF stands
 
@@ -32,6 +32,7 @@ Checked against the code on 2026-10-30, at the end of step 4 (`feat/step-4`, thr
 | **AWS's prices are in every price book already:** AWS's US$ prices and the rate used (`source.usdPrices`, `usdRate`), checked SKU by SKU. Usage is kept by month for functions (each call's cold start too), databases, buckets, queues, caches and mail. AWS also bills what FF doesn't: databases' and caches' instances, data sent out (decision 12), logs, cold starts. | `BE/src/billing/price-book.ts` (`awsPriceProblems`); `BE/src/usage/usage.service.ts`, `usage-estimate.ts`, `usage-record.entity.ts` (`initMs`) | The estimate is a rating with the US$ prices, plus lines for what FF doesn't bill (D13). |
 | **Limits and rates follow one recipe.** Changes count against the plan's `writesPerMinute` (60 on beta); reads are free. | `BE/src/plans/plan-limits.ts`, `BE/src/plans/rate-limits.ts` | Two new limits (D14); Terraform's parallel changes may meet the rate (§8). |
 | **The tests already drive AWS's clients:** the AWS CLI, AWS's SDK for JavaScript and boto3, in L4 and in the CLI's suite. Nothing uses Terraform, OpenTofu or the SAM CLI. The small app is set up by about twenty `ff` commands. | `hack/e2e.sh`, `hack/cli-e2e.sh`, `hack/lib/s3-clients/`, `hack/lib/sqs-clients/`, `hack/install-tools.sh`; `examples/orders-app/README.md` | X-01 brings the three tools, pinned; the small app becomes one template (X-15). |
+| **The pipeline answers a push after 52 minutes, one failure at a time** (read on 2026-10-31 from GitHub's runs): the `cluster` job takes 48 of them, L3, L4, L5, the `ff` suite, the images and the manifests one after the other; each suite stops at its first failing check and its cleanup deletes what would explain it; nothing is cached between runs; and the nightly run has been red every night since 2026-10-25, for three reasons (zod's expired advisory, `hack/e2e-platform.sh` copying into a `hack/.kube/` only `cluster-up.sh` makes, one L3 flake). | `.github/workflows/ci.yml`, `hack/ci.sh`, `hack/lib/e2e-stack.sh`; the [task list](step-5-tasks.md)'s §3.1 with the numbers | The step adds about twenty sections and three tools' suites: the pipeline is split, reports every failure and overlaps its waits before they come (D15, T-01 to T-11). |
 
 ## 2. Goals and non-goals
 
@@ -190,6 +191,17 @@ Proposed; §9 lists the choices to confirm.
 - **Why:** What to build next §10: limits, a bill, an admin page, metrics and alarms, for every service.
 - **AWS's names:** `CodeStorageExceededException`; `GetAccountSettings`'s `TotalCodeSize`; CloudWatch's `ExecutedVersion` and `Resource`.
 
+### D15. The pipeline: jobs that run at once, every failing check reported, the waits overlapped
+- Added on 2026-10-31, when you asked for the tests to be faster and split, so that a failing test is known without waiting for the whole run. What GitHub's last green push measured (`82d66ba`, 2026-10-24): an answer after 52 minutes, 48 of them one `cluster` job running L3 (276 s), L4 (850 s), L5 (335 s), the `ff` suite (742 s), the images (310 s) and the manifests (187 s) in a row, so that a failure in the `ff` suite is known 30 to 42 minutes after the push; each suite stopping at its first failing check, so one failure a run; the backend log, the pods' state and the work directories deleted on exit; no cache (`npm ci` four times a job, the `ff` command compiled twice, the console's image built twice a run, the edge's Caddy from source each time); and the nightly run repeating every job, about 80 real minutes a night, red every night since 2026-10-25 with nobody told. The findings with their numbers are the task list's §3.1.
+- **Jobs:** `hack/ci.sh` gains the stages `l3` (with the platform's manifests), `l4`, `l5`, `cli` and `images`; `cluster` stays as the five in a row, for a laptop, where one heavy stage runs at a time. The workflow runs the five at once, each on a runner with a cluster of its own, gated on `static`, `unit` and `db` as today: about 22 minutes to an answer instead of 52, for about ten job-minutes more, which the caches give back. The ten images are built once a run, in the job that scans them, and the tests that need one take it from there.
+- **Failures:** a failing `check` is recorded and the suite goes on; `fail` stays for what nothing after can pass without, and ends the run. The run ends with every failed check, its section and its time, in the job's summary and in `hack/.ci/report.md` beside each step's duration; a failed run keeps the backend log, the pods' state and the services' logs, uploaded as an artifact for 7 days; `FF_FAIL_FAST=1` stops at the first, for a laptop. A case that fails one run in six is found and fixed where it is, never retried blindly; until then it is reported as flaky, with its count.
+- **Sections:** each suite's sections become functions with what they need declared, so that `--list`, `--only` and `--from` run a part alone, a failed precondition skips only what needs it, `--reuse` runs against a stack already up, and the minutes the suites spend waiting for the clock (a schedule's minute, an alarm's quiet minute, a usage sample) are started early and checked late, so they overlap. What each wait tests stays what it tests: the product's intervals are not shortened for the tests. Each section names a budget in seconds, and the report flags the ones past it.
+- **Caches:** npm's, Cargo's, Trivy's and the pinned tools', between runs, each action pinned like everything in the workflow.
+- **The nightly run** runs what the day's pushes don't: your choice, the decision log's question on GitHub's minutes, with four options and a recommendation in T-09 (the schedule runs `platform` and a job that tries the latest versions of the tools the tests pin).
+- **The step's suites** are born into this: X-01's recordings of what each AWS tool sends replayed in L1, Terraform's and SAM's runs in a job of their own, the monthly real-AWS run on a schedule (§9, 13).
+- **Rules:** no check dropped for speed, the suites' counts before and after in each task's row; `hack/ci.sh <stage>` means the same on a laptop and on GitHub; the job-minutes a push costs counted in each row, against the free 2,000 a month until you decide otherwise.
+- **Why:** three reasons, each enough: the step adds about twenty sections and three tools' suites to a job already 48 minutes long; a run that reports one failure and keeps no evidence makes each failure cost a run and a guess; and a red nightly hides every new failure, as six nights showed.
+
 ## 4. Data model
 
 Proposed, each table with `account_id`:
@@ -248,7 +260,46 @@ As step 4's: a commit for each task or part, `type(scope): summary (X-xx)`; one 
 
 ## 7. Tasks
 
-The order follows §9's first choice as recommended: the export kit first.
+The order follows §9's first choice as recommended: the export kit first. The pipeline's tasks (D15) come before it and beside it: T-01 to T-05 in the week the choices take, on branches of their own from `master`; T-06 to T-08 beside phase 1; T-09 when you answer; T-10 and T-11 with the tasks they serve. The [task list](step-5-tasks.md) has each one's parts.
+
+### Before the step, and beside it: the pipeline
+
+#### T-01: The nightly run made green, and a red one seen
+- `hack/e2e-platform.sh` makes `hack/.kube` before copying its kubeconfig there, and the platform's suite passes on GitHub for the first time; the L3 case that fails one night in six (HTTP 503 `error trying to reach service: EOF` from the cluster's proxy during an invocation) found and fixed where it is, reported as flaky with its count until then; a failed scheduled run opens or updates one GitHub issue, which the next green run closes.
+- **Done when:** three nightly runs in a row are green, or red for a reason the issue names.
+
+#### T-02: Every failing check reported, not only the first
+- `check` records the failure and goes on; `fail` ends the run; a check whose input came from a failed one is marked "after it", a section whose precondition failed "not run"; the failures with their sections and times in the job's summary and in `hack/.ci/report.md`, with each step's duration; `hack/test-images.sh` and the manifests' test on the shared `check`.
+- **Done when:** two failures planted in two sections of L4 are both reported, with the sections' other checks.
+
+#### T-03: What a failed run leaves behind
+- The backend log whole, `kubectl get pods -A`, the run's namespaces described, the function pods' and `ff-system`'s logs, the compose services' logs and k3d's node logs, kept under `hack/.ci/failure/<suite>/` on a failure and uploaded as `failure-<job>` for 7 days; the dev guide says how to read them and how to reproduce GitHub's run on a laptop.
+
+#### T-04: The cluster job split into five jobs that run at once
+- The stages `l3`, `l4`, `l5`, `cli` and `images` in `hack/ci.sh`, `cluster` their sum; five jobs gated as today, each with its runner, its cluster, a time limit from the measured times and its artifact; measured in the row: the wall time of a push (52 minutes against about 22), the job-minutes (about 70 against about 80), and when a failure in each suite is known.
+- **Done when:** a push to `master` is answered in under 25 minutes with every suite green, the counts unchanged.
+
+#### T-05: Nothing built twice, nothing downloaded twice
+- `setup-node`'s npm cache over the four lockfiles; `actions/cache` for Cargo's registry and `cli/target`, Trivy's database by the day, the pinned tools by version; the ten images built once in the `security` job with BuildKit's cache between runs, their test run there on them, the manifests' test taking the edge's image from the same build; measured: about 80 job-minutes a push against about 65.
+
+#### T-06: A suite's sections run alone, and against a stack already up
+- Sections as functions with their needs declared, `--list`, `--only`, `--from`, `--keep` and `--reuse` in L4, L5 and the `ff` suite; a section's checks count the same alone or in the suite.
+- **Done when:** `hack/e2e.sh --only queues` runs in under 3 minutes on a laptop with the stack up, and a full run's counts are unchanged.
+
+#### T-07: The minutes the suites spend waiting, overlapped
+- The schedule, the alarm's error, the `LOST` call and the minute-counted usage set in a first section and checked in a last one; `ff` built once by `hack/ci.sh` and reused by the suites, the backend built once a job; polls that ask the backend rather than the clock; measured: L4 from 850 s, the `ff` suite from 742 s, L5 from 335 s, the aim about a third off each.
+
+#### T-08: The unit suites: workers, transforms and the cargo cache
+- L1's workers from `FF_CI_JOBS` or half the cores; ts-jest without the type check `static` already did; L2 on two workers where the scratch names carry `JEST_WORKER_ID`, kept only if faster and green five runs in a row; clippy and `cargo test` sharing one `target` directory.
+
+#### T-09: The nightly run: what the day's pushes don't do
+- Your answer to the decision log's question on GitHub's minutes: (a) the schedule runs `platform` and a job that tries the latest versions of the tools the tests pin, about 600 minutes a month, **recommended**; (b) a weekly full run on top; (c) the repository public again; (d) as today, about 2,400. Then `if:` on the five jobs, the decision log's 39 with the measured minutes, and the heavy jobs skipped for a push that changes only the docs.
+
+#### T-10: Step 5's suites, fast from their first commit
+- X-01's recordings as L1 fixtures for Lambda's endpoint; a stage and a job `aws-tools` for the Terraform runs and the SAM deploys, their binaries cached; the monthly real-AWS run on a schedule, skipped without the account's secrets (§9, 13); a budget in seconds per section, flagged when passed.
+
+#### T-11: Before a commit: which stages and sections a change needs
+- `hack/ci.sh suggest` prints, from the working tree's diff and one map in `hack/`, the stages and the sections to run and the order to run them in, one heavy stage at a time; a suggestion, never a skip on GitHub.
 
 ### Phase 0: groundwork
 
@@ -333,7 +384,8 @@ The order follows §9's first choice as recommended: the export kit first.
 | The way out is never tried on AWS, for want of an AWS account FF can pay for: the very problem FF solves | Offline checks in every run (`sam validate --lint`, cfn-lint, `tofu validate`, Moto); a monthly run on AWS once you have an account (§9, 13) |
 | Terraform's parallel changes pass the plan's 60 changes a minute | `TooManyRequestsException` with `Retry-After`, which the provider retries; the guide's `-parallelism`; the rate for Lambda's endpoint raised if the beta shows the need |
 | A function calls itself through Lambda's API, in a loop | The plan's calls a second and the account's credit stop it; Lambda's loop detection later |
-| CI's minutes: OpenTofu, Terraform and the SAM CLI make each run longer, while the private repository has 2,000 free minutes a month (the decision log's open question) | The new suites in the nightly run and on demand; each push runs the endpoint's own checks |
+| CI's minutes and the run's length: OpenTofu, Terraform and the SAM CLI make each run longer, the `cluster` job already takes 48 minutes, and the private repository has 2,000 free minutes a month (the decision log's open question) | D15: the job split in five that run at once (T-04), the caches (T-05), the tools' suites in a job of their own (T-10), the nightly run's shape your choice (T-09); each push runs the endpoint's own checks |
+| A case that fails one run in six (the L3 503 of 2026-10-29) makes a red run that teaches nothing | Found and fixed where it is (T-01), never retried blindly; until then reported as flaky with its count; a failed run keeps what explains it (T-03) |
 | Names like AWS's: `lambda.ffunc.cloud`, `arn:aws:`, Lambda's error names | Part of decision 18's legal check before the launch (the parent plan's ADR-006) |
 | The cost estimate is read as a quote | Called an estimate, with the date of AWS's prices and each line's assumption |
 
@@ -369,8 +421,10 @@ Each with what it means and a recommendation. Your answers go into the decision 
 | SAM templates (X-12, X-13) | 2.5 to 3 |
 | Documentation and the close (X-14, X-15) | 1.5 to 2 |
 | **Together** | **18.5 to 23.5** |
+| The pipeline (T-01 to T-11, D15): T-01 to T-05 about 4 to 5 days, T-06 to T-08 about 5 to 7, T-09 half a day, T-10 and T-11 about 3 | 2.5 to 3 |
+| **The step and the pipeline together** | **21 to 26.5** |
 
-About 92 to 118 working days, where step 4's plan said 34 to 46. What to build next §8 counts 15.5 weeks for its five rows. This plan adds what every service needs (its §10: the console, the admin app, `ff`, L5, the pages in French), the CLI plan's C-30 (the SAM reader, which §8 doesn't count), Terraform's reads of buckets and queues, and functions' keys that expire. Lambda's API's weeks depend most on what X-01 finds each tool calls; SAM's on §9's ninth and tenth choices.
+About 92 to 118 working days for the step, where step 4's plan said 34 to 46; the pipeline's 12 to 15 days come before and beside it, not inside. What to build next §8 counts 15.5 weeks for its five rows. This plan adds what every service needs (its §10: the console, the admin app, `ff`, L5, the pages in French), the CLI plan's C-30 (the SAM reader, which §8 doesn't count), Terraform's reads of buckets and queues, and functions' keys that expire. Lambda's API's weeks depend most on what X-01 finds each tool calls; SAM's on §9's ninth and tenth choices.
 
 ## 11. Progress log
 
@@ -392,3 +446,14 @@ About 92 to 118 working days, where step 4's plan said 34 to 46. What to build n
 | X-13 SAM's events, queues and buckets | ⏳ Planned | | |
 | X-14 Documentation | ⏳ Planned | | |
 | X-15 The step closed | ⏳ Planned | | |
+| T-01 The nightly run made green, and a red one seen | ⏳ Planned: first, before X-00 | | |
+| T-02 Every failing check reported, not only the first | ⏳ Planned | | |
+| T-03 What a failed run leaves behind | ⏳ Planned | | |
+| T-04 The cluster job split into five jobs that run at once | ⏳ Planned | | |
+| T-05 Nothing built twice, nothing downloaded twice | ⏳ Planned | | |
+| T-06 A suite's sections run alone, and against a stack already up | ⏳ Planned: beside phase 1 | | |
+| T-07 The minutes the suites spend waiting, overlapped | ⏳ Planned: beside phase 1 | | |
+| T-08 The unit suites: workers, transforms and the cargo cache | ⏳ Planned: beside phase 1 | | |
+| T-09 The nightly run: what the day's pushes don't do | ⏳ Planned: waiting for your answer (the decision log's question on GitHub's minutes) | | |
+| T-10 Step 5's suites, fast from their first commit | ⏳ Planned: with X-01, X-09, X-11 and X-15 | | |
+| T-11 Before a commit: which stages and sections a change needs | ⏳ Planned: once T-06's sections exist | | |
