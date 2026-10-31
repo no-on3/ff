@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step 5's spike of what AWS's tools call (the step-5 plan's X-01, part 1): lambda-endpoint.mjs on a free port, fresh
+# Step 5's spike of what AWS's tools call: lambda-endpoint.mjs on a free port, fresh
 # for each client, recording every request; then the AWS CLI v2, AWS's SDK for JavaScript v3 and boto3, each through a
 # function's whole life with only the endpoint, the region and a key, as a customer's code would have them; and
 # Terraform's AWS provider with OpenTofu and with Terraform's CLI, terraform/main.tf applied, planned again with
@@ -35,8 +35,10 @@ with zipfile.ZipFile(f'{work}/big.zip', 'w') as z:
     z.writestr('data.bin', os.urandom(6 * 1024 * 1024))
 PY
 
+# A key of the spike's own, made up, its secret too: the recordings keep each request as signed, for a test to check
+# its signature again with them.
 key=AKFFSPIKELAMBDA23456
-secret="$(head -c 30 /dev/urandom | base64 | tr -d '/+=' | head -c 40)"
+secret=the-spike-s-own-secret-not-a-real-one
 export AWS_ACCESS_KEY_ID="$key" AWS_SECRET_ACCESS_KEY="$secret" AWS_REGION=tn-tunis-1 AWS_DEFAULT_REGION=tn-tunis-1
 endpoint_pid=''
 trap '[ -z "$endpoint_pid" ] || kill "$endpoint_pid" 2>/dev/null || true' EXIT
@@ -181,6 +183,8 @@ for tool in "$@"; do
     *) echo "unknown client $tool: cli, sdk, boto3, tofu, terraform or sam" >&2; exit 2 ;;
   esac >"$work/$tool.steps.jsonl"
   endpoint_stop
+  # What the tool sent, kept in the repository for the endpoint's tests to replay; nothing for a tool that sent nothing.
+  if [ -s "$work/$tool.requests.jsonl" ]; then mkdir -p "$here/recordings" && cp "$work/$tool.requests.jsonl" "$here/recordings/"; fi
   jq -r '"  \(if .ok then "ok  " else "FAIL" end) \(.step)\(if .ok then "" else ": \(.shown | gsub("\n"; " ") | .[0:160])" end)"' "$work/$tool.steps.jsonl"
 done
 python3 "$here/analyze.py" "$work" "$@" | tee "$work/summary.md"

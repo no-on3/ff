@@ -1,7 +1,7 @@
 """What each client of the spike asked the Lambda endpoint, from run.sh's recordings: in Markdown, for each client, its
 steps that failed, the operations it called and how often, how it signed their paths, its waiters' polls, what it made
-of a refusal, and its largest bodies; then every operation against every client, which is D2's list made from what
-the tools call.
+of a refusal, and its largest bodies; then every operation against every client, which is the plan's list of
+operations made from what the tools call.
   python3 analyze.py <work directory> <client...>"""
 import json
 import statistics

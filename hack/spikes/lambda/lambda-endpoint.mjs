@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-// A minimal AWS Lambda endpoint, Node.js's standard library only, for step 5's spike (the step-5 plan's X-01): Lambda's
-// REST API in JSON at its dated paths, Signature Version 4 for the service lambda with one key, the 41 operations of
-// the plan's D2 kept in memory, and every other operation refused in Lambda's error shape, saying it comes later. A
-// function is Pending for PENDING_MS after it is made, and an update InProgress for UPDATE_MS, as Lambda's are, so that
-// the clients' waiters poll; an update asked while one is in progress is refused as Lambda refuses it. Nothing runs:
-// Invoke answers with the event it was given. Every request is one line of REQUESTS (JSON): the tool, from its
-// User-Agent; the operation; the path as sent and whether its signature was made over it escaped once or twice; the
-// signed headers; the bodies' sizes; the answer's status and error. What AWS's tools call, and how, is run.sh's question.
+// A minimal AWS Lambda endpoint, Node.js's standard library only, for step 5's spike of what AWS's tools call: Lambda's
+// REST API in JSON at its dated paths, Signature Version 4 for the service lambda with one key, the 41 operations
+// step 5's plan offers first, kept in memory, and every other operation refused in Lambda's error shape, saying it
+// comes later. A function is Pending for PENDING_MS after it is made, and an update InProgress for UPDATE_MS, as
+// Lambda's are, so that the clients' waiters poll; an update asked while one is in progress is refused as Lambda
+// refuses it. Nothing runs: Invoke answers with the event it was given. Every request is one line of REQUESTS (JSON):
+// the tool, from its User-Agent; the operation; the path as sent and whether its signature was made over it escaped
+// once or twice; the signed headers; the bodies' sizes; the answer's status and error; and the request whole, its
+// headers and its body, for a test to check its signature again without the tool. What AWS's tools call, and how, is
+// run.sh's question.
 //   PORT=… KEY=AKFF… SECRET=… REQUESTS=<file> [REGION=tn-tunis-1] [ACCOUNT=123456789012] node lambda-endpoint.mjs
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { appendFileSync } from 'node:fs';
@@ -475,6 +477,11 @@ createServer((request, response) => {
       at: new Date().toISOString(), tool: toolOf(request.headers['user-agent']), method: request.method, path: (request.url ?? '/').split('?')[0], query: url.search.slice(1),
       contentType: request.headers['content-type'], transferEncoding: request.headers['transfer-encoding'], requestBytes: body.length,
       ...(body.length && body.length < 4096 && /json/.test(request.headers['content-type'] ?? '') ? { requestBody: body.toString('utf8') } : {}),
+      // The request whole, as signed, for a test to check again without the tool: its headers in order, as sent, and its
+      // body, in base64 up to 64 KB, the larger ones (a function's code) by their SHA-256 alone.
+      target: request.url ?? '/',
+      headers: Array.from({ length: request.rawHeaders.length / 2 }, (_, i) => [request.rawHeaders[2 * i], request.rawHeaders[2 * i + 1]]),
+      ...(body.length <= 65536 ? { body: body.toString('base64') } : { bodySha256: createHash('sha256').update(body).digest('hex') }),
     };
     let status = 500;
     let answer = null;
@@ -483,7 +490,7 @@ createServer((request, response) => {
       Object.assign(record, verify(request, body));
       const route = routes.find(([method, pattern]) => method === request.method && pattern.test(url.pathname));
       if (!route) {
-        // What D2 leaves for later: 400, which no client retries, naming what was asked and what to do instead.
+        // What step 5's plan leaves for later: 400, which no client retries, naming what was asked and what to do instead.
         throw new LambdaError(400, 'UnknownOperationException', `FF doesn't offer this operation of Lambda's API yet: ${request.method} ${url.pathname}. It comes in a later step.`);
       }
       record.operation = route[2];
