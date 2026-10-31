@@ -23,12 +23,14 @@ FF's functions are AWS Lambda's: the same handler, the same events, the same lim
 | Your domains on a URL | A CloudFront distribution in front of the function URL, with a certificate of ACM's | Not there: below |
 | A schedule | An EventBridge rule, the same expression, in UTC, with its input or EventBridge's Scheduled Event | `Events`, `Type: Schedule` |
 | A queue it reads, its calls that don't wait, a bucket's events | As [`sqs.md`](sqs.md) says | `Events` of `Type: SQS` and `S3`, `EventInvokeConfig` |
-| The function's key, given to its code | Its execution role: AWS's SDKs find its credentials in the environment Lambda gives | A role SAM makes |
+| The function's key, given to its code | Its execution role: AWS's SDKs find its credentials in the environment Lambda gives | A role SAM makes, with `Policies` for what the key used on FF |
 | FF's endpoints, `AWS_ENDPOINT_URL_S3`, `_SQS` and `_SESV2` | None: AWS's SDKs reach AWS's own | Not there |
 | Its log, `ff logs` | CloudWatch Logs, `/aws/lambda/<function>`, or `sam logs` | |
 | Its metrics and alarms | CloudWatch's `AWS/Lambda`, the same names (`Invocations`, `Errors`, `Duration`, `Throttles`, `ConcurrentExecutions`), and its alarms | |
 
 The code needs nothing new: AWS's SDKs read the region and the credentials Lambda gives, as they read FF's.
+
+A function's role allows what its key used of the account's buckets, queues and mail on FF, which FF notes a day at a time: SAM's policy templates where the function did what one is for (`S3ReadPolicy`, `S3CrudPolicy`, `SQSSendMessagePolicy`, `SQSPollerPolicy`…), each on its one bucket or queue, and statements for the rest, such as `ses:SendEmail` on the identity it sends as. A use FF never saw, such as a monthly job's, AWS refuses with `AccessDenied` until the function's `Policies` allow it.
 
 ## Deploying
 

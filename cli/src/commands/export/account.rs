@@ -13,6 +13,7 @@ use super::super::schedule::Schedule;
 use super::super::secrets::Secrets;
 use super::super::sites::Website;
 use super::super::url::{Domain, FunctionUrl};
+use super::roles::{KeyUse, KeyUses};
 use crate::api::types::{Function, MeAccount, name_in_arn};
 use crate::api::{Call, Client};
 use crate::error::{Error, Kind};
@@ -96,6 +97,8 @@ pub struct FunctionRecord {
     pub schedules: Vec<Schedule>,
     pub event_sources: Vec<EventSource>,
     pub async_config: Option<AsyncConfig>,
+    /// What its keys used of the account's buckets, queues and mail, which its role allows.
+    pub uses: Vec<KeyUse>,
 }
 
 /// A bucket, its notifications, and its site when it is one, with the site's domains.
@@ -134,6 +137,7 @@ fn function_record(client: &Client, listed: &Function) -> Result<FunctionRecord,
         schedules: client.json(&Call::get(format!("{path}/schedules")))?,
         event_sources: client.json(&Call::get(format!("{path}/event-sources")))?,
         async_config: client.json_if_any(&Call::get(format!("{path}/event-invoke-config")))?,
+        uses: client.json::<KeyUses>(&Call::get(format!("{path}/key-uses")))?.uses,
         function,
     })
 }
@@ -192,14 +196,25 @@ impl Account {
         self.queues.iter().find(|queue| queue.name == name)
     }
 
-    /// The buckets that call the functions, and the queues the functions read, send their calls'
-    /// records to or have their buckets' events sent to, with these queues' dead-letter queues.
+    /// The buckets that call the functions or that their keys use, and the queues the functions
+    /// read, use, send their calls' records to or have their buckets' events sent to, with these
+    /// queues' dead-letter queues.
     fn keep_what_the_functions_reach(&mut self) {
         let functions: Vec<&str> = self.functions.iter().map(|record| record.function.name.as_str()).collect();
+        let used = |service: &str| -> Vec<String> {
+            self.functions
+                .iter()
+                .flat_map(|record| &record.uses)
+                .filter(|used| used.service == service && !used.resource.is_empty())
+                .map(|used| used.resource.clone())
+                .collect()
+        };
+        let (used_buckets, used_queues) = (used("s3"), used("sqs"));
         self.buckets.retain(|bucket| {
-            bucket.notifications.lambda_function_configurations.iter().any(|notification| {
-                notification.lambda_function_arn.as_deref().is_some_and(|arn| functions.contains(&name_in_arn(arn)))
-            })
+            used_buckets.contains(&bucket.name)
+                || bucket.notifications.lambda_function_configurations.iter().any(|notification| {
+                    notification.lambda_function_arn.as_deref().is_some_and(|arn| functions.contains(&name_in_arn(arn)))
+                })
         });
         let mut queues: Vec<String> = self
             .functions
@@ -222,6 +237,7 @@ impl Account {
             }))
             .filter(|arn| arn.starts_with("arn:aws:sqs:"))
             .map(|arn| name_in_arn(arn).to_owned())
+            .chain(used_queues)
             .collect();
         // A queue's dead-letter queue, and that one's, as far as they go.
         let mut next = 0;
@@ -244,7 +260,8 @@ mod tests {
     use super::super::fixtures::shop;
 
     #[test]
-    fn the_functions_named_keep_the_buckets_that_call_them_and_the_queues_they_reach_with_their_dead_letters() {
+    fn the_functions_named_keep_the_buckets_that_call_them_or_that_they_use_and_the_queues_they_reach_with_their_dead_letters()
+     {
         let mut account = shop();
         account.functions.retain(|record| record.function.name == "make-thumbnail");
 
@@ -259,7 +276,9 @@ mod tests {
         let mut account = shop();
         account.functions.retain(|record| record.function.name == "send-receipts");
         account.keep_what_the_functions_reach();
-        assert!(account.buckets.is_empty());
+        // No bucket calls send-receipts: its keys use photos and the site www, and send to invoices, gone since.
+        let buckets: Vec<&str> = account.buckets.iter().map(|bucket| bucket.name.as_str()).collect();
+        assert_eq!(buckets, ["photos", "www"]);
         let queues: Vec<&str> = account.queues.iter().map(|queue| queue.name.as_str()).collect();
         assert_eq!(queues, ["failed-receipts", "orders", "orders-dlq"]);
     }

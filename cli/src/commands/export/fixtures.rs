@@ -1,17 +1,28 @@
 //! An account for the export's tests, read as the API answers: three functions, one with a name
-//! from before Lambda's rule, three queues, a bucket with events and a site, a database, a cache
-//! and a mail domain.
+//! from before Lambda's rule, two with what their keys used; three queues, a bucket with events and
+//! a site, a database, a cache and a mail domain.
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::account::{Account, BucketRecord, FunctionRecord};
+use super::roles::KeyUse;
 
 const ACCOUNT: &str = "123456789012";
 const AT: &str = "2026-10-21T09:00:00.000Z";
 
 fn read<T: DeserializeOwned>(value: Value) -> T {
     serde_json::from_value(value).expect("the API's answer")
+}
+
+/// What a function's keys used, by service, resource and operation, seen from 2026-10-21 to 2026-10-31.
+pub fn uses(rows: &[(&str, &str, &str)]) -> Vec<KeyUse> {
+    rows.iter()
+        .map(|(service, resource, operation)| {
+            read(json!({ "service": service, "resource": resource, "operation": operation,
+                         "firstDay": "2026-10-21", "lastDay": "2026-10-31" }))
+        })
+        .collect()
 }
 
 fn function(id: &str, name: &str, runtime: &str, settings: Value) -> Value {
@@ -78,6 +89,19 @@ pub fn shop() -> Account {
                                                                "onFailure": { "destination": arn("sqs", "failed-receipts") } },
                                         "lastModified": AT }),
         )),
+        // The site, a bucket gone since, a queue gone since, the account's mail and its own.
+        uses: uses(&[
+            ("s3", "archive", "GetObject"),
+            ("s3", "photos", "GetBucketNotificationConfiguration"),
+            ("s3", "photos", "GetObject"),
+            ("s3", "photos", "ListObjectsV2"),
+            ("s3", "www", "PutObject"),
+            ("sesv2", "", "GetAccount"),
+            ("sesv2", "receipts@shop.tn", "SendEmail"),
+            ("sqs", "failed-receipts", "SendMessage"),
+            ("sqs", "invoices", "SendMessageBatch"),
+            ("sqs", "orders", "GetQueueAttributes"),
+        ]),
     };
     let make_thumbnail = FunctionRecord {
         function: read(function(
@@ -92,6 +116,12 @@ pub fn shop() -> Account {
         schedules: Vec::new(),
         event_sources: Vec::new(),
         async_config: None,
+        uses: uses(&[
+            ("s3", "", "ListBuckets"),
+            ("s3", "photos", "DeleteObject"),
+            ("s3", "photos", "GetObject"),
+            ("s3", "photos", "PutObject"),
+        ]),
     };
     let report = FunctionRecord {
         function: read(function("f3", "report.v1", "nodejs", json!({ "eventFormat": "wrapped" }))),
@@ -101,6 +131,7 @@ pub fn shop() -> Account {
         schedules: Vec::new(),
         event_sources: Vec::new(),
         async_config: None,
+        uses: Vec::new(),
     };
     let photos = BucketRecord {
         name: "photos".to_owned(),

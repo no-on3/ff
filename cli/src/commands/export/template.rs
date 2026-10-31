@@ -1,6 +1,6 @@
-//! The export's SAM template: the functions with their URLs, schedules, queues read, buckets' events
-//! and settings for calls that don't wait; the queues; the buckets. What AWS takes otherwise than FF
-//! has it is written as AWS takes it, and said in the notes `MIGRATION.md` lists.
+//! The export's SAM template: the functions with their roles, URLs, schedules, queues read, buckets'
+//! events and settings for calls that don't wait; the queues; the buckets. What AWS takes otherwise
+//! than FF has it is written as AWS takes it, and said in the notes `MIGRATION.md` lists.
 
 use std::collections::HashMap;
 
@@ -9,6 +9,7 @@ use serde_json::Value;
 use super::super::queues::Queue;
 use super::account::{Account, AsyncConfig, BucketRecord, Destination, FunctionRecord, Notification};
 use super::names::{LogicalIds, lambda_names};
+use super::roles::{self, Role, Target};
 use super::yaml::Yaml;
 use crate::api::types::name_in_arn;
 
@@ -82,8 +83,10 @@ struct Builder<'a> {
     functions: HashMap<&'a str, (String, String)>,
     queues: HashMap<&'a str, String>,
     buckets: HashMap<&'a str, String>,
-    /// Each bucket's parameter for its name on S3.
+    /// Each bucket's parameter for its name on S3: the template's, and the sites' a role uses.
     bucket_names: HashMap<&'a str, String>,
+    /// Each function's role, by its name on FF.
+    roles: HashMap<&'a str, Role>,
     /// The policy of each queue a bucket sends its events to.
     policies: HashMap<&'a str, String>,
     exported: Vec<Exported>,
@@ -108,10 +111,32 @@ impl<'a> Builder<'a> {
             });
         }
         let queues = account.queues.iter().map(|queue| (queue.name.as_str(), ids.give(&queue.name, "Queue"))).collect();
-        let stored = account.buckets.iter().filter(|bucket| bucket.website.is_none());
-        let buckets: HashMap<&str, String> =
-            stored.clone().map(|bucket| (bucket.name.as_str(), ids.give(&bucket.name, "Bucket"))).collect();
-        let bucket_names = stored.map(|bucket| (bucket.name.as_str(), ids.give(&bucket.name, "BucketName"))).collect();
+        let buckets: HashMap<&str, String> = account
+            .buckets
+            .iter()
+            .filter(|bucket| bucket.website.is_none())
+            .map(|bucket| (bucket.name.as_str(), ids.give(&bucket.name, "Bucket")))
+            .collect();
+        let proved: Vec<&str> = account
+            .identities
+            .iter()
+            .filter(|identity| identity.status == "SUCCESS")
+            .map(|identity| identity.identity.as_str())
+            .collect();
+        let roles: HashMap<&str, Role> = account
+            .functions
+            .iter()
+            .map(|record| (record.function.name.as_str(), roles::role(&record.uses, &proved)))
+            .collect();
+        let bucket_names = account
+            .buckets
+            .iter()
+            .filter(|bucket| {
+                buckets.contains_key(bucket.name.as_str())
+                    || roles.values().any(|role| role.buckets().contains(&bucket.name.as_str()))
+            })
+            .map(|bucket| (bucket.name.as_str(), ids.give(&bucket.name, "BucketName")))
+            .collect();
         let mut policies: HashMap<&str, String> = HashMap::new();
         for bucket in account.buckets.iter().filter(|bucket| buckets.contains_key(bucket.name.as_str())) {
             for queue in bucket
@@ -134,6 +159,7 @@ impl<'a> Builder<'a> {
             queues,
             buckets,
             bucket_names,
+            roles,
             policies,
             exported,
             parameters: Vec::new(),
@@ -176,19 +202,25 @@ impl<'a> Builder<'a> {
                 ]),
             ));
         }
-        for bucket in account.buckets.iter().filter(|bucket| self.buckets.contains_key(bucket.name.as_str())) {
+        for bucket in &account.buckets {
+            let Some(parameter) = self.bucket_names.get(bucket.name.as_str()) else { continue };
+            let description = if bucket.website.is_some() {
+                format!(
+                    "The site {}'s bucket on S3, for the roles that use it: the output Bucket of data/s3-website.md's stack, FF's name until it is made",
+                    bucket.name
+                )
+            } else {
+                format!(
+                    "The bucket {}'s name on S3, which names a bucket for all of S3: FF's may be taken there",
+                    bucket.name
+                )
+            };
             parameters.push((
-                self.bucket_names[bucket.name.as_str()].clone(),
+                parameter.clone(),
                 Yaml::map([
                     ("Type", Yaml::from("String")),
                     ("Default", Yaml::from(bucket.name.as_str())),
-                    (
-                        "Description",
-                        Yaml::from(format!(
-                            "The bucket {}'s name on S3, which names a bucket for all of S3: FF's may be taken there",
-                            bucket.name
-                        )),
-                    ),
+                    ("Description", Yaml::from(description)),
                 ]),
             ));
         }
@@ -293,6 +325,9 @@ impl<'a> Builder<'a> {
         if !variables.is_empty() {
             properties.push(("Environment".to_owned(), Yaml::map([("Variables", Yaml::Map(variables))])));
         }
+        if let Some(policies) = self.policies(record) {
+            properties.push(("Policies".to_owned(), policies));
+        }
         if function.min_instances > 0 {
             properties.push(("AutoPublishAlias".to_owned(), Yaml::from("live")));
             properties.push((
@@ -365,6 +400,100 @@ impl<'a> Builder<'a> {
         (id, Yaml::Map(properties))
     }
 
+    /// The function's `Policies`: what its keys used on FF, through SAM's templates and a policy of
+    /// statements for the rest; none when they used nothing.
+    fn policies(&mut self, record: &FunctionRecord) -> Option<Yaml> {
+        let function = &record.function.name;
+        if record.uses.is_empty() {
+            self.notes.push(format!(
+                "**{function}**'s keys used no bucket, queue or mail of the account on FF: its role allows none."
+            ));
+            return None;
+        }
+        let role = &self.roles[function.as_str()];
+        for operation in &role.unknown {
+            self.notes.push(format!(
+                "**{function}**'s keys used {operation}, which this export knows no IAM action of: allow it in the function's `Policies`."
+            ));
+        }
+        for bucket in role.buckets() {
+            match self.account.buckets.iter().find(|held| held.name == bucket) {
+                Some(site) if site.website.is_some() => self.notes.push(format!(
+                    "**{function}**'s keys used the site `{bucket}`, whose bucket on AWS `data/s3-website.md`'s stack makes: give its name, that stack's output `Bucket`, as the parameter `{}`, FF's name until then.",
+                    self.bucket_names[bucket]
+                )),
+                Some(_) => {}
+                None => self.notes.push(format!(
+                    "**{function}**'s keys used the bucket `{bucket}`, which the account no longer has: its role allows it by that name all the same."
+                )),
+            }
+        }
+        for queue in role.queues().into_iter().filter(|queue| !self.queues.contains_key(queue)) {
+            self.notes.push(format!(
+                "**{function}**'s keys used the queue `{queue}`, which the account no longer has: its role allows it by that name all the same, in the stack's account and region."
+            ));
+        }
+        let mut policies: Vec<Yaml> = role
+            .templates
+            .iter()
+            .map(|template| match template {
+                roles::Template::Bucket(name, bucket) => {
+                    Yaml::map([(*name, Yaml::map([("BucketName", self.bucket_name(bucket))]))])
+                }
+                roles::Template::Queue(name, queue) => {
+                    Yaml::map([(*name, Yaml::map([("QueueName", self.queue_name(queue))]))])
+                }
+            })
+            .collect();
+        if !role.statements.is_empty() {
+            let statements = role.statements.iter().map(|(target, actions)| {
+                Yaml::map([
+                    ("Effect", Yaml::from("Allow")),
+                    ("Action", Yaml::list(actions.iter().map(|action| Yaml::from(action.as_str())))),
+                    ("Resource", self.resource(target)),
+                ])
+            });
+            policies.push(Yaml::map([("Version", Yaml::from("2012-10-17")), ("Statement", Yaml::list(statements))]));
+        }
+        (!policies.is_empty()).then_some(Yaml::List(policies))
+    }
+
+    /// A bucket's name on S3: its parameter's when the template has one, FF's otherwise.
+    fn bucket_name(&self, bucket: &str) -> Yaml {
+        self.bucket_names.get(bucket).map_or_else(|| Yaml::from(bucket), |parameter| Yaml::reference(parameter))
+    }
+
+    /// A queue's name: its attribute when the template holds it, FF's otherwise.
+    fn queue_name(&self, queue: &str) -> Yaml {
+        self.queues.get(queue).map_or_else(|| Yaml::from(queue), |id| Yaml::attribute(id, "QueueName"))
+    }
+
+    /// A queue's ARN: its attribute when the template holds it, else in the stack's account and region.
+    fn queue_arn(&self, queue: &str) -> Yaml {
+        self.queues.get(queue).map_or_else(
+            || Yaml::sub(format!("arn:aws:sqs:${{AWS::Region}}:${{AWS::AccountId}}:{queue}")),
+            |id| Yaml::attribute(id, "Arn"),
+        )
+    }
+
+    /// What a statement of a role allows its actions on, as IAM names it.
+    fn resource(&self, target: &Target) -> Yaml {
+        match target {
+            Target::Bucket(bucket) | Target::Objects(bucket) => {
+                let objects = if matches!(target, Target::Objects(_)) { "/*" } else { "" };
+                match self.bucket_names.get(bucket.as_str()) {
+                    Some(parameter) => Yaml::sub(format!("arn:aws:s3:::${{{parameter}}}{objects}")),
+                    None => Yaml::from(format!("arn:aws:s3:::{bucket}{objects}")),
+                }
+            }
+            Target::Queue(queue) => self.queue_arn(queue),
+            Target::Identity(identity) => {
+                Yaml::sub(format!("arn:aws:ses:${{AWS::Region}}:${{AWS::AccountId}}:identity/{identity}"))
+            }
+            Target::Account => Yaml::from("*"),
+        }
+    }
+
     fn async_config(&mut self, config: &AsyncConfig, function: &str) -> Option<Yaml> {
         let mut properties = Vec::new();
         if let Some(retries) = config.maximum_retry_attempts {
@@ -393,16 +522,12 @@ impl<'a> Builder<'a> {
         let arn = destination.destination.as_deref()?;
         let name = name_in_arn(arn);
         let (kind, target) = if arn.starts_with("arn:aws:sqs:") {
-            let target = match self.queues.get(name) {
-                Some(id) => Yaml::attribute(id, "Arn"),
-                None => {
-                    self.notes.push(format!(
-                        "**{function}** sends its calls' records to the queue `{name}`, which this export doesn't hold: it must be in the same AWS account and region."
-                    ));
-                    Yaml::sub(format!("arn:aws:sqs:${{AWS::Region}}:${{AWS::AccountId}}:{name}"))
-                }
-            };
-            ("SQS", target)
+            if !self.queues.contains_key(name) {
+                self.notes.push(format!(
+                    "**{function}** sends its calls' records to the queue `{name}`, which this export doesn't hold: it must be in the same AWS account and region."
+                ));
+            }
+            ("SQS", self.queue_arn(name))
         } else {
             let lambda_name = match self.functions.get(name) {
                 Some((_, lambda_name)) => lambda_name.clone(),
@@ -439,12 +564,10 @@ impl<'a> Builder<'a> {
         }
         for mapping in &record.event_sources {
             let name = name_in_arn(&mapping.event_source_arn);
-            let queue = self.queues.get(name).map_or_else(
-                || Yaml::sub(format!("arn:aws:sqs:${{AWS::Region}}:${{AWS::AccountId}}:{name}")),
-                |id| Yaml::attribute(id, "Arn"),
-            );
-            let mut properties =
-                vec![("Queue".to_owned(), queue), ("BatchSize".to_owned(), Yaml::from(mapping.batch_size))];
+            let mut properties = vec![
+                ("Queue".to_owned(), self.queue_arn(name)),
+                ("BatchSize".to_owned(), Yaml::from(mapping.batch_size)),
+            ];
             if mapping.maximum_batching_window_in_seconds > 0 {
                 properties.push((
                     "MaximumBatchingWindowInSeconds".to_owned(),
@@ -539,14 +662,12 @@ impl<'a> Builder<'a> {
             ("ReceiveMessageWaitTimeSeconds".to_owned(), Yaml::from(queue.receive_message_wait_time_seconds)),
         ];
         if let Some(policy) = &queue.redrive_policy {
-            let name = name_in_arn(&policy.dead_letter_target_arn);
-            let target = self.queues.get(name).map_or_else(
-                || Yaml::sub(format!("arn:aws:sqs:${{AWS::Region}}:${{AWS::AccountId}}:{name}")),
-                |id| Yaml::attribute(id, "Arn"),
-            );
             properties.push((
                 "RedrivePolicy".to_owned(),
-                Yaml::map([("deadLetterTargetArn", target), ("maxReceiveCount", Yaml::from(policy.max_receive_count))]),
+                Yaml::map([
+                    ("deadLetterTargetArn", self.queue_arn(name_in_arn(&policy.dead_letter_target_arn))),
+                    ("maxReceiveCount", Yaml::from(policy.max_receive_count)),
+                ]),
             ));
         }
         Yaml::map([("Type", Yaml::from("AWS::SQS::Queue")), ("Properties", Yaml::Map(properties))])
@@ -736,6 +857,10 @@ mod tests {
                 "**make-thumbnail** runs 10 instance(s) at most on FF",
                 "**report.v1** is `report_v1` on Lambda, whose rule for names it is outside of",
                 "**report.v1** gets FF's original event, its input in `event.body`",
+                "**report.v1**'s keys used no bucket, queue or mail of the account on FF",
+                "**send-receipts**'s keys used the bucket `archive`, which the account no longer has",
+                "**send-receipts**'s keys used the site `www`, whose bucket on AWS `data/s3-website.md`'s stack makes",
+                "**send-receipts**'s keys used the queue `invoices`, which the account no longer has",
                 "**send-receipts**'s URL takes FF's API keys on FF",
                 "**send-receipts**'s URL answers at `api.shop.tn` on FF",
                 "**send-receipts** sends its calls' records to the function `audit`, which this export doesn't hold",

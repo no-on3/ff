@@ -2,6 +2,7 @@
 //! has, and `MIGRATION.md`, the account's own runbook.
 
 use super::account::Account;
+use super::roles::seen_between;
 use super::template::{SCHEDULES_STATE, Template};
 use crate::api::types::name_in_arn;
 
@@ -176,7 +177,7 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
     let mut text = format!(
         "# Moving {} from FF to AWS\n\n\
          `ff export` wrote this folder on {read_on} from FF's account {}: {}. It holds:\n\n\
-         - `template.yaml`, for AWS SAM: the functions with their URLs, schedules, queues read and settings for calls that don't wait, the queues and the buckets with their events;\n",
+         - `template.yaml`, for AWS SAM: the functions with their roles, URLs, schedules, queues read and settings for calls that don't wait, the queues and the buckets with their events;\n",
         account.name,
         account.id,
         held.join(", ")
@@ -223,6 +224,11 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
             String::new()
         }
     ));
+    if let Some((first, last)) = seen_between(account.functions.iter().flat_map(|record| &record.uses)) {
+        text.push_str(&format!(
+            "\nEach function's role allows what its keys used of the account's buckets, queues and mail on FF from {first} to {last}, as FF noted each use: one FF didn't see then, such as a monthly job's, AWS refuses with `AccessDenied` until the function's `Policies` allow it.\n"
+        ));
+    }
     text.push_str("\n## 3. The data\n\n");
     let mut step = 1;
     let mut item = |text: &mut String, line: String| {
@@ -449,6 +455,7 @@ mod tests {
             "- **report.v1**: `report_v1` on Lambda.",
             "- **send-receipts**: its URL's callers from https://abc.fn.ff.tn/ to the address in the stack's output `SendReceiptsUrl`; `api.shop.tn` through CloudFront, as `data/lambda.md` says; `ff schedule disable send-receipts nightly`; reads `orders` on AWS once the senders send there.",
             "`sam deploy --parameter-overrides ScheduleState=ENABLED` turns AWS's on",
+            "Each function's role allows what its keys used of the account's buckets, queues and mail on FF from 2026-10-21 to 2026-10-31",
         ] {
             assert!(runbook.contains(line), "{line:?} in:\n{runbook}");
         }

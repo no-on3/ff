@@ -32,7 +32,7 @@ pub(super) struct Identity {
     pub(super) identity: String,
     #[serde(rename = "type")]
     kind: String,
-    status: String,
+    pub(super) status: String,
     sending_enabled: bool,
     dkim_selector: Option<String>,
     mail_from_domain: Option<String>,

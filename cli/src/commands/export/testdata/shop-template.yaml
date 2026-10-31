@@ -14,6 +14,10 @@ Parameters:
     Type: String
     Default: photos
     Description: 'The bucket photos''s name on S3, which names a bucket for all of S3: FF''s may be taken there'
+  WwwBucketName:
+    Type: String
+    Default: www
+    Description: 'The site www''s bucket on S3, for the roles that use it: the output Bucket of data/s3-website.md''s stack, FF''s name until it is made'
   SendReceiptsLogLevel:
     Type: String
     Description: 'send-receipts''s variable LOG_LEVEL, which `ff env list send-receipts --show` gives'
@@ -31,6 +35,15 @@ Resources:
       Runtime: python3.13
       MemorySize: 512
       Timeout: 30
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref PhotosBucketName
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:ListAllMyBuckets
+              Resource: '*'
       AutoPublishAlias: live
       ProvisionedConcurrencyConfig:
         ProvisionedConcurrentExecutions: 1
@@ -71,6 +84,35 @@ Resources:
         Variables:
           LOG_LEVEL: !Ref SendReceiptsLogLevel
           DATABASE_URL: !Ref SendReceiptsDatabaseUrl
+      Policies:
+        - S3ReadPolicy:
+            BucketName: archive
+        - S3ReadPolicy:
+            BucketName: !Ref PhotosBucketName
+        - S3WritePolicy:
+            BucketName: !Ref WwwBucketName
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt FailedReceiptsQueue.QueueName
+        - SQSSendMessagePolicy:
+            QueueName: invoices
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetBucketNotification
+              Resource: !Sub 'arn:aws:s3:::${PhotosBucketName}'
+            - Effect: Allow
+              Action:
+                - sqs:GetQueueAttributes
+              Resource: !GetAtt OrdersQueue.Arn
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+              Resource: !Sub 'arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/shop.tn'
+            - Effect: Allow
+              Action:
+                - ses:GetAccount
+              Resource: '*'
       FunctionUrlConfig:
         AuthType: AWS_IAM
         Cors:

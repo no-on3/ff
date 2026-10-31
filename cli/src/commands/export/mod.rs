@@ -7,6 +7,7 @@ mod account;
 mod fixtures;
 mod kit;
 mod names;
+mod roles;
 mod template;
 mod yaml;
 

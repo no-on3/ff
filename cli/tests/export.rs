@@ -34,8 +34,8 @@ fn queue(name: &str, visibility: u32) -> Value {
             "sizeBytes": 0, "createdAt": AT, "updatedAt": AT })
 }
 
-/// The replies, in the order ff export asks: the account, the function and what calls it, the
-/// queues, the buckets, the databases, caches and mail, then the function's code.
+/// The replies, in the order ff export asks: the account, the function, what calls it and what its
+/// keys used, the queues, the buckets, the databases, caches and mail, then the function's code.
 fn account(zip: &[u8]) -> Vec<Reply> {
     vec![
         Reply::json(200, me()),
@@ -67,6 +67,11 @@ fn account(zip: &[u8]) -> Vec<Reply> {
                                  "maximumRetryAttempts": 1, "maximumEventAgeInSeconds": null,
                                  "destinationConfig": { "onSuccess": {}, "onFailure": { "destination": format!("arn:aws:sqs:tn-tunis-1:{ACCOUNT}:failed-receipts") } },
                                  "lastModified": AT }),
+        ),
+        Reply::json(
+            200,
+            json!({ "uses": [{ "service": "s3", "resource": "uploads", "operation": "GetObject", "firstDay": "2026-10-21", "lastDay": "2026-10-30" },
+                             { "service": "sqs", "resource": "orders", "operation": "SendMessage", "firstDay": "2026-10-22", "lastDay": "2026-10-31" }] }),
         ),
         Reply::json(200, json!([queue("failed-receipts", 30), queue("orders", 30)])),
         Reply::json(
@@ -119,6 +124,7 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
             "/functions/f1/schedules",
             "/functions/f1/event-sources",
             "/functions/f1/event-invoke-config",
+            "/functions/f1/key-uses",
             "/queues",
             "/buckets",
             "/buckets/uploads/website",
@@ -129,7 +135,7 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
             "/functions/f1/code?javascript=true",
         ]
     );
-    assert_eq!(api.requests()[16].header("accept"), Some("application/zip"));
+    assert_eq!(api.requests()[17].header("accept"), Some("application/zip"));
     assert_eq!(std::fs::read(folder.join("code/send-receipts.zip")).unwrap(), zip);
     let read = |path: &str| std::fs::read_to_string(folder.join(path)).unwrap();
     let template = read("template.yaml");
@@ -144,6 +150,8 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
         "            State: !Ref ScheduleState\n",
         "      BucketName: !Ref UploadsBucketName\n",
         "      VisibilityTimeout: 60\n",
+        "        - S3ReadPolicy:\n            BucketName: !Ref UploadsBucketName\n",
+        "        - SQSSendMessagePolicy:\n            QueueName: !GetAtt OrdersQueue.QueueName\n",
     ] {
         assert!(template.contains(line), "{line:?} in:\n{template}");
     }
@@ -155,6 +163,7 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
     let migration = read("MIGRATION.md");
     assert!(migration.starts_with("# Moving Shop from FF to AWS\n"), "{migration}");
     assert!(migration.contains("`ff schedule disable send-receipts nightly`"), "{migration}");
+    assert!(migration.contains("on FF from 2026-10-21 to 2026-10-31, as FF noted each use"), "{migration}");
     assert!(read("data/postgres.md").contains("> **In this account:** the database `shop` (50 MB)."));
     #[cfg(unix)]
     {
