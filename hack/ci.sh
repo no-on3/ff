@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # FF's pipeline, one stage per job, the same here as on the CI server (.github/workflows/ci.yml calls it):
-#   deps      npm ci in the backend, the console, the admin app and the Node.js runtime, and Rust for the ff
-#             command where the machine has none recent enough (CI only: locally, the installed
-#             dependencies are used as they are)
+#   deps      what the stages after it use: npm ci in the backend, the console, the admin app and the Node.js
+#             runtime, and the ff command's Rust (hack/install-tools.sh), each for the stages that need it; alone,
+#             all of them (CI only: locally, the installed dependencies are used as they are)
 #   static    linters and type checks, the builds, the ff command's formatting and lints, the docs' links and
 #             tables, npm audit's checker, the nightly run's issue and the suites' checks against stand-ins,
 #             how-it-works.html's script, every shell script parsed, and the CI workflow linted
@@ -14,13 +14,14 @@
 #   security  secrets in the history (gitleaks), the dependencies' advisories (npm audit, but those
 #             .npmauditignore accepts until a date), and every image built, scanned (Trivy, but what
 #             .trivyignore.yaml accepts) and listed as an SBOM (CycloneDX), into hack/.ci/sbom
-#   cluster   l3, l4, l5, cli and images below, one after the other, as a laptop runs them; GitHub runs each one on a
-#             runner of its own, at once. Each makes or reuses the k3d dev cluster (hack/k8s/cluster-up.sh):
-#     l3      the Kubernetes driver (L3), and the platform's manifests, without deploying them
+#   cluster   l3, l4, l5, cli and images below, one after the other, as a laptop runs them; GitHub runs l3 to cli
+#             each on a runner of its own, at once, and images after security, in its job, on the images it built.
+#             Each makes or reuses the k3d dev cluster (hack/k8s/cluster-up.sh):
+#     l3      the Kubernetes driver (L3)
 #     l4      the stack through the API (L4)
 #     l5      every route as another account (L5)
 #     cli     the ff command on the stack and in Docker
-#     images  the platform's images, run as the cluster runs them
+#     images  the platform's images, run as the cluster runs them, and its manifests, without deploying them
 #   platform  FF deployed from deploy/k8s on a cluster of its own (hack/e2e-platform.sh), about 15 minutes
 #   all       static, unit, db, security and cluster, one after the other
 # A failed step is reported and the next one runs, so that a run names every failed step, not only the first; a step
@@ -74,11 +75,23 @@ free_ports() {
   return 1
 }
 
+# What each stage uses that deps installs: the directories npm ci runs in, and the ff command's Rust. A stage that runs
+# the backend here needs its packages; the images build in Docker with their own, and npm audit reads the lockfiles.
+declare -A stage_uses=(
+  [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust" [db]=BE [security]=''
+  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust" [images]=BE [platform]=''
+)
+stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[images]}"
+stage_uses[all]="${stage_uses[static]} ${stage_uses[unit]} ${stage_uses[db]} ${stage_uses[security]} ${stage_uses[cluster]}"
+
 stage_deps() {
+  local stage uses=' ' dir
+  for stage in $ci_stages; do uses+="${stage_uses[$stage]:-} "; done
+  [ "$ci_stages" != deps ] || uses=" ${stage_uses[all]} "
   for dir in BE FE admin runtimes/nodejs; do
-    prepare "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund
+    case "$uses" in *" $dir "*) prepare "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund ;; esac
   done
-  prepare "Rust for the ff command" hack/install-tools.sh rust
+  case "$uses" in *" rust "*) prepare "Rust for the ff command" hack/install-tools.sh rust ;; esac
 }
 
 # The page's one script, which a syntax error stops entirely (and with it every scenario).
@@ -267,12 +280,16 @@ stage_l3() {
   cluster_ready
   step "what a failed run leaves behind, collected from the cluster" hack/test-evidence.sh
   step "L3: the Kubernetes driver on the cluster" hack/k8s/test-it.sh
-  step "the platform's manifests, without deploying them" hack/k8s/test-platform-manifests.sh
 }
 stage_l4() { cluster_ready; step "L4: the stack through the API" hack/e2e.sh; }
 stage_l5() { cluster_ready; step "L5: every route as another account" hack/e2e-tenancy.sh; }
 stage_cli() { cluster_ready; step "the ff command on the stack and in Docker" hack/cli-e2e.sh; }
-stage_images() { cluster_ready; step "the platform's images, run as the cluster runs them" hack/test-images.sh; }
+# After security in a run, the images are built already: Docker's build cache has every layer of them.
+stage_images() {
+  cluster_ready
+  step "the platform's images, run as the cluster runs them" hack/test-images.sh
+  step "the platform's manifests, without deploying them" hack/k8s/test-platform-manifests.sh
+}
 stage_cluster() { stage_l3; stage_l4; stage_l5; stage_cli; stage_images; }
 
 stage_platform() {

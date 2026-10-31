@@ -1,6 +1,7 @@
 # FF's pipeline: each job one stage of hack/ci.sh, which runs the same commands on a laptop. GitHub runs it, and
 # so does a self-hosted Gitea with Gitea Actions, which reads this directory when it has no .gitea/workflows.
-# Actions are pinned to the commit of a release at least two weeks old when chosen; Node.js to the images' version.
+# Actions are pinned to the commit of a release at least two weeks old when chosen; Node.js to the images' version,
+# in .github/actions/setup, each job's setup, with its caches.
 name: ci
 
 on:
@@ -23,7 +24,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: 24.21.0
+  # The ff command's build starts from the cache (.github/actions/setup), never from an edit before it: incremental
+  # compilation's files would only weigh the cache down, and line tables are enough for a failed test's backtrace.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   static:
@@ -32,9 +36,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: ./.github/actions/setup
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          lockfiles: |
+            BE/package-lock.json
+            FE/package-lock.json
+            admin/package-lock.json
+            runtimes/nodejs/package-lock.json
+          cargo: static
       - run: hack/ci.sh deps static
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
@@ -52,9 +61,14 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: ./.github/actions/setup
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          lockfiles: |
+            BE/package-lock.json
+            FE/package-lock.json
+            admin/package-lock.json
+            runtimes/nodejs/package-lock.json
+          cargo: unit
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.13' # the Python runtime's
@@ -75,9 +89,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
+      - uses: ./.github/actions/setup
       - run: hack/ci.sh deps db
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
@@ -89,18 +101,21 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # The images built once: scanned, then run as the cluster runs them, and the manifests checked with the edge's, from
+  # Docker's build cache, where the scans left every layer; at once with static, unit and db, needing none of them.
   security:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',security,') }}
+    name: security, then the images run
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',security,') || contains(format(',{0},', inputs.jobs), ',images,') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # gitleaks reads the whole history
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - run: hack/ci.sh deps security
+      - uses: ./.github/actions/setup
+      # The images and the cluster need more room than a runner leaves free (hack/check-resources.sh).
+      - run: df -h / && sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+      - run: hack/ci.sh deps security images
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
         with:
@@ -117,12 +132,13 @@ jobs:
           path: hack/.ci/sbom/
           if-no-files-found: ignore
 
-  # The cluster's five stages, each on a runner of its own, at once (hack/ci.sh cluster runs them in a row, on a
-  # laptop): a failure in one is known within that stage's own time, and every stage's failures are reported.
+  # The cluster's stages, each on a runner of its own, at once (hack/ci.sh cluster runs them in a row, on a laptop,
+  # with images, which runs in security's job here): a failure in one is known within that stage's own time, and every
+  # stage's failures are reported.
   cluster:
     needs: [static, unit, db]
     # After the three it needs, or without them when a run started by hand names a stage alone.
-    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',cluster,') || contains(format(',{0},', inputs.jobs), ',l3,') || contains(format(',{0},', inputs.jobs), ',l4,') || contains(format(',{0},', inputs.jobs), ',l5,') || contains(format(',{0},', inputs.jobs), ',cli,') || contains(format(',{0},', inputs.jobs), ',images,')) }}
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',cluster,') || contains(format(',{0},', inputs.jobs), ',l3,') || contains(format(',{0},', inputs.jobs), ',l4,') || contains(format(',{0},', inputs.jobs), ',l5,') || contains(format(',{0},', inputs.jobs), ',cli,')) }}
     name: ${{ matrix.stage }}
     strategy:
       fail-fast: false # every stage's failures, not only the first stage's
@@ -132,7 +148,6 @@ jobs:
           - { stage: l4, minutes: 30 }
           - { stage: l5, minutes: 20 }
           - { stage: cli, minutes: 30 }
-          - { stage: images, minutes: 20 }
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.minutes }}
     steps:
@@ -148,10 +163,10 @@ jobs:
           esac >>"$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.wanted.outputs.run == 'true'
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: ./.github/actions/setup
         if: steps.wanted.outputs.run == 'true'
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          cargo: ${{ matrix.stage == 'cli' && 'cli' || '' }}
       # The images and the cluster need more room than a runner leaves free (hack/check-resources.sh).
       - if: steps.wanted.outputs.run == 'true'
         run: df -h / && sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
@@ -175,10 +190,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: ./.github/actions/setup
         with:
-          node-version: ${{ env.NODE_VERSION }}
-      - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          lockfiles: '' # the platform's suite installs nothing with npm ci: no cache of its own
+      - run: df -h / && sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
       - run: hack/ci.sh deps platform
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure() # what the failed run left behind (hack/lib/evidence.sh), and the report of its steps and checks
