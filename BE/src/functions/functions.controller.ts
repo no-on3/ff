@@ -6,8 +6,10 @@ import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
 import { booleanQuery } from '../common/boolean-query';
 import { Invocation } from '../plans/rate-limits';
+import { KeyUses } from '../storage/key-uses.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
+import { FunctionKeyUsesView } from './dto/key-uses.dto';
 import { AsyncInvocationView, InvocationType, InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListFunctionsQuery } from './dto/list-functions.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
@@ -44,6 +46,7 @@ export class FunctionsController {
   constructor(
     private readonly functionsService: FunctionsService,
     private readonly asyncInvocations: AsyncInvocationsService,
+    private readonly keyUses: KeyUses,
   ) {}
 
   @Post()
@@ -104,6 +107,21 @@ export class FunctionsController {
   ): Promise<StreamableFile> {
     const { name, zip } = await this.functionsService.code(principal.accountId, id, { javascript: booleanQuery('javascript', javascript) });
     return new StreamableFile(zip, { type: 'application/zip', disposition: `attachment; filename="${codeFileName(name)}"`, length: zip.length });
+  }
+
+  @Get(':id/key-uses')
+  @RequireScope('functions:read')
+  @ApiOperation({
+    summary: "What the function's keys used of the account's buckets, queues and mail",
+    description:
+      "Each bucket, queue or e-mail identity its keys reached through the S3 front door, the SQS endpoint or the SES endpoint, by which of the " +
+      "service's operations, with the first and the last day, UTC: what an export's IAM role grants it, and no more. Noted once a day since " +
+      '2026-10-31; a key replaced keeps its uses with its function',
+  })
+  @ApiResponse({ status: 200, type: FunctionKeyUsesView })
+  async keyUsesOf(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<FunctionKeyUsesView> {
+    const function_ = await this.functionsService.findOne(principal.accountId, id);
+    return { uses: await this.keyUses.of(function_.accountId, function_.id) };
   }
 
   @Put(':id')

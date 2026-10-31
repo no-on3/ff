@@ -52,6 +52,15 @@ export class KeyUses implements OnModuleInit, OnModuleDestroy {
     await this.flush();
   }
 
+  /** What a holder's keys used, as written: a function's, by its ID, or one of the account's keys, by the key's; by service, resource and operation. */
+  async of(accountId: string, holder: string): Promise<Array<Pick<KeyUse, 'service' | 'resource' | 'operation' | 'firstDay' | 'lastDay'>>> {
+    return this.uses.find({
+      where: { accountId, holder },
+      select: { service: true, resource: true, operation: true, firstDay: true, lastDay: true },
+      order: { service: 'ASC', resource: 'ASC', operation: 'ASC' },
+    });
+  }
+
   /** A key's use, written at the next turn unless it was noted already today. */
   note({ key, service, resource, operation }: NotedUse, at = new Date()): void {
     const day = dayOf(at);

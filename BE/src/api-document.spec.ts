@@ -18,6 +18,7 @@ import { AsyncInvocationsService } from './functions/async-invocations.service';
 import { EventInvokeConfigController } from './functions/event-invoke-config.controller';
 import { EventInvokeConfigService } from './functions/event-invoke-config.service';
 import { FunctionsService } from './functions/functions.service';
+import { KeyUses } from './storage/key-uses.service';
 import { FunctionUrlsController } from './function-urls/function-urls.controller';
 import { FunctionUrlsService } from './function-urls/function-urls.service';
 import { CustomDomainsController } from './function-urls/custom-domains.controller';
@@ -126,6 +127,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
           }),
         },
         { provide: AsyncInvocationsService, useValue: succeeding(AsyncInvocationsService, { queue: async () => ({ requestId: ID }), dryRun: async () => undefined }) },
+        { provide: KeyUses, useValue: succeeding(KeyUses, { of: async () => [] }) },
         { provide: QueuesService, useValue: succeeding(QueuesService, { list: async () => [], receive: async () => [], remove: async () => undefined, purge: async () => undefined, deleteMessage: async () => undefined }) },
         { provide: EventInvokeConfigService, useValue: succeeding(EventInvokeConfigService, { remove: async () => undefined }) },
         { provide: EventSourcesService, useValue: succeeding(EventSourcesService, { list: async () => [], listForFunction: async () => [], remove: async () => undefined }) },

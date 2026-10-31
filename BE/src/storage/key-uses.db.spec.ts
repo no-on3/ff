@@ -60,4 +60,19 @@ run("what the account's keys use, in FF's database (L2)", () => {
 
     expect((await rows()).map((row) => `${row.operation} ${row.resource.length}`)).toEqual(['ListQueues 0', 'SendEmail 320', 'GetObject 6']);
   });
+
+  it("reads a holder's uses by service, in the services' order, resource and operation: no other holder's, nor another account's", async () => {
+    const accounts = { id: 'AKFFBBBBBBBBBBBBBBBB', accountId: ACCOUNT, functionId: null };
+    const another = { ...key, accountId: '740000000002' };
+    first.note({ key: accounts, service: AwsEndpoint.S3, resource: 'photos', operation: 'PutObject' }, at('2026-10-31'));
+    first.note({ key: another, service: AwsEndpoint.S3, resource: 'theirs', operation: 'GetObject' }, at('2026-10-31'));
+    await first.flush();
+
+    expect((await first.of(ACCOUNT, FUNCTION)).map((use) => `${use.service} ${use.resource.length} ${use.operation} ${use.firstDay} ${use.lastDay}`)).toEqual([
+      's3 6 GetObject 2026-10-29 2026-10-31',
+      'sqs 0 ListQueues 2026-10-31 2026-10-31',
+      'sesv2 320 SendEmail 2026-10-31 2026-10-31',
+    ]);
+    expect(await first.of(ACCOUNT, accounts.id)).toEqual([{ service: 's3', resource: 'photos', operation: 'PutObject', firstDay: '2026-10-31', lastDay: '2026-10-31' }]);
+  });
 });

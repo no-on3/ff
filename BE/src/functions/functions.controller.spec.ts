@@ -14,6 +14,7 @@ import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
 import { INVOCATION } from '../plans/rate-limits';
 import { FunctionsController, codeFileName, invocationTypeOf } from './functions.controller';
 import { FunctionsService } from './functions.service';
+import { KeyUses } from '../storage/key-uses.service';
 import { AsyncInvocationsService } from './async-invocations.service';
 import { InvocationType } from './dto/invoke-function.dto';
 import { of } from 'rxjs';
@@ -26,12 +27,17 @@ const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
  * validation pipe, and the request ID's interceptor, which changes how Nest runs a handler, and so how a failure
  * reaches the caller. Its caller is a member of the role given, of an approved account.
  */
-async function serve(role: Principal['role'], functions: object, asyncInvocations: object = {}): Promise<{ app: INestApplication; baseUrl: string }> {
+async function serve(
+  role: Principal['role'],
+  functions: object,
+  { asyncInvocations = {}, keyUses = {} }: { asyncInvocations?: object; keyUses?: object } = {},
+): Promise<{ app: INestApplication; baseUrl: string }> {
   const moduleRef = await Test.createTestingModule({
     controllers: [FunctionsController],
     providers: [
       { provide: FunctionsService, useValue: functions },
       { provide: AsyncInvocationsService, useValue: asyncInvocations },
+      { provide: KeyUses, useValue: keyUses },
     ],
   }).compile();
   const app = moduleRef.createNestApplication({ logger: false });
@@ -69,7 +75,7 @@ describe('FunctionsController route rules (L1, P-12, P-13)', () => {
     expect(rules('remove')).toEqual({ roles: ['owner', 'developer'], activeAccount: false, scope: 'functions:write' });
   });
 
-  it.each<keyof FunctionsController>(['findAll', 'findOne', 'code', 'getInvocations', 'getScalingConfig'])(
+  it.each<keyof FunctionsController>(['findAll', 'findOne', 'code', 'keyUsesOf', 'getInvocations', 'getScalingConfig'])(
     '%s: every member reads, viewers included, and a key with functions:read',
     (handler) => {
       expect(rules(handler)).toEqual({ roles: 'anyone', activeAccount: false, scope: 'functions:read' });
@@ -103,7 +109,7 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
     });
 
   beforeAll(async () => {
-    ({ app, baseUrl } = await serve('developer', functions, asyncInvocations));
+    ({ app, baseUrl } = await serve('developer', functions, { asyncInvocations }));
   });
 
   afterAll(() => app.close());
@@ -327,5 +333,40 @@ describe("GET /functions/:id/code: the function's code, as a zip AWS Lambda take
   it('refuses an ID that is not one', async () => {
     expect((await fetch(`${baseUrl}/functions/fn-1/code`)).status).toBe(400);
     expect(functions.code).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /functions/:id/key-uses: what the function's keys used, which an export's role grants (L1)", () => {
+  const USES = [{ service: 'sqs', resource: 'orders', operation: 'SendMessage', firstDay: '2026-10-31', lastDay: '2026-11-02' }];
+  const functions = {
+    findOne: jest.fn(async (accountId: string, id: string) => {
+      if (id !== ID) throw new NotFoundException(`Function with ID ${id} not found`);
+      return { id, accountId };
+    }),
+  };
+  const keyUses = { of: jest.fn(async () => USES) };
+  let app: INestApplication;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    ({ app, baseUrl } = await serve('viewer', functions, { keyUses }));
+  });
+
+  afterAll(() => app.close());
+  beforeEach(() => jest.clearAllMocks());
+
+  it("gives the uses of the caller's account's function, read under the function, which holds its keys' uses", async () => {
+    const res = await fetch(`${baseUrl}/functions/${ID}/key-uses`);
+
+    expect([res.status, await res.json()]).toEqual([200, { uses: USES }]);
+    expect(functions.findOne).toHaveBeenCalledWith(ACCOUNT, ID);
+    expect(keyUses.of).toHaveBeenCalledWith(ACCOUNT, ID);
+  });
+
+  it("answers another account's function, or none, with 404, reading no uses", async () => {
+    const res = await fetch(`${baseUrl}/functions/00000000-0000-4000-8000-000000000000/key-uses`);
+
+    expect([res.status, (await res.json()).message]).toEqual([404, 'Function with ID 00000000-0000-4000-8000-000000000000 not found']);
+    expect(keyUses.of).not.toHaveBeenCalled();
   });
 });
