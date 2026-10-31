@@ -200,7 +200,7 @@ stage_unit() {
 stage_db() {
   "$repo/hack/check-resources.sh"
   local name="ff-ci-postgres-$$" data="ff-ci-data-db-$$" s3="ff-ci-s3-$$" cache="ff-ci-cache-$$" password port admin data_port s3_key s3_port \
-    cache_port first caches
+    cache_port first caches servers
   password="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   admin="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   s3_key="ci$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -235,14 +235,17 @@ stage_db() {
   docker cp -q "$data:/var/lib/postgresql/tls/ca.crt" "$ci_dir/data-db-ca.crt"
   for _ in $(seq 1 60); do curl -sfk -o /dev/null -H "authorization: Bearer $admin" "https://127.0.0.1:$cache_port/health" && break; sleep 1; done
   docker cp -q "$cache:/var/lib/ff-cache/tls/ca.crt" "$ci_dir/cache-ca.crt"
-  # The variables win over BE/.env, which dotenv never overrides.
-  export DB_HOST=127.0.0.1 DB_PORT="$port" DB_USERNAME=postgres DB_PASSWORD="$password" DB_NAME=postgres DB_SSL=false
-  export FF_DATA_DB_HOST=127.0.0.1 FF_DATA_DB_PORT="$data_port" FF_DATA_DB_ADMIN_PASSWORD="$admin" FF_DATA_DB_CA_FILE="$ci_dir/data-db-ca.crt"
-  export FF_CACHE_HOST=127.0.0.1 FF_CACHE_PORTS="$caches" FF_CACHE_AGENT_URL="https://127.0.0.1:$cache_port" FF_CACHE_AGENT_TOKEN="$admin" \
+  # The variables win over BE/.env, which dotenv never overrides. They are this stage's servers' and go to its two
+  # steps alone: exported, they reached the stages after it, whose backends took these servers' ports for theirs.
+  servers=(DB_HOST=127.0.0.1 DB_PORT="$port" DB_USERNAME=postgres DB_PASSWORD="$password" DB_NAME=postgres DB_SSL=false
+    FF_DATA_DB_HOST=127.0.0.1 FF_DATA_DB_PORT="$data_port" FF_DATA_DB_ADMIN_PASSWORD="$admin" FF_DATA_DB_CA_FILE="$ci_dir/data-db-ca.crt"
+    FF_CACHE_HOST=127.0.0.1 FF_CACHE_PORTS="$caches" FF_CACHE_AGENT_URL="https://127.0.0.1:$cache_port" FF_CACHE_AGENT_TOKEN="$admin"
     FF_CACHE_CA_FILE="$ci_dir/cache-ca.crt"
-  export FF_OBJECT_STORE_ENDPOINT=127.0.0.1 FF_OBJECT_STORE_PORT="$s3_port" FF_OBJECT_STORE_USE_SSL=false FF_OBJECT_STORE_ACCESS_KEY="$s3_key" FF_OBJECT_STORE_SECRET_KEY="$password"
-  step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18, buckets on SeaweedFS ${SEAWEEDFS_IMAGE#*:}" in_dir BE npm run test:db
-  step "migrations: exactly the entities' schema" in_dir BE npm run migration:check
+    FF_OBJECT_STORE_ENDPOINT=127.0.0.1 FF_OBJECT_STORE_PORT="$s3_port" FF_OBJECT_STORE_USE_SSL=false FF_OBJECT_STORE_ACCESS_KEY="$s3_key"
+    FF_OBJECT_STORE_SECRET_KEY="$password")
+  step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18, buckets on SeaweedFS ${SEAWEEDFS_IMAGE#*:}" \
+    in_dir BE env "${servers[@]}" npm run test:db
+  step "migrations: exactly the entities' schema" in_dir BE env "${servers[@]}" npm run migration:check
   docker rm -f -v "$name" "$data" "$s3" "$cache" >/dev/null
 }
 

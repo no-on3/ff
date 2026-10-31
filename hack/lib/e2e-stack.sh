@@ -91,8 +91,8 @@ e2e_data_db() {
   docker network connect --gw-priority -1 "$network" "$node"
   e2e_cleanups+=("docker network disconnect $network $node")
   docker cp -q "$e2e_data_db_container:/var/lib/postgresql/tls/ca.crt" "$work/data-db-ca.crt"
-  e2e_data_db_env=(FF_DATA_DB_HOST="$address" FF_DATA_DB_ADMIN_PASSWORD=ff-data-admin-dev FF_DATA_DB_CIDRS="$address/32"
-    FF_DATA_DB_CA_FILE="$work/data-db-ca.crt")
+  e2e_data_db_env=(FF_DATA_DB_HOST="$address" FF_DATA_DB_PORT=5432 FF_DATA_DB_ADMIN_PASSWORD=ff-data-admin-dev
+    FF_DATA_DB_CIDRS="$address/32" FF_DATA_DB_CA_FILE="$work/data-db-ca.crt")
   echo "  customers' database server at $address"
 }
 
@@ -106,8 +106,8 @@ e2e_cache() {
     fail "the cache server did not become healthy"
   e2e_cache_container="$("${compose[@]}" ps -q cache)"
   docker cp -q "$e2e_cache_container:/var/lib/ff-cache/tls/ca.crt" "$work/cache-ca.crt"
-  e2e_cache_env=(FF_CACHE_HOST="$address" FF_CACHE_AGENT_URL="https://$address:6390" FF_CACHE_AGENT_TOKEN=ff-cache-dev
-    FF_CACHE_CIDRS="$address/32" FF_CACHE_CA_FILE="$work/cache-ca.crt")
+  e2e_cache_env=(FF_CACHE_HOST="$address" FF_CACHE_PORTS=6400-6999 FF_CACHE_AGENT_URL="https://$address:6390"
+    FF_CACHE_AGENT_TOKEN=ff-cache-dev FF_CACHE_CIDRS="$address/32" FF_CACHE_CA_FILE="$work/cache-ca.crt")
   echo "  customers' cache server at $address"
 }
 
