@@ -7,7 +7,7 @@
  * reads the account; files deleted, and uploads let in again within a minute.
  */
 import 'dotenv/config';
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
@@ -30,6 +30,7 @@ import { BucketsService } from './buckets.service';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { StoreBuckets } from './store-buckets';
+import { testObjectStore, testStoreClient } from '../object-store/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const A = '730000000001';
@@ -39,21 +40,9 @@ const OWNER = 'owner@buckets.test';
 const MIB = 1_048_576;
 
 run("customers' buckets measured every hour (L2, ADR 0009)", () => {
-  const objectStore = {
-    endPoint: process.env.FF_OBJECT_STORE_ENDPOINT ?? 'localhost',
-    port: Number(process.env.FF_OBJECT_STORE_PORT ?? 9003),
-    useSSL: process.env.FF_OBJECT_STORE_USE_SSL === 'true',
-    accessKey: process.env.FF_OBJECT_STORE_ACCESS_KEY ?? 'ffdevaccesskey',
-    secretKey: process.env.FF_OBJECT_STORE_SECRET_KEY ?? 'ffdevsecretkey-local-only',
-  };
+  const objectStore = testObjectStore();
   const config = new ConfigService({ objectStore, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' }, mail: { consoleUrl: 'https://console.example.tn' } });
-  const s3 = new S3Client({
-    endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
-    region: 'us-east-1',
-    forcePathStyle: true,
-    credentials: { accessKeyId: objectStore.accessKey, secretAccessKey: objectStore.secretKey },
-    requestChecksumCalculation: 'WHEN_REQUIRED',
-  });
+  const s3 = testStoreClient();
   let db: ScratchDatabase;
   let store: StoreBuckets;
   let directory: StorageDirectory;

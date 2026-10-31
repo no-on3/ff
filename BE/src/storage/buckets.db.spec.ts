@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { CreateMultipartUploadCommand, HeadBucketCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { CreateMultipartUploadCommand, HeadBucketCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
 import { BadRequestException, ConflictException, ForbiddenException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
@@ -16,28 +16,16 @@ import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { StorageKeysService } from './storage-keys.service';
 import { StoreBuckets } from './store-buckets';
+import { testObjectStore, testStoreClient } from '../object-store/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '710000000001';
 const OTHER = '710000000002';
 
 run("buckets and access keys, in FF's database and the store (L2)", () => {
-  // The store's settings as the backend reads them, FF_OBJECT_STORE_*, alone: BE/.env's development SeaweedFS, or the CI's own.
-  const objectStore = {
-    endPoint: process.env.FF_OBJECT_STORE_ENDPOINT ?? 'localhost',
-    port: Number(process.env.FF_OBJECT_STORE_PORT ?? 9003),
-    useSSL: process.env.FF_OBJECT_STORE_USE_SSL === 'true',
-    accessKey: process.env.FF_OBJECT_STORE_ACCESS_KEY ?? 'ffdevaccesskey',
-    secretKey: process.env.FF_OBJECT_STORE_SECRET_KEY ?? 'ffdevsecretkey-local-only',
-  };
+  const objectStore = testObjectStore();
   const config = new ConfigService({ objectStore, storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' }, sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1' }, ses: { base: 'https://email.example.tn' } });
-  const store = new S3Client({
-    endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
-    region: 'us-east-1',
-    forcePathStyle: true,
-    credentials: { accessKeyId: objectStore.accessKey, secretAccessKey: objectStore.secretKey },
-    requestChecksumCalculation: 'WHEN_REQUIRED',
-  });
+  const store = testStoreClient();
   const exists = (storeName: string) => store.send(new HeadBucketCommand({ Bucket: storeName })).then(() => true, () => false);
   let db: ScratchDatabase;
   let storeBuckets: StoreBuckets;

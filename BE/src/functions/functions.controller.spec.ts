@@ -12,11 +12,38 @@ import { Principal } from '../auth/principal';
 import { RequestIdInterceptor } from '../common/request-context';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
 import { INVOCATION } from '../plans/rate-limits';
-import { FunctionsController, invocationTypeOf } from './functions.controller';
+import { FunctionsController, codeFileName, invocationTypeOf } from './functions.controller';
 import { FunctionsService } from './functions.service';
 import { AsyncInvocationsService } from './async-invocations.service';
 import { InvocationType } from './dto/invoke-function.dto';
 import { of } from 'rxjs';
+
+const ACCOUNT = '000000000001';
+const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
+
+/**
+ * The controller over HTTP, its services the given stand-ins, set up as main.ts and app.module.ts set the API up: the
+ * validation pipe, and the request ID's interceptor, which changes how Nest runs a handler, and so how a failure
+ * reaches the caller. Its caller is a member of the role given, of an approved account.
+ */
+async function serve(role: Principal['role'], functions: object, asyncInvocations: object = {}): Promise<{ app: INestApplication; baseUrl: string }> {
+  const moduleRef = await Test.createTestingModule({
+    controllers: [FunctionsController],
+    providers: [
+      { provide: FunctionsService, useValue: functions },
+      { provide: AsyncInvocationsService, useValue: asyncInvocations },
+    ],
+  }).compile();
+  const app = moduleRef.createNestApplication({ logger: false });
+  app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
+    req.principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role };
+    next();
+  });
+  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }));
+  app.useGlobalInterceptors(new RequestIdInterceptor());
+  await app.listen(0, '127.0.0.1');
+  return { app, baseUrl: await app.getUrl() };
+}
 
 const reflector = new Reflector();
 const rules = (handler: keyof FunctionsController) => {
@@ -42,7 +69,7 @@ describe('FunctionsController route rules (L1, P-12, P-13)', () => {
     expect(rules('remove')).toEqual({ roles: ['owner', 'developer'], activeAccount: false, scope: 'functions:write' });
   });
 
-  it.each<keyof FunctionsController>(['findAll', 'findOne', 'getInvocations', 'getScalingConfig'])(
+  it.each<keyof FunctionsController>(['findAll', 'findOne', 'code', 'getInvocations', 'getScalingConfig'])(
     '%s: every member reads, viewers included, and a key with functions:read',
     (handler) => {
       expect(rules(handler)).toEqual({ roles: 'anyone', activeAccount: false, scope: 'functions:read' });
@@ -64,8 +91,6 @@ describe('FunctionsController route rules (L1, P-12, P-13)', () => {
 });
 
 describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", () => {
-  const ACCOUNT = '000000000001';
-  const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
   const functions = { invoke: jest.fn(async () => ({ id: 'inv-1', status: 'COMPLETED', output: 1 })) };
   const asyncInvocations = { queue: jest.fn(async () => ({ requestId: 'req-1' })), dryRun: jest.fn(async () => undefined) };
   let app: INestApplication;
@@ -78,22 +103,7 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
     });
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      controllers: [FunctionsController],
-      providers: [
-        { provide: FunctionsService, useValue: functions },
-        { provide: AsyncInvocationsService, useValue: asyncInvocations },
-      ],
-    }).compile();
-    app = moduleRef.createNestApplication({ logger: false });
-    app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
-      req.principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'developer' };
-      next();
-    });
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true })); // as main.ts
-    app.useGlobalInterceptors(new RequestIdInterceptor());
-    await app.listen(0, '127.0.0.1');
-    baseUrl = await app.getUrl();
+    ({ app, baseUrl } = await serve('developer', functions, asyncInvocations));
   });
 
   afterAll(() => app.close());
@@ -159,8 +169,6 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
 });
 
 describe('GET /functions/:id/logs (L1, P-40, P-43)', () => {
-  const ACCOUNT = '000000000001';
-  const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
   const LOGS = { lines: [{ time: '2026-10-17T10:00:00.000000000Z', instance: 'fn-a', requestId: null, stream: 'stdout', message: 'hi' }], next: 'older' };
   const functions = {
     logs: jest.fn(async () => LOGS),
@@ -171,23 +179,7 @@ describe('GET /functions/:id/logs (L1, P-40, P-43)', () => {
   const get = (query: string) => fetch(`${baseUrl}/functions/${ID}/logs${query}`);
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({
-      controllers: [FunctionsController],
-      providers: [
-        { provide: FunctionsService, useValue: functions },
-        { provide: AsyncInvocationsService, useValue: {} },
-      ],
-    }).compile();
-    app = moduleRef.createNestApplication({ logger: false });
-    app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
-      req.principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'viewer' };
-      next();
-    });
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true })); // as main.ts
-    // As app.module.ts: an interceptor changes how Nest runs a handler, and so how a failure reaches the caller.
-    app.useGlobalInterceptors(new RequestIdInterceptor());
-    await app.listen(0, '127.0.0.1');
-    baseUrl = await app.getUrl();
+    ({ app, baseUrl } = await serve('viewer', functions));
   });
 
   afterAll(() => app.close());
@@ -286,5 +278,54 @@ describe('GET /functions/:id/logs (L1, P-40, P-43)', () => {
       expect([res.status, (await res.json()).message]).toEqual([400, expect.arrayContaining([message])]);
       expect(functions.liveLogs).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("GET /functions/:id/code: the function's code, as a zip AWS Lambda takes (L1)", () => {
+  /** An empty zip: its end of central directory alone. */
+  const ZIP = Buffer.concat([Buffer.from([0x50, 0x4b, 0x05, 0x06]), Buffer.alloc(18)]);
+  const functions = { code: jest.fn(async (..._args: unknown[]) => ({ name: 'orders', zip: ZIP })) };
+  let app: INestApplication;
+  let baseUrl: string;
+  const get = (query = '') => fetch(`${baseUrl}/functions/${ID}/code${query}`);
+
+  beforeAll(async () => {
+    ({ app, baseUrl } = await serve('viewer', functions));
+  });
+
+  afterAll(() => app.close());
+  beforeEach(() => jest.clearAllMocks());
+
+  it("gives the caller's account's function's zip, a file named after it, with its length", async () => {
+    const res = await get();
+
+    expect([res.status, res.headers.get('content-type'), res.headers.get('content-disposition'), res.headers.get('content-length')]).toEqual([
+      200,
+      'application/zip',
+      'attachment; filename="orders.zip"',
+      String(ZIP.length),
+    ]);
+    expect(Buffer.from(await res.arrayBuffer()).equals(ZIP)).toBe(true);
+    expect(functions.code).toHaveBeenCalledWith(ACCOUNT, ID, { javascript: false });
+  });
+
+  it('asks for JavaScript with javascript=true, and refuses what is neither true nor false, calling nothing', async () => {
+    await get('?javascript=true');
+    const refused = await get('?javascript=yes');
+
+    expect(functions.code.mock.calls).toEqual([[ACCOUNT, ID, { javascript: true }]]);
+    expect([refused.status, (await refused.json()).message]).toEqual([400, 'javascript must be true or false']);
+  });
+
+  it("names the file after a name from before Lambda's rule too, a character the rule refuses made _, as a header holds it", async () => {
+    functions.code.mockResolvedValueOnce({ name: 'commandes "été"', zip: ZIP });
+
+    expect((await get()).headers.get('content-disposition')).toBe('attachment; filename="commandes___t__.zip"');
+    expect(codeFileName('orders-v2_eu')).toBe('orders-v2_eu.zip');
+  });
+
+  it('refuses an ID that is not one', async () => {
+    expect((await fetch(`${baseUrl}/functions/fn-1/code`)).status).toBe(400);
+    expect(functions.code).not.toHaveBeenCalled();
   });
 });

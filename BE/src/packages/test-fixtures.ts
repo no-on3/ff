@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { Server, createServer } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { crc32, deflateRawSync } from 'node:zlib';
+import { fromBufferPromise } from 'yauzl';
 import { MEDIA_TYPES } from './registry';
 
 export interface TestEntry {
@@ -90,6 +91,18 @@ export function zipOf(entries: TestEntry[]): Buffer {
   end.writeUInt32LE(offset, 16);
   end.writeUInt16LE(0, 20);
   return Buffer.concat([...locals, directory, end]);
+}
+
+/** An archive's files read back as the backend reads a package (yauzl, its checks on), each as UTF-8 text, by name. */
+export async function filesOf(zip: Buffer): Promise<Record<string, string>> {
+  const archive = await fromBufferPromise(zip, { strictFileNames: true, validateEntrySizes: true });
+  const files: Record<string, string> = {};
+  for await (const entry of archive.eachEntry()) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of (await archive.openReadStreamPromise(entry)) as AsyncIterable<Buffer>) chunks.push(chunk);
+    files[entry.fileName] = Buffer.concat(chunks).toString('utf8');
+  }
+  return files;
 }
 
 const sha256 = (bytes: Buffer) => `sha256:${createHash('sha256').update(bytes).digest('hex')}`;

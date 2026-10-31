@@ -12,8 +12,9 @@ COPY nest-cli.json tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN npm run build
 
-# The production dependencies alone. Optional ones too are left out: TypeORM's optional peer ts-node, which
-# brings TypeScript, for its CLI on .ts files the image never has; and pg's for Cloudflare Workers.
+# The production dependencies alone, TypeScript among them, which turns inline code into the JavaScript an export
+# gives AWS Lambda (GET /functions/:id/code). Optional ones are left out: TypeORM's optional peer ts-node, for its CLI
+# on .ts files the image never has; and pg's for Cloudflare Workers.
 FROM node:24.21.0-alpine3.24 AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./

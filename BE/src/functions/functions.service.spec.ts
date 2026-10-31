@@ -28,10 +28,13 @@ import { FunctionUrl } from './entities/function-url.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { inlineCodeFacts } from './code-package';
 import { inlinePackage } from './inline-package';
+import { lambdaJavaScript } from './lambda-javascript';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { CodeImagesService } from '../packages/code-images.service';
+import { packageKey } from '../packages/package.entity';
 import { PackagesService } from '../packages/packages.service';
+import { filesOf, zipOf } from '../packages/test-fixtures';
 import { RegistryError } from '../packages/registry';
 import { FunctionKeys } from '../storage/function-keys.service';
 import { FunctionsService, workloadOf } from './functions.service';
@@ -57,7 +60,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     remove: jest.fn(),
   };
   const invocationsRepo = { create: jest.fn(), save: jest.fn(), insert: jest.fn(), findAndCount: jest.fn() };
-  const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
+  const storage = { uploadCode: jest.fn(), deleteCode: jest.fn(), getDocument: jest.fn() };
   const metrics = { recordMetric: jest.fn(), invocationStarted: jest.fn(), invocationFinished: jest.fn() };
   /** The account's plan, and how many functions it has: the transaction that saves a new one counts them. */
   let accountPlan: PlanView;
@@ -425,6 +428,47 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       // The attempt ran inline code's package; the rollback, the package before.
       expect(codeImages.imageFor.mock.calls.map(([, codeSha256]) => codeSha256)).toEqual([inlinePackage('broken', Runtime.NODEJS).codeSha256, PACKAGE]);
       expect(orchestrator.update.mock.calls.map(([workload]) => (workload as { codeImage?: string }).codeImage)).toEqual([IMAGE, IMAGE]);
+    });
+  });
+
+  describe("a function's code, as AWS Lambda takes it", () => {
+    const PACKAGE = 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=';
+    const TYPESCRIPT = 'enum Greeting { Hello = "Ahlan" }\nexport const handler = async (event: { name: string }) => `${Greeting.Hello}, ${event.name}`;\n';
+    const named = (fields: Partial<Function>) => functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), ...fields });
+
+    it('gives a package as it was uploaded, read from where object storage keeps it, with javascript too', async () => {
+      const zip = zipOf([{ name: 'src/orders.ts', data: 'export const create = async () => 201;' }]);
+      named({ name: 'orders', packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, handler: 'src/orders.create' });
+      storage.getDocument.mockResolvedValue({ body: zip, contentType: 'application/zip' });
+
+      await expect(service.code('user-1', 'fn-1')).resolves.toEqual({ name: 'orders', zip });
+      await expect(service.code('user-1', 'fn-1', { javascript: true })).resolves.toEqual({ name: 'orders', zip });
+      expect(storage.getDocument.mock.calls).toEqual([[packageKey('user-1', PACKAGE)], [packageKey('user-1', PACKAGE)]]);
+    });
+
+    it('gives inline code as the one-file package its pods run, byte for byte', async () => {
+      named({ name: 'greet', code: TYPESCRIPT, ...inlineCodeFacts(TYPESCRIPT) });
+
+      const { name, zip } = await service.code('user-1', 'fn-1');
+
+      expect(name).toBe('greet');
+      expect(zip.equals(inlinePackage(TYPESCRIPT, Runtime.NODEJS).zip)).toBe(true);
+      expect(storage.getDocument).not.toHaveBeenCalled();
+    });
+
+    it("gives inline Node.js code as JavaScript with javascript, in function.js, which the function's handler names on Lambda", async () => {
+      named({ code: TYPESCRIPT, ...inlineCodeFacts(TYPESCRIPT), handler: 'function.handler' });
+
+      const { zip } = await service.code('user-1', 'fn-1', { javascript: true });
+
+      expect(await filesOf(zip)).toEqual({ 'function.js': await lambdaJavaScript(TYPESCRIPT) });
+    });
+
+    it('gives Python code as it is, with javascript too', async () => {
+      const python = 'def handler(event, context):\n    return "Ahlan"\n';
+      named({ runtime: Runtime.PYTHON, code: python, ...inlineCodeFacts(python) });
+
+      expect(await filesOf((await service.code('user-1', 'fn-1', { javascript: true })).zip)).toEqual({ 'function.py': python });
     });
   });
 
@@ -1884,6 +1928,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
     const calls: Array<[string, (accountId: string, id?: string) => Promise<unknown>]> = [
       ['findOne', (accountId, id = ID) => service.findOne(accountId, id)],
+      ['code', (accountId, id = ID) => service.code(accountId, id)],
       ['update', (accountId, id = ID) => service.update(accountId, id, { code: 'v2' })],
       ['remove', (accountId, id = ID) => service.remove(accountId, id)],
       ['invoke', (accountId, id = ID) => service.invoke(accountId, id, {})],

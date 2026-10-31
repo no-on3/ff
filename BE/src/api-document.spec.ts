@@ -118,8 +118,12 @@ describe('the OpenAPI document (L1, P-08)', () => {
         // The caller owns the function, so the ownership checks pass.
         {
           provide: FunctionsService,
-          // The live tail answers with an event stream, which ends here at once (P-43).
-          useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }), liveLogs: async () => of({ data: {} }) }),
+          // The live tail answers with an event stream, which ends here at once (P-43); the code, with a zip: an empty one.
+          useValue: succeeding(FunctionsService, {
+            findOne: async () => ({ id: ID, accountId: ACCOUNT }),
+            liveLogs: async () => of({ data: {} }),
+            code: async () => ({ name: 'hello', zip: Buffer.from([0x50, 0x4b, 0x05, 0x06, ...new Array<number>(18).fill(0)]) }),
+          }),
         },
         { provide: AsyncInvocationsService, useValue: succeeding(AsyncInvocationsService, { queue: async () => ({ requestId: ID }), dryRun: async () => undefined }) },
         { provide: QueuesService, useValue: succeeding(QueuesService, { list: async () => [], receive: async () => [], remove: async () => undefined, purge: async () => undefined, deleteMessage: async () => undefined }) },

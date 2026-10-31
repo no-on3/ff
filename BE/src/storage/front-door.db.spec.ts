@@ -35,6 +35,7 @@ import { StorageKey } from './storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey, newStoreName } from './storage-names';
 import { StorageRequestCount } from './storage-request-count.entity';
 import { StorageRequestCountsService } from './storage-request-counts.service';
+import { testObjectStore, testStoreClient } from '../object-store/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '700000000001';
@@ -42,22 +43,9 @@ const OTHER = '700000000002';
 const MB = 1024 * 1024;
 
 run("buckets' S3 front door, in front of the store, its keys and buckets in FF's database (L2)", () => {
-  // The store's settings as the backend reads them, FF_OBJECT_STORE_*, alone: BE/.env's development SeaweedFS, or the CI's own.
-  const objectStore = {
-    endPoint: process.env.FF_OBJECT_STORE_ENDPOINT ?? 'localhost',
-    port: Number(process.env.FF_OBJECT_STORE_PORT ?? 9003),
-    useSSL: process.env.FF_OBJECT_STORE_USE_SSL === 'true',
-    accessKey: process.env.FF_OBJECT_STORE_ACCESS_KEY ?? 'ffdevaccesskey',
-    secretKey: process.env.FF_OBJECT_STORE_SECRET_KEY ?? 'ffdevsecretkey-local-only',
-  };
+  const objectStore = testObjectStore();
   /** The store itself, with FF's credentials: what it really keeps. */
-  const store = new S3Client({
-    endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
-    region: 'us-east-1',
-    forcePathStyle: true,
-    credentials: { accessKeyId: objectStore.accessKey, secretAccessKey: objectStore.secretKey },
-    requestChecksumCalculation: 'WHEN_REQUIRED',
-  });
+  const store = testStoreClient();
   const encryption = new EncryptionService({ getOrThrow: () => [{ id: 'test', key: randomBytes(32) }] } as unknown as ConfigService);
   let db: ScratchDatabase;
   let frontDoor: S3FrontDoor;

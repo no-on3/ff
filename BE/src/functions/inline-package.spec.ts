@@ -3,8 +3,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readPackage } from '../packages/package-archive';
+import { filesOf } from '../packages/test-fixtures';
 import { Runtime } from './entities/function.entity';
-import { inlinePackage } from './inline-package';
+import { inlinePackage, oneFileZip } from './inline-package';
 
 describe('inline code as a package', () => {
   let dir: string;
@@ -23,8 +24,16 @@ describe('inline code as a package', () => {
     const contents = await readPackage(file);
 
     expect(contents).toMatchObject({ files: ['function.ts'], unpackedSize: Buffer.byteLength(CODE) });
+    expect(await filesOf(built.zip)).toEqual({ 'function.ts': CODE });
     expect(built).toMatchObject({ file: 'function.ts', unpackedSize: Buffer.byteLength(CODE) });
     expect(built.codeSha256).toBe(createHash('sha256').update(built.zip).digest('base64'));
+  });
+
+  it("is the one-file zip of its file's name and bytes, which other code exported as another file makes the same way", async () => {
+    const javascript = 'exports.handler = async () => "Ahlan, Gabès";\n';
+
+    expect(oneFileZip('function.ts', Buffer.from(CODE, 'utf8')).equals(inlinePackage(CODE, Runtime.NODEJS).zip)).toBe(true);
+    expect(await filesOf(oneFileZip('function.js', Buffer.from(javascript, 'utf8')))).toEqual({ 'function.js': javascript });
   });
 
   it("names Python's file for Python, and keeps a name and code outside ASCII", async () => {
