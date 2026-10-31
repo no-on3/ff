@@ -21,6 +21,7 @@ import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
 import { withCachePrices } from '../migrations/1793333328301-CacheMeasures';
 import { withEmailPrices } from '../migrations/1793345460517-EmailBilling';
+import { withEstimatePrices } from '../migrations/1793486079752-AwsEstimatePrices';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
@@ -76,6 +77,7 @@ const CACHES = migrationNames.find((name) => name.startsWith('Caches1')) as stri
 const CACHE_MEASURES = migrationNames.find((name) => name.startsWith('CacheMeasures')) as string;
 const EMAIL_IDENTITIES = migrationNames.find((name) => name.startsWith('EmailIdentities')) as string;
 const EMAIL_MESSAGES = migrationNames.find((name) => name.startsWith('EmailMessages')) as string;
+const KEY_USES = migrationNames.find((name) => name.startsWith('KeyUses')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -597,10 +599,14 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
 
-      // The caches' and mail's migrations after it give both ElastiCache's SKU and SES's too.
+      // The caches', mail's and the estimate's migrations after it give both ElastiCache's SKU, SES's and what AWS bills that FF doesn't too.
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        { valid_from: next, prices: withEmailPrices(withCachePrices(withQueuePrices(current))), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'test' },
+        { valid_from: next, prices: withEstimatePrices(withEmailPrices(withCachePrices(withQueuePrices(current)))), created_by: 'system' },
+        {
+          valid_from: new Date('2099-01-01T00:00:00Z'),
+          prices: withEstimatePrices(withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))))),
+          created_by: 'test',
+        },
       ]);
       const minute = `date_trunc('minute', now())`;
       await dataSource.query(
@@ -744,9 +750,10 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
 
+      // The estimate's migration after it gives both what AWS bills that FF doesn't too.
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        { valid_from: next, prices: withEmailPrices(current), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(cached), created_by: 'test' },
+        { valid_from: next, prices: withEstimatePrices(withEmailPrices(current)), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEstimatePrices(withEmailPrices(cached)), created_by: 'test' },
       ]);
       await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
       await dataSource.query(
@@ -787,6 +794,48 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the estimate prices' migration gives books of AWS's prices not started yet what AWS bills that FF doesn't, with AWS's free tier and the price lists, adds its own from next month's first hour, leaves a book of other prices and every price of FF's as they were, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, KEY_USES);
+      // As after the key-uses migration, in a month later than its own: no book starts next month yet.
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      await dataSource.query(`DELETE FROM price_books WHERE valid_from > now()`);
+      const emailed = withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))));
+      const manual = { ...emailed, source: { kind: 'manual' } };
+      const book = async (validFrom: string, prices: unknown) =>
+        (await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', $1, $2, 'test') RETURNING id`, [validFrom, JSON.stringify(prices)]))[0].id as string;
+      const future = await book('2099-01-01T00:00:00Z', emailed);
+      const own = await book('2099-02-01T00:00:00Z', manual);
+      const [{ prices: current }] = await dataSource.query(`SELECT prices FROM price_books WHERE valid_from <= now() ORDER BY valid_from DESC LIMIT 1`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      const books = await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
+      expect(books).toEqual([
+        { valid_from: next, prices: withEstimatePrices(current), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEstimatePrices(emailed), created_by: 'test' },
+        { valid_from: new Date('2099-02-01T00:00:00Z'), prices: manual, created_by: 'test' },
+      ]);
+      expect(books.map((row: { prices: { prices: unknown; freeTier: unknown } }) => [row.prices.prices, row.prices.freeTier])).toEqual([
+        [current.prices, current.freeTier],
+        [emailed.prices, emailed.freeTier],
+        [manual.prices, manual.freeTier],
+      ]);
+
+      // Reverted: the book it made goes, the other loses what it gained.
+      await migrateDownTo(dataSource, KEY_USES);
+
+      expect(await dataSource.query(`SELECT id, prices FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
+        { id: future, prices: emailed },
+        { id: own, prices: manual },
+      ]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it("the cache-measures migration samples caches by month, append-only, rates their hours beside the others', lets an alarm watch a cache and go with it, gives books not started yet ElastiCache's SKU, adds its own from next month's first hour, and reverts unless a cache's hour is rated", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -804,9 +853,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       await dataSource.runMigrations({ transaction: 'each' });
 
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        // The mail's migration after it gives both SES's SKUs too.
-        { valid_from: next, prices: withEmailPrices(withCachePrices(current)), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(queued)), created_by: 'test' },
+        // The mail's and the estimate's migrations after it give both SES's SKUs and what AWS bills that FF doesn't too.
+        { valid_from: next, prices: withEstimatePrices(withEmailPrices(withCachePrices(current))), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEstimatePrices(withEmailPrices(withCachePrices(queued))), created_by: 'test' },
       ]);
       await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
       const cache = async (name: string, port: number) =>
@@ -1270,9 +1319,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
       const books = await dataSource.query(`SELECT id, valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
       expect(books).toEqual([
-        // The queues', the caches' and mail's migrations after it give both SQS's SKU, ElastiCache's and SES's too.
-        { id: expect.any(String), valid_from: next, prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'system' },
-        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'test' },
+        // The queues', the caches', mail's and the estimate's migrations after it give both SQS's SKU, ElastiCache's, SES's and what AWS bills that FF doesn't too.
+        { id: expect.any(String), valid_from: next, prices: withEstimatePrices(withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))))), created_by: 'system' },
+        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEstimatePrices(withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))))), created_by: 'test' },
       ]);
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

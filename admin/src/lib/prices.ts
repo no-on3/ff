@@ -1,8 +1,9 @@
 /**
  * Price books, as the admin routes give them (P-73, D8): AWS Lambda's SKUs in
  * TND, and those of customers' databases, buckets, queues, caches and mail, as AWS
- * RDS, S3, SQS, ElastiCache and SES price them, in the books that have them. contract.test.ts checks the
- * SKUs against the backend's priceDocumentSchema.
+ * RDS, S3, SQS, ElastiCache and SES price them, in the books that have them; and,
+ * for the estimate at AWS's prices, what AWS bills that FF doesn't, in US$
+ * alone. contract.test.ts checks the SKUs against the backend's priceDocumentSchema.
  */
 export type BookStatus = 'past' | 'active' | 'scheduled';
 
@@ -39,17 +40,57 @@ export interface StoragePrices {
   emailAttachmentsGb?: string;
 }
 
-/** AWS's US$ prices, as a book from them records them. */
-export interface UsdPrices extends StoragePrices {
+/** Data out's, Lambda's logs' and CloudFront's tiers, by the account's GB in the month: a price per GB. */
+export interface GbTier {
+  upToGb: number | null;
+  price: string;
+}
+
+/**
+ * What AWS bills that FF doesn't, for the estimate at AWS's prices, in US$ alone: an RDS db.t4g.micro for each
+ * database, an ElastiCache cache.t4g.micro for each cache, data out, Lambda's logs written and kept, CloudFront in front
+ * of a site (its data out, HTTPS requests, and the function each request runs), and a NAT gateway with its public IPv4
+ * address. Lambda's start-up time is billed as its duration.
+ */
+export interface EstimatePrices {
+  databaseInstanceHour: string;
+  cacheNodeHour: string;
+  dataOutGb: GbTier[];
+  logsIngestedGb: GbTier[];
+  logsStorageGbMonth: string;
+  cloudFrontDataOutGb: GbTier[];
+  cloudFrontRequestsPerTenThousand: string;
+  cloudFrontFunctionsPerMillion: string;
+  natGatewayHour: string;
+  natGatewayGb: string;
+  publicIpv4Hour: string;
+}
+
+/** AWS Lambda's SKUs. */
+export interface LambdaPrices {
   requestsPerMillion: string;
   gbSecond: PriceTier[];
   provisionedGbSecond: string;
   provisionedDurationGbSecond: string;
 }
 
+/** AWS's US$ prices, as a book from them records them. */
+export interface UsdPrices extends LambdaPrices, StoragePrices, Partial<EstimatePrices> {}
+
+/** The free tier AWS gives every account every month, which the estimate takes off. */
+export interface AwsFreeTier {
+  requests: number;
+  gbSeconds: number;
+  queueRequests: number;
+  dataOutGb: number;
+  cloudFrontDataOutGb: number;
+  cloudFrontRequests: number;
+  cloudFrontFunctions: number;
+}
+
 export interface PriceDocument {
   currency: string;
-  source: { kind: string; readOn?: string; usdRate?: string; usdRateDate?: string; usdPrices?: UsdPrices; [more: string]: unknown };
+  source: { kind: string; readOn?: string; usdRate?: string; usdRateDate?: string; usdPrices?: UsdPrices; awsFreeTier?: AwsFreeTier; [more: string]: unknown };
   freeTier: {
     requests: number;
     gbSeconds: number;
@@ -59,7 +100,7 @@ export interface PriceDocument {
     requestsTier2?: number;
     queueRequests?: number;
   };
-  prices: UsdPrices & { minimumBilledMs: number; idleInstanceGbSecond: string; monthlyPlanFee: string; databaseMonthlyFee?: string };
+  prices: LambdaPrices & StoragePrices & { minimumBilledMs: number; idleInstanceGbSecond: string; monthlyPlanFee: string; databaseMonthlyFee?: string };
 }
 
 export interface PriceBook {
@@ -99,6 +140,36 @@ export const SKUS = [
   'emailRecipientsPerThousand',
   'emailAttachmentsGb',
 ] as const;
+
+/** What AWS bills that FF doesn't, in the order of the backend's US$ prices. */
+export const ESTIMATE_SKUS = [
+  'databaseInstanceHour',
+  'cacheNodeHour',
+  'dataOutGb',
+  'logsIngestedGb',
+  'logsStorageGbMonth',
+  'cloudFrontDataOutGb',
+  'cloudFrontRequestsPerTenThousand',
+  'cloudFrontFunctionsPerMillion',
+  'natGatewayHour',
+  'natGatewayGb',
+  'publicIpv4Hour',
+] as const;
+
+/** Each of those prices' names, as the page's fields, a draft's problems and a book's rows say them; a tiered one's tiers follow it. */
+export const ESTIMATE_LABELS: Record<(typeof ESTIMATE_SKUS)[number], string> = {
+  databaseInstanceHour: 'An RDS db.t4g.micro for each database, an hour',
+  cacheNodeHour: 'An ElastiCache cache.t4g.micro for each cache, an hour',
+  dataOutGb: 'Data out',
+  logsIngestedGb: "Lambda's logs written",
+  logsStorageGbMonth: "Lambda's logs kept, per GB-month",
+  cloudFrontDataOutGb: "A site's data out through CloudFront, in Europe",
+  cloudFrontRequestsPerTenThousand: 'CloudFront HTTPS requests, per 10,000',
+  cloudFrontFunctionsPerMillion: 'CloudFront Functions, per million',
+  natGatewayHour: 'A NAT gateway, an hour',
+  natGatewayGb: 'A NAT gateway, per GB through it',
+  publicIpv4Hour: "The NAT gateway's public IPv4 address, an hour",
+};
 
 export const STATUS_LABELS: Record<BookStatus, string> = { past: 'Past', active: 'Active', scheduled: 'Scheduled' };
 
@@ -153,6 +224,22 @@ export interface DraftForm {
   monthlyPlanFee: string;
   /** Customers' databases', buckets', queues', caches' and mail's prices and free tier, as text; only those the book drafted from has are used. */
   storage: StorageForm;
+  /** What AWS bills that FF doesn't, in US$, as text, each tiered price by its tiers; used when the book drafted from has it, in "aws" mode. */
+  estimate: EstimateForm;
+}
+
+export interface EstimateForm {
+  databaseInstanceHour: string;
+  cacheNodeHour: string;
+  dataOutTiers: string[];
+  logsIngestedTiers: string[];
+  logsStorageGbMonth: string;
+  cloudFrontDataOutTiers: string[];
+  cloudFrontRequestsPerTenThousand: string;
+  cloudFrontFunctionsPerMillion: string;
+  natGatewayHour: string;
+  natGatewayGb: string;
+  publicIpv4Hour: string;
 }
 
 export interface StorageForm {
@@ -177,6 +264,9 @@ export const pricesCaches = (book: PriceDocument): boolean => book.prices.cacheG
 
 /** Whether a book prices customers' mail, as SES does: the page shows its SKUs, and a book drafted from it has them too. */
 export const pricesEmail = (book: PriceDocument): boolean => book.prices.emailRecipientsPerThousand !== undefined;
+
+/** Whether a book records what AWS bills that FF doesn't, for the estimate at AWS's prices: the page shows those prices, and a book drafted from it has them too. */
+export const pricesEstimate = (book: PriceDocument): boolean => book.source.usdPrices?.databaseInstanceHour !== undefined;
 
 /** A form that starts from a book, the active one: its prices, its rate, and the next hour. */
 export function formFrom(book: PriceDocument, now: Date): DraftForm {
@@ -234,6 +324,19 @@ export function formFrom(book: PriceDocument, now: Date): DraftForm {
       freeRequestsTier2: String(book.freeTier.requestsTier2 ?? ''),
       freeQueueRequests: String(book.freeTier.queueRequests ?? ''),
     },
+    estimate: {
+      databaseInstanceHour: usd?.databaseInstanceHour ?? '',
+      cacheNodeHour: usd?.cacheNodeHour ?? '',
+      dataOutTiers: (usd?.dataOutGb ?? []).map((tier) => tier.price),
+      logsIngestedTiers: (usd?.logsIngestedGb ?? []).map((tier) => tier.price),
+      logsStorageGbMonth: usd?.logsStorageGbMonth ?? '',
+      cloudFrontDataOutTiers: (usd?.cloudFrontDataOutGb ?? []).map((tier) => tier.price),
+      cloudFrontRequestsPerTenThousand: usd?.cloudFrontRequestsPerTenThousand ?? '',
+      cloudFrontFunctionsPerMillion: usd?.cloudFrontFunctionsPerMillion ?? '',
+      natGatewayHour: usd?.natGatewayHour ?? '',
+      natGatewayGb: usd?.natGatewayGb ?? '',
+      publicIpv4Hour: usd?.publicIpv4Hour ?? '',
+    },
   };
 }
 
@@ -243,7 +346,8 @@ export function formFrom(book: PriceDocument, now: Date): DraftForm {
  * price times the rate, exactly. Customers' databases', buckets', queues', caches' and mail's
  * SKUs and free tier are those the base book has, each as the form sets it: a
  * book without them would price them at nothing, which the API refuses after
- * a book that has them.
+ * a book that has them. So is what AWS bills that FF doesn't, in "aws" mode:
+ * US$ prices alone, with the base book's free tier and price lists.
  */
 export function draftDocument(form: DraftForm, base: PriceDocument, today: Date): { document: PriceDocument; validFrom: string } | { problems: string[] } {
   const problems: string[] = [];
@@ -260,7 +364,7 @@ export function draftDocument(form: DraftForm, base: PriceDocument, today: Date)
   const validFrom = `${form.day}T${String(hour).padStart(2, '0')}:00:00Z`;
 
   let source: PriceDocument['source'];
-  let prices: UsdPrices;
+  let prices: LambdaPrices & StoragePrices;
   const storage = (given: StorageForm['usd'], unit: string): StoragePrices => {
     const basePrices = base.prices;
     return {
@@ -286,6 +390,25 @@ export function draftDocument(form: DraftForm, base: PriceDocument, today: Date)
       }),
     };
   };
+  /** What AWS bills that FF doesn't, from the form, on the base book's tiers. */
+  const estimate = (given: EstimateForm, baseUsd: UsdPrices): EstimatePrices => {
+    const price = (sku: Exclude<(typeof ESTIMATE_SKUS)[number], 'dataOutGb' | 'logsIngestedGb' | 'cloudFrontDataOutGb'>) => decimal(`${ESTIMATE_LABELS[sku]} (US$)`, given[sku]);
+    const tiers = (sku: 'dataOutGb' | 'logsIngestedGb' | 'cloudFrontDataOutGb', texts: string[]) =>
+      (baseUsd[sku] ?? []).map((tier, index, all) => ({ upToGb: tier.upToGb, price: decimal(`${ESTIMATE_LABELS[sku]}, ${gbTierLabel(all, index)}, per GB (US$)`, texts[index] ?? '') }));
+    return {
+      databaseInstanceHour: price('databaseInstanceHour'),
+      cacheNodeHour: price('cacheNodeHour'),
+      dataOutGb: tiers('dataOutGb', given.dataOutTiers),
+      logsIngestedGb: tiers('logsIngestedGb', given.logsIngestedTiers),
+      logsStorageGbMonth: price('logsStorageGbMonth'),
+      cloudFrontDataOutGb: tiers('cloudFrontDataOutGb', given.cloudFrontDataOutTiers),
+      cloudFrontRequestsPerTenThousand: price('cloudFrontRequestsPerTenThousand'),
+      cloudFrontFunctionsPerMillion: price('cloudFrontFunctionsPerMillion'),
+      natGatewayHour: price('natGatewayHour'),
+      natGatewayGb: price('natGatewayGb'),
+      publicIpv4Hour: price('publicIpv4Hour'),
+    };
+  };
   if (form.mode === 'aws') {
     const rate = decimal('Rate', form.rate);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(form.rateDate)) problems.push('Rate of: must be a day, such as 2026-10-14');
@@ -295,6 +418,7 @@ export function draftDocument(form: DraftForm, base: PriceDocument, today: Date)
       provisionedGbSecond: decimal('Provisioned concurrency (US$)', form.usd.provisionedGbSecond),
       provisionedDurationGbSecond: decimal('Duration on provisioned concurrency (US$)', form.usd.provisionedDurationGbSecond),
       ...storage(form.storage.usd, ' (US$)'),
+      ...(pricesEstimate(base) && estimate(form.estimate, base.source.usdPrices as UsdPrices)),
     };
     if (problems.length) return { problems };
     const times = (usdPrice: string) => multiplyDecimals(usdPrice, rate);
@@ -343,26 +467,24 @@ export function draftDocument(form: DraftForm, base: PriceDocument, today: Date)
   return { validFrom, document: { currency: base.currency, source, freeTier, prices: { ...prices, ...knobs } } };
 }
 
-/** A tier's name, from where it ends: "first 6,000,000,000 GB-s", "past 15,000,000,000 GB-s". */
-export function tierLabel(tiers: PriceTier[], index: number): string {
-  const end = tiers[index].upToGbSeconds;
-  if (end !== null) return index === 0 ? `first ${end.toLocaleString('en-US')} GB-s` : `up to ${end.toLocaleString('en-US')} GB-s`;
-  return `past ${(tiers[index - 1]?.upToGbSeconds ?? 0).toLocaleString('en-US')} GB-s`;
+/** A tier's name, from where it ends, in its unit: "first 6,000,000,000 GB-s", "up to 15,000,000,000 GB-s", "past 15,000,000,000 GB-s". */
+function tierName(ends: Array<number | null>, index: number, unit: string): string {
+  const end = ends[index];
+  if (end !== null) return index === 0 ? `first ${end.toLocaleString('en-US')} ${unit}` : `up to ${end.toLocaleString('en-US')} ${unit}`;
+  return `past ${(ends[index - 1] ?? 0).toLocaleString('en-US')} ${unit}`;
 }
 
-/** An S3 storage tier's name, from where it ends: "first 51,200 GB-months", "past 512,000 GB-months". */
-export function storageTierLabel(tiers: StorageTier[], index: number): string {
-  const end = tiers[index].upToGbMonths;
-  if (end !== null) return index === 0 ? `first ${end.toLocaleString('en-US')} GB-months` : `up to ${end.toLocaleString('en-US')} GB-months`;
-  return `past ${(tiers[index - 1]?.upToGbMonths ?? 0).toLocaleString('en-US')} GB-months`;
-}
+/** A duration tier's name: "first 6,000,000,000 GB-s", "past 15,000,000,000 GB-s". */
+export const tierLabel = (tiers: PriceTier[], index: number): string => tierName(tiers.map((tier) => tier.upToGbSeconds), index, 'GB-s');
 
-/** An SQS request tier's name, from where it ends: "first 100,000,000,000 requests", "past 200,000,000,000 requests". */
-export function queueTierLabel(tiers: QueueTier[], index: number): string {
-  const end = tiers[index].upToRequests;
-  if (end !== null) return index === 0 ? `first ${end.toLocaleString('en-US')} requests` : `up to ${end.toLocaleString('en-US')} requests`;
-  return `past ${(tiers[index - 1]?.upToRequests ?? 0).toLocaleString('en-US')} requests`;
-}
+/** An S3 storage tier's name: "first 51,200 GB-months", "past 512,000 GB-months". */
+export const storageTierLabel = (tiers: StorageTier[], index: number): string => tierName(tiers.map((tier) => tier.upToGbMonths), index, 'GB-months');
+
+/** An SQS request tier's name: "first 100,000,000,000 requests", "past 200,000,000,000 requests". */
+export const queueTierLabel = (tiers: QueueTier[], index: number): string => tierName(tiers.map((tier) => tier.upToRequests), index, 'requests');
+
+/** A tier by the GB of data out, logs or CloudFront's: "first 10,240 GB", "past 153,600 GB". */
+export const gbTierLabel = (tiers: GbTier[], index: number): string => tierName(tiers.map((tier) => tier.upToGb), index, 'GB');
 
 /** A book's SKUs as its page lists them: each one's label, its price in the book's currency, and AWS's US$ price where the book has it. */
 export function bookRows(document: PriceDocument): Array<[string, string, string]> {
@@ -403,6 +525,22 @@ export function bookRows(document: PriceDocument): Array<[string, string, string
   // Customers' mail, as AWS SES prices it: each recipient, and attachments by the GB, in a book that has them.
   if (prices.emailRecipientsPerThousand !== undefined) rows.push(['E-mail, per 1,000 recipients', prices.emailRecipientsPerThousand, usd?.emailRecipientsPerThousand ?? '']);
   if (prices.emailAttachmentsGb !== undefined) rows.push(['E-mail attachments, per GB', prices.emailAttachmentsGb, usd?.emailAttachmentsGb ?? '']);
+  // What AWS bills that FF doesn't, for the estimate at AWS's prices, in US$ alone, with the free tier AWS gives every month.
+  if (usd && pricesEstimate(document)) {
+    for (const sku of ESTIMATE_SKUS) {
+      const price = usd[sku];
+      if (Array.isArray(price)) rows.push(...price.map((tier, index): [string, string, string] => [`Estimate: ${ESTIMATE_LABELS[sku]}, ${gbTierLabel(price, index)}, per GB`, '', tier.price]));
+      else rows.push([`Estimate: ${ESTIMATE_LABELS[sku]}`, '', price ?? '']);
+    }
+    const free = source.awsFreeTier;
+    if (free) {
+      rows.push([
+        "Estimate: AWS's free tier, a month",
+        '',
+        `${free.requests.toLocaleString('en-US')} requests and ${free.gbSeconds.toLocaleString('en-US')} GB-s of Lambda, ${free.queueRequests.toLocaleString('en-US')} SQS requests, ${free.dataOutGb} GB out, CloudFront's ${free.cloudFrontDataOutGb.toLocaleString('en-US')} GB, ${free.cloudFrontRequests.toLocaleString('en-US')} requests and ${free.cloudFrontFunctions.toLocaleString('en-US')} functions`,
+      ]);
+    }
+  }
   return rows;
 }
 

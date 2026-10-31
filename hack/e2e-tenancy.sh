@@ -2006,8 +2006,9 @@ first_book="$(jq -c '.[0].document' <<<"$books")"
 latest_book="$(jq -c '.[-1].document' <<<"$books")"
 starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
 with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5 tries"}')" >/dev/null
-check "a book after one with databases', buckets', queues', caches' and mail's prices is refused without them, each named" \
-  "400 14 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
+check "a book after one with databases', buckets', queues', caches' and mail's prices, and what AWS bills that FF doesn't, is refused without them, each named" \
+  "400 25 prices.databaseStorageGbMonth: the book before this one has it, so this one must too source.usdPrices.publicIpv4Hour: the book before this one has it, so this one must too" \
+  "$(status) $(jq -r '"\(.message | length) \(.message[0]) \(.message[-1])"' "$work/body")"
 created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
 check "the operator adds a book for next year from the latest: scheduled, made by the operator" "201 scheduled true" \
   "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"

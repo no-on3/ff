@@ -7,7 +7,7 @@ import { Currency } from '../billing/currency.entity';
 import { Decimal } from '../billing/decimal';
 import { formatMinor } from '../billing/money';
 import { PriceBook } from '../billing/price-book.entity';
-import { PriceDocument, priceDocumentProblems, storageKeysMissing } from '../billing/price-book';
+import { PriceDocument, priceDocumentProblems, keysLeftOut } from '../billing/price-book';
 import { PricingService, monthBounds } from '../billing/pricing.service';
 import { BookStatus, PriceBookPreviewView, PriceBookView } from './admin-prices.dto';
 import { Operator } from './operator';
@@ -59,7 +59,7 @@ export class AdminPricesService {
       throw new BadRequestException(`validFrom must be a whole hour, UTC, from ${earliest.toISOString()} on`);
     }
     const before = await this.books.findOne({ where: { validFrom: LessThan(validFrom) }, order: { validFrom: 'DESC' } });
-    const missing = before ? storageKeysMissing(before.prices, checked) : [];
+    const missing = before ? keysLeftOut(before.prices, checked) : [];
     if (missing.length) throw new BadRequestException(missing.map((path) => `${path}: the book before this one has it, so this one must too`));
     const taken = `A price book already starts at ${validFrom.toISOString()}`;
     try {

@@ -34,7 +34,7 @@ import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
 import { OVERVIEW_FIELDS } from './lib/overview';
 import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
 import { LIMIT_FIELDS } from './lib/plans';
-import { SKUS, multiplyDecimals } from './lib/prices';
+import { ESTIMATE_SKUS, SKUS, multiplyDecimals } from './lib/prices';
 import { REASON_HEADER, REASON_LENGTH } from './lib/reason';
 import { SETTINGS } from './lib/settings';
 
@@ -169,6 +169,13 @@ describe("the plans' limits and the price books' SKUs (P-73)", () => {
     const skus = [...prices.slice(0, prices.indexOf('\n  }),')).matchAll(/^ {4}(\w+): /gm)].map((match) => match[1]);
 
     expect(skus).toEqual([...SKUS]);
+  });
+
+  it("are the backend's, for what AWS bills that FF doesn't, in its order: the US$ prices after SES's", () => {
+    const usd = priceBookSource.slice(priceBookSource.indexOf('const usdPricesSchema = z.strictObject({'));
+    const keys = [...usd.slice(0, usd.indexOf('\n});')).matchAll(/^ {2}(\w+): /gm)].map((match) => match[1]);
+
+    expect(keys.slice(keys.indexOf('emailAttachmentsGb') + 1)).toEqual([...ESTIMATE_SKUS]);
   });
 
   it("price the first book's TND as the migration has them: its US$ prices times its rate", () => {
