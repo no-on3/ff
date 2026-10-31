@@ -1394,6 +1394,8 @@ hack/ci.sh all               # static, unit, db, security and cluster
 
 `security` fails on a high or critical vulnerability that has a fix. One that can't be fixed yet, or whose fix is less than two weeks old, is accepted for a while, with why and until when, and on that date it is reported again: in an image, in `.trivyignore.yaml`, for the one binary it is in; in what a Node.js package ships, in `.npmauditignore`, for that directory and package (`hack/lib/npm-audit.py` reads npm audit's report against it, and `hack/test-npm-audit.sh` tests it). A gitleaks finding that isn't a secret goes in `.gitleaksignore`, by its fingerprint.
 
+**On GitHub,** a push to `master` and a pull request run every stage but `platform`, and the nightly run (02:17 UTC) runs them all. A run started by hand names its jobs: `gh workflow run ci.yml --ref <branch> -f jobs=platform` runs that one alone, `-f jobs=static,unit` those two, `all` every one, and `nightly` what the schedule runs, with its issue. **A red nightly run is seen:** it opens one issue, "The nightly run is red", with the run's page and the lines of the failed jobs' logs that say what failed, or comments on the one already open; the next green nightly closes it (`hack/lib/nightly-issue.sh`, which `hack/test-nightly-issue.sh` tests in `static` against a stand-in `gh`).
+
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
 
 ```bash

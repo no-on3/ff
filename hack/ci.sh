@@ -4,8 +4,8 @@
 #             command where the machine has none recent enough (CI only: locally, the installed
 #             dependencies are used as they are)
 #   static    linters and type checks, the builds, the ff command's formatting and lints, the docs' links and
-#             tables and npm audit's checker, how-it-works.html's script, every shell script parsed, and the CI
-#             workflow linted
+#             tables, npm audit's checker and the nightly run's issue against stand-ins, how-it-works.html's
+#             script, every shell script parsed, and the CI workflow linted
 #   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the cache
 #             and mail servers' agents', the small app's handlers, the ff command's and its binary's (L1, L2),
 #             the alert rules' and the log collector's filter (these two in their own images)
@@ -113,6 +113,7 @@ stage_static() {
   step "ff: lints, its tests included, and its build (clippy)" in_dir cli cargo clippy --all-targets --locked -- -D warnings
   step "docs: the checker itself, on documents with one problem each" hack/test-check-docs.sh
   step "npm audit's checker, on reports of each kind" hack/test-npm-audit.sh
+  step "the nightly run's issue, against a stand-in gh" hack/test-nightly-issue.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses

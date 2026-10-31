@@ -8,6 +8,10 @@ on:
     branches: [master, main] # the repository's main branch is master; a host may name it main
   pull_request:
   workflow_dispatch:
+    inputs:
+      jobs:
+        description: 'The jobs to run: all; nightly, as the schedule runs them, with its issue; or names, comma-separated'
+        default: all
   schedule:
     - cron: '17 2 * * *' # nightly: the platform deployed on a cluster of its own
 
@@ -23,6 +27,7 @@ env:
 
 jobs:
   static:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',static,') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -33,6 +38,7 @@ jobs:
       - run: hack/ci.sh deps static
 
   unit:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',unit,') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -46,6 +52,7 @@ jobs:
       - run: hack/ci.sh deps unit
 
   db:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',db,') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -56,6 +63,7 @@ jobs:
       - run: hack/ci.sh deps db
 
   security:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',security,') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -75,6 +83,8 @@ jobs:
 
   cluster:
     needs: [static, unit, db]
+    # After the three it needs, or without them when a run started by hand names it alone.
+    if: ${{ !cancelled() && !contains(needs.*.result, 'failure') && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',cluster,')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -87,7 +97,9 @@ jobs:
       - run: hack/ci.sh deps cluster
 
   platform:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.jobs == 'all' ||
+      inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',platform,')))
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -97,3 +109,24 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - run: hack/ci.sh deps platform
+
+  # A red nightly opens an issue, or comments on the one open, and a green one closes it (hack/lib/nightly-issue.sh):
+  # GitHub itself e-mails only whoever last changed this file.
+  nightly-report:
+    needs: [static, unit, db, security, cluster, platform]
+    if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.jobs == 'nightly')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      actions: read # the failed jobs' logs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: hack/lib/nightly-issue.sh
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
