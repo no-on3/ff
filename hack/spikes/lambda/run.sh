@@ -12,16 +12,24 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../../k8s/env.sh"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-work="$FF_REPO_ROOT/hack/.spike-lambda"
+# Its work, and where what each tool sent is kept: elsewhere for a run of other versions (hack/ci.sh tools).
+work="${SPIKE_WORK:-$FF_REPO_ROOT/hack/.spike-lambda}"
+recordings="${SPIKE_RECORDINGS:-$here/recordings}"
 "$FF_REPO_ROOT/hack/check-resources.sh"
 mkdir -p "$work"
 
-# The clients, pinned: the CLI and the SDKs at the versions hack/e2e.sh uses for S3 and SQS.
-AWS_CLI_IMAGE=amazon/aws-cli:2.34.32
-[ -d "$work/js/node_modules/@aws-sdk/client-lambda" ] ||
-  npm install --prefix "$work/js" --no-audit --no-fund --silent @aws-sdk/client-lambda@3.1156.0 >/dev/null
+# The clients, pinned: the CLI and the SDKs at the versions hack/e2e.sh uses for S3 and SQS; others through the
+# environment, as the nightly's tools job gives the latest, OpenTofu's, Terraform's, the provider's and the SAM CLI's
+# through hack/install-tools.sh's own variables.
+AWS_CLI_VERSION="${AWS_CLI_VERSION:-2.34.32}"
+SDK_VERSION="${SDK_VERSION:-3.1156.0}"
+BOTO3_VERSION="${BOTO3_VERSION:-1.43.118}"
+AWS_CLI_IMAGE="amazon/aws-cli:$AWS_CLI_VERSION"
+[ "$(jq -r .version "$work/js/node_modules/@aws-sdk/client-lambda/package.json" 2>/dev/null)" = "$SDK_VERSION" ] ||
+  npm install --prefix "$work/js" --no-audit --no-fund --silent "@aws-sdk/client-lambda@$SDK_VERSION" >/dev/null
 [ -x "$work/venv/bin/python" ] || python3 -m venv "$work/venv"
-"$work/venv/bin/python" -c 'import boto3' 2>/dev/null || "$work/venv/bin/pip" install --quiet --disable-pip-version-check boto3==1.43.118
+[ "$("$work/venv/bin/python" -c 'import boto3; print(boto3.__version__)' 2>/dev/null)" = "$BOTO3_VERSION" ] ||
+  "$work/venv/bin/pip" install --quiet --disable-pip-version-check "boto3==$BOTO3_VERSION"
 
 # Two functions' code: a handler, and the same with 6 MB that doesn't compress, for the largest body.
 python3 - "$work" <<'PY'
@@ -68,18 +76,21 @@ cli_step() { # <label> <lambda command and arguments...>
   jq -cn --arg step "$label" --argjson ok "$([ "$status" -eq 0 ] && echo true || echo false)" --argjson ms "$(($(date +%s%3N) - started))" --arg out "$out" \
     'if $ok then {step: $step, ok: true, ms: $ms, result: ($out | .[0:200])} else {step: $step, ok: false, ms: $ms, shown: ($out | .[0:400])} end'
 }
+# A step whose refusal depends on the CLI's own pace: each command starts a container, which takes about as long as the
+# endpoint's 3 s of Pending or 2 s of InProgress, so that the refusal comes on one run and not on the next.
+cli_paced_step() { cli_step "$@" | jq -c '. + {paced: true}'; }
 cli_flow() {
   local name=spike-cli arn mapping
   arn="arn:aws:lambda:$AWS_REGION:123456789012:function:$name"
   cli_step create-function create-function --function-name "$name" --runtime nodejs22.x --role arn:aws:iam::123456789012:role/spike \
     --handler index.handler --zip-file fileb:///work/code.zip --query State --output text
-  cli_step "invoke while pending" invoke --function-name "$name" --cli-binary-format raw-in-base64-out --payload '{"early":true}' /work/cli-out.json
+  cli_paced_step "invoke while pending" invoke --function-name "$name" --cli-binary-format raw-in-base64-out --payload '{"early":true}' /work/cli-out.json
   cli_step "wait function-active-v2" wait function-active-v2 --function-name "$name"
   cli_step "invoke, with the log tail" invoke --function-name "$name" --cli-binary-format raw-in-base64-out --payload '{"hello":"spike"}' --log-type Tail \
     --query StatusCode /work/cli-out.json
   cli_step "invoke, asynchronously" invoke --function-name "$name" --invocation-type Event --cli-binary-format raw-in-base64-out --payload '{}' /work/cli-out.json
   cli_step "update-function-code, 6 MB" update-function-code --function-name "$name" --zip-file fileb:///work/big.zip --query LastUpdateStatus --output text
-  cli_step "update-function-configuration during the update" update-function-configuration --function-name "$name" --timeout 10 --query LastUpdateStatus --output text
+  cli_paced_step "update-function-configuration during the update" update-function-configuration --function-name "$name" --timeout 10 --query LastUpdateStatus --output text
   cli_step "wait function-updated-v2" wait function-updated-v2 --function-name "$name"
   cli_step update-function-configuration update-function-configuration --function-name "$name" --timeout 10 --environment 'Variables={STAGE=spike}' \
     --query LastUpdateStatus --output text
@@ -116,7 +127,7 @@ cli_flow() {
   cli_step "reads: get-account-settings" get-account-settings --query AccountUsage.FunctionCount
   cli_step "update-alias, weighted" update-alias --function-name "$name" --name live --function-version 1 --routing-config 'AdditionalVersionWeights={}' \
     --query FunctionVersion --output text
-  cli_step "update-event-source-mapping while creating" update-event-source-mapping --uuid "$mapping" --batch-size 7 --query State --output text
+  cli_paced_step "update-event-source-mapping while creating" update-event-source-mapping --uuid "$mapping" --batch-size 7 --query State --output text
   cli_step update-function-url-config update-function-url-config --function-name "$name" --auth-type AWS_IAM --query AuthType --output text
   cli_step update-function-event-invoke-config update-function-event-invoke-config --function-name "$name" --maximum-event-age-in-seconds 600
   cli_step "a later operation: list-layers" list-layers
@@ -143,6 +154,8 @@ tf_step() { # <label> <command...>
 tf_flow() { # <tofu|terraform>
   local dir="$work/$1"
   rm -rf "$dir" && mkdir -p "$dir" && cp "$here/terraform/main.tf" "$dir/"
+  # Another version of the provider than the one main.tf names: AWS_PROVIDER_VERSION, as hack/install-tools.sh takes it.
+  if [ -n "${AWS_PROVIDER_VERSION:-}" ]; then sed -i "s/version = \"[0-9.]*\"/version = \"$AWS_PROVIDER_VERSION\"/" "$dir/main.tf"; fi
   local tf=("$FF_REPO_ROOT/hack/bin/$1" "-chdir=$dir") vars=(-var "endpoint=$endpoint" -var "name=spike-$1" -var "code=$work/code.zip")
   export TF_CLI_CONFIG_FILE="$FF_REPO_ROOT/hack/.terraform/cli.tfrc" TF_IN_AUTOMATION=1 CHECKPOINT_DISABLE=1 TF_LOG=DEBUG TF_LOG_PATH="$dir/debug.log"
   tf_step "$1 init" "${tf[@]}" init -input=false -no-color
@@ -183,8 +196,10 @@ for tool in "$@"; do
     *) echo "unknown client $tool: cli, sdk, boto3, tofu, terraform or sam" >&2; exit 2 ;;
   esac >"$work/$tool.steps.jsonl"
   endpoint_stop
-  # What the tool sent, kept in the repository for the endpoint's tests to replay; nothing for a tool that sent nothing.
-  if [ -s "$work/$tool.requests.jsonl" ]; then mkdir -p "$here/recordings" && cp "$work/$tool.requests.jsonl" "$here/recordings/"; fi
+  # What the tool sent, kept in the repository for the endpoint's tests to replay, nothing for a tool that sent nothing;
+  # and its steps, against which another version's are compared (compare.py).
+  mkdir -p "$recordings" && cp "$work/$tool.steps.jsonl" "$recordings/"
+  if [ -s "$work/$tool.requests.jsonl" ]; then cp "$work/$tool.requests.jsonl" "$recordings/"; fi
   jq -r '"  \(if .ok then "ok  " else "FAIL" end) \(.step)\(if .ok then "" else ": \(.shown | gsub("\n"; " ") | .[0:160])" end)"' "$work/$tool.steps.jsonl"
 done
 python3 "$here/analyze.py" "$work" "$@" | tee "$work/summary.md"

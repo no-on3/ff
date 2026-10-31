@@ -1,0 +1,4 @@
+{"step":"tofu init","ok":true,"ms":4789}
+{"step":"tofu apply","ok":true,"ms":15947}
+{"step":"tofu plan, nothing to change","ok":true,"ms":4496}
+{"step":"tofu destroy","ok":true,"ms":16686}

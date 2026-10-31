@@ -253,10 +253,38 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+  # The latest release of each tool the tests pin, tried as the pinned ones run (hack/ci.sh tools): a change of theirs
+  # is seen the night it comes out, before a pin moves.
+  tools:
+    if: >-
+      github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.jobs == 'all' ||
+      inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',tools,')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          lockfiles: '' # the spike installs the SDK it tries itself
+      - run: hack/ci.sh deps tools
+        env:
+          GH_TOKEN: ${{ github.token }} # the tools' releases on GitHub
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure() # the versions tried, the spike's log and what each tool sent, and the report of its steps
+        with:
+          name: failure-${{ github.job }}
+          path: |
+            hack/.ci/tools/latest.env
+            hack/.ci/tools/spike.log
+            hack/.ci/tools/recordings/
+            hack/.ci/report.md
+          retention-days: 7
+          if-no-files-found: ignore
+
   # A red nightly opens an issue, or comments on the one open, and a green one closes it (hack/lib/nightly-issue.sh):
   # GitHub itself e-mails only whoever last changed this file.
   nightly-report:
-    needs: [platform, advisories]
+    needs: [platform, advisories, tools]
     if: ${{ always() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.jobs == 'nightly')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

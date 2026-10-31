@@ -25,6 +25,9 @@
 #     images  the platform's images, run as the cluster runs them, and its manifests, without deploying them
 #   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last push's) and the lockfiles,
 #             checked again with the day's advisories, for an image or a package unchanged since its push: nightly
+#   tools     the latest release of each tool the tests pin (the AWS CLI, the SDK for JavaScript, boto3, OpenTofu,
+#             Terraform and its AWS provider, the SAM CLI, Rust's stable toolchain), tried as the pinned ones run,
+#             and what changed said: nightly
 #   platform  FF deployed from deploy/k8s on a cluster of its own (hack/e2e-platform.sh), about 15 minutes
 #   all       static, unit, db, security and cluster, one after the other
 # A failed step is reported and the next one runs, so that a run names every failed step, not only the first; a step
@@ -82,7 +85,7 @@ free_ports() {
 # the backend here needs its packages; the images build in Docker with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
   [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust" [db]=BE [security]=''
-  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust" [images]=BE [platform]='' [advisories]=''
+  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
 )
 stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[images]}"
 stage_uses[all]="${stage_uses[static]} ${stage_uses[unit]} ${stage_uses[db]} ${stage_uses[security]} ${stage_uses[cluster]}"
@@ -152,6 +155,7 @@ stage_static() {
   step "the pipeline's steps, on runs of their own" hack/test-ci-steps.sh
   step "a push of documents alone, told from one with code" hack/test-changes.sh
   step "the nightly's SBOMs, the branch's last, against a stand-in gh" hack/test-last-sboms.sh
+  step "the nightly's latest tools, compared with the pinned ones, on recordings of its own" hack/test-tools-compare.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses
@@ -305,6 +309,36 @@ stage_advisories() {
   done
 }
 
+# The latest release of each tool the tests pin, tried as the pinned ones run: a change of theirs is seen the night it
+# comes out, before a pin moves. Into hack/.ci/tools/: the versions (latest.env), the spike's log and recordings.
+latest_tools() {
+  mkdir -p "$ci_dir/tools"
+  "$repo/hack/lib/latest-tools.sh" >"$ci_dir/tools/latest.env"
+  grep -v SHA256 "$ci_dir/tools/latest.env"
+}
+rust_stable() { # the ff command's lints and tests with Rust's newest stable release, the toolchain file's pin aside
+  RUSTUP_TOOLCHAIN=stable "$repo/hack/install-tools.sh" rust >/dev/null &&
+    in_dir cli env RUSTUP_TOOLCHAIN=stable cargo clippy --all-targets --locked -- -D warnings &&
+    in_dir cli env RUSTUP_TOOLCHAIN=stable cargo test --locked
+}
+tools_spike() { # the Lambda spike's flows with the latest, compared with the pinned ones' recordings; the spike's output in a log
+  local dir="$ci_dir/tools"
+  rm -rf "$dir/recordings"
+  if ! (set -a && source "$dir/latest.env" && set +a &&
+    SPIKE_WORK="$dir/spike" SPIKE_RECORDINGS="$dir/recordings" "$repo/hack/spikes/lambda/run.sh") >"$dir/spike.log" 2>&1; then
+    echo "the spike's run failed (hack/.ci/tools/spike.log):" >&2
+    tail -20 "$dir/spike.log" >&2
+    return 1
+  fi
+  python3 "$repo/hack/spikes/lambda/compare.py" "$repo/hack/spikes/lambda/recordings" "$dir/recordings" cli sdk boto3 tofu terraform sam
+}
+stage_tools() {
+  "$repo/hack/check-resources.sh"
+  prepare "the latest releases of the tools the tests pin" latest_tools
+  step "Rust's latest stable release: the ff command's lints and tests" rust_stable
+  step "the AWS tools' latest releases: the Lambda spike's flows, as the pinned ones ran" tools_spike
+}
+
 runtime_images() { # the tags the backend runs, which the cluster tests import
   docker build -q -t ff-runtime-nodejs:24-v3 runtimes/nodejs >/dev/null &&
     docker build -q -t ff-runtime-python:3.13-v3 runtimes/python >/dev/null
@@ -343,9 +377,9 @@ stage_platform() {
 ci_stages="$*"
 for stage in "$@"; do
   case "$stage" in
-    deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | images | advisories | platform) "stage_$stage" ;;
+    deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | images | advisories | tools | platform) "stage_$stage" ;;
     all) stage_static; stage_unit; stage_db; stage_security; stage_cluster ;;
-    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), advisories, platform or all" >&2; exit 2 ;;
+    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), advisories, tools, platform or all" >&2; exit 2 ;;
   esac
 done
 ci_done

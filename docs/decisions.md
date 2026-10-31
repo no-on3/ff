@@ -65,7 +65,8 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 **67. The nightly run: the platform's suite, and a job that tries the newest versions of the tools the tests pin;** the other jobs run on pushes and pull requests alone. ✅ Your answer: as recommended. It answers 39's question on GitHub's minutes: about 20 minutes a night, 600 a month, where the nightly took about 80 a night repeating every job, 2,400 a month, more than the free 2,000.
 - **Changed already:** T-09's first part: the five jobs a push runs skip on the schedule, and 39 says the measured minutes; its second, a push that changes only documents runs `static` alone, about 4 minutes, gitleaks among its steps now.
 - **Corrected while doing it (2026-10-31), yours to undo:** the recommendation said the nightly adds nothing to the jobs a push ran but minutes. Not so for the security scans: advisories come out every day, and an image unchanged since its push can have one the next night, as the SBOMs of 2026-10-24, scanned again on 2026-10-31, had three (go-jose in Caddy's three images, OpenSSL in two). So the nightly also runs `advisories`: the branch's last SBOMs and the lockfiles checked again with the day's databases, nothing built, about 2 minutes a night, 60 a month.
-- **Still to change:** T-09: the tools' job.
+- **Changed since:** the tools' job, T-09's last part: each night, the latest release of each AWS tool the tests pin and Rust's stable, tried as the pinned ones run, red when one behaves otherwise.
+- **Still to change:** nothing.
 
 ## 2026-10-30: step 4 started, its eleven choices as recommended
 
