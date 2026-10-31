@@ -91,7 +91,7 @@ e2e_data_db 10.199.3.0/24 "$data_db_address"
 e2e_cache 10.199.3.11
 e2e_mail 10.199.3.12 10.199.3.13
 }
-section_def stack section_stack
+section_def stack section_stack budget=90
 
 section_backend() {
 section "ff and the backend"
@@ -225,7 +225,7 @@ for example in hello.ts hello.py; do
   check "and it is gone" 3 "$(code)"
 done
 }
-section_def backend section_backend stack
+section_def backend section_backend stack budget=90
 
 section_failures() {
 section "failures"
@@ -277,7 +277,7 @@ check "and another account none of them" "0 No function yet: \`ff deploy <file>\
 for name in cli-raises cli-slow cli-broken; do ff delete "$name" --yes; done
 check "the last one deleted" "0 deleted cli-broken" "$(code) $(out)"
 }
-section_def failures section_failures backend
+section_def failures section_failures backend budget=45
 
 section_environment() {
 section "environment variables: --env, ff env, and on this machine"
@@ -301,7 +301,7 @@ check "ff local invoke --env gives the run its variables" "0 Local" "$(code) $(o
 ff local invoke "$work/env-reader.py" --env FUNCTION_TIMEOUT=1
 check "and refuses the names the runtime sets itself, as the API does" "2 error: FUNCTION_TIMEOUT is reserved: AWS Lambda or FF's runtime sets it" "$(code) $(err)"
 }
-section_def environment section_environment backend
+section_def environment section_environment backend budget=40
 
 section_secrets() {
 section "secrets: set from stdin, read by the function only"
@@ -321,7 +321,7 @@ ff invoke cli-secrets --raw
 check "ff secrets unset removes it" "0 none" "$(code) $(out | jq -r .password)"
 ff delete cli-secrets --yes
 }
-section_def secrets section_secrets backend
+section_def secrets section_secrets backend budget=25
 
 section_url() {
 section "a function's URL: ff url, ff invoke --http, ff domains"
@@ -356,7 +356,7 @@ ff invoke cli-url --http GET /
 check "after which ff invoke --http has nowhere to call" "3 error: cli-url has no URL: \`ff url enable cli-url --auth none|key\` gives it one" "$(code) $(err)"
 ff delete cli-url --yes
 }
-section_def url section_url backend
+section_def url section_url backend budget=15
 
 section_schedules() {
 section "schedules: ff schedule set, its runs read a few sections on"
@@ -368,7 +368,7 @@ check "ff schedule set makes it, and says its next runs" "0 cli-sched's schedule
 ff schedule set cli-sched "rate(5 minute)"
 check "a wrong expression is said in the API's words, and nothing changes" "3 error: rate(5 minute) must be rate(5 minutes): the unit is plural above 1" "$(code) $(err | head -1)"
 }
-section_def schedules section_schedules backend
+section_def schedules section_schedules backend budget=10
 
 section_init() {
 section "ff init: a new function's folder, run locally, then deployed"
@@ -388,7 +388,7 @@ for runtime in python nodejs; do
   ff delete "$name" --yes
 done
 }
-section_def init section_init backend
+section_def init section_init backend budget=35
 
 section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"
@@ -524,7 +524,7 @@ ff invoke cli-pkg-ts --data '{"ms": 60000}'
 check "and run on FF as they would on Lambda" "0 1m" "$(code) $(out | sed '$d' | jq -r .took)"
 ff delete cli-pkg-ts --yes
 }
-section_def packages section_packages init
+section_def packages section_packages init budget=135
 
 section_schedules_ran() {
 section "schedules: its runs, list, disable, remove, once their minute has passed in the sections before"
@@ -559,7 +559,7 @@ ff schedule list cli-sched
 check "ff schedule remove takes it away" "0 cli-sched has no schedule: \`ff schedule set cli-sched \"rate(1 hour)\"\` makes one" "$(code) $(out)"
 ff delete cli-sched --yes
 }
-section_def schedules_ran section_schedules_ran schedules
+section_def schedules_ran section_schedules_ran schedules budget=10
 
 section_small_app_db() {
 section "the small app with a database of its own on the internet: a package with a driver, a secret, a URL that writes there, a nightly schedule"
@@ -609,7 +609,7 @@ check "which reports the day's order from the database" "0 $order_day 1 2 0" "$(
 ff delete orders-nightly --yes --profile c
 ff delete orders-api --yes --profile c
 }
-section_def small_app_db section_small_app_db backend
+section_def small_app_db section_small_app_db backend budget=90
 
 section_databases() {
 section "a customer's database, with ff db: a function's secret, written by the app with its account's internet access off"
@@ -639,7 +639,7 @@ check "ff db password: the old string opens no session, the new one does, and th
 ff invoke cli-db-orders --http POST /orders --data '{"item": "bambalouni", "quantity": 1}'
 check "  ... which writes again through its new secret" "0 HTTP 201 2" "$(code) $(out | head -1) $(data_db_psql "$new_conn" 'select count(*) from orders')"
 }
-section_def databases section_databases small_app_db
+section_def databases section_databases small_app_db budget=55
 
 section_buckets() {
 section "buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
@@ -693,7 +693,7 @@ ff buckets keys revoke "$key_id" --yes
 refused="$(aws_with_key s3 ls 2>&1 || true)"
 check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
 }
-section_def buckets section_buckets backend
+section_def buckets section_buckets backend budget=15
 
 section_sites() {
 section "a site, with ff sites: a built folder deployed with a deploy's own key, visited, deployed again changed"
@@ -737,7 +737,7 @@ check "ff sites domains add gives the CNAME to the site's host that proves it" "
 ff sites domains remove cli-site www.cli-shop.tn --yes
 check "  ... and remove takes it away" "0 0" "$(code) $("$ff_bin" sites domains list cli-site --output json | jq length)"
 }
-section_def sites section_sites backend
+section_def sites section_sites backend budget=5
 
 section_queues() {
 section "queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
@@ -795,7 +795,7 @@ check "the other account has none of them" "0 The account has no queue: \`ff que
 # Its key's last use is above: revoked now, so that the account's two keys are free for the sections after.
 ff buckets keys revoke "$queue_key" --yes
 }
-section_def queues section_queues buckets
+section_def queues section_queues buckets budget=15
 
 section_event_sources() {
 section "functions reading queues, with ff event-sources: the function given the queue's batches, the message it failed kept"
@@ -836,7 +836,7 @@ check "ff event-sources remove removes it, the queue's messages staying" "0 remo
 ff delete cli-reader --yes
 ff queues delete cli-work --yes
 }
-section_def event_sources section_event_sources backend
+section_def event_sources section_event_sources backend budget=20
 
 section_notifications() {
 section "a bucket's notifications, with ff buckets notify: an upload with the AWS CLI runs a function with S3's event, a deletion goes to a queue"
@@ -880,7 +880,7 @@ ff buckets delete cli-drop --force --yes
 ff queues delete cli-drop-events --yes
 ff delete cli-on-upload --yes
 }
-section_def notifications section_notifications buckets
+section_def notifications section_notifications buckets budget=15
 
 section_databases_used() {
 section "a customer's database: its month in ff usage, minutes after it was made; then deleted"
@@ -896,7 +896,7 @@ check "ff db delete drops it, with its data, its user gone" "0 deleted the datab
   "$(code) $(out) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select count(*) from pg_roles where rolname = '$(jq -rn --arg s "$new_conn" '$s | capture("//(?<u>[^:]+):").u')'")"
 ff delete cli-db-orders --yes
 }
-section_def databases_used section_databases_used databases
+section_def databases_used section_databases_used databases budget=15
 
 section_small_app() {
 section "the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
@@ -1021,7 +1021,7 @@ ff delete shop-nightly --yes
 ff delete shop-receipts --yes
 ff delete shop-api --yes
 }
-section_def small_app section_small_app small_app_db buckets
+section_def small_app section_small_app small_app_db buckets budget=195
 
 # What the sections above started and the minutes since have done: read here, once those minutes have passed in the
 # sections between.
@@ -1042,7 +1042,7 @@ check "ff buckets delete leaves a bucket with files, in the API's words, exit 3"
 ff buckets delete cli-photos --force --yes
 check "  ... and --force deletes them first" "0 deleted the bucket cli-photos, with its files" "$(code) $(out)"
 }
-section_def buckets_used section_buckets_used buckets
+section_def buckets_used section_buckets_used buckets budget=5
 
 section_sites_counted() {
 section "a site: its visits in ff sites metrics, minutes after; then no site, a site again, and deleted"
@@ -1059,7 +1059,7 @@ check "  ... its files kept: a deploy finds them unchanged, and makes it a site 
   "$(code) $(out | jq -r '"\(.uploaded | length) \(.unchanged) \(.singlePageApp)"')"
 ff buckets delete cli-site --force --yes
 }
-section_def sites_counted section_sites_counted sites
+section_def sites_counted section_sites_counted sites budget=5
 
 section_queues_counted() {
 section "queues: the queue's metrics, minutes after; then deleted, and its month in ff usage"
@@ -1080,7 +1080,7 @@ ff usage
 check "ff usage lists the queue's month after the buckets, deleted since: its requests as SQS bills them, the messages sent and received" "0 true" \
   "$(code) $(out | grep -E '^cli-orders \(deleted\) +[1-9][0-9]* +[1-9][0-9]* +[1-9][0-9]* +[0-9.]+$' >/dev/null && echo true || echo false)"
 }
-section_def queues_counted section_queues_counted queues
+section_def queues_counted section_queues_counted queues budget=5
 
 section_account() {
 section "the account: who, its plan, what it used and owes, how its functions ran"
@@ -1106,7 +1106,7 @@ ff metrics --since 2h --period 3600
 check "  ... and its calls that didn't wait, as Lambda's metrics count them, cli-raises's dropped among them" "0 true" \
   "$(code) $(out | tail -1 | grep -E '; calls without waiting: ([2-9]|[1-9][0-9]+) kept, [1-9][0-9]* dropped' >/dev/null && echo true || echo false)"
 }
-section_def account section_account failures
+section_def account section_account failures budget=5
 
 section_local() {
 section "ff local: on this machine, in Docker, as production runs it"
@@ -1156,7 +1156,7 @@ kill -INT "$starter"
 wait "$starter" 2>/dev/null || true
 check "and Ctrl-C removes its container too" 0 "$(leftover)"
 }
-section_def local section_local backend
+section_def local section_local backend budget=45
 
 sections_run
 checks_done cli-e2e

@@ -4,15 +4,17 @@
 # of its own, so that one which stops, at a failed command under set -e or at fail(), stops alone: it is recorded as a
 # failure at its line, the sections that need it are recorded as not run, and the others run. What a section leaves,
 # its variables and its functions, passes to the suite's shell as if it had run there. Each section's time is kept in
-# the suite's work directory, and --list shows the last run's.
+# the suite's work directory, and --list shows the last run's. A section's budget is the seconds a whole run should
+# take in it: one that takes longer is said after the last section and in hack/ci.sh's report, a flag, not a failure,
+# so that a suite stays the size it was as sections come; a section run alone waits its minutes out, and is not.
 #   source "$FF_REPO_ROOT/hack/lib/sections.sh"; sections_options "$@"; set -- "${sections_rest[@]}"
-#   section_def <id> <function> [needs...]          each section, in order, after its function
+#   section_def <id> <function> [needs...] budget=<seconds>   each section, in order, after its function
 #   sections_run                                    then checks_done
 #   <suite> --list | --only <id>[,<id>...] | --from <id>
 # The runner's own names all start with sections_: a section's code sees every name of the shell that runs it, and a
 # suite's must not be hidden by one of the runner's.
 sections_order=()
-declare -A sections_fn=() sections_needs=() sections_outcome=()
+declare -A sections_fn=() sections_needs=() sections_outcome=() sections_budget=()
 sections_only=''
 sections_from=''
 sections_list=false
@@ -32,12 +34,33 @@ sections_options() { # the suite's arguments: its own come back in sections_rest
   done
 }
 
-section_def() { # <id> <function> [needs...]: a section, in the order it runs
-  local sections_id="$1" sections_function="$2"
+section_def() { # <id> <function> [needs...] [budget=<seconds>]: a section, in the order it runs
+  local sections_id="$1" sections_function="$2" sections_word sections_given=()
   shift 2
+  for sections_word in "$@"; do
+    case "$sections_word" in
+      budget=*) sections_budget[$sections_id]="${sections_word#budget=}" ;;
+      *) sections_given+=("$sections_word") ;;
+    esac
+  done
   sections_order+=("$sections_id")
   sections_fn[$sections_id]="$sections_function"
-  sections_needs[$sections_id]="$*"
+  sections_needs[$sections_id]="${sections_given[*]}"
+}
+
+# The sections a whole run took longer in than their budgets: said, and added to hack/ci.sh's report.
+sections_over_budget() { # <"id: seconds against budget">...
+  local sections_suite="${checks_suite:-$(basename "$0" .sh)}"
+  echo "sections over their budget, a flag: $(printf '%s; ' "$@" | sed 's/; $//')"
+  [ -n "${FF_CHECKS_REPORT:-}" ] || return 0
+  {
+    echo "### $sections_suite: sections over their budget"
+    echo
+    echo '```text'
+    printf '  %s\n' "$@"
+    echo '```'
+    echo
+  } >>"$FF_CHECKS_REPORT"
 }
 
 # The sections to run, in order: every one, or those asked for and, transitively, what they need.
@@ -136,7 +159,7 @@ sections_leave() { # <status> <file>
 
 sections_run() {
   local sections_times="$work/section-times" sections_wanted_ids sections_id sections_need sections_unmet sections_start
-  local sections_state sections_status
+  local sections_state sections_status sections_over=()
   local -A sections_seconds=() sections_last=()
   if [ -f "$sections_times" ]; then
     while IFS=$'\t' read -r sections_id sections_start; do sections_last[$sections_id]="$sections_start"; done <"$sections_times"
@@ -145,8 +168,10 @@ sections_run() {
     local sections_width=0
     for sections_id in "${sections_order[@]}"; do [ ${#sections_id} -le "$sections_width" ] || sections_width=${#sections_id}; done
     for sections_id in "${sections_order[@]}"; do
+      sections_need="${sections_needs[$sections_id]:+needs: ${sections_needs[$sections_id]}}"
+      [ -z "${sections_budget[$sections_id]:-}" ] || sections_need+="${sections_need:+; }budget ${sections_budget[$sections_id]} s"
       printf '%-*s %6s  %s%s\n' "$sections_width" "$sections_id" "${sections_last[$sections_id]:+${sections_last[$sections_id]} s}" \
-        "$(section_title "$sections_id")" "${sections_needs[$sections_id]:+  (needs: ${sections_needs[$sections_id]})}"
+        "$(section_title "$sections_id")" "${sections_need:+  ($sections_need)}"
     done
     checks_quit 0
   fi
@@ -184,6 +209,10 @@ sections_run() {
     [ ! -f "$sections_state" ] || source "$sections_state"
     if [ "$sections_status" -eq 0 ]; then sections_outcome[$sections_id]=ok; else sections_outcome[$sections_id]=stopped; fi
     sections_seconds[$sections_id]=$((SECONDS - sections_start))
+    if [ -z "$sections_only$sections_from" ] && [ -n "${sections_budget[$sections_id]:-}" ] &&
+      [ "${sections_seconds[$sections_id]}" -gt "${sections_budget[$sections_id]}" ]; then
+      sections_over+=("$sections_id: ${sections_seconds[$sections_id]} s against ${sections_budget[$sections_id]}")
+    fi
     for sections_need in "${sections_order[@]}"; do
       [ -z "${sections_seconds[$sections_need]:-}" ] || printf '%s\t%s\n' "$sections_need" "${sections_seconds[$sections_need]}"
     done >"$sections_times"
@@ -192,4 +221,5 @@ sections_run() {
       exit 1
     fi
   done
+  [ ${#sections_over[@]} -eq 0 ] || sections_over_budget "${sections_over[@]}"
 }

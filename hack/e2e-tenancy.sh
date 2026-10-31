@@ -380,7 +380,7 @@ e2e_data_db 10.199.2.0/24 10.199.2.10
 e2e_cache 10.199.2.11
 e2e_mail 10.199.2.12 10.199.2.13
 }
-section_def stack section_stack
+section_def stack section_stack budget=145
 
 section_receiver() {
 section "a webhook receiver, as a customer's: it records each request, and answers 204, or 500 on /fail"
@@ -404,7 +404,7 @@ PY
 python3 "$work/receiver.py" "$receiver_port" "$work/webhooks.jsonl" &
 e2e_pids+=("$!")
 }
-section_def receiver section_receiver stack
+section_def receiver section_receiver stack budget=5
 
 section_backends() {
 section "backends"
@@ -429,7 +429,7 @@ e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e
   FF_SQS_PORT="$sqs_port_oidc" FF_SQS_BASE="http://127.0.0.1:$sqs_port_oidc"
 echo "  accounts A $account_a and B $account_b on $api; OIDC mode on $api_oidc"
 }
-section_def backends section_backends stack
+section_def backends section_backends stack budget=100
 
 section_account_a() {
 section "account A's function"
@@ -517,7 +517,7 @@ needs_user_for_members="400 Development mode acts as FF_DEV_ACCOUNT_ID, without 
 no_operator="400 Development mode has no operator: the admin dashboard needs FF_AUTH_MODE=oidc and an operator's login"
 not_admin_client="403 The admin routes take a token issued to the admin dashboard (ff-admin)"
 }
-section_def account_a section_account_a backends receiver
+section_def account_a section_account_a backends receiver budget=20
 
 section_dev_routes() {
 section "development mode, account B, on every route (${#routes[@]})"
@@ -925,7 +925,7 @@ check "B deletes its own function" 200 "$(status)"
 as_b DELETE "/databases/$db_b" >/dev/null
 check "B deletes its own database" 204 "$(status)"
 }
-section_def dev_routes section_dev_routes account_a
+section_def dev_routes section_dev_routes account_a budget=30
 
 section_s3_keys() {
 section "buckets through the S3 front door: each account's key reaches its own account's buckets alone"
@@ -954,7 +954,7 @@ $(site_of as_a l5-photos-a)"
 as_b DELETE /buckets/l5-photos-b >/dev/null
 check "B deletes its own bucket" 204 "$(status)"
 }
-section_def s3_keys section_s3_keys dev_routes
+section_def s3_keys section_s3_keys dev_routes budget=25
 
 section_sqs_keys() {
 section "queues through the SQS endpoint: each account's key reaches its own account's queues alone"
@@ -988,7 +988,7 @@ sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_b" >/dev/n
 check "each deletes its own queue" "http://127.0.0.1:$sqs_port/$account_a/l5-events-a http://127.0.0.1:$sqs_port/$account_a/l5-orders-a http://127.0.0.1:$sqs_port/$account_b/l5-orders-b" \
   "$(listed_by "$key_a_id" "$key_a_secret") $(listed_by "$key_b_id" "$key_b_secret")"
 }
-section_def sqs_keys section_sqs_keys s3_keys
+section_def sqs_keys section_sqs_keys s3_keys budget=25
 
 section_ses_keys() {
 section "mail through the SES endpoint: each account's key reaches its own account's identities and sends from them alone"
@@ -1016,7 +1016,7 @@ check "SendEmail: B's key can't send from A's domain, which isn't B's; A's key c
 $([[ "$(ses_with "$key_a_id" "$key_a_secret" send-email --from-email-address orders@shop.l5.example.tn --destination ToAddresses=team@shop.l5.example.tn --content "$ses_message" --query MessageId)" =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false) \
 $(as_b GET /email/messages | jq '.messages | length')"
 }
-section_def ses_keys section_ses_keys s3_keys
+section_def ses_keys section_ses_keys s3_keys budget=15
 
 section_anonymous() {
 section "nobody authenticated, through the guard, on every route (${#routes[@]})"
@@ -1031,7 +1031,7 @@ for route in "${routes[@]}"; do
   fi
 done
 }
-section_def anonymous section_anonymous account_a
+section_def anonymous section_anonymous account_a budget=10
 
 section_signup() {
 section "sign-up: Keycloak's form, e-mail verification through Mailpit, a pending account"
@@ -1108,7 +1108,7 @@ ref_1="$(jq -r .reference <<<"$proforma_1")"
 
 grant "$account_1" 5000 "promo:l5-1"
 }
-section_def signup section_signup account_a
+section_def signup section_signup account_a budget=20
 
 section_isolation() {
 section "account 2, on account 1's function and account, on every route (${#routes[@]})"
@@ -1546,7 +1546,7 @@ with_token "$token_2" GET /functions >/dev/null
 check "user 2, now in two accounts, must name one" \
   "400 This user belongs to several accounts: name one in the X-FF-Account header" "$(status) $(message)"
 }
-section_def isolation section_isolation signup s3_keys
+section_def isolation section_isolation signup s3_keys budget=25
 
 section_api_keys() {
 section "API keys"
@@ -1628,7 +1628,7 @@ for route in "${routes[@]}"; do
   check "account 2's key on $route: 404" "404 Function with ID $fn_1 not found" "$(status) $(message)"
 done
 }
-section_def api_keys section_api_keys isolation
+section_def api_keys section_api_keys isolation budget=10
 
 section_url_credentials() {
 section "a function URL that takes the account's credentials"
@@ -1651,7 +1651,7 @@ check "account 1 deletes the URL" 204 "$(status)"
 check "account 1's function was invoked twice more by its key, through the API and its URL, and is otherwise unchanged" \
   "$(jq -c '.invocations += 2' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
 }
-section_def url_credentials section_url_credentials api_keys
+section_def url_credentials section_url_credentials api_keys budget=5
 
 section_members() {
 section "members (P-16): user 2 is invited into account 1"
@@ -1702,7 +1702,7 @@ check "the owner removes user 2" 200 "$(status)"
 as_member GET /functions >/dev/null
 check "who can't reach account 1 any more" "404 Account $account_1 not found" "$(status) $(message)"
 }
-section_def members section_members isolation
+section_def members section_members isolation budget=5
 
 section_audit() {
 section "the audit log (P-17)"
@@ -1719,7 +1719,7 @@ check "the approval is FF's, with the operator's reason, but neither their e-mai
 as_user_1 GET '/audit-log?limit=0' >/dev/null
 check "a page of nothing is refused" "400 limit must not be less than 1" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 }
-section_def audit section_audit members
+section_def audit section_audit members budget=5
 
 section_admin() {
 section "the admin routes (P-70): FF's operator"
@@ -1736,7 +1736,7 @@ check "and the audit log keeps who, why, and what it replaced" "operator@ff.test
   "$(sql_value "SELECT actor_label, details->>'reason', details->'changes'->'gracePeriodHours'->>'from', details->'changes'->'gracePeriodHours'->>'to'
        FROM audit_log WHERE action = 'settings.update' AND actor LIKE 'operator:%'" -F '|')"
 }
-section_def admin section_admin backends
+section_def admin section_admin backends budget=5
 
 section_operator_accounts() {
 section "the operator's accounts (P-71)"
@@ -1788,7 +1788,7 @@ as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"again"}}' >/dev/null
 check "and its function answers again, from a cold start" 201 "$(status)"
 check "and its cache lets its user in again, its keys kept" "one active" "$(cache_cli "$cache_conn_1" GET l5) $(as_user_1 GET /caches/l5-one | jq -r .status)"
 }
-section_def operator_accounts section_operator_accounts admin isolation
+section_def operator_accounts section_operator_accounts admin isolation budget=15
 
 section_logs() {
 section "the function's logs (P-40; from the log store, P-43)"
@@ -1907,7 +1907,7 @@ plan_change="$(with_token "$operator_token" PUT /admin/plans/l5-large \
 check "a new quota for the plan reaches its account's namespace at once (P-73)" "200 1 0 32 16 16Gi" \
   "$(status) $(jq -r '"\(.quota.applied) \(.quota.failed)"' <<<"$plan_change") $(kubectl -n "$(tenant_namespace "$account_1")" get resourcequota ff-tenant-quota -o jsonpath='{.spec.hard.pods} {.spec.hard.limits\.cpu} {.spec.hard.limits\.memory}')"
 }
-section_def logs section_logs isolation admin api_keys
+section_def logs section_logs isolation admin api_keys budget=25
 
 section_metrics() {
 section "metrics, from the usage records the bill is made of"
@@ -1921,7 +1921,7 @@ check "the function's Invocations, by the hour, are its usage records' calls, ex
 as_user_1 GET "/functions/$fn_1/metrics?period=60&start=2026-01-01T00:00:00Z" >/dev/null
 check "a window of more points than an answer gives is refused, saying why" 400 "$(status)"
 }
-section_def metrics section_metrics isolation
+section_def metrics section_metrics isolation budget=5
 
 section_notifications() {
 section "notifications: a test to a webhook and the owners' e-mail, signed, delivered, tried again"
@@ -1969,7 +1969,7 @@ check "its webhooks then carry a valid signature by each" true "$(verify_signatu
 check "the rotation and the tests are in the account's audit log, never a secret" "notification.test webhook_secret.rotate false" \
   "$(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action | startswith("notification.") or startswith("webhook_secret.")) | .action] | unique | join(" ")') $(as_user_1 GET /audit-log | grep whsec_ >/dev/null && echo true || echo false)"
 }
-section_def notifications section_notifications signup
+section_def notifications section_notifications signup budget=10
 
 section_support() {
 section "support: finding what a customer asks about, and its data only for a reason"
@@ -1994,7 +1994,7 @@ check "its owner reads each look in the account's audit log, as FF's, with the r
   "support.view_logs:FF:l5: its lines support.view_code:FF:l5: checking the handler support.view_invocation:FF:l5: the customer asked about this call" \
   "$(jq -r '[.entries[] | "\(.action):\(.actorLabel):\(.details.reason)"] | join(" ")' <<<"$looks")"
 }
-section_def support section_support admin logs
+section_def support section_support admin logs budget=5
 
 section_price_books() {
 section "the operator's price books (P-73)"
@@ -2021,7 +2021,7 @@ check "the active book is never removed" 409 "$(status)"
 with_token "$operator_token" DELETE "/admin/price-books/$(jq -r .id <<<"$created")" '{"reason": "l5: not yet"}' >/dev/null
 check "a scheduled one is" "200 2" "$(status) $(with_token "$operator_token" GET /admin/price-books | jq length)"
 }
-section_def price_books section_price_books admin
+section_def price_books section_price_books admin budget=5
 
 section_transfers() {
 section "bank transfers (P-35)"
@@ -2077,7 +2077,7 @@ check "and, in the account's audit log, who asked for it and FF's two credits, w
   "billing.pro_forma:$user_1:true payment.record:FF:null payment.withholding:FF:null" \
   "$(jq -r '[.entries[] | select(.action == "billing.pro_forma" or (.action | startswith("payment."))) | "\(.action):\(.actorLabel):\(if .actor == "operator" then .ip else (.ip != null) end)"] | reverse | join(" ")' <<<"$log_payments")"
 }
-section_def transfers section_transfers admin signup
+section_def transfers section_transfers admin signup budget=5
 
 section_invoices() {
 section "invoices (P-36)"
@@ -2125,7 +2125,7 @@ check "the operator downloads the invoice too" "200 application/pdf" "$(fetch_pd
 documents_1="$(with_token "$operator_token" GET "/admin/invoices?accountId=$account_1")"
 check "and lists both documents of account 1" "200 AV-$year-000001,FAC-$year-000001" "$(status) $(jq -r '[.invoices[].number] | join(",")' <<<"$documents_1")"
 }
-section_def invoices section_invoices transfers
+section_def invoices section_invoices transfers budget=5
 
 section_grants() {
 section "credit grants (P-74)"
@@ -2165,7 +2165,7 @@ check "the account page has the credit: balance, state, this month's charges onl
   "200 $(plus_millimes "$balance_after_grant" -500) ok true $(date -u +%Y-%m) 0.000 100.000" \
   "$(status) $(jq -r '.credit | "\(.balance) \(.state.state) \(.shadowMode) \(.month) \(.debited) \(.largeCreditThreshold)"' <<<"$page_credit")"
 }
-section_def grants section_grants transfers
+section_def grants section_grants transfers budget=5
 
 section_cancel_proformas() {
 section "cancelling pro-formas (P-74)"
@@ -2233,7 +2233,7 @@ check "a token meant for another API (Keycloak's admin-cli client): 401" \
   "401 The token is not meant for this API" "$(status) $(message)"
 check "A's function, history and limits are still unchanged" "$before" "$(snapshot as_a "$id")"
 }
-section_def cancel_proformas section_cancel_proformas transfers
+section_def cancel_proformas section_cancel_proformas transfers budget=5
 
 section_overview() {
 section "the overview: the platform at a glance, for the operator"
@@ -2251,7 +2251,7 @@ check "the invoices issued this month, the one above among them" \
   "$(sql_value "SELECT count(*) FROM invoices WHERE kind = 'invoice' AND issued_on >= date_trunc('month', now() AT TIME ZONE 'UTC')::date")" "$(jq .invoices.issued <<<"$overview")"
 check "and the last 7 days of capacity against billing" 7 "$(jq '.capacity | length' <<<"$overview")"
 }
-section_def overview section_overview admin
+section_def overview section_overview admin budget=5
 
 section_closing() {
 section "closing an account: its functions, their history and logs deleted once its notice period has passed"
@@ -2307,7 +2307,7 @@ check "and GET /me says when it was done" "$deleted" "$(as_user_1 GET /me | jq -
 check "another account's function and namespace are untouched" "true $before" \
   "$(kubectl get namespace "$(tenant_namespace "$account_a")" >/dev/null 2>&1 && echo true || echo false) $(snapshot as_a "$id")"
 }
-section_def closing section_closing isolation admin
+section_def closing section_closing isolation admin budget=30
 
 sections_run
 checks_done "$E2E_NAME"

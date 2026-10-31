@@ -251,7 +251,7 @@ e2e_cache "$cache_address"
 # Customers' mail (ADR 0012): the run's own server, beside them, handing what it sends to a stand-in for recipients'.
 e2e_mail 10.199.1.12 10.199.1.13
 }
-section_def stack section_stack
+section_def stack section_stack budget=80
 
 section_backend() {
 section "backend"
@@ -307,7 +307,7 @@ be_ready_timeout=90
 e2e_start_backend "$work/backend.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 check "backend answers on $api" 200 "$(curl -s -o /dev/null -w '%{http_code}' "$api/functions")"
 }
-section_def backend section_backend stack
+section_def backend section_backend stack budget=50
 
 section_scenario() {
 section "scenario (tenant $tenant → namespace $tenant_ns)"
@@ -397,7 +397,7 @@ check "its archive is removed from object storage" "" "$(archived "$id/code.ts")
 http GET "/functions/$id" >/dev/null
 check "the function record is gone" 404 "$(status)"
 }
-section_def scenario section_scenario backend
+section_def scenario section_scenario backend budget=20
 
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"
@@ -420,7 +420,7 @@ check "a function with schedules keeps AWS Lambda's event" 400 "$(status)"
 failing_sched_fn="$(http POST /functions "$(jq -n '{name: "e2e-scheduled-fails", runtime: "nodejs", code: "export const handler = async () => { throw new Error(\"the report failed\"); };", memory: 128, timeout: 5}')" | jq -r .id)"
 http POST "/functions/$failing_sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}' >/dev/null
 }
-section_def schedules section_schedules backend
+section_def schedules section_schedules backend budget=20
 
 section_python() {
 section "python function"
@@ -451,7 +451,7 @@ check "a handler in another file than inline code's is refused, naming its file,
 http DELETE "/functions/$id" >/dev/null
 check "delete returns 200" 200 "$(status)"
 }
-section_def python section_python backend
+section_def python section_python backend budget=15
 
 section_requests() {
 section "the API's request limits, and a function found by its name"
@@ -503,7 +503,7 @@ check "any other body over 100 KB is refused with 413 and why, where the API ans
 http DELETE "/functions/$large_id" >/dev/null
 check "delete returns 200" 200 "$(status)"
 }
-section_def requests section_requests backend
+section_def requests section_requests backend budget=30
 
 section_package() {
 section "a function's package"
@@ -529,7 +529,7 @@ upload "$work/package.zip" text/plain >/dev/null
 check "a body not sent as a zip is refused with 415" "415 Send the package as the body, a zip archive, with Content-Type: application/zip, not text/plain" \
   "$(status) $(jq -r .message "$work/body")"
 }
-section_def package section_package backend
+section_def package section_package backend budget=5
 
 section_from_package() {
 section "a function made from a package"
@@ -594,7 +594,7 @@ check "a package with a native module built against glibc, as Lambda's are, runs
   "$(status) $(jq -r .status <<<"$native") $(http POST "/functions/$(jq -r .id <<<"$native")/invoke" '{"input":{"password":"hunter2"}}' | jq -c .output)"
 http DELETE "/functions/$(jq -r .id <<<"$native")" >/dev/null
 }
-section_def from_package section_from_package package
+section_def from_package section_from_package package budget=30
 
 section_environment() {
 section "environment variables"
@@ -625,7 +625,7 @@ http DELETE "/functions/$env_fn" >/dev/null
 check "deleting the function deletes its Secrets and its row" "200  0" \
   "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$env_fn" -o name) $(env_q "SELECT count(*) FROM function_environments WHERE function_id = '$env_fn'")"
 }
-section_def environment section_environment backend
+section_def environment section_environment backend budget=20
 
 section_secrets() {
 section "secrets"
@@ -669,7 +669,7 @@ check "the audit log names the secrets changed" '{"added":["API_TOKEN"],"changed
 http DELETE "/functions/$sec_fn" >/dev/null
 check "deleting the function deletes its Secrets" "200 " "$(status) $(kubectl -n "$tenant_ns" get secrets -l "ff.dev/function-id=$sec_fn" -o name)"
 }
-section_def secrets section_secrets backend
+section_def secrets section_secrets backend budget=20
 
 section_event() {
 section "the event a function receives"
@@ -692,7 +692,7 @@ http PUT "/functions/$wrapped_fn" '{"eventFormat": "v2"}' >/dev/null
 check "an unknown format is refused" "400 eventFormat must be one of the following values: lambda, wrapped" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 for f in "$event_fn" "$wrapped_fn"; do http DELETE "/functions/$f" >/dev/null; done
 }
-section_def event section_event backend
+section_def event section_event backend budget=30
 
 section_url() {
 section "a function's URL"
@@ -754,7 +754,7 @@ check "the call is in the history as the URL's, its credentials kept as ***" 'ur
   "$(jq -r '"\(.source) \(.input.headers.authorization) \(.input.cookies)"' <<<"$latest")"
 check "each call has its usage record, under its request ID" 1 "$(env_q "SELECT count(*) FROM usage_records WHERE request_id = '$url_call'")"
 }
-section_def url section_url backend
+section_def url section_url backend budget=15
 
 section_url_domain() {
 section "a URL's own domain"
@@ -818,7 +818,7 @@ check "deleting the URL: its address answers 404 at once, and the function has n
   "$(status) $(at_url GET / >/dev/null; url_status) $(http GET "/functions/$url_fn/url" >/dev/null; status)"
 http DELETE "/functions/$url_fn" >/dev/null
 }
-section_def url_domain section_url_domain url
+section_def url_domain section_url_domain url budget=10
 
 section_async() {
 section "asynchronous calls (ADR 0010)"
@@ -909,7 +909,7 @@ check "  ... after its one attempt" 1 "$(attempts_of "$failed" | jq length)"
 http DELETE "/functions/$async_fn/event-invoke-config" >/dev/null
 check "its settings deleted, it follows Lambda's defaults again" "204 404" "$(status) $(http GET "/functions/$async_fn/event-invoke-config" >/dev/null; status)"
 }
-section_def async section_async backend
+section_def async section_async backend budget=45
 
 section_databases() {
 section "customers' databases (ADR 0008)"
@@ -957,7 +957,7 @@ check "a function reaches it, the account's internet access off, and trusts its 
   "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg host "$data_db_address" '{input: {host: $host}}')" | jq -c .output)"
 http DELETE "/functions/$probe_fn" >/dev/null
 }
-section_def databases section_databases backend
+section_def databases section_databases backend budget=15
 
 section_caches() {
 section "customers' caches (ADR 0013)"
@@ -1013,7 +1013,7 @@ check "a function reaches it, the account's internet access off, trusts its cert
   "$(http POST "/functions/$probe_fn/invoke" "$(jq -cn --arg url "$new_cache_url" '{input: {url: $url}}')" | jq -c .output)"
 http DELETE "/functions/$probe_fn" >/dev/null
 }
-section_def caches section_caches backend
+section_def caches section_caches backend budget=15
 
 section_schedules_ran() {
 section "a function on a schedule: its runs, once their minute has passed in the sections before"
@@ -1074,7 +1074,7 @@ http DELETE "/functions/$failing_sched_fn" >/dev/null
 http DELETE "/functions/$sched_fn" >/dev/null
 check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
 }
-section_def schedules_ran section_schedules_ran schedules
+section_def schedules_ran section_schedules_ran schedules budget=5
 
 section_keys() {
 section "keys and clients: the other account's access key, and AWS's clients at the versions ADR 0009 measured"
@@ -1094,7 +1094,7 @@ if [ ! -d "$clients/python/boto3" ]; then
   "$clients/venv/bin/pip" install --quiet --disable-pip-version-check --target "$clients/python" boto3==1.43.118
 fi
 }
-section_def keys section_keys backend
+section_def keys section_keys backend budget=20
 
 section_buckets() {
 section "customers' buckets (ADR 0009): the API, then AWS's own clients through the S3 front door"
@@ -1266,7 +1266,7 @@ check "  ... which deletes its files, then the bucket, gone from the store too, 
   "$(status) $(http GET /buckets/e2e-photos >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$store_name") $(http GET "/alarms/$bucket_alarm" >/dev/null; status)"
 http DELETE "/storage-keys/$key_id" >/dev/null
 }
-section_def buckets section_buckets keys
+section_def buckets section_buckets keys budget=175
 
 section_queues() {
 section "customers' queues (ADR 0010): AWS's own clients through the SQS endpoint, then functions with no setting"
@@ -1387,7 +1387,7 @@ check "the audit log names each change of a queue, whichever way it came: the CL
   "queue.create access_key:$queue_key_id|queue.create dev|queue.purge dev|queue.delete dev" \
   "$(env_q "SELECT string_agg(action || ' ' || actor, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource IN ('queue:e2e-cli-orders', 'queue:e2e-api-orders') AND (resource = 'queue:e2e-api-orders' OR action = 'queue.create')")"
 }
-section_def queues section_queues keys
+section_def queues section_queues keys budget=100
 
 section_buckets_room() {
 section "customers' buckets: the full account's room, made in their section, measured a minute on"
@@ -1398,7 +1398,7 @@ check "the other account's buckets, room made in them, take its upload again wit
   "$(storage_notice) $(as_other_s3 outcome aws_ff s3 cp "$work/part.bin" s3://e2e-theirs/three.bin)"
 sql "UPDATE accounts SET plan_id = 'beta' WHERE id = '$other'"
 }
-section_def buckets_room section_buckets_room buckets
+section_def buckets_room section_buckets_room buckets budget=5
 
 section_mappings() {
 section "functions reading queues, as Lambda's event source mappings: a batch, a partial batch failure, the dead-letter queue"
@@ -1448,7 +1448,7 @@ check "the audit log names each change of the mapping" "event_source.create|even
   "$(env_q "SELECT string_agg(action, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'event_source:$mapping_id'")"
 http DELETE "/functions/$batch_fn" >/dev/null
 }
-section_def mappings section_mappings queues
+section_def mappings section_mappings queues budget=45
 
 section_notifications() {
 section "buckets' notifications, as S3's: an upload runs a function with S3's event, a deletion puts S3's event in a queue"
@@ -1492,7 +1492,7 @@ check "the audit log names the change, under the CLI's key" "bucket.notification
 http DELETE "/functions/$upload_fn" >/dev/null
 http DELETE "/buckets/e2e-notify?force=true" >/dev/null
 }
-section_def notifications section_notifications mappings
+section_def notifications section_notifications mappings budget=25
 
 section_sites() {
 section "buckets' sites, as S3's website endpoint answers them: a built site synced with the AWS CLI, then visited"
@@ -1558,7 +1558,7 @@ s3n s3api delete-bucket-website --bucket e2e-site
 check "DeleteBucketWebsite makes it no site again, its files kept" "404 NoSuchWebsiteConfiguration 5" \
   "$(page /) $(s3n s3 ls s3://e2e-site --recursive | wc -l)"
 }
-section_def sites section_sites notifications url_domain
+section_def sites section_sites notifications url_domain budget=15
 
 section_mail() {
 section "customers' mail (ADR 0012): identities and the suppression list, with AWS's CLI through the SES endpoint"
@@ -1620,7 +1620,7 @@ check "  ... and taken off" "refused NotFoundException" "$(outcome_ses aws_ses g
 check "the audit log names each change to the domain, the CLI's under its key" "email.identity.create access_key:$mail_key_id email.identity.verify" \
   "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'email-identity:shop.e2e-customer.tn'")"
 }
-section_def mail section_mail keys url_domain
+section_def mail section_mail keys url_domain budget=20
 
 section_mail_sent() {
 section "customers' mail sent (ADR 0012): through the run's mail server, signed with the domain's key, its bounces back"
@@ -1678,7 +1678,7 @@ check "both deleted, one through the CLI, one through FF's API, their keys with 
 check "  ... the domain's mail stays in GET /usage, said deleted, as billed" "true 4" "$(http GET /usage | jq -r '.email[] | "\(.deleted) \(.recipients)"')"
 http DELETE "/storage-keys/$mail_key_id" >/dev/null
 }
-section_def mail_sent section_mail_sent mail
+section_def mail_sent section_mail_sent mail budget=20
 
 section_plans() {
 section "plans and rate limits (P-15)"
@@ -1722,7 +1722,7 @@ check "invocations have their own rate: two a second, then 429" " 201 201 429" "
 http PUT "/functions/$small_id/scaling-config" '{"maxInstances": 1}' >/dev/null
 check "another account, from the same address, isn't slowed: its own count, and its function isn't found" 404 "$(status)"
 }
-section_def plans section_plans backend
+section_def plans section_plans backend budget=15
 
 # What the sections above started and the minutes since have done: read here, once those minutes have passed in the
 # sections between, and before the backend is killed (usage_records), whose counts of the minute are in its memory
@@ -1742,7 +1742,7 @@ http DELETE "/functions/$records_fn" >/dev/null
 http DELETE "/functions/$async_fn" >/dev/null
 check "deleting the function deletes its queue" 0 "$(env_q "SELECT count(*) FROM queues WHERE function_id = '$async_fn'")"
 }
-section_def async_metrics section_async_metrics async
+section_def async_metrics section_async_metrics async budget=5
 
 section_databases_sampled() {
 section "customers' databases: the one made, its hourly sample read minutes after; then deleted"
@@ -1756,7 +1756,7 @@ http DELETE "/databases/$db_id" >/dev/null
 check "a database deleted: 204, then 404, gone from the server with its user" "204 404 0 0" \
   "$(status) $(http GET "/databases/$db_id" >/dev/null; status) $(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$db_name') || ' ' || (select count(*) from pg_roles where rolname = '$db_name')")"
 }
-section_def databases_sampled section_databases_sampled databases
+section_def databases_sampled section_databases_sampled databases budget=5
 
 section_caches_sampled() {
 section "customers' caches: the one made, its hourly sample read minutes after, its metrics, alarm and bill; then deleted"
@@ -1787,7 +1787,7 @@ $(cache_cli "$new_cache_url" PING | grep 'Could not connect' >/dev/null && echo 
 check "  ... its alarm with it; its month's usage kept, as a deleted cache's" "404 true" \
   "$(http GET "/alarms/$(jq -r .id <<<"$cache_alarm")" >/dev/null; status) $(http GET /usage | jq -r '.caches[] | select(.name == "e2e-sessions") | .deleted')"
 }
-section_def caches_sampled section_caches_sampled caches
+section_def caches_sampled section_caches_sampled caches budget=5
 
 section_sites_counted() {
 section "queues and sites, minutes on: the queue's alarm fired, the messages and the visits counted; then all deleted"
@@ -1818,7 +1818,7 @@ check "the queues deleted, their messages with them" "0 0" \
   "$(env_q "SELECT count(*) FROM queues WHERE kind = 'customer'") $(env_q "SELECT count(*) FROM queue_messages m JOIN queues q ON q.id = m.queue_id WHERE q.kind = 'customer'")"
 http DELETE "/storage-keys/$queue_key_id" >/dev/null
 }
-section_def sites_counted section_sites_counted sites
+section_def sites_counted section_sites_counted sites budget=45
 
 section_usage_records() {
 section "usage records (P-20)"
@@ -1887,7 +1887,7 @@ be_ready_timeout=1
 e2e_start_backend "$work/backend-restarted.log" "$api" "${be_env[@]}" "${alarm_env[@]}" K8S_READY_TIMEOUT_SECONDS="$be_ready_timeout"
 restarted_pid="${e2e_pids[${#e2e_pids[@]}-1]}" # the processes started after it come after it
 }
-section_def usage_records section_usage_records backend
+section_def usage_records section_usage_records backend budget=70
 
 section_alarms() {
 section "alarms: an error fires an alarm, a quiet minute recovers it, each change told to a webhook"
@@ -1957,7 +1957,7 @@ http DELETE "/alarms/$alarm_id" >/dev/null
 check "the alarm is deleted" 204 "$(status)"
 http DELETE "/functions/$alarmed_id" >/dev/null
 }
-section_def alarms section_alarms backend
+section_def alarms section_alarms backend budget=185
 
 section_usage_lost() {
 section "usage records: the call lost, marked LOST by the restarted backend, read once its minute has passed"
@@ -1975,7 +1975,7 @@ check "the history says why" "Lost: the backend restarted during the call, so it
 check "one record per invocation, none without one" "5 5" \
   "$(q "SELECT (SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'), (SELECT count(*) FROM usage_records WHERE function_id = '$meter_id')")"
 }
-section_def usage_lost section_usage_lost usage_records
+section_def usage_lost section_usage_lost usage_records budget=5
 
 section_capacity() {
 section "capacity samples (P-21)"
@@ -1986,7 +1986,7 @@ report="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s capacity:
 check "the capacity report shows the account's day: capacity reserved, and capacity billed" true \
   "$(awk -v account="$tenant" '$2 == account && $3 != "0.000" && $5 != "0.000" { found = 1 } END { print found ? "true" : "false" }' <<<"$report")"
 }
-section_def capacity section_capacity usage_records
+section_def capacity section_capacity usage_records budget=20
 
 section_usage() {
 section "usage API (P-22)"
@@ -2042,7 +2042,7 @@ check "a month without calls is empty, and before the first price book, unpriced
 http GET '/usage?month=2026-13' >/dev/null
 check "a month that is not YYYY-MM is refused" "400 month must be a month as YYYY-MM, such as 2026-10" "$(status) $(jq -r '.message | join("; ")' "$work/body")"
 }
-section_def usage section_usage usage_lost python databases_sampled sites_counted buckets
+section_def usage section_usage usage_lost python databases_sampled sites_counted buckets budget=5
 
 section_priced() {
 section "usage priced (P-30)"
@@ -2058,7 +2058,7 @@ check "the free tier covers the month: usage, the free tier taking it all off, a
 check "and the CSV has each function's cost" true \
   "$(tr -d '\r' <<<"$csv" | grep "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" >/dev/null && echo true || echo false)"
 }
-section_def priced section_priced usage
+section_def priced section_priced usage budget=5
 
 section_rating() {
 section "the hourly rating (P-32)"
@@ -2081,7 +2081,7 @@ reconciliation="$(cd "$FF_REPO_ROOT/BE" && env "${e2e_base_env[@]}" npm run -s b
 check "the reconciliation runs against the database: nobody used anything in the hours rated" "No account used anything." \
   "$(tail -1 <<<"$reconciliation")"
 }
-section_def rating section_rating backend
+section_def rating section_rating backend budget=10
 
 section_balance() {
 section "the balance check (P-33)"
@@ -2110,7 +2110,7 @@ http POST "/functions/$meter_id/invoke" '{"input":{}}' >/dev/null
 check "a top-up lets them in again at once: the ledger's NOTIFY refreshed the backend's cached balance" 201 "$(status)"
 sql "DELETE FROM platform_settings WHERE key IN ('billingShadowMode', 'negativeBuffer', 'gracePeriodHours')"
 }
-section_def balance section_balance usage_records
+section_def balance section_balance usage_records budget=5
 
 section_monitoring() {
 section "the operator's monitoring: readiness, the metrics on their own port, the log in JSON"
@@ -2146,7 +2146,7 @@ print(bool(lines) and all({'time', 'level', 'message'} <= line.keys() for line i
 PY
 )"
 }
-section_def monitoring section_monitoring backend
+section_def monitoring section_monitoring backend budget=5
 
 section_lost_images() {
 section "code images the registry lost, made again (CLI plan, C-29)"
@@ -2198,7 +2198,7 @@ check "a new pod of it starts on the node, which had no copy: pulled from the re
 check "the other function rolled out with its package's image, which its new pod pulled; its record as it was" "$small_image true true ACTIVE" \
   "$(code_image_in "$small_ns" "$small_id") $(kubectl -n "$small_ns" rollout status deployment "fn-$small_id" --timeout=120s >/dev/null 2>&1 && echo true || echo false) $(on_node "$small_image") $(as_small GET "/functions/$small_id" | jq -r .status)"
 }
-section_def lost_images section_lost_images plans usage_records
+section_def lost_images section_lost_images plans usage_records budget=35
 
 sections_run
 checks_done e2e

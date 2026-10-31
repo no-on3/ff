@@ -2,7 +2,9 @@
 # hack/lib/sections.sh, on small suites of its own: what a section leaves, variables, arrays and functions, reaches the
 # sections after it, a value changed again too; one that stops, at a failed command or at fail(), stops alone, recorded at its line, the sections
 # that need it not run, the others run, and the cleanup it asked for still runs; --only runs a section and what it
-# needs, --from one and those after it, --list names them with the last run's times; FF_FAIL_FAST=1 stops at the first.
+# needs, --from one and those after it, --list names them with the last run's times; FF_FAIL_FAST=1 stops at the first;
+# a section past its budget is flagged after a whole run, and in the report, and not when it runs alone; and every
+# section of the three end-to-end suites names a budget.
 # Its own assertions are plain, so that a broken library can't pass itself. A few seconds.
 #   hack/test-sections.sh
 set -euo pipefail
@@ -104,5 +106,34 @@ expect "recorded once, as fail() says it" "  hh:mm:ss  made: no function|  hh:mm
 
 expect "FF_FAIL_FAST=1 stops the run at the section that stopped" "1 0" \
   "$(FF_FAIL_FAST=1 suite "$stopping") $(grep -c '^== alone' "$work/out" || true)"
+
+# Two sections with budgets: one takes two seconds against its one, the other is within its own.
+budgeted='
+slow() {
+section "slow"
+sleep 2.1
+check "slow, and passing" a a
+}
+quick() {
+section "quick"
+check "quick" a a
+}
+section_def slow slow budget=1
+section_def quick quick slow budget=30
+'
+expect "a section past its budget fails nothing" 0 "$(FF_CHECKS_REPORT="$work/report.md" suite "$budgeted")"
+# Its seconds are whole ones, its start's and its end's, as --list's are: 2.1 s reads as 2 or 3.
+expect "but is flagged after the last section, before the count, with its seconds and its budget" \
+  "sections over their budget, a flag: slow: N s against 1|toy: 2 checks passed" \
+  "$(tail -2 "$work/out" | sed -E 's/slow: [23] s/slow: N s/' | paste -sd'|')"
+expect "and in the report, under the suite script's name" "### suite: sections over their budget|  slow: N s against 1" \
+  "$(grep -E '^(###|  slow)' "$work/report.md" | sed -E 's/slow: [23] s/slow: N s/' | paste -sd'|')"
+expect "run alone, as it waits its minutes out, it is not flagged" "0 0" \
+  "$(suite "$budgeted" --only slow) $(grep -c 'over their budget' "$work/out" || true)"
+expect "--list says each budget after what the section needs" "slow N s slow (budget 1 s)|quick N s quick (needs: slow; budget 30 s)" \
+  "$(suite "$budgeted" --list >/dev/null; tr -s ' ' <"$work/out" | sed -E 's/^([a-z]+) [0-9]+ s /\1 N s /' | paste -sd'|')"
+# The three suites' sections, each with its budget, which a section added without one would lack.
+expect "every section of L4, L5 and the ff suite names a budget" "" \
+  "$(grep -h '^section_def ' "$hack/e2e.sh" "$hack/e2e-tenancy.sh" "$hack/cli-e2e.sh" | grep -v ' budget=[0-9]*$' | awk '{ print $2 }' | paste -sd' ')"
 
 echo "test-sections: $asserted assertions passed"
