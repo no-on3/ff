@@ -189,6 +189,8 @@ hack/.spike-lambda/
 hack/.spike-lambda-tf/
 # hack/spikes/versions: a function's versions on the dev cluster, the backend's log and the results (step 5's spike)
 hack/.spike-versions/
+# hack/spikes/keys: the SDKs, the loads' calls, the backend's log and the results (step 5's spike)
+hack/.spike-keys/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/
