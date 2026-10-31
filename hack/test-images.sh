@@ -32,8 +32,9 @@ docker build -q -t "ff-backend:$tag" "$FF_REPO_ROOT/BE" >/dev/null
 echo "  built ff-backend:$tag ($(size "ff-backend:$tag"))"
 check "it runs as the numeric user 10001, Node.js 24.21.0" "10001:10001 v24.21.0" \
   "$(docker image inspect "ff-backend:$tag" --format '{{.Config.User}}') $(docker run --rm "ff-backend:$tag" node --version)"
-check "with its production dependencies only: no TypeScript, no ts-node, no Jest, no Nest CLI" "0" \
-  "$(docker run --rm "ff-backend:$tag" sh -c 'ls -d node_modules/typescript node_modules/ts-node node_modules/jest node_modules/@nestjs/cli 2>/dev/null | wc -l')"
+check "with its production dependencies only: TypeScript, which turns inline code into the JavaScript an export gives Lambda, but no ts-node, Jest or Nest CLI" \
+  "node_modules/typescript" \
+  "$(docker run --rm "ff-backend:$tag" sh -c 'ls -d node_modules/typescript node_modules/ts-node node_modules/jest node_modules/@nestjs/cli 2>/dev/null | paste -sd" "')"
 
 pg_port="$(free_port)"
 docker run -d --name "$prefix-db" -e POSTGRES_PASSWORD=images-test-password -e POSTGRES_DB=ff -p "127.0.0.1:$pg_port:5432" postgres:15-alpine >/dev/null
