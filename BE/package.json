@@ -107,10 +107,9 @@
       "^.+\\.ts$": [
         "ts-jest",
         {
-          "diagnostics": {
-            "ignoreCodes": [
-              151002
-            ]
+          "tsconfig": {
+            "isolatedModules": true,
+            "rootDir": "."
           }
         }
       ]

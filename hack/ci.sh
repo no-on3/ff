@@ -35,7 +35,8 @@
 # first failure. A suite in a step reports each of its failed checks, not only the first. hack/.ci/report.md lists
 # each step with its result and its seconds, and every failed check, and GitHub shows it as the job's summary.
 # Heavy steps run one at a time. FF_CI_JOBS=<n> caps the test runners' and Rust's parallelism at n, for a machine
-# others share; unset, each tool takes its own default.
+# others share; unset, each tool takes its own default, but the backend's L1, which takes half the cores, or every one
+# on GitHub.
 #   hack/ci.sh <stage> [<stage> ...]
 #   FF_CI_JOBS=2 hack/ci.sh unit
 set -euo pipefail
@@ -56,10 +57,14 @@ rm -rf "$ci_dir/failure"
 source "$repo/hack/lib/ci-steps.sh"
 # The backend's build, with what it was built from beside it, which the suites read before they build it again.
 source "$repo/hack/lib/backend-build.sh"
-# The console's and the admin app's Vitest, then cargo's builds and test threads, at most FF_CI_JOBS at once.
+# The console's and the admin app's Vitest, then cargo's builds and test threads, at most FF_CI_JOBS at once. The
+# backend's L1 too, else half the cores, or every one on GitHub, whose runner runs one job alone.
 vitest_jobs=()
+l1_workers=50%
+[ "${GITHUB_ACTIONS:-}" != true ] || l1_workers=100%
 if [ -n "${FF_CI_JOBS:-}" ]; then
   vitest_jobs=(-- "--maxWorkers=$FF_CI_JOBS")
+  l1_workers="$FF_CI_JOBS"
   export CARGO_BUILD_JOBS="$FF_CI_JOBS" RUST_TEST_THREADS="$FF_CI_JOBS"
 fi
 # The ff command's Rust, where hack/install-tools.sh put it because the machine had none recent enough.
@@ -172,7 +177,7 @@ stage_static() {
 
 stage_unit() {
   "$repo/hack/check-resources.sh"
-  step "backend: L1" in_dir BE npx jest --maxWorkers=2
+  step "backend: L1" in_dir BE npx jest --maxWorkers="$l1_workers"
   step "console: unit tests" in_dir FE npm test "${vitest_jobs[@]}"
   step "admin app: unit tests" in_dir admin npm test "${vitest_jobs[@]}"
   step "Node.js runtime: protocol tests" in_dir runtimes/nodejs npm test
