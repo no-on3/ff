@@ -9,3 +9,4 @@ Rules for everyone who works in this repository, people and coding agents alike.
 5. **A new API route gets its rules in both of L5's loops** (`hack/e2e-tenancy.sh`), or L5 fails.
 6. **The backend's names are mirrored in `ff` and the console:** after changing a DTO or a constant, run `cargo test` and both apps' Vitest; after rewording an API message, search `hack/` for it and run the suite that asserts it.
 7. **ESLint is the style check;** there is no Prettier configuration, and `prettier --write` rewrites whole files.
+8. **In the shell scripts, never pipe into `grep -q`:** they run under `pipefail`, and `grep -q`'s exit at its first match fails a writer that is still writing, so a match reads as none, on some runs only. Read everything (`… | grep pattern >/dev/null`) or grep a file; `hack/ci.sh static` refuses the pipe.

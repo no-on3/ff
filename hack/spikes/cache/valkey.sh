@@ -94,7 +94,7 @@ pid="$(info server | grep '^process_id:' | cut -d: -f2)"
 full_rss="$(docker exec "$container" awk '/^VmRSS/ { print $2 }' "/proc/$pid/status")"
 echo "{\"measure\": \"one cache filled past its memory\", \"usedMemoryMb\": $(grep '^used_memory:' <<<"$memory" | cut -d: -f2 | awk '{ printf "%.1f", $1 / 1048576 }'), \"maxmemoryMb\": $(grep '^maxmemory:' <<<"$memory" | cut -d: -f2 | awk '{ printf "%.0f", $1 / 1048576 }'), \"evictedKeys\": $(grep '^evicted_keys:' <<<"$stats" | cut -d: -f2), \"keys\": \"$(grep '^db0:' <<<"$keyspace" | cut -d: -f2 | cut -d, -f1)\", \"processRssMb\": $(awk '{ printf "%.1f", $1 / 1024 }' <<<"$full_rss")}"
 plain="refused"
-(exec 3<>"/dev/tcp/127.0.0.1/$(jq -r '.[0].port' <<<"$list")" && printf 'PING\r\n' >&3 && timeout 2 head -c 5 <&3 | grep -q PONG) 2>/dev/null && plain="answered"
+(exec 3<>"/dev/tcp/127.0.0.1/$(jq -r '.[0].port' <<<"$list")" && printf 'PING\r\n' >&3 && timeout 2 head -c 5 <&3 | grep PONG >/dev/null) 2>/dev/null && plain="answered"
 echo "{\"check\": \"a connection without TLS\", \"want\": \"refused\", \"got\": \"$plain\"}"
 
 HOST=127.0.0.1 CA="$work/certs/ca.crt" CACHES="$list" AGENT_PASSWORD="$agent_password" node "$here/checks.mjs" | tee "$work/results.jsonl"

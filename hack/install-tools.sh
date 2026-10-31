@@ -41,7 +41,7 @@ verify() { # <file> <expected sha256>
 }
 
 install_kubectl() {
-  if [ -x "$bin_dir/kubectl" ] && "$bin_dir/kubectl" version --client 2>/dev/null | grep -q "$KUBECTL_VERSION"; then
+  if [ -x "$bin_dir/kubectl" ] && "$bin_dir/kubectl" version --client 2>/dev/null | grep "$KUBECTL_VERSION" >/dev/null; then
     echo "kubectl $KUBECTL_VERSION already installed"
     return
   fi
@@ -53,7 +53,7 @@ install_kubectl() {
 }
 
 install_k3d() {
-  if [ -x "$bin_dir/k3d" ] && "$bin_dir/k3d" version 2>/dev/null | grep -q "k3d version $K3D_VERSION"; then
+  if [ -x "$bin_dir/k3d" ] && "$bin_dir/k3d" version 2>/dev/null | grep "k3d version $K3D_VERSION" >/dev/null; then
     echo "k3d $K3D_VERSION already installed"
     return
   fi

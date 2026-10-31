@@ -46,7 +46,7 @@ if [ ! -x "$bin_dir/runsc" ]; then
 fi
 
 # 2. The binaries in the node, next to each other as runsc expects.
-if ! docker exec "$node" runsc --version 2>/dev/null | grep -q "release-$GVISOR_RELEASE"; then
+if ! docker exec "$node" runsc --version 2>/dev/null | grep "release-$GVISOR_RELEASE" >/dev/null; then
   docker exec "$node" mkdir -p /usr/local/bin/gvisor-bin
   for f in "${files[@]}"; do docker cp "$bin_dir/$f" "$node:/usr/local/bin/$f"; done
   docker exec "$node" chown -R root:root /usr/local/bin

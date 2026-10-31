@@ -24,7 +24,7 @@ url() {
   echo "postgres://app:$password@$address:5432/app"
 }
 
-joined() { docker container inspect -f '{{json .NetworkSettings.Networks}}' "$node" | grep -q "\"$name\""; }
+joined() { docker container inspect -f '{{json .NetworkSettings.Networks}}' "$node" | grep "\"$name\"" >/dev/null; }
 
 case "${1:-}" in
   up)

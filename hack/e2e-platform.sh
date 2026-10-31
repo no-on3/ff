@@ -268,7 +268,7 @@ tenant="ff-t-$(printf %s "$account" | sha256sum | cut -c1-12)"
 # The image a function's pods mount at /var/task, as the Deployment names it.
 code_image() { kubectl -n "$tenant" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}'; }
 check "its inline code is an image too, from the platform's registry, by digest, under the name the nodes map to it" true \
-  "$(code_image "$fn" | grep -qE '^registry\.ff\.internal/ff-code/[0-9]{12}@sha256:[0-9a-f]{64}$' && echo true || echo false)"
+  "$(code_image "$fn" | grep -E '^registry\.ff\.internal/ff-code/[0-9]{12}@sha256:[0-9a-f]{64}$' >/dev/null && echo true || echo false)"
 # gVisor answers with a kernel of its own, not the node's.
 check "and invokes it: the backend calls its Service directly, the function inside gVisor" "201 Hello platform true" \
   "$(as "$token" "/functions/$fn/invoke" -d '{"input": {"name": "platform"}}' >/dev/null; status) $(jq -r .output.message "$work/body") $(jq -r '.output.kernel | test("gvisor")' "$work/body")"
@@ -306,7 +306,7 @@ check "and makes a function of it: its code image pushed to the platform's regis
 check "which answers from its package, inside gVisor" "201 Hello platform, from a package" \
   "$(as "$token" "/functions/$pkg_fn/invoke" -d '{"input": {"name": "platform"}}' >/dev/null; status) $(jq -r .output.message "$work/body")"
 check "its pods mount the image by digest, under the name the nodes map to the registry" true \
-  "$(code_image "$pkg_fn" | grep -qE '^registry\.ff\.internal/ff-code/[0-9]{12}@sha256:[0-9a-f]{64}$' && echo true || echo false)"
+  "$(code_image "$pkg_fn" | grep -E '^registry\.ff\.internal/ff-code/[0-9]{12}@sha256:[0-9a-f]{64}$' >/dev/null && echo true || echo false)"
 reach_fn="$(as "$token" /functions -d "$(jq -cn --arg sha "$sha" '{name: "e2e-package-reach", runtime: "nodejs", codeSha256: $sha, handler: "index.reach", memory: 128, timeout: 5}')" | jq -r .id)"
 check "a second function from the same package, the image the registry has" "201 ACTIVE" "$(status) $(jq -r .status "$work/body")"
 check "whose own code doesn't reach the registry: a tenant reaches no private address" "201 refused" \

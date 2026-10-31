@@ -25,7 +25,7 @@ forbidden() {
 }
 # For calls that fail further on anyway (a Service without pods): did the policy let them through?
 policy() {
-  if "$@" 2>&1 | grep -q "ff-controller may only manage"; then echo denied; else echo "passed the policy"; fi
+  if "$@" 2>&1 | grep "ff-controller may only manage" >/dev/null; then echo denied; else echo "passed the policy"; fi
 }
 # can-i until it answers $1 (RBAC changes take a moment to reach the authorizer).
 can_until() {

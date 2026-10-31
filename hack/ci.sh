@@ -108,6 +108,10 @@ workflow_lints() { # the CI server's workflow, its run: steps shellchecked
   docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color=false
 }
 
+# Under pipefail, grep -q's exit at its first match fails a writer that is still writing, and a match reads as none:
+# the images' test found its metrics on 2 nights of 4 that way. grep without -q reads everything; a file is safe.
+no_pipe_into_grep_q() { ! git grep -nE '\| *grep -[a-zA-Z]*q' -- '*.sh'; }
+
 shell_scripts_parse() {
   local file
   while IFS= read -r file; do bash -n "$file" || { echo "  $file" >&2; return 1; }; done < <(git ls-files '*.sh')
@@ -133,6 +137,7 @@ stage_static() {
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
   step "how-it-works.html: its script parses" how_it_works_parses
   step "shell scripts parse" shell_scripts_parse
+  step "shell scripts: no pipe into grep -q, which pipefail turns into a race" no_pipe_into_grep_q
   step "the CI workflow (actionlint)" workflow_lints
 }
 

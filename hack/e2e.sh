@@ -822,7 +822,7 @@ check "a name RDS wouldn't take is refused, saying what a name is" "400 name mus
 reset="$(http POST "/databases/$db_id/password")"
 new_conn="$(jq -r .connectionString <<<"$reset")"
 check "a new password: the old one opens no session, the new one does, the data kept" "200 true 1" \
-  "$(status) $( (data_db_psql "$db_conn" 'select 1' || true) | grep -q 'password authentication failed' && echo true || echo false) $(data_db_psql "$new_conn" 'select count(*) from orders')"
+  "$(status) $( (data_db_psql "$db_conn" 'select 1' || true) | grep 'password authentication failed' >/dev/null && echo true || echo false) $(data_db_psql "$new_conn" 'select count(*) from orders')"
 probe='import * as net from "node:net";
 import * as tls from "node:tls";
 // The server of customers'"'"' databases, as a function reaches it: its port, then TLS after PostgreSQL'"'"'s SSLRequest, its certificate checked.
@@ -862,7 +862,7 @@ check "the address reaches it over TLS, the server's certificate checked, as the
   "$(cache_cli "$cache_url" SET cart:42 'two croissants') $(cache_cli "$cache_url" GET cart:42) $(cache_cli "$cache_url" ACL WHOAMI)"
 memory="$(cache_cli "$cache_url" INFO memory | tr -d '\r')"
 check "its memory the plan's, the least recently used keys going past it; the server's settings none of the customer's" "67108864 allkeys-lru true" \
-  "$(sed -n 's/^maxmemory://p' <<<"$memory") $(sed -n 's/^maxmemory_policy://p' <<<"$memory") $(cache_cli "$cache_url" CONFIG SET maxmemory 1gb | grep -q NOPERM && echo true || echo false)"
+  "$(sed -n 's/^maxmemory://p' <<<"$memory") $(sed -n 's/^maxmemory_policy://p' <<<"$memory") $(cache_cli "$cache_url" CONFIG SET maxmemory 1gb | grep NOPERM >/dev/null && echo true || echo false)"
 check "its process runs as a user of its own, never root" true \
   "$([ "$(docker exec "$e2e_cache_container" sh -c 'for p in $(pgrep valkey-server); do stat -c %u /proc/$p; done')" -gt 20000 ] && echo true || echo false)"
 shown="$(http GET /caches/e2e-sessions)"
@@ -876,7 +876,7 @@ check "a name ElastiCache wouldn't take is refused, saying what a name is" "400 
 reset="$(http POST /caches/e2e-sessions/password)"
 new_cache_url="$(jq -r .url <<<"$reset")"
 check "a new password: the old one refused, the new one logs in, the keys kept" "200 true two croissants" \
-  "$(status) $(cache_cli "$cache_url" PING | grep -q WRONGPASS && echo true || echo false) $(cache_cli "$new_cache_url" GET cart:42)"
+  "$(status) $(cache_cli "$cache_url" PING | grep WRONGPASS >/dev/null && echo true || echo false) $(cache_cli "$new_cache_url" GET cart:42)"
 probe='import * as tls from "node:tls";
 // The server of customers'"'"' caches, as a function reaches it: TLS to the cache'"'"'s port, its certificate checked, then AUTH and GET.
 export async function handler(event: { url: string }) {
@@ -925,7 +925,7 @@ http DELETE /caches/e2e-sessions >/dev/null
 check "a cache deleted: 204, then 404, gone from the server with its keys, its address answering no more" "204 404 404 true" \
   "$(status) $(http GET /caches/e2e-sessions >/dev/null; status) \
 $(curl -s -o /dev/null -w '%{http_code}' --cacert "$work/cache-ca.crt" -H 'Authorization: Bearer ff-cache-dev' "https://$cache_address:6390/caches/$cache_server_name") \
-$(cache_cli "$new_cache_url" PING | grep -q 'Could not connect' && echo true || echo false)"
+$(cache_cli "$new_cache_url" PING | grep 'Could not connect' >/dev/null && echo true || echo false)"
 check "  ... its alarm with it; its month's usage kept, as a deleted cache's" "404 true" \
   "$(http GET "/alarms/$(jq -r .id <<<"$cache_alarm")" >/dev/null; status) $(http GET /usage | jq -r '.caches[] | select(.name == "e2e-sessions") | .deleted')"
 
@@ -958,7 +958,7 @@ http POST /buckets '{"name": "e2e-theirs"}' >/dev/null
 check "a name is FF's once, whoever asks, as on AWS" "409 The bucket name \"e2e-theirs\" is taken: bucket names are unique across FF, as on AWS" "$(status) $(jq -r .message "$work/body")"
 http POST /buckets '{"name": "My.Photos"}' >/dev/null
 check "a name AWS wouldn't take, or that has a dot, is refused, saying why" "400 true" \
-  "$(status) $(jq -r '.message | join("; ")' "$work/body" | grep -q 'is not a bucket name: 3 to 63 lower-case letters' && echo true || echo false)"
+  "$(status) $(jq -r '.message | join("; ")' "$work/body" | grep 'is not a bucket name: 3 to 63 lower-case letters' >/dev/null && echo true || echo false)"
 for n in 2 3 4 5; do http POST /buckets "{\"name\": \"e2e-more-$n\"}" >/dev/null; done
 http POST /buckets '{"name": "e2e-sixth"}' >/dev/null
 check "past the beta plan's five buckets, refused" "400 The Beta plan allows 5 buckets, and the account has 5: delete one first" "$(status) $(jq -r .message "$work/body")"
@@ -1632,7 +1632,7 @@ invoked="$(http POST "/functions/$meter_id/invoke" '{"input":{}}')"
 inv="$(jq -r .id <<<"$invoked")"
 check "the runtime got the invocation's ID as its request ID" "201 $inv" "$(status) $(jq -r .output.requestId <<<"$invoked")"
 check "the runtime's log names the call by that ID" true \
-  "$(kubectl -n "$tenant_ns" logs "deployment/fn-$meter_id" 2>/dev/null | grep -q "START RequestId: $inv" && echo true || echo false)"
+  "$(kubectl -n "$tenant_ns" logs "deployment/fn-$meter_id" 2>/dev/null | grep "START RequestId: $inv" >/dev/null && echo true || echo false)"
 check "its usage record: a success, the function's memory and minInstances (P-30), billed its duration rounded up" "success 128 0 t" \
   "$(q "SELECT status, memory_mb, min_instances, billed_ms = ceil(duration_ms) FROM usage_records WHERE request_id = '$inv'")"
 check "and the history's start and end, to the millisecond, and its duration" "t t t" \
@@ -1727,14 +1727,14 @@ check "the bucket, deleted earlier, keeps its month: its hours measured, GB-mont
 csv="$(curl -sS -H 'accept: text/csv' -D "$work/headers" "$api/usage?month=$month")"
 check "as CSV: a download, its header, the meter function's line, the database's and the bucket's" \
   "text/csv; charset=utf-8|kind,id,name,deleted,requests,billed_ms,gb_seconds,gb_months,tier1_requests,tier2_requests,bytes_downloaded,bytes_uploaded,attachment_bytes,throttled,platform_errors,lost,cost|true|true|true" \
-  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,,0\.000$" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -qE "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,,0\.000$" && echo true || echo false)"
+  "$(tr -d '\r' <"$work/headers" | awk -F': ' 'tolower($1) == "content-type" { print $2 }')|$(head -1 <<<"$csv" | tr -d '\r')|$(grep -q "^function,$meter_id,e2e-meter,false,4," <<<"$csv" && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -E "^database,$db_id,e2e-orders,true,,,,[0-9.]+,,,,,,,,,0\.000$" >/dev/null && echo true || echo false)|$(tr -d '\r' <<<"$csv" | grep -E "^bucket,$photos_id,e2e-photos,true,,,,[0-9.]+,${photos_requests/ /,},${photos_bytes/ /,},,,,,0\.000$" >/dev/null && echo true || echo false)"
 cli_queue_id="$(env_q "SELECT DISTINCT queue_id FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-cli-orders'")"
 cli_counted="$(env_q "SELECT sum(requests) || ' ' || sum(sent) || ' ' || sum(received) FROM queue_request_counts WHERE queue_id = '$cli_queue_id'")"
 check "the AWS CLI's queue, deleted earlier, keeps its month: its requests as SQS bills them, its messages sent and received, as counted, at nothing before the book that prices queues" \
   "true e2e-cli-orders $cli_counted 0.000" \
   "$(jq -r --arg id "$cli_queue_id" '.queues[] | select(.queueId == $id) | "\(.deleted) \(.name) \(.requests) \(.messagesSent) \(.messagesReceived) \(.cost)"' <<<"$usage")"
 check "  ... in the CSV, its requests in the requests column" true \
-  "$(tr -d '\r' <<<"$csv" | grep -qE "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,,0\.000$" && echo true || echo false)"
+  "$(tr -d '\r' <<<"$csv" | grep -E "^queue,$cli_queue_id,e2e-cli-orders,true,${cli_counted%% *},,,,,,,,,,,,0\.000$" >/dev/null && echo true || echo false)"
 check "a function's batches counted as received: the five, then the two again; the three handled deleted" "7 3" \
   "$(env_q "SELECT sum(received) || ' ' || sum(deleted) FROM queue_request_counts WHERE account_id = '$tenant' AND name = 'e2e-batch'")"
 empty="$(http GET '/usage?month=2001-01')"
@@ -1754,7 +1754,7 @@ check "the meter function's cost: its billed requests and GB-s at the book's pri
 check "the free tier covers the month: usage, the free tier taking it all off, and nothing to pay" "true 0.000" \
   "$(jq -r '.estimate | "\((.usage | tonumber) + (.freeTier | tonumber) == 0) \(.total)"' <<<"$usage")"
 check "and the CSV has each function's cost" true \
-  "$(tr -d '\r' <<<"$csv" | grep -q "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id "$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" && echo true || echo false)"
+  "$(tr -d '\r' <<<"$csv" | grep "^function,$meter_id,e2e-meter,false,4,.*,$(jq -r --arg id " >/dev/null$meter_id" '.functions[] | select(.functionId == $id) | .cost' <<<"$usage")$" && echo true || echo false)"
 
 section "the hourly rating (P-32)"
 # As it started, the backend rated every hour since the first book that had settled: ended 33 minutes ago at least.

@@ -1001,7 +1001,7 @@ account_1="$(as_user_1 POST /accounts '{"name": "L5 one", "useCase": "isolation 
 check "user 1 creates an account: pending, and its owner" "201 pending owner" \
   "$(status) $(as_user_1 GET "/accounts/$account_1" | jq -r '"\(.status) \(.role)"')"
 check "you get an e-mail to approve it" true \
-  "$(mail_to "$operator" | grep -q "($account_1)" && mail_to "$operator" | grep -q 'http://localhost:5198/accounts?status=pending' && echo true || echo false)"
+  "$(mail_to "$operator" | grep "($account_1)" >/dev/null && mail_to "$operator" | grep 'http://localhost:5198/accounts?status=pending' >/dev/null && echo true || echo false)"
 as_user_1 POST /accounts '{"name": "L5 again"}' >/dev/null
 check "one account at a time waits for approval" "400 You already have an account waiting for approval" "$(status) $(message)"
 as_user_1 POST /functions "$(function_body l5-one)" >/dev/null
@@ -1586,7 +1586,7 @@ section "members (P-16): user 2 is invited into account 1"
 as_user_1 POST /members "$(jq -cn --arg email "$user_2" '{email: $email, role: "viewer"}')" >/dev/null
 check "account 1's owner invites user 2's address as a viewer" 201 "$(status)"
 check "user 2 gets an e-mail with the console's address" true \
-  "$(mail_to "$user_2" | grep -q 'http://localhost:5199' && echo true || echo false)"
+  "$(mail_to "$user_2" | grep 'http://localhost:5199' >/dev/null && echo true || echo false)"
 check "in user 2's language, French, though user 1's is English" "$user_1 vous invite sur le compte FF « L5 one »" "$(mail_to "$user_2" | head -1)"
 check "user 2 joins on the next call: account 1 is in GET /me, as a viewer" "viewer" \
   "$(with_token "$token_2" GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .role')"
@@ -1678,7 +1678,7 @@ check "and account 2's page its own, 7.000 TND, as a string to the millime" '200
   INSERT INTO ledger_entries (transaction_id, ledger_account_id, amount_minor)
   SELECT t.id, a.id, CASE a.type WHEN 'wallet' THEN -3000 ELSE 3000 END FROM t, ledger_accounts a
    WHERE a.currency = 'TND' AND (a.account_id = '$account_1' OR (a.account_id IS NULL AND a.type = 'revenue'));" >/dev/null
-for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^Your FF credit' && break; sleep 0.5; done
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep '^Your FF credit' >/dev/null && break; sleep 0.5; done
 check "account 1's owner gets the low-balance e-mail, through the ledger's NOTIFY (P-33)" \
   "Your FF credit is down to 50%: $(as_user_1 GET "/accounts/$account_1" | jq -r .name)|2.000 TND" \
   "$(mail_to "$user_1" | head -1)|$(mail_to "$user_1" | sed -n 2p | grep -o '[0-9.]* TND' | head -1)"
@@ -1687,7 +1687,7 @@ check "the operator suspends account 1" 200 "$(status)"
 check "its function is scaled to zero at once" 0 \
   "$(kubectl -n "$(tenant_namespace "$account_1")" get deployment "fn-$fn_1" -o jsonpath='{.spec.replicas}')"
 check "its cache's user can't log in, the cache suspended with it (ADR 0013)" "true suspended" \
-  "$(cache_cli "$cache_conn_1" GET l5 | grep -q WRONGPASS && echo true || echo false) $(as_user_1 GET /caches/l5-one | jq -r .status)"
+  "$(cache_cli "$cache_conn_1" GET l5 | grep WRONGPASS >/dev/null && echo true || echo false) $(as_user_1 GET /caches/l5-one | jq -r .status)"
 as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"one"}}' >/dev/null
 check "its owner can't invoke" "403 Your account is suspended" "$(status) $(message)"
 as_user_1 POST /functions "$(function_body l5-suspended)" >/dev/null
@@ -1695,7 +1695,7 @@ check "nor deploy" "403 Your account is suspended" "$(status) $(message)"
 as_user_1 GET "/functions/$fn_1" >/dev/null
 check "but still reads its functions" 200 "$(status)"
 check "the owner gets an e-mail that says why" "Your FF account is suspended: L5 one true" \
-  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep -q '^Why: l5: abuse report$' && echo true || echo false)"
+  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep '^Why: l5: abuse report$' >/dev/null && echo true || echo false)"
 log_1="$(as_user_1 GET '/audit-log?limit=1')"
 check "and sees it in the account's audit log as FF's, with the reason, without the operator's address" "account.suspend operator FF null l5: abuse report" \
   "$(jq -r '.entries[0] | "\(.action) \(.actor) \(.actorLabel) \(.ip) \(.details.reason)"' <<<"$log_1")"
@@ -1796,7 +1796,7 @@ check "and account 2's functions still reach nothing beyond DNS" none "$(interne
 storage="$(with_token "$operator_token" PUT "/admin/accounts/$account_1/storage" '{"enabled": false, "reason": "l5: files shared against the terms"}')"
 check "the operator turns account 1's databases, buckets and queues off: its database's user can't log in, and its members read why in GET /me" \
   "200 suspended true l5: files shared against the terms" \
-  "$(status) $(jq -r --arg id "$db_1" '.databases[] | select(.id == $id) | .status' <<<"$storage") $( (data_db_psql "$conn_1" 'select 1' || true) | grep -q 'is not permitted to log in' && echo true || echo false) $(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .storageDisabledReason')"
+  "$(status) $(jq -r --arg id "$db_1" '.databases[] | select(.id == $id) | .status' <<<"$storage") $( (data_db_psql "$conn_1" 'select 1' || true) | grep 'is not permitted to log in' >/dev/null && echo true || echo false) $(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .storageDisabledReason')"
 as_user_1 POST /databases '{"name": "l5-while-off"}' >/dev/null
 check "  ... and no database is made meanwhile" "403 FF turned this account's databases, buckets and queues off: l5: files shared against the terms" "$(status) $(message)"
 check "  ... nor a queue, and no message is sent" "403 403 FF turned this account's databases, buckets and queues off: l5: files shared against the terms" \
@@ -1876,7 +1876,7 @@ as_user_1 POST /notifications/test "{\"webhookUrl\": \"$receiver/rotated\"}" >/d
 for _ in $(seq 1 40); do [ -n "$(webhooks_to /rotated)" ] && break; sleep 0.5; done
 check "its webhooks then carry a valid signature by each" true "$(verify_signature "$(jq -r .secret <<<"$rotated")" "$secret_1" <<<"$(webhooks_to /rotated | head -1)")"
 check "the rotation and the tests are in the account's audit log, never a secret" "notification.test webhook_secret.rotate false" \
-  "$(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action | startswith("notification.") or startswith("webhook_secret.")) | .action] | unique | join(" ")') $(as_user_1 GET /audit-log | grep -q whsec_ && echo true || echo false)"
+  "$(as_user_1 GET /audit-log | jq -r '[.entries[] | select(.action | startswith("notification.") or startswith("webhook_secret.")) | .action] | unique | join(" ")') $(as_user_1 GET /audit-log | grep whsec_ >/dev/null && echo true || echo false)"
 
 section "support: finding what a customer asks about, and its data only for a reason"
 found="$(with_token "$operator_token" GET "/admin/search?q=$logged_id")"
@@ -1942,7 +1942,7 @@ check "the operator records the transfer, net of 0.892 TND withheld at source" "
   "$(status) $(jq -r '"\(.status) \(.transfer.received) \(.transfer.withheld) \(.transfer.credited) \(.recordedBy | sub("(?<k>operator:).*"; "\(.k)"))"' <<<"$recorded")"
 check "account 1's balance grows by the credit less the withheld share, $before_transfer + 49.108 TND" \
   "$(plus_millimes "$before_transfer" 49108)" "$(as_user_1 GET /billing/balance | jq -r .balance)"
-for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^Your transfer was received' && break; sleep 0.5; done
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep '^Your transfer was received' >/dev/null && break; sleep 0.5; done
 check "account 1's owner gets an e-mail: the transfer, the credit added, the withheld share to come" \
   "Your transfer was received: L5 one|58.608 TND for the pro-forma $ref_1: 49.108 TND of credit|0.892 TND was withheld at source" \
   "$(mail_to "$user_1" | head -1)|$(mail_to "$user_1" | grep -o "58.608 TND for the pro-forma $ref_1: 49.108 TND of credit")|$(mail_to "$user_1" | grep -o '0.892 TND was withheld at source')"
@@ -1957,7 +1957,7 @@ check "with its reason in X-FF-Reason, the certificate is kept, and the withheld
   "$(status) $(jq -r '"\(.certificateType) \(.transfer.withheldCreditedAt != null)"' <<<"$certified")"
 check "account 1's balance now has the whole credit, $before_transfer + 50.000 TND" \
   "$(plus_millimes "$before_transfer" 50000)" "$(as_user_1 GET /billing/balance | jq -r .balance)"
-for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^The share withheld' && break; sleep 0.5; done
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep '^The share withheld' >/dev/null && break; sleep 0.5; done
 check "and its owner an e-mail that says so" "The share withheld at source was added: L5 one" "$(mail_to "$user_1" | head -1)"
 check "the reason reached the audit log as typed, accents and all" "l5: certificat de retenue reçu" \
   "$("${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "SELECT details->>'reason' FROM audit_log WHERE action = 'payment.withholding'")"
@@ -1997,7 +1997,7 @@ check "the operator issues them: one invoice, numbered first of the fiscal year,
 invoice_1="$(jq -r '.issued[0].id' <<<"$issued")"
 check "the stamp duty is taken from account 1's credit: $balance_before_invoice - 1.000 TND" \
   "$(plus_millimes "$balance_before_invoice" -1000)" "$(as_user_1 GET /billing/balance | jq -r .balance)"
-for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^Your invoice' && break; sleep 0.5; done
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep '^Your invoice' >/dev/null && break; sleep 0.5; done
 check "account 1's owner gets an e-mail, with the invoice's number" "Your invoice FAC-$year-000001: L5 one" "$(mail_to "$user_1" | head -1)"
 listed_invoices="$(as_user_1 GET /billing/invoices)"
 check "and lists it: its month, issue date in Tunisia and total" "200 FAC-$year-000001 invoice $last_month $(TZ=Africa/Tunis date +%F) 24.800" \
@@ -2015,7 +2015,7 @@ check "a credit note corrects it: its own numbers, 5.000 TND and 19% VAT, no sta
 with_token "$operator_token" POST "/admin/invoices/$invoice_1/credit-notes" '{"lines": [{"description": "Trop", "amount": "15.001"}], "reason": "l5 tries"}' >/dev/null
 check "and all its credit notes give back no more than it charged" \
   "400 FAC-$year-000001's credit notes would give back 20.001 TND before tax and 3.800 TND of VAT: it charged 20.000 TND and 3.800 TND" "$(status) $(message)"
-for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^A credit note' && break; sleep 0.5; done
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep '^A credit note' >/dev/null && break; sleep 0.5; done
 check "and its owner is told" "A credit note for your invoice FAC-$year-000001: L5 one" "$(mail_to "$user_1" | head -1)"
 check "the owner's list has both, newest first" "AV-$year-000001 FAC-$year-000001" "$(as_user_1 GET /billing/invoices | jq -r '[.invoices[].number] | join(" ")')"
 check "the owner downloads the month's usage statement" "200 application/pdf %PDF- releve-$(date -u +%Y-%m).pdf" \
@@ -2039,9 +2039,9 @@ check "the owner's balance has it" "$balance_after_grant" "$(as_user_1 GET /bill
 replayed="$(with_token "$operator_token" POST "/admin/accounts/$account_1/credits" "$(grant_body promo 15 'l5: welcome credit' "$promo_key")")"
 check "sent again with its key, it grants once: the first grant, replayed" "201 true $(jq -r .grant.id <<<"$granted") $balance_after_grant" \
   "$(status) $(jq -r '"\(.grant.replayed) \(.grant.id)"' <<<"$replayed") $(as_user_1 GET /billing/balance | jq -r .balance)"
-for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^FF added credit' && break; sleep 0.5; done
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep '^FF added credit' >/dev/null && break; sleep 0.5; done
 check "the owner gets an e-mail, with the reason and the balance" "FF added credit to your account: L5 one true true" \
-  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep -q '^Why: l5: welcome credit$' && echo true || echo false) $(mail_to "$user_1" | grep -q "^The balance is now $balance_after_grant TND.$" && echo true || echo false)"
+  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep '^Why: l5: welcome credit$' >/dev/null && echo true || echo false) $(mail_to "$user_1" | grep "^The balance is now $balance_after_grant TND.$" >/dev/null && echo true || echo false)"
 with_token "$operator_token" POST "/admin/accounts/$account_1/credits" "$(grant_body promo 150 'l5 tries' "$(new_key)")" >/dev/null
 check "above the large-credit threshold, the amount is typed again" \
   "400 150.000 TND is above the large-credit threshold, 100.000 TND: type the amount again as confirmAmount to grant it (D12)" "$(status) $(message)"
@@ -2076,9 +2076,9 @@ with_token "$operator_token" POST "/admin/payments/$twice_id/cancel" '{}' >/dev/
 check "an operator cancels only with a reason" "400 Every admin change needs a reason: send reason, 3 to 500 characters, in the body" "$(status) $(message)"
 op_cancelled="$(with_token "$operator_token" POST "/admin/payments/$twice_id/cancel" '{"reason": "l5: asked for twice"}')"
 check "the operator cancels another, with a reason" "200 cancelled true" "$(status) $(jq -r '"\(.status) \(.cancelledBy | startswith("operator:"))"' <<<"$op_cancelled")"
-for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep -q '^Your pro-forma' && break; sleep 0.5; done
+for _ in $(seq 1 20); do mail_to "$user_1" | head -1 | grep '^Your pro-forma' >/dev/null && break; sleep 0.5; done
 check "the owner gets an e-mail that gives the reason" "Your pro-forma $twice_ref was cancelled: L5 one true" \
-  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep -q '^Why: l5: asked for twice$' && echo true || echo false)"
+  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep '^Why: l5: asked for twice$' >/dev/null && echo true || echo false)"
 listed_cancelled="$(with_token "$operator_token" GET "/admin/payments?status=cancelled&accountId=$account_1")"
 check "the operator lists account 1's cancelled pro-formas, newest first" "200 $twice_ref,$dropped_ref" "$(status) $(jq -r '[.payments[].reference] | join(",")' <<<"$listed_cancelled")"
 balance_before_late="$(with_token "$operator_token" GET "/admin/accounts/$account_1" | jq -r .credit.balance)"
@@ -2158,13 +2158,13 @@ check "the operator closes account 1: its data is due for deletion in the 30 day
   "$(status) $(jq -r '"\(.account.status) \(((.account.dataDeletionDueAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) - now) / 86400 | round) \(.account.dataDeletedAt)"' <<<"$closed")"
 due_1="$(jq -r .account.dataDeletionDueAt <<<"$closed")"
 check "the owner's e-mail says when, and what is kept" "Your FF account is closed: L5 one true true" \
-  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep -q "^Its functions, their invocation history and their logs will be deleted on ${due_1:0:10} at ${due_1:11:5} UTC\." && echo true || echo false) $(mail_to "$user_1" | grep -q '^Its usage, payments and invoices are kept' && echo true || echo false)"
+  "$(mail_to "$user_1" | head -1) $(mail_to "$user_1" | grep "^Its functions, their invocation history and their logs will be deleted on ${due_1:0:10} at ${due_1:11:5} UTC\." >/dev/null && echo true || echo false) $(mail_to "$user_1" | grep '^Its usage, payments and invoices are kept' >/dev/null && echo true || echo false)"
 check "and so does GET /me, for the console's banner" "$due_1" "$(as_user_1 GET /me | jq -r --arg id "$account_1" '.accounts[] | select(.id == $id) | .dataDeletionDueAt')"
 as_user_1 GET "/functions/$fn_1" >/dev/null
 check "until then, its members still read its functions" 200 "$(status)"
 check "but its database's user can't log in any more (ADR 0008)" true \
-  "$( (data_db_psql "$conn_1" 'select 1' || true) | grep -q 'is not permitted to log in' && echo true || echo false)"
-check "nor its cache's (ADR 0013)" true "$(cache_cli "$cache_conn_1" GET l5 | grep -q WRONGPASS && echo true || echo false)"
+  "$( (data_db_psql "$conn_1" 'select 1' || true) | grep 'is not permitted to log in' >/dev/null && echo true || echo false)"
+check "nor its cache's (ADR 0013)" true "$(cache_cli "$cache_conn_1" GET l5 | grep WRONGPASS >/dev/null && echo true || echo false)"
 # The notice period passes.
 sql "UPDATE accounts SET data_deletion_due_at = now() WHERE id = '$account_1'" >/dev/null
 deleted=""
@@ -2184,7 +2184,7 @@ check "its namespace is gone from the cluster, its code from object storage, and
 check "its database is gone from the server, with its user" "0 0" \
   "$(docker exec -u postgres "$e2e_data_db_container" psql -XAtc "select (select count(*) from pg_database where datname = '$(jq -r .database <<<"$database_1")') || ' ' || (select count(*) from pg_roles where rolname = '$(jq -r .user <<<"$database_1")')")"
 check "its cache is gone from the server, with its keys: its address answers no more" "0 true" \
-  "$(sql "SELECT count(*) FROM caches WHERE account_id = '$account_1'") $(cache_cli "$cache_conn_1" PING | grep -q 'Could not connect' && echo true || echo false)"
+  "$(sql "SELECT count(*) FROM caches WHERE account_id = '$account_1'") $(cache_cli "$cache_conn_1" PING | grep 'Could not connect' >/dev/null && echo true || echo false)"
 check "its bucket is gone, with its files, from FF's records and the store, and its key opens nothing" "0 0 refused InvalidAccessKeyId" \
   "$(sql "SELECT count(*) FROM buckets WHERE account_id = '$account_1'") $(sql "SELECT count(*) FROM storage_keys WHERE account_id = '$account_1' AND revoked_at IS NULL") $(s3_with "$key_1_s3_id" "$key_1_s3_secret" "$storage_port_oidc" s3 ls s3://l5-photos-1)"
 check "its usage records, payments and invoices are kept, as the law requires" "$kept_1" \

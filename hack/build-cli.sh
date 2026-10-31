@@ -18,7 +18,7 @@ binary="ff-linux-x86_64"
 commit="$(git -C "$repo" rev-parse --short=12 HEAD)"
 mkdir -p "$dist"
 
-if [ "${1:-}" != --container ] && rustup target list --installed 2>/dev/null | grep -qx "$target" && command -v musl-gcc >/dev/null; then
+if [ "${1:-}" != --container ] && rustup target list --installed 2>/dev/null | grep -x "$target" >/dev/null && command -v musl-gcc >/dev/null; then
   echo "== building here, for $target"
   (cd "$repo/cli" && FF_BUILD_COMMIT="$commit" cargo build --release --locked --target "$target")
 else
@@ -34,6 +34,6 @@ fi
 
 cp "${built:-$repo/cli/target}/$target/release/ff" "$dist/$binary"
 (cd "$dist" && sha256sum "$binary" >"$binary.sha256")
-file "$dist/$binary" | grep -q 'static' || { echo "$dist/$binary isn't static" >&2; exit 1; }
+file "$dist/$binary" | grep 'static' >/dev/null || { echo "$dist/$binary isn't static" >&2; exit 1; }
 echo "== $dist/$binary ($(du -h "$dist/$binary" | cut -f1)), sha256 $(cut -d' ' -f1 "$dist/$binary.sha256")"
 "$dist/$binary" version --verbose

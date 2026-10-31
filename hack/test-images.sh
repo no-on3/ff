@@ -98,11 +98,11 @@ check "it has no package manager: npm, npx, corepack and yarn removed" none \
 check "and ready: its database and the cluster answer" '200 {"database":"ok","kubernetes":"ok"}' \
   "$(curl -s -o "$work/ready" -w '%{http_code}' "$api/readyz") $(jq -c .checks "$work/ready")"
 check "each answer names its request" true \
-  "$(curl -s -D - -o /dev/null "$api/healthz" | tr -d '\r' | grep -qiE '^x-ff-request-id: [0-9a-f-]{36}$' && echo true || echo false)"
+  "$(curl -s -D - -o /dev/null "$api/healthz" | tr -d '\r' | grep -iE '^x-ff-request-id: [0-9a-f-]{36}$' >/dev/null && echo true || echo false)"
 check "the API's documents are off in production" "404 404" \
   "$(curl -s -o /dev/null -w '%{http_code}' "$api/api") $(curl -s -o /dev/null -w '%{http_code}' "$api/api-json")"
-check "its metrics, on their own port" true \
-  "$(curl -s "http://127.0.0.1:$metrics_port/metrics" | grep -q '^ff_backend_process_resident_memory_bytes ' && echo true || echo false)"
+check "its metrics, on their own port" "200 true" \
+  "$(curl -s -o "$work/metrics" -w '%{http_code}' "http://127.0.0.1:$metrics_port/metrics") $(grep -q '^ff_backend_process_resident_memory_bytes ' "$work/metrics" && echo true || echo false)"
 check "queues' SQS endpoint, on its own port, refuses a request with no signature as SQS does" "403 com.amazonaws.sqs#MissingAuthenticationToken" \
   "$(curl -s -o "$work/sqs" -w '%{http_code}' -X POST -H 'Content-Type: application/x-amz-json-1.0' -H 'X-Amz-Target: AmazonSQS.ListQueues' -d '{}' "http://127.0.0.1:$sqs_port/") $(jq -r .__type "$work/sqs")"
 check "mail's SES endpoint, on its own port, refuses a request with no signature as SES does" "403 MissingAuthenticationTokenException" \
@@ -133,7 +133,7 @@ static() {
   check "the app, never cached, with the security headers, and no Server header" "true no-cache nosniff DENY false" \
     "$(grep -q '<div id="root">' "$work/$name-index.html" && echo true || echo false) $(tr -d '\r' <"$work/$name-headers" | awk -F': ' 'tolower($1) == "cache-control" {printf "%s", $2}') $(tr -d '\r' <"$work/$name-headers" | awk -F': ' 'tolower($1) == "x-content-type-options" {printf "%s", $2}') $(tr -d '\r' <"$work/$name-headers" | awk -F': ' 'tolower($1) == "x-frame-options" {printf "%s", $2}') $(grep -qi '^server:' "$work/$name-headers" && echo true || echo false)"
   check "a path of the app's router gets the app" true \
-    "$(curl -s "$url/accounts/000000000001?tab=usage" | grep -q '<div id="root">' && echo true || echo false)"
+    "$(curl -s "$url/accounts/000000000001?tab=usage" | grep '<div id="root">' >/dev/null && echo true || echo false)"
   asset="$(grep -o '/assets/index-[^"]*\.js' "$work/$name-index.html" | head -1)"
   check "its bundle has the API, the login and the client baked in" "true true true" \
     "$(curl -s "$url$asset" >"$work/$name.js"; for needle in https://api.ff.test https://login.ff.test/realms/ff "$client"; do grep -q "$needle" "$work/$name.js" && printf 'true ' || printf 'false '; done | sed 's/ $//')"

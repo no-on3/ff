@@ -175,7 +175,7 @@ configs:
       username: ff-node
       password: \"$(cat "$secrets/registry-node-password")\"" 0600 && changed=true
 # gVisor's release, checked against the SHA-512 it is published with, as hack/k8s/gvisor-up.sh installs it.
-if ! /usr/local/bin/runsc --version 2>/dev/null | grep -q "release-$gvisor_release"; then
+if ! /usr/local/bin/runsc --version 2>/dev/null | grep "release-$gvisor_release" >/dev/null; then
   base="https://storage.googleapis.com/gvisor/releases/release/$gvisor_release/$(uname -m)"
   curl -fsSL --retry 3 -o "$work/gvisor.tar.zstd" "$base/gvisor.tar.zstd"
   curl -fsSL --retry 3 -o "$work/gvisor.tar.zstd.sha512" "$base/gvisor.tar.zstd.sha512"
@@ -202,7 +202,7 @@ elif [ "$changed" = true ]; then
   systemctl restart k3s
   echo "  k3s restarted for its new settings"
 fi
-for _ in $(seq 1 90); do kubectl get nodes 2>/dev/null | grep -q ' Ready ' && break; sleep 2; done
+for _ in $(seq 1 90); do kubectl get nodes 2>/dev/null | grep ' Ready ' >/dev/null && break; sleep 2; done
 kubectl wait --for=condition=Ready node --all --timeout=180s >/dev/null
 for _ in $(seq 1 60); do kubectl -n kube-system get deployment coredns >/dev/null 2>&1 && break; sleep 2; done
 kubectl -n kube-system rollout status deployment/coredns --timeout=180s >/dev/null

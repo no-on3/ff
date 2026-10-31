@@ -16,7 +16,7 @@ docker network inspect "$network" >/dev/null 2>&1 || { echo "no cluster $FF_CLUS
 # and the end-to-end checks delete one to see it made again. A container made before without them is made again,
 # its volume kept.
 if docker container inspect "$FF_REGISTRY_NAME" >/dev/null 2>&1 &&
-  ! docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$FF_REGISTRY_NAME" | grep -qx 'REGISTRY_STORAGE_DELETE_ENABLED=true'; then
+  ! docker container inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$FF_REGISTRY_NAME" | grep -x 'REGISTRY_STORAGE_DELETE_ENABLED=true' >/dev/null; then
   docker rm -f "$FF_REGISTRY_NAME" >/dev/null
 fi
 if ! docker container inspect "$FF_REGISTRY_NAME" >/dev/null 2>&1; then
@@ -28,7 +28,7 @@ if ! docker container inspect "$FF_REGISTRY_NAME" >/dev/null 2>&1; then
 fi
 [ "$(docker container inspect -f '{{.State.Running}}' "$FF_REGISTRY_NAME")" = true ] || docker start "$FF_REGISTRY_NAME" >/dev/null
 # A cluster made again has a new network.
-docker container inspect -f '{{json .NetworkSettings.Networks}}' "$FF_REGISTRY_NAME" | grep -q "\"$network\"" ||
+docker container inspect -f '{{json .NetworkSettings.Networks}}' "$FF_REGISTRY_NAME" | grep "\"$network\"" >/dev/null ||
   docker network connect "$network" "$FF_REGISTRY_NAME"
 
 hosts="server = \"http://$pull\"
