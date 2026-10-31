@@ -1398,7 +1398,10 @@ hack/ci.sh advisories        # the last security run's SBOMs and the lockfiles, 
 hack/ci.sh tools             # the latest release of each AWS tool the tests pin, and Rust's stable, tried as the pinned ones run: nightly on the CI server
 hack/ci.sh platform          # hack/e2e-platform.sh: nightly on the CI server, about 15 min
 hack/ci.sh all               # static, unit, db, security and cluster
+hack/ci.sh suggest           # runs nothing: what the working tree's changes need, and the commands that run it, in order
 ```
+
+**On a machine others share,** one heavy stage at a time, the resource check first (`hack/check-resources.sh`, which each heavy stage runs itself), with `FF_CI_JOBS=2` for the test workers and cargo's jobs. `hack/ci.sh suggest` reads the working tree's changes, the files not added yet among them, and prints the stages and the suites' sections that cover them, as commands in that order: `hack/suggest.map` says, path by path, what a change there needs, its narrower lines first, and `hack/test-suggest.sh` checks in `static` that every file the repository tracks has a line and that every stage and section a line names exists. `hack/ci.sh suggest origin/master` counts everything since `master` too. It skips nothing: GitHub runs every stage on a push, but `static` alone for one that changes documents only.
 
 `security` fails on a high or critical vulnerability that has a fix. One that can't be fixed yet, or whose fix is less than two weeks old, is accepted for a while, with why and until when, and on that date it is reported again: in an image, in `.trivyignore.yaml`, for the one binary it is in; in what a Node.js package ships, in `.npmauditignore`, for that directory and package (`hack/lib/npm-audit.py` reads npm audit's report against it, and `hack/test-npm-audit.sh` tests it). A gitleaks finding that isn't a secret goes in `.gitleaksignore`, by its fingerprint.
 

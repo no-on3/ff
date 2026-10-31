@@ -28,6 +28,9 @@
 #   tools     the latest release of each tool the tests pin (the AWS CLI, the SDK for JavaScript, boto3, OpenTofu,
 #             Terraform and its AWS provider, the SAM CLI, Rust's stable toolchain), tried as the pinned ones run,
 #             and what changed said: nightly
+#   suggest   [<commit>] runs nothing: what the working tree's changes need, the stages and the suites' sections that
+#             cover the paths changed (hack/suggest.map), and the commands that run them, one at a time; since a
+#             commit too, when one is named (hack/lib/suggest.sh)
 #   platform  FF deployed from deploy/k8s on a cluster of its own (hack/e2e-platform.sh), about 15 minutes
 #   all       static, unit, db, security and cluster, one after the other
 # A failed step is reported and the next one runs, so that a run names every failed step, not only the first; a step
@@ -36,12 +39,15 @@
 # each step with its result and its seconds, and every failed check, and GitHub shows it as the job's summary.
 # Heavy steps run one at a time. FF_CI_JOBS=<n> caps the test runners' and Rust's parallelism at n, for a machine
 # others share; unset, each tool takes its own default, but the backend's L1, which takes half the cores, or every one
-# on GitHub.
+# on GitHub. On a machine others share, one stage at a time too, with FF_CI_JOBS=2, each heavy one checking the
+# resources first (hack/check-resources.sh): suggest prints the commands in that order.
 #   hack/ci.sh <stage> [<stage> ...]
 #   FF_CI_JOBS=2 hack/ci.sh unit
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo"
+# What a change needs, printed: nothing runs, so nothing of a run's below, its report and a failed run's files kept.
+[ "${1:-}" != suggest ] || { shift; exec "$repo/hack/lib/suggest.sh" "$@"; }
 
 # Pinned to releases at least two weeks old when chosen.
 TRIVY_IMAGE=aquasec/trivy:0.75.0
@@ -161,6 +167,7 @@ stage_static() {
   step "the suites' checks, on suites of their own" hack/test-checks.sh
   step "the pipeline's steps, on runs of their own" hack/test-ci-steps.sh
   step "a push of documents alone, told from one with code" hack/test-changes.sh
+  step "what a change needs, from a map that names every file, real stages and real sections" hack/test-suggest.sh
   step "the nightly's SBOMs, the branch's last, against a stand-in gh" hack/test-last-sboms.sh
   step "the nightly's latest tools, compared with the pinned ones, on recordings of its own" hack/test-tools-compare.sh
   step "the resource guard, its limits and the load's off" hack/test-check-resources.sh
@@ -390,7 +397,7 @@ for stage in "$@"; do
   case "$stage" in
     deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | images | advisories | tools | platform) "stage_$stage" ;;
     all) stage_static; stage_unit; stage_db; stage_security; stage_cluster ;;
-    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), advisories, tools, platform or all" >&2; exit 2 ;;
+    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), advisories, tools, platform or all; suggest, alone" >&2; exit 2 ;;
   esac
 done
 ci_done
