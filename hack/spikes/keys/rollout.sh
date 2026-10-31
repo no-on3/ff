@@ -44,7 +44,7 @@ until_one_pod() {
   fail "the function didn't settle at one pod within 60 s"
 }
 load_pod=spike-keys-load
-on_exit "kubectl -n ff-system delete pod $load_pod configmap $load_pod --ignore-not-found --wait=false >/dev/null 2>&1"
+on_exit "kubectl -n ff-system delete pod/$load_pod configmap/$load_pod --ignore-not-found --wait=false >/dev/null 2>&1"
 
 section "a function at one instance"
 code='export async function handler() {
@@ -101,9 +101,11 @@ under_load() { # <path>
     def ok: (.status // 0) < 300 and (.status // 0) > 0 and (.record == null);
     def ms(p): (sort | .[((length - 1) * p | floor)]);
     {calls: length, lost: (map(select(ok | not)) | length),
-     failures: (map(select(ok | not) | {after_ms: (.t - $from), what: (.error // "\(.status) \(.record // .body // "")"), refused}) | group_by(.what)
-       | map({what: .[0].what, count: length, after_ms: (map(.after_ms) | [min, max])})),
+     failures: (map(select(ok | not) | {after_ms: (.t - $from), refused,
+         what: ((.error // "\(.status) \(.record // .body // "")") + (if .reused then ", on a connection kept alive" else "" end))})
+       | group_by(.what) | map({what: .[0].what, count: length, after_ms: (map(.after_ms) | [min, max])})),
      refused_then_answered: (map(select(ok and (.refused // 0) > 0)) | length),
+     not_run_then_answered: (map(select(ok and (.notRun // 0) > 0)) | length),
      change_answered_after_ms: ($answered - $from), rolled_out_after_ms: ($over - $from),
      first_new_after_ms: (map(select(ok and .value == $value) | .t - $from) | min),
      last_old_after_ms: (map(select(ok and .value != $value) | .t - $from) | max),

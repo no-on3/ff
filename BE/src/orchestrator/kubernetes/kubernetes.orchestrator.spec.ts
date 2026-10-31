@@ -522,6 +522,52 @@ describe('KubernetesOrchestrator', () => {
   });
 
   describe('invoke', () => {
+    /** A direct call's address: the function's Service. */
+    const serviceUrl = `http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`;
+    /** An orchestrator that calls functions' Services directly, as production does, trying a refused call again for `refusedRetryMs`. */
+    const directly = (refusedRetryMs = 5000) => new KubernetesOrchestrator(settings({ invokeMode: 'direct' }), api, 5, 3000, refusedRetryMs);
+
+    /** A local server standing in for a function's pod: `answer` gets each request once its body is read. */
+    const podAnswering = async (answer: (req: http.IncomingMessage, res: http.ServerResponse, body: string) => void) => {
+      const server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (chunk: Buffer) => (body += chunk.toString()));
+        req.on('end', () => answer(req, res, body));
+      });
+      await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+      return { port: (server.address() as AddressInfo).port, close: () => new Promise((resolve) => server.close(resolve)) };
+    };
+
+    /** A port nothing listens on, which refuses every connection. */
+    const refusingPort = async () => {
+      const closed = http.createServer();
+      await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve));
+      const { port } = closed.address() as AddressInfo;
+      await new Promise((resolve) => closed.close(resolve));
+      return port;
+    };
+
+    /** Sends direct calls, which name the function's Service, to a local port instead, which `portFor` picks for each attempt (1, 2…). */
+    const sendDirectCallsTo = (portFor: (attempt: number) => number) => {
+      const send = http.request;
+      const urls: string[] = [];
+      const spy = jest.spyOn(http, 'request').mockImplementation((url: string, options: http.RequestOptions, callback: () => void) => {
+        urls.push(url);
+        return send(`http://127.0.0.1:${portFor(urls.length)}${new URL(url).pathname}`, options, callback);
+      });
+      return { urls, restore: () => spy.mockRestore() };
+    };
+
+    /** The runtimes' answer to a call that reaches them while they stop. */
+    const refusedAsNotRun = (res: http.ServerResponse) => {
+      res.writeHead(503, { 'content-type': 'application/json', 'x-ff-not-run': 'shutting-down', connection: 'close' });
+      res.end('{"errorType":"ServiceUnavailableException","errorMessage":"Runtime is shutting down"}');
+    };
+    const answered = (res: http.ServerResponse) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('"answered"');
+    };
+
     it('posts the payload through the API server proxy and maps the runtime headers', async () => {
       api.objects.set(deploymentPath, rolledOut(1));
       api.responses.push({
@@ -632,102 +678,27 @@ describe('KubernetesOrchestrator', () => {
       });
 
       it("sends it on a direct call to the function's Service too, and reads a measure of 0 ms as one", async () => {
-        // A local server stands in for the Service; the request still names the Service's address.
         const seen: Array<{ url?: string; headers: http.IncomingHttpHeaders; body: string }> = [];
-        const server = http.createServer((req, res) => {
-          let body = '';
-          req.on('data', (chunk: Buffer) => (body += chunk.toString()));
-          req.on('end', () => {
-            seen.push({ url: req.url, headers: req.headers, body });
-            res.writeHead(200, { 'content-type': 'application/json', 'x-ff-duration-ms': '0.00', 'x-ff-max-memory-used-mb': '48' });
-            res.end('"ok"');
-          });
+        const pod = await podAnswering((req, res, body) => {
+          seen.push({ url: req.url, headers: req.headers, body });
+          res.writeHead(200, { 'content-type': 'application/json', 'x-ff-duration-ms': '0.00', 'x-ff-max-memory-used-mb': '48' });
+          res.end('"ok"');
         });
-        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-        const { port } = server.address() as AddressInfo;
-        const send = http.request;
-        const urls: string[] = [];
-        const spy = jest.spyOn(http, 'request').mockImplementation((url: string, options: http.RequestOptions, callback: () => void) => {
-          urls.push(url);
-          return send(`http://127.0.0.1:${port}${new URL(url).pathname}`, options, callback);
-        });
+        const calls = sendDirectCallsTo(() => pod.port);
         try {
-          const direct = new KubernetesOrchestrator(settings({ invokeMode: 'direct' }), api, 5);
           api.objects.set(deploymentPath, rolledOut(1));
 
-          const result = await direct.invoke(fn, { a: 1 }, 'inv-2');
+          const result = await directly().invoke(fn, { a: 1 }, 'inv-2');
 
-          expect(urls).toEqual([`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`]);
+          expect(calls.urls).toEqual([serviceUrl]);
           expect(seen).toEqual([
             { url: '/invoke', headers: expect.objectContaining({ 'x-ff-request-id': 'inv-2', 'content-type': 'application/json' }), body: '{"a":1}' },
           ]);
           // 0.00 ms is what the runtime measured: billed as such, not replaced by the backend's own, longer measure.
           expect(result).toEqual({ output: 'ok', durationMs: 0, memoryUsedMb: 48 });
         } finally {
-          spy.mockRestore();
-          await new Promise((resolve) => server.close(resolve));
-        }
-      });
-
-      /** A port nothing listens on, which refuses every connection. */
-      const refusingPort = async () => {
-        const closed = http.createServer();
-        await new Promise<void>((resolve) => closed.listen(0, '127.0.0.1', resolve));
-        const { port } = closed.address() as AddressInfo;
-        await new Promise((resolve) => closed.close(resolve));
-        return port;
-      };
-
-      it("tries a direct call again while the function's Service refuses it, as just after its pod became ready", async () => {
-        const server = http.createServer((req, res) => {
-          req.resume();
-          req.on('end', () => {
-            res.writeHead(200, { 'content-type': 'application/json' });
-            res.end('"answered"');
-          });
-        });
-        await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-        const { port } = server.address() as AddressInfo;
-        const refusing = await refusingPort();
-        const send = http.request;
-        const urls: string[] = [];
-        // The first two attempts reach no endpoint yet; the third, the pod.
-        const spy = jest.spyOn(http, 'request').mockImplementation((url: string, options: http.RequestOptions, callback: () => void) => {
-          urls.push(url);
-          return send(`http://127.0.0.1:${urls.length <= 2 ? refusing : port}${new URL(url).pathname}`, options, callback);
-        });
-        try {
-          const direct = new KubernetesOrchestrator(settings({ invokeMode: 'direct' }), api, 5, 3000, 5000);
-          api.objects.set(deploymentPath, rolledOut(1));
-
-          const result = await direct.invoke(fn, {}, 'inv-3');
-
-          expect(result.output).toBe('answered');
-          expect(urls).toEqual(Array(3).fill(`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`));
-        } finally {
-          spy.mockRestore();
-          await new Promise((resolve) => server.close(resolve));
-        }
-      });
-
-      it('gives up on a Service that keeps refusing once its few seconds are up, with the error it gave', async () => {
-        const refusing = await refusingPort();
-        const send = http.request;
-        let attempts = 0;
-        const spy = jest.spyOn(http, 'request').mockImplementation((url: string, options: http.RequestOptions, callback: () => void) => {
-          attempts += 1;
-          return send(`http://127.0.0.1:${refusing}${new URL(url).pathname}`, options, callback);
-        });
-        try {
-          const direct = new KubernetesOrchestrator(settings({ invokeMode: 'direct' }), api, 5, 3000, 1000);
-          api.objects.set(deploymentPath, rolledOut(1));
-          const started = Date.now();
-
-          await expect(direct.invoke(fn, {}, 'inv-4')).rejects.toMatchObject({ code: 'ECONNREFUSED' });
-          // At 0, 100, 300 and 700 ms, the next wait ending past the second given; three when the machine is slow.
-          expect([attempts >= 3 && attempts <= 4, Date.now() - started < 1000]).toEqual([true, true]);
-        } finally {
-          spy.mockRestore();
+          calls.restore();
+          await pod.close();
         }
       });
 
@@ -789,6 +760,125 @@ describe('KubernetesOrchestrator', () => {
         expect(error).toBeInstanceOf(OrchestratorError);
         expect(initMsOf(error)).toBeGreaterThanOrEqual(50);
         expect(api.requests).toEqual([]);
+      });
+    });
+
+    describe('a call the function never got, tried again for a few seconds from the first refusal', () => {
+      it("tries a direct call again while the function's Service refuses it, as just after its pod became ready", async () => {
+        const pod = await podAnswering((_req, res) => answered(res));
+        const refusing = await refusingPort();
+        // The first two attempts reach no endpoint yet; the third, the pod.
+        const calls = sendDirectCallsTo((attempt) => (attempt <= 2 ? refusing : pod.port));
+        try {
+          api.objects.set(deploymentPath, rolledOut(1));
+
+          const result = await directly().invoke(fn, {}, 'inv-3');
+
+          expect(result.output).toBe('answered');
+          expect(calls.urls).toEqual(Array(3).fill(serviceUrl));
+        } finally {
+          calls.restore();
+          await pod.close();
+        }
+      });
+
+      it('gives up on a Service that keeps refusing once its few seconds are up, with the error it gave', async () => {
+        const refusing = await refusingPort();
+        const calls = sendDirectCallsTo(() => refusing);
+        try {
+          api.objects.set(deploymentPath, rolledOut(1));
+          const started = Date.now();
+
+          await expect(directly(1000).invoke(fn, {}, 'inv-4')).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+          // At 0, 100, 300 and 700 ms, the next wait ending past the second given; three when the machine is slow.
+          expect([calls.urls.length >= 3 && calls.urls.length <= 4, Date.now() - started < 1000]).toEqual([true, true]);
+        } finally {
+          calls.restore();
+        }
+      });
+
+      it('tries again, on a connection of its own, a direct call that an instance stopping refused as never run', async () => {
+        const connections: Array<string | undefined> = [];
+        const pod = await podAnswering((req, res) => {
+          connections.push(req.headers.connection);
+          if (connections.length === 1) refusedAsNotRun(res);
+          else answered(res);
+        });
+        const calls = sendDirectCallsTo(() => pod.port);
+        try {
+          api.objects.set(deploymentPath, rolledOut(1));
+
+          const result = await directly().invoke(fn, {}, 'inv-5');
+
+          expect(result.output).toBe('answered');
+          // The first on a connection kept alive, as every call; the second on one of its own, closed after it: one kept
+          // alive could lead back to the pod that refused.
+          expect(connections).toEqual(['keep-alive', 'close']);
+        } finally {
+          calls.restore();
+          await pod.close();
+        }
+      });
+
+      it('counts its few seconds from the first refusal, so that a call refused after waiting its turn still has them', async () => {
+        let attempts = 0;
+        const pod = await podAnswering((_req, res) => {
+          attempts += 1;
+          // The first waited its turn behind a longer call, and was refused when the instance was told to stop.
+          if (attempts === 1) setTimeout(() => refusedAsNotRun(res), 300);
+          else answered(res);
+        });
+        const calls = sendDirectCallsTo(() => pod.port);
+        try {
+          api.objects.set(deploymentPath, rolledOut(1));
+
+          // 200 ms to try again: over already at the refusal, were they counted from the start of the call.
+          const result = await directly(200).invoke(fn, {}, 'inv-6');
+
+          expect([result.output, attempts]).toEqual(['answered', 2]);
+        } finally {
+          calls.restore();
+          await pod.close();
+        }
+      });
+
+      it('gives up on instances that keep refusing it as never run once its few seconds are up, with the last refusal', async () => {
+        let attempts = 0;
+        const pod = await podAnswering((_req, res) => {
+          attempts += 1;
+          refusedAsNotRun(res);
+        });
+        const calls = sendDirectCallsTo(() => pod.port);
+        try {
+          api.objects.set(deploymentPath, rolledOut(1));
+
+          const error = await directly(300).invoke(fn, {}, 'inv-7').catch((failure: unknown) => failure);
+
+          expect(error).toBeInstanceOf(OrchestratorError);
+          expect((error as Error).message).toMatch(/^Invocation failed with HTTP 503: .*Runtime is shutting down/);
+          expect(attempts).toBeGreaterThanOrEqual(2);
+        } finally {
+          calls.restore();
+          await pod.close();
+        }
+      });
+
+      it('tries again a proxied call refused as never run, and no other answer of 503', async () => {
+        api.objects.set(deploymentPath, rolledOut(1));
+        const runtimeStopping = {
+          status: 503,
+          headers: { 'x-ff-not-run': 'shutting-down' },
+          body: '{"errorType":"ServiceUnavailableException","errorMessage":"Runtime is shutting down"}',
+        };
+        const noEndpoints = { status: 503, headers: {}, body: '{"kind":"Status","message":"no endpoints available for service"}' };
+        api.responses.push(runtimeStopping, { status: 200, headers: {}, body: '"answered"' }, noEndpoints);
+
+        const result = await orchestrator.invoke(fn, {});
+        const failure = await orchestrator.invoke(fn, {}).catch((error: unknown) => error);
+
+        expect(result.output).toBe('answered');
+        expect(failure).toBeInstanceOf(OrchestratorError);
+        expect(api.requests).toHaveLength(3);
       });
     });
   });

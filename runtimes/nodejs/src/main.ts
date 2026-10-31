@@ -16,6 +16,7 @@
 import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as net from 'node:net';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
@@ -156,7 +157,10 @@ function maxMemoryUsedMb(): number {
 
 function send(res: http.ServerResponse, status: number, body: string, headers: Record<string, string> = {}): void {
   if (res.writableEnded || res.destroyed) return; // the client gave up
-  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...headers });
+  // While the runtime stops, each answer closes its connection, so that the caller's next call opens a new one, which
+  // the Service gives a ready pod: on a connection kept alive, it would come here again.
+  const closing = shuttingDown ? { connection: 'close' } : {};
+  res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...closing, ...headers });
   res.end(body);
 }
 
@@ -174,6 +178,11 @@ function invocationHeaders(inv: Invocation): Record<string, string> {
 
 function respondError(inv: Invocation, status: number, error: FunctionError): void {
   sendJson(inv.res, status, error, { ...invocationHeaders(inv), 'x-ff-function-error': 'Unhandled' });
+}
+
+/** A call refused before it ran, as the header says, so that the caller may send it to another instance: the backend does. */
+function refuseNotRun(res: http.ServerResponse): void {
+  sendJson(res, 503, { errorType: 'ServiceUnavailableException', errorMessage: 'Runtime is shutting down' }, { 'x-ff-not-run': 'shutting-down' });
 }
 
 function startWorker(): void {
@@ -221,7 +230,8 @@ function replaceWorker(): void {
   generation++;
   worker = undefined;
   void old?.terminate();
-  if (!shuttingDown) startWorker();
+  if (shuttingDown) exitIfDrained(); // no new worker: that was the last call
+  else startWorker();
 }
 
 /**
@@ -362,16 +372,17 @@ function onTimeout(inv: Invocation): void {
 }
 
 function dispatch(): void {
+  if (shuttingDown) {
+    exitIfDrained(); // nothing starts any more: shutdown() refused the calls that waited
+    return;
+  }
   if (current || state !== 'ready' || !worker) return;
   let inv = queue.shift();
   while (inv && inv.res.destroyed) {
     clearTimeout(inv.queueTimer);
     inv = queue.shift(); // callers that gave up while queued
   }
-  if (!inv) {
-    if (shuttingDown) process.exit(0);
-    return;
-  }
+  if (!inv) return;
   clearTimeout(inv.queueTimer);
   current = inv;
   inv.startedAt = performance.now();
@@ -426,7 +437,7 @@ async function acceptInvocation(req: http.IncomingMessage, res: http.ServerRespo
     return;
   }
   if (shuttingDown) {
-    sendJson(res, 503, { errorType: 'ServiceUnavailableException', errorMessage: 'Runtime is shutting down' });
+    refuseNotRun(res);
     return;
   }
   if (queue.length >= maxQueue) {
@@ -478,16 +489,48 @@ const server = http.createServer((req, res) => {
 // An idle connection stays open longer than the clients that pool connections keep theirs: the cluster API's service
 // proxy keeps its own 90 seconds and ignores the Keep-Alive hint. A runtime that closes first races the proxy's next
 // call on that connection, which then fails as "error trying to reach service: EOF". Node.js's default is 5 seconds;
-// shutdown() exits once drained, so the longer wait never holds a pod.
+// shutdown() waits no longer than its own limit, so the longer wait never holds a pod.
 server.keepAliveTimeout = 130_000;
 
+/**
+ * How long the backend keeps a connection to a function unused before it closes it (kubernetes.orchestrator.ts): a
+ * runtime that stops waits as long for its callers to close their connections.
+ */
+const CALLER_IDLE_CLOSE_MS = 5_000;
+/** The connections open to the server, which a runtime that stops leaves to their callers to close. */
+const connections = new Set<net.Socket>();
+server.on('connection', (socket: net.Socket) => {
+  connections.add(socket);
+  socket.once('close', () => {
+    connections.delete(socket);
+    exitIfDrained();
+  });
+});
+
+/**
+ * Kubernetes stops the runtime to replace or remove its pod. The call running is answered; every other one, waiting or
+ * still to come, is refused as never run, and the backend sends it to another instance. Each answer closes its
+ * connection, and the runtime closes no other: a call could be on its way on one, and would be lost. The callers close
+ * them, the backend each one it leaves unused for CALLER_IDLE_CLOSE_MS. The runtime exits once nothing runs and no
+ * connection is open, or when the time for both is up.
+ */
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
   log({ level: 'info', msg: 'shutting down; draining invocations', signal, inFlight: Number(Boolean(current)), queued: queue.length });
-  server.close();
-  if (!current && queue.length === 0) process.exit(0);
-  setTimeout(() => process.exit(0), timeoutMs + 1_000).unref();
+  for (const inv of queue.splice(0)) {
+    clearTimeout(inv.queueTimer);
+    refuseNotRun(inv.res);
+  }
+  // net.Server's close, which stops accepting connections: http.Server's would also close those that are idle.
+  net.Server.prototype.close.call(server);
+  setTimeout(() => process.exit(0), Math.max(timeoutMs, CALLER_IDLE_CLOSE_MS) + 1_000).unref();
+  exitIfDrained();
+}
+
+/** While stopping: exits once nothing runs and every connection is closed. */
+function exitIfDrained(): void {
+  if (shuttingDown && !current && queue.length === 0 && connections.size === 0) process.exit(0);
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

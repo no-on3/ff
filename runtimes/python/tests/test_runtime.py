@@ -38,6 +38,14 @@ class Result:
         return json.loads(self.text) if self.text else None
 
 
+def exchange(connection, method, path, body=None, headers=None):
+    """One request on this connection, which stays open for the next unless the runtime closes it."""
+    connection.request(method, path, body=body, headers=headers or {})
+    response = connection.getresponse()
+    text = response.read().decode()
+    return Result(response.status, text, {name.lower(): value for name, value in response.getheaders()})
+
+
 class Runtime:
     def __init__(self, fixture, env):
         self.port = free_port()
@@ -102,10 +110,7 @@ class Runtime:
     def request(self, method, path, body=None, headers=None):
         connection = HTTPConnection("127.0.0.1", self.port, timeout=30)
         try:
-            connection.request(method, path, body=body, headers=headers or {})
-            response = connection.getresponse()
-            text = response.read().decode()
-            return Result(response.status, text, {name.lower(): value for name, value in response.getheaders()})
+            return exchange(connection, method, path, body, headers)
         finally:
             connection.close()
 
@@ -516,6 +521,74 @@ class Lifecycle(RuntimeTest):
         self.assertEqual(res.status, 200)
         self.assertEqual(code, 0)
         self.assertIn("shutting down; draining invocations", rt.logs())
+
+    REFUSED = (503, {"errorType": "ServiceUnavailableException", "errorMessage": "Runtime is shutting down"}, "shutting-down", "close")
+
+    @staticmethod
+    def not_run(res):
+        return res.status, res.json, res.headers.get("x-ff-not-run"), res.headers.get("connection")
+
+    def test_refuses_at_once_as_never_run_a_call_waiting_its_turn_and_closes_both_connections(self):
+        rt = self.start("slow-echo")  # each call takes 200 ms
+        rt.ready()
+
+        def answered(n):
+            res = rt.invoke({"n": n})
+            return res, time.monotonic()
+
+        with ThreadPoolExecutor(2) as pool:
+            running = pool.submit(answered, 1)
+            time.sleep(0.025)
+            waiting = pool.submit(answered, 2)
+            time.sleep(0.025)
+            rt.process.send_signal(signal.SIGTERM)
+            (answer, answered_at), (refusal, refused_at) = running.result(), waiting.result()
+        code = rt.exit_code(2)
+
+        self.assertEqual((answer.status, answer.json["n"], answer.headers.get("connection")), (200, 1, "close"))
+        self.assertEqual(self.not_run(refusal), self.REFUSED)
+        self.assertLess(refused_at, answered_at, "the call waiting was refused only after the one before it ended")
+        self.assertEqual(code, 0)
+
+    def test_leaves_an_idle_connection_for_its_caller_to_close_and_refuses_a_call_on_it_as_never_run(self):
+        rt = self.start("echo")
+        rt.ready()
+        idle = HTTPConnection("127.0.0.1", rt.port, timeout=10)
+        self.addCleanup(idle.close)
+        call = {"body": json.dumps({"n": 1}).encode(), "headers": {"content-type": "application/json"}}
+        before = exchange(idle, "POST", "/invoke", **call)
+
+        rt.process.send_signal(signal.SIGTERM)
+        waited_for = rt.exit_code(0.8)
+        refuses_new_connections = self.refuses_new_connections(rt)
+        on_the_idle_one = exchange(idle, "POST", "/invoke", **call)
+        code = rt.exit_code(2)
+
+        self.assertEqual(before.status, 200)
+        self.assertIsNone(waited_for, "the runtime exited with a connection still open, which a call could have been crossing")
+        self.assertTrue(refuses_new_connections)
+        self.assertEqual(self.not_run(on_the_idle_one), self.REFUSED)
+        self.assertEqual(code, 0)
+
+    def test_exits_at_once_when_it_runs_nothing_and_no_connection_is_open(self):
+        rt = self.start("echo")
+        rt.ready()
+
+        rt.process.send_signal(signal.SIGTERM)
+
+        self.assertEqual(rt.exit_code(1.5), 0)
+
+    @staticmethod
+    def refuses_new_connections(rt, within_s=2):
+        """Once its accept loop has seen the signal, within half a second; until then, a probe is answered and closed."""
+        deadline = time.monotonic() + within_s
+        while time.monotonic() < deadline:
+            try:
+                rt.request("GET", "/healthz")
+            except ConnectionRefusedError:
+                return True
+            time.sleep(0.05)
+        return False
 
 
 class AcceptLoop(unittest.TestCase):

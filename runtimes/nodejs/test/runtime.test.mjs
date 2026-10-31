@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
+import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,6 +24,25 @@ async function freePort() {
   const { port } = server.address();
   await new Promise((resolve) => server.close(resolve));
   return port;
+}
+
+/**
+ * One request on a connection of its own, closed after it: a probe leaves no connection open, which a runtime that
+ * stops would wait for (fetch keeps its connections for as long as the runtime's Keep-Alive says, 130 seconds).
+ * `agent` sends it on that agent's connections instead.
+ */
+function request(base, method, path, body, agent = false) {
+  return new Promise((resolve, reject) => {
+    const headers = body === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) };
+    const req = http.request(`${base}${path}`, { method, headers, agent }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => (text += chunk));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text, json: text ? JSON.parse(text) : undefined }));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
 }
 
 /**
@@ -62,6 +82,7 @@ async function startRuntime(fixture, env = {}, { oneFile = false } = {}) {
     stdout: () => stdout,
     /** The exit code once the process exits, or 'running' after waitMs. */
     exitCode: (waitMs) => Promise.race([exited, sleep(waitMs).then(() => 'running')]),
+    signal: (name) => proc.kill(name),
     async stop() {
       running.delete(runtime);
       if (proc.exitCode === null) {
@@ -74,7 +95,7 @@ async function startRuntime(fixture, env = {}, { oneFile = false } = {}) {
   running.add(runtime);
   for (let i = 0; i < 100; i++) {
     try {
-      if ((await fetch(`${base}/healthz`)).ok) return runtime;
+      if ((await request(base, 'GET', '/healthz')).status === 200) return runtime;
     } catch {
       // not listening yet
     }
@@ -87,8 +108,8 @@ async function readyzUntil(runtime, predicate, timeoutMs = 5000) {
   const until = Date.now() + timeoutMs;
   let last;
   while (Date.now() < until) {
-    const res = await fetch(`${runtime.base}/readyz`);
-    last = { status: res.status, body: await res.json() };
+    const res = await request(runtime.base, 'GET', '/readyz');
+    last = { status: res.status, body: res.json };
     if (predicate(last)) return last;
     await sleep(50);
   }
@@ -748,6 +769,68 @@ describe('connections', () => {
 
     assert.match(got, /^HTTP\/1\.1 200 /);
     socket.destroy();
+    await rt.stop();
+  });
+});
+
+describe('stopping, as Kubernetes asks before it replaces or removes the pod', () => {
+  /** A call on `agent`'s connections, which it keeps open between calls. */
+  const call = (rt, agent, event) => request(rt.base, 'POST', '/invoke', JSON.stringify(event), agent);
+  const notRun = (res) => [res.status, res.json, res.headers['x-ff-not-run'], res.headers.connection];
+  const refused = [503, { errorType: 'ServiceUnavailableException', errorMessage: 'Runtime is shutting down' }, 'shutting-down', 'close'];
+
+  it('answers the call it runs, refuses at once the one waiting its turn as never run, closes both connections, and exits', async () => {
+    const rt = await startRuntime('slow-echo'); // each call takes 200 ms
+    await readyz(rt, 200);
+    const [first, second] = [new http.Agent({ keepAlive: true }), new http.Agent({ keepAlive: true })];
+
+    const answered = (res) => ({ ...res, at: Date.now() });
+    const running = call(rt, first, { n: 1 }).then(answered);
+    await sleep(25);
+    const waiting = call(rt, second, { n: 2 }).then(answered);
+    await sleep(25);
+    rt.signal('SIGTERM');
+    const [answer, refusal] = await Promise.all([running, waiting]);
+    const code = await rt.exitCode(2_000);
+
+    assert.deepEqual([answer.status, answer.json.n, answer.headers.connection], [200, 1, 'close']);
+    assert.deepEqual(notRun(refusal), refused);
+    assert.ok(refusal.at < answer.at, 'the call waiting was refused only after the one before it ended');
+    assert.equal(code, 0);
+    assert.deepEqual(
+      logLines(rt, 'shutting down; draining invocations').map(({ signal, inFlight, queued }) => ({ signal, inFlight, queued })),
+      [{ signal: 'SIGTERM', inFlight: 1, queued: 1 }],
+    );
+    await rt.stop();
+  });
+
+  it('leaves an idle connection for its caller to close, refuses as never run a call that comes on it, then exits', async () => {
+    const rt = await startRuntime('js-function');
+    await readyz(rt, 200);
+    const agent = new http.Agent({ keepAlive: true });
+    const before = await call(rt, agent, { n: 1 });
+
+    rt.signal('SIGTERM');
+    const waitedFor = await rt.exitCode(500);
+    const newConnection = await request(rt.base, 'GET', '/healthz').catch((error) => error.code);
+    const onTheIdleOne = await call(rt, agent, { n: 2 });
+    const code = await rt.exitCode(2_000);
+
+    assert.deepEqual([before.status, before.headers.connection], [200, 'keep-alive']);
+    assert.equal(waitedFor, 'running', 'the runtime exited with a connection still open, which a call could have been crossing');
+    assert.equal(newConnection, 'ECONNREFUSED');
+    assert.deepEqual(notRun(onTheIdleOne), refused);
+    assert.equal(code, 0);
+    await rt.stop();
+  });
+
+  it('exits at once when it runs nothing and no connection is open', async () => {
+    const rt = await startRuntime('hello');
+    await readyz(rt, 200);
+
+    rt.signal('SIGTERM');
+
+    assert.equal(await rt.exitCode(1_000), 0);
     await rt.stop();
   });
 });

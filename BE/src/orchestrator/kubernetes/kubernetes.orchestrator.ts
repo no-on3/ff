@@ -88,6 +88,16 @@ interface Pod extends Listed {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * The connections direct calls keep open to functions' Services, each closed once unused for 5 seconds. A runtime that
+ * stops waits as long for its callers to close theirs (CALLER_IDLE_CLOSE_MS in both runtimes): one it closed itself
+ * could cross a call on its way, which would be lost.
+ */
+const functionConnections = new http.Agent({ keepAlive: true, timeout: 5_000 });
+
+/** The runtimes' mark on a call they refused before running it, as they do while they stop: another instance may take it. */
+const NOT_RUN_HEADER = 'x-ff-not-run';
+
 /** The newest of the pods, by creation time; undefined when there are none. */
 function newestOf<T extends Listed>(pods: T[]): T | undefined {
   return [...pods].sort((a, b) => (b.metadata.creationTimestamp ?? '').localeCompare(a.metadata.creationTimestamp ?? ''))[0];
@@ -146,7 +156,7 @@ export class KubernetesOrchestrator implements Orchestrator {
     private readonly api: KubeApi,
     private readonly pollIntervalMs = 1000,
     private readonly loadCheckIntervalMs = 3000,
-    /** How long a direct call keeps trying a function's Service that refuses it (post()). */
+    /** How long a call the function never got keeps being tried, from its first refusal (post()). */
     private readonly refusedRetryMs = 5000,
   ) {
     this.logStore = new LogStore(settings.invokeMode, api);
@@ -551,27 +561,45 @@ export class KubernetesOrchestrator implements Orchestrator {
     // A call may wait for a free instance (the runtime then answers 429), then runs up to its timeout. The
     // 2 s past that include the second the Node.js runtime may wait for the call's output (OUTPUT_WAIT_MS).
     const timeoutMs = maxQueueWaitMs(fn) + fn.timeout * 1000 + 2000;
-    if (this.settings.invokeMode === 'proxy') {
-      try {
-        return await this.api.request('POST', paths.serviceProxy(ns, name, 'http', '/invoke'), { body, timeoutMs, headers });
-      } catch (error) {
-        // Giving up waiting is the same timeout in both modes, so development records what production does.
-        if (error instanceof KubeRequestTimeoutError) throw noResponseWithin(timeoutMs);
-        throw error;
-      }
-    }
-    // Direct: the Service's own address. A pod that has just become ready joins the Service's endpoints on each node a
-    // moment later, and until then the Service refuses the connection. The call never reached the function, so it is
-    // tried again, a little later each time, for a few seconds, before it fails.
-    const url = `http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`;
-    const deadline = Date.now() + this.refusedRetryMs;
+    const direct = this.settings.invokeMode === 'direct';
+    // Direct: the Service's own address; tried again, on a connection of its own, since one kept alive could lead back to
+    // the pod that refused.
+    const send = direct
+      ? (again: boolean) => postJson(`http://${name}.${ns}.svc:${RUNTIME_PORT}/invoke`, body, timeoutMs, headers, again)
+      : () => this.postThroughProxy(ns, name, body, timeoutMs, headers);
+    // A call the function never got is tried again, a little later each time, for a few seconds from the first refusal,
+    // before it fails. A pod that has just become ready joins the Service's endpoints on each node a moment later, and
+    // until then the Service refuses a direct call's connection; a pod that stops refuses, saying the call never ran,
+    // what still reaches it (both runtimes), while the others take it.
+    let deadline: number | undefined;
     for (let wait = 100; ; wait = Math.min(2 * wait, 1000)) {
+      let res: KubeResponse | undefined;
+      let failure: unknown;
       try {
-        return await postJson(url, body, timeoutMs, headers);
+        res = await send(deadline !== undefined);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ECONNREFUSED' || Date.now() + wait > deadline) throw error;
-        await sleep(wait);
+        failure = error;
       }
+      const refused = res
+        ? res.status === 503 && res.headers[NOT_RUN_HEADER] !== undefined
+        : direct && (failure as NodeJS.ErrnoException).code === 'ECONNREFUSED';
+      deadline ??= Date.now() + this.refusedRetryMs;
+      if (!refused || Date.now() + wait > deadline) {
+        if (res) return res;
+        throw failure;
+      }
+      await sleep(wait);
+    }
+  }
+
+  /** Through the cluster API's proxy to the function's Service: development's path. */
+  private async postThroughProxy(ns: string, name: string, body: string, timeoutMs: number, headers: Record<string, string>): Promise<KubeResponse> {
+    try {
+      return await this.api.request('POST', paths.serviceProxy(ns, name, 'http', '/invoke'), { body, timeoutMs, headers });
+    } catch (error) {
+      // Giving up waiting is the same timeout in both modes, so development records what production does.
+      if (error instanceof KubeRequestTimeoutError) throw noResponseWithin(timeoutMs);
+      throw error;
     }
   }
 
@@ -638,12 +666,16 @@ function measure(header: string | string[] | undefined): number | undefined {
   return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-/** Direct (in-cluster) call to a function Service. */
-function postJson(url: string, body: string, timeoutMs: number, headers: Record<string, string> = {}): Promise<KubeResponse> {
+/** Direct (in-cluster) call to a function Service: on a connection kept alive, or on one of its own (`fresh`). */
+function postJson(url: string, body: string, timeoutMs: number, headers: Record<string, string>, fresh: boolean): Promise<KubeResponse> {
   return new Promise((resolve, reject) => {
     const req = http.request(
       url,
-      { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...headers } },
+      {
+        method: 'POST',
+        agent: fresh ? false : functionConnections,
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...headers },
+      },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));

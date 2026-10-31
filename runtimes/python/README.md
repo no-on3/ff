@@ -30,6 +30,10 @@ Each connection gets its own thread, started with the low-level `_thread` call. 
 
 `multiprocessing` is not used: its spawn mode starts an extra resource-tracker process in every container and re-imports the main module in the child. A plain subprocess avoids both and exposes the worker's exit status directly.
 
+### Stopping
+
+Kubernetes stops the runtime with `SIGTERM` to replace or remove its pod: at a deploy's rollout, a scale-down, a key's renewal. The runtime stops accepting connections, once its accept loop has seen the signal (within half a second), and answers the call it is running. Every other call, one waiting its turn or one that comes on a connection still open, it refuses with `503 Runtime is shutting down` and `X-FF-Not-Run: shutting-down`: the call never ran, and the backend sends it to another instance. Each answer closes its connection (`Connection: close`), so that the caller's next call opens a new one, which the Service gives a ready pod. The runtime closes no other connection itself, since a call could be on its way on it and would be lost: the callers close them, the backend each one it hasn't used for 5 seconds. The runtime exits with status 0 once nothing runs and no connection is open, or, at the latest, a second after the function's timeout or those 5 seconds, whichever is longer; the pod's grace period is the timeout and 5 seconds. Through the cluster API's proxy, development's path, connections stay open 90 seconds, so there the runtime waits until its limit.
+
 ## HTTP protocol
 
 | Request | Response |
@@ -54,6 +58,7 @@ Each connection gets its own thread, started with the low-level `_thread` call. 
 | 400 | `InvalidRequestContentException` | Body is not JSON |
 | 413 | `RequestEntityTooLargeException` | Body above 6 MB |
 | 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting, or one waited longer than `FF_MAX_QUEUE_WAIT_MS` for its turn: `Rate exceeded: no instance was free within X.XX seconds` |
+| 503 | `ServiceUnavailableException` | The runtime is stopping, and refused the call before it ran: `Runtime is shutting down`, with `X-FF-Not-Run: shutting-down`, so that the caller may send it to another instance, as the backend does (see [Stopping](#stopping)) |
 
 The error names and messages follow AWS Lambda's (for example `Unable to import module 'function': No module named 'requests'`), so code and tooling port across.
 
@@ -143,7 +148,7 @@ REPORT RequestId: <id>	Duration: 12.34 ms	Billed Duration: 13 ms	Memory Size: 12
 {"time": "…", "level": "error", "msg": "function error", "requestId": "…", "errorType": "ValueError", "errorMessage": "…", "stackTrace": ["  File \"/var/task/function.py\", line 3, in handler\n    raise ValueError(\"…\")"]}
 ```
 
-A worker replaced after `Runtime.OutOfMemory` is logged as `function worker crashed; restarting`, with the request ID, as on the Node.js runtime. **Environment variables are never logged.** On `SIGTERM` the runtime stops accepting connections, finishes the invocations in flight, and exits with status 0.
+A worker replaced after `Runtime.OutOfMemory` is logged as `function worker crashed; restarting`, with the request ID, as on the Node.js runtime. **Environment variables are never logged.**
 
 ## What changed in v3
 

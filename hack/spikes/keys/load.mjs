@@ -1,11 +1,13 @@
 // A function called without pause by CALLERS callers for SECONDS, by one of three paths, each as FF's callers make
 // the call: MODE=ff, through FF's API (API, FUNCTION), as a program calls a function; MODE=proxy, through the cluster
 // API's service proxy (API, TOKEN_FILE, CA_FILE, NS, SERVICE), as the backend calls in development; MODE=direct,
-// straight to the function's Service (TARGET), as the backend calls in production: on Node.js's default agent, which
-// keeps connections alive, a refused connection tried again for 5 s, 100 ms later and twice that each time up to a
-// second, as the backend tries it. One JSON line per call: when it started (the epoch's ms: a pod's clock is the
-// node's), how long it took, its status or its error, the VALUE and the pod that answered, and the connections
-// refused before it.
+// straight to the function's Service (TARGET), as the backend calls in production, on connections kept alive and
+// closed after 5 s unused, as the backend's. By the proxy and directly, a call the function never got is tried again
+// as the backend tries it (post() in kubernetes.orchestrator.ts): for 5 s from the first refusal, 100 ms later and
+// twice that each time up to a second, on a connection of its own directly; a connection refused (directly), or an
+// answer that says the call never ran, as an instance that stops gives. One JSON line per call: when it started (the
+// epoch's ms: a pod's clock is the node's), how long it took, its status or its error (and whether it came on a
+// connection kept alive), the VALUE and the pod that answered, and the refusals before it, of each kind.
 //   MODE=direct TARGET=http://fn-<id>.<ns>.svc:8080/invoke CALLERS=4 SECONDS=30 node load.mjs
 import http from 'node:http';
 import https from 'node:https';
@@ -25,43 +27,50 @@ const target = {
       headers: { authorization: `Bearer ${readFileSync(TOKEN_FILE, 'utf8').trim()}` },
     },
   }),
-  direct: () => ({ url: TARGET, body: '{}', options: {} }),
+  direct: () => ({ url: TARGET, body: '{}', options: { agent: new http.Agent({ keepAlive: true, timeout: 5000 }) } }),
 }[MODE]();
 
-function post() {
+/** One attempt; `again` on a connection of its own, directly. */
+function post(again) {
   return new Promise((resolve, reject) => {
     const { url, body, options } = target;
     const request = (url.startsWith('https:') ? https : http).request(url, {
       method: 'POST',
       ...options,
+      ...(again && MODE === 'direct' ? { agent: false } : {}),
       headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), ...options.headers },
     }, (response) => {
       let text = '';
       response.on('data', (chunk) => (text += chunk));
-      response.on('end', () => resolve({ status: response.statusCode, text }));
+      response.on('end', () => resolve({ status: response.statusCode, text, notRun: response.headers['x-ff-not-run'] !== undefined }));
       response.on('error', reject);
     });
     request.setTimeout(10_000, () => request.destroy(new Error('no answer within 10 s')));
-    request.on('error', reject);
+    request.on('error', (error) => reject(Object.assign(error, { reused: request.reusedSocket })));
     request.end(body);
   });
 }
 
-// The backend's rule in production: a connection refused never reached the function, so it is tried again.
 async function call() {
-  let refused = 0;
-  const deadline = Date.now() + REFUSED_RETRY_MS;
+  const before = { refused: 0, notRun: 0 };
+  let deadline;
   for (let wait = 100; ; wait = Math.min(2 * wait, 1000)) {
+    let res, failure;
     try {
-      return { ...(await post()), refused };
+      res = await post(deadline !== undefined);
     } catch (error) {
-      if (MODE !== 'direct' || error.code !== 'ECONNREFUSED' || Date.now() + wait > deadline) {
-        error.refused = refused;
-        throw error;
-      }
-      refused += 1;
-      await sleep(wait);
+      failure = error;
     }
+    const kind = res
+      ? MODE !== 'ff' && res.status === 503 && res.notRun && 'notRun'
+      : MODE === 'direct' && failure.code === 'ECONNREFUSED' && 'refused';
+    deadline ??= Date.now() + REFUSED_RETRY_MS;
+    if (!kind || Date.now() + wait > deadline) {
+      if (res) return { ...res, ...before };
+      throw Object.assign(failure, before);
+    }
+    before[kind] += 1;
+    await sleep(wait);
   }
 }
 
@@ -78,12 +87,13 @@ async function caller() {
     const t = Date.now();
     const line = { t };
     try {
-      const { status, text, refused } = await call();
-      Object.assign(line, { ms: Date.now() - t, status, refused });
+      const { status, text, refused, notRun } = await call();
+      Object.assign(line, { ms: Date.now() - t, status, refused, notRun });
       if (status < 300) Object.assign(line, answerOf(text));
       else line.body = text.slice(0, 200);
     } catch (error) {
-      Object.assign(line, { ms: Date.now() - t, error: `${error.code ?? ''} ${error.message}`.trim(), refused: error.refused });
+      const { refused, notRun, reused } = error;
+      Object.assign(line, { ms: Date.now() - t, error: `${error.code ?? ''} ${error.message}`.trim(), reused, refused, notRun });
     }
     console.log(JSON.stringify(line));
   }

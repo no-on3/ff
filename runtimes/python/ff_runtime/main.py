@@ -79,12 +79,20 @@ def memory_used_mb(worker):
     return max(1, round((own + (protocol.proc_status_kb("VmHWM", worker.pid) or 0)) / 1024))
 
 
+# A call refused before it ran, as the header says, so that the caller may send it to another instance: the backend does.
+NOT_RUN = (503, json.dumps({"errorType": "ServiceUnavailableException", "errorMessage": "Runtime is shutting down"}),
+           {"x-ff-not-run": "shutting-down"})
+# How long the backend keeps a connection to a function unused before it closes it (kubernetes.orchestrator.ts): a
+# runtime that stops waits as long for its callers to close their connections.
+CALLER_IDLE_CLOSE_MS = 5000
+
+
 class Supervisor:
     """Owns the worker process. Invocations run one at a time."""
 
     def __init__(self):
         self.lock = threading.Condition()  # guards the fields below
-        self.exec_lock = threading.Lock()  # held while an invocation runs
+        self.running = False  # an invocation runs: the others wait their turn
         self.state = "starting"  # starting | ready | failed
         self.init_error = None
         # The code has loaded at least once: a later load failure is a broken environment, not broken code.
@@ -185,6 +193,8 @@ class Supervisor:
     def admit(self):
         """Reserves a place for one invocation, or returns the response that refuses it."""
         with self.lock:
+            if SHUTTING_DOWN.is_set():
+                return NOT_RUN
             if self.state == "failed":
                 return 500, json.dumps(self.init_error), {"x-ff-function-error": "Unhandled"}
             if self.pending > MAX_QUEUE:  # one running plus MAX_QUEUE waiting
@@ -197,15 +207,25 @@ class Supervisor:
             self.pending -= 1
             self.lock.notify_all()
 
+    def stopping(self):
+        """The runtime stops: the calls waiting their turn wake, to be refused."""
+        with self.lock:
+            self.lock.notify_all()
+
     def drain(self, timeout_s):
         with self.lock:
             self.lock.wait_for(lambda: self.pending == 0, timeout_s)
 
     def invoke(self, request_id, event):
         """Runs one admitted invocation. Returns (status, body, headers)."""
-        if not self.exec_lock.acquire(timeout=MAX_QUEUE_WAIT_MS / 1000):
-            message = f"Rate exceeded: no instance was free within {MAX_QUEUE_WAIT_MS / 1000:.2f} seconds"
-            return 429, json.dumps({"errorType": "TooManyRequestsException", "errorMessage": message}), {}
+        with self.lock:
+            # A call still waiting its turn when the runtime stops is refused, never run (see main()).
+            if not self.lock.wait_for(lambda: not self.running or SHUTTING_DOWN.is_set(), MAX_QUEUE_WAIT_MS / 1000):
+                message = f"Rate exceeded: no instance was free within {MAX_QUEUE_WAIT_MS / 1000:.2f} seconds"
+                return 429, json.dumps({"errorType": "TooManyRequestsException", "errorMessage": message}), {}
+            if SHUTTING_DOWN.is_set():
+                return NOT_RUN
+            self.running = True
         try:
             with self.lock:
                 # After a timeout or crash, a fresh worker is loading user code.
@@ -216,7 +236,9 @@ class Supervisor:
                 process, sock = self.process, self.sock
             return self._run(process, sock, request_id, event)
         finally:
-            self.exec_lock.release()
+            with self.lock:
+                self.running = False
+                self.lock.notify_all()
 
     def _run(self, process, sock, request_id, event):
         print(f"START RequestId: {request_id} Version: {FUNCTION_VERSION}", flush=True)
@@ -299,6 +321,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("content-length", str(len(data)))
             for name, value in (headers or {}).items():
                 self.send_header(name, value)
+            if SHUTTING_DOWN.is_set():
+                # While the runtime stops, each answer closes its connection, so that the caller's next call opens a
+                # new one, which the Service gives a ready pod: on a connection kept alive, it would come here again.
+                self.send_header("connection", "close")
             self.end_headers()
             self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
@@ -334,9 +360,6 @@ class Handler(BaseHTTPRequestHandler):
                 "errorType": "RequestEntityTooLargeException",
                 "errorMessage": f"Request must be smaller than {MAX_PAYLOAD_BYTES} bytes",
             })
-            return
-        if SHUTTING_DOWN.is_set():
-            self.send_json(503, {"errorType": "ServiceUnavailableException", "errorMessage": "Runtime is shutting down"})
             return
         refusal = SUPERVISOR.admit()
         if refusal:
@@ -413,11 +436,38 @@ class Handler(BaseHTTPRequestHandler):
 class Server(ThreadingHTTPServer):
     request_queue_size = 128
 
+    def __init__(self, *args):
+        self.connections = threading.Condition()  # guards open_connections
+        self.open_connections = 0  # which a runtime that stops leaves to their callers to close
+        super().__init__(*args)
+
     def process_request(self, request, client_address):
+        self.opened()
         try:
-            start_thread(self.process_request_thread, request, client_address)
+            start_thread(self.connection_thread, request, client_address)
         except (RuntimeError, MemoryError):  # only this connection is lost
             self.shutdown_request(request)
+            self.closed()
+
+    def connection_thread(self, request, client_address):
+        try:
+            self.process_request_thread(request, client_address)
+        finally:
+            self.closed()
+
+    def opened(self):
+        with self.connections:
+            self.open_connections += 1
+
+    def closed(self):
+        with self.connections:
+            self.open_connections -= 1
+            self.connections.notify_all()
+
+    def wait_until_closed(self, timeout_s):
+        """Until the callers have closed every connection, or timeout_s."""
+        with self.connections:
+            self.connections.wait_for(lambda: self.open_connections == 0, timeout_s)
 
     def handle_error(self, request, client_address):
         error = sys.exc_info()[1]
@@ -462,16 +512,28 @@ def main():
         log(level="info", msg="shutting down; draining invocations", signal=signal.Signals(signum).name,
             inFlight=SUPERVISOR.pending)
         try:
-            start_thread(server.shutdown)  # stop accepting connections
+            start_thread(stop)
         except (RuntimeError, MemoryError):
             os._exit(0)
+
+    def stop():
+        SUPERVISOR.stopping()
+        server.shutdown()  # serve_forever() returns
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
     log(level="info", msg="runtime listening", port=protocol.PORT, timeoutMs=TIMEOUT_MS, maxQueueWaitMs=MAX_QUEUE_WAIT_MS,
         memoryLimitMb=MEMORY_MB, handler=HANDLER, protocol=3, eventFormat=protocol.EVENT_FORMAT)
     server.serve_forever()
-    SUPERVISOR.drain(TIMEOUT_MS / 1000 + 1)
+    # Kubernetes stops the runtime to replace or remove its pod. New connections are refused, and go to another instance.
+    # The call running is answered; every other one, waiting or still to come, is refused as never run, and the backend
+    # sends it to another instance. Each answer closes its connection, and the runtime closes no other: a call could be
+    # on its way on one, and would be lost. The callers close them, the backend each one it leaves unused for
+    # CALLER_IDLE_CLOSE_MS. The runtime exits once nothing runs and no connection is open, or when the time for both is up.
+    server.server_close()
+    deadline = time.monotonic() + max(TIMEOUT_MS, CALLER_IDLE_CLOSE_MS) / 1000 + 1
+    SUPERVISOR.drain(deadline - time.monotonic())
+    server.wait_until_closed(deadline - time.monotonic())
     with SUPERVISOR.lock:
         process, sock = SUPERVISOR.process, SUPERVISOR.sock
     SUPERVISOR.stop_worker(process, sock)
