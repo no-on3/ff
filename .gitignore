@@ -184,6 +184,8 @@ hack/.spike-queue/
 hack/.spike-sites/
 hack/.spike-mail/
 hack/.spike-cache/
+# hack/spikes/lambda: the SDKs, the functions' code, each client's steps and requests (step 5's spike)
+hack/.spike-lambda/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/
