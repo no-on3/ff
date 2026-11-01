@@ -139,6 +139,10 @@ interface Exchange {
 }
 
 /** S3's event for each write that creates an object, by the operation, without its s3: prefix. */
+/** How many times a created object's size and ETag are asked of the store, and the wait before the second, longer for each next. */
+const MEASURE_ATTEMPTS = 3;
+const MEASURE_WAIT_MS = 50;
+
 const CREATED_EVENTS: Record<string, string> = {
   PutObject: 'ObjectCreated:Put',
   CopyObject: 'ObjectCreated:Copy',
@@ -537,16 +541,29 @@ export class S3FrontDoor implements OnModuleDestroy {
     }
   }
 
-  /** A created object's size and ETag, without its quotes, as the store has them now; nothing it can't say. */
+  /**
+   * A created object's size and ETag, without its quotes, as the store has
+   * them; nothing it can't say. The store may not show an object yet when it
+   * has just answered its write, as SeaweedFS once didn't here: it is asked
+   * again, a little later each time, before the event goes without them.
+   */
   private async measure(storePath: string): Promise<{ size?: number; eTag?: string }> {
-    const head = this.store.send('HEAD', storePath, '', {});
-    head.request.end();
-    const answer = await head.response;
-    answer.resume();
-    if (answer.statusCode !== 200) return {};
-    const size = Number(single(answer.headers['content-length']));
-    const eTag = single(answer.headers.etag)?.replace(/"/g, '');
-    return { ...(Number.isSafeInteger(size) ? { size } : {}), ...(eTag ? { eTag } : {}) };
+    for (let attempt = 1; ; attempt++) {
+      const head = this.store.send('HEAD', storePath, '', {});
+      head.request.end();
+      const answer = await head.response;
+      answer.resume();
+      if (answer.statusCode === 200) {
+        const size = Number(single(answer.headers['content-length']));
+        const eTag = single(answer.headers.etag)?.replace(/"/g, '');
+        return { ...(Number.isSafeInteger(size) ? { size } : {}), ...(eTag ? { eTag } : {}) };
+      }
+      if (attempt === MEASURE_ATTEMPTS) {
+        this.logger.warn(`The store answered ${answer.statusCode} to ${MEASURE_ATTEMPTS} HEADs of ${storePath} after its write: its event goes without its size and ETag`);
+        return {};
+      }
+      await new Promise((resolve) => setTimeout(resolve, MEASURE_WAIT_MS * attempt));
+    }
   }
 
   /**

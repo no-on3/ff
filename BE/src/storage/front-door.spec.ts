@@ -16,6 +16,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { IncomingMessage, Server, ServerResponse, createServer, request as httpRequest } from 'node:http';
 import { AddressInfo } from 'node:net';
@@ -65,6 +66,9 @@ interface StoreRequestSeen {
  * A store in memory that checks FF's own signature to it, as any S3 store
  * would, keeps what is put, and lists it in its own name for the bucket.
  */
+/** How many HEADs of an object the store answers 404 before it shows it, as a store may just after its write. */
+let headsBeforeShown = 0;
+
 function fakeStore(seen: StoreRequestSeen[]): Server {
   const objects = new Map<string, Buffer>();
   return createServer((request: IncomingMessage, response: ServerResponse) => {
@@ -109,7 +113,7 @@ function fakeStore(seen: StoreRequestSeen[]): Server {
           .end(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${storeName}</Name><KeyCount>${keys.length}</KeyCount>${keys.map((k) => `<Contents><Key>${k}</Key><Size>1</Size></Contents>`).join('')}<IsTruncated>false</IsTruncated></ListBucketResult>`);
       } else if (request.method === 'HEAD' && key.length) {
         const object = objects.get(name);
-        if (!object) response.writeHead(404).end();
+        if (!object || headsBeforeShown-- > 0) response.writeHead(404).end();
         else response.writeHead(200, { 'content-length': object.length, etag: '"etag-1"' }).end();
       } else if (request.method === 'POST') {
         response.writeHead(200, { 'content-type': 'application/xml' }).end('<DeleteResult><Deleted><Key>a.txt</Key></Deleted></DeleteResult>');
@@ -203,6 +207,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   });
 
   beforeEach(() => {
+    headsBeforeShown = 0;
     seen.length = 0;
     counted.length = 0;
     hits.clear();
@@ -632,6 +637,26 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       });
       // The object's size and ETag, asked of the store once, for the write a rule named.
       expect(seen.filter((request) => request.method === 'HEAD')).toHaveLength(1);
+    });
+
+    it("asks the store again for a created object's size and ETag while it doesn't show the object yet, and sends the event without them after three tries", async () => {
+      photos.notifications = [{ id: 'thumbs', target: 'function', arn: FUNCTION_ARN, events: ['s3:ObjectCreated:*'], prefix: null, suffix: null }];
+      const warned = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      headsBeforeShown = 2;
+      await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'late.txt', Body: 'hello' }));
+      await frontDoor.notified();
+      headsBeforeShown = 3;
+      await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'never.txt', Body: 'hello' }));
+      await frontDoor.notified();
+
+      expect(records()).toEqual([
+        ['ObjectCreated:Put', 'thumbs', 'late.txt', 5],
+        ['ObjectCreated:Put', 'thumbs', 'never.txt', undefined],
+      ]);
+      expect(seen.filter((request) => request.method === 'HEAD')).toHaveLength(6);
+      expect(warned).toHaveBeenCalledWith(expect.stringMatching(/^The store answered 404 to 3 HEADs of \/[^ ]+\/never\.txt after its write/));
+      warned.mockRestore();
     });
 
     it('sends a copy as ObjectCreated:Copy, and a deletion as ObjectRemoved:Delete, one for each key DeleteObjects deleted', async () => {
