@@ -447,6 +447,9 @@ for pid in "${burst[@]}"; do wait "$pid" || true; done
 check "four calls at once through the alias scale the version up, on its own calls; \$LATEST keeps its one instance" \
   "201 201 201 201 true 1" \
   "$(cat "$work"/burst-{1,2,3,4} | paste -sd ' ') $([ "$(replicas_in_ver "fn-$versioned_id-v1")" -ge 2 ] && echo true || echo false) $(replicas_in_ver "fn-$versioned_id")"
+as_ver POST "/functions/$versioned_id/invoke" '{"qualifier": "live", "invocationType": "Event", "input": {}}' >/dev/null
+check "a call that doesn't wait through the alias is kept, as Lambda's Event, to run as the version" 202 "$(status)"
+event_request="$(jq -r .requestId "$work/body")"
 # Idle a minute on, in the background while the sections between run: the version's pods sampled first, at a minute's
 # fifth second, then removed by the scaler's run of the minute after the window (versions_idle).
 (sleep 65 && sql "UPDATE plans SET limits = limits || '{\"idleSeconds\": 1}' WHERE id = 'e2e-versions'") >/dev/null 2>&1 &
@@ -1893,6 +1896,9 @@ check "the version's Deployment, Service and Secret are removed" "" "$left"
 aliased="$(as_ver GET "/functions/$versioned_id/aliases/live")"
 check "\$LATEST scaled to zero; the version and its alias kept, for the next call to start again" "0 200 1" \
   "$latest $(status) $(jq -r .functionVersion <<<"$aliased")"
+as_ver GET "/functions/$versioned_id/invocations?resource=live" >/dev/null
+check "the alias's call that didn't wait ran version 1, an attempt of the queue's worker, its history through live" "200 async 1 live COMPLETED" \
+  "$(status) $(jq -r --arg r "$event_request" '.invocations[] | select(.requestId == $r) | "\(.source) \(.version) \(.alias) \(.status)"' "$work/body")"
 check "the version's pods were sampled apart while they ran, at the memory it was published with, none warm; \$LATEST's at its own" \
   "128 0 256" \
   "$(q "SELECT memory_mb, min_instances FROM capacity_samples WHERE function_id = '$versioned_id' AND version = 1 LIMIT 1") $(q "SELECT memory_mb FROM capacity_samples WHERE function_id = '$versioned_id' AND version = 0 ORDER BY minute DESC LIMIT 1")"

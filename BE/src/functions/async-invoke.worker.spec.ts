@@ -36,7 +36,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
   let plans: { forAccount: jest.Mock };
   let counts: { count: jest.Mock };
   let asyncCounts: { count: jest.Mock };
-  let functions: { findOne: jest.Mock; call: jest.Mock };
+  let functions: { findOne: jest.Mock; callTarget: jest.Mock; call: jest.Mock };
   let credit: { admit: jest.Mock };
   let accounts: { findOne: jest.Mock };
   let schedules: { update: jest.Mock };
@@ -112,7 +112,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     plans = { forAccount: jest.fn(async () => plan()) };
     counts = { count: jest.fn() };
     asyncCounts = { count: jest.fn() };
-    functions = { findOne: jest.fn(async () => fn), call: jest.fn(async () => ({ ok: true, output: 1, invocation: {} })) };
+    functions = { findOne: jest.fn(async () => fn), callTarget: jest.fn(async () => ({})), call: jest.fn(async () => ({ ok: true, output: 1, invocation: {} })) };
     credit = { admit: jest.fn(async () => undefined) };
     accounts = { findOne: jest.fn(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE })) };
     schedules = { update: jest.fn(async () => ({ affected: 1 })) };
@@ -129,7 +129,8 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     expect(queues.claimEvents).toHaveBeenCalledWith(10, NOW, 90);
     expect(functions.findOne).toHaveBeenCalledWith(ACCOUNT, 'fn-1');
     expect(credit.admit).toHaveBeenCalledWith(ACCOUNT);
-    expect(functions.call).toHaveBeenCalledWith(fn, { order: 42 }, { source: InvocationSource.ASYNC, requestId: 'req-1', attempt: 1 });
+    expect(functions.callTarget).toHaveBeenCalledWith(fn, undefined);
+    expect(functions.call).toHaveBeenCalledWith(fn, { order: 42 }, { source: InvocationSource.ASYNC, requestId: 'req-1', attempt: 1, target: {} });
     expect(queues.deleteEvent).toHaveBeenCalledWith(expect.objectContaining({ id: '7', receiveCount: 1 }));
     expect(warnings).not.toHaveBeenCalled();
   });
@@ -150,13 +151,18 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
         failures: 1,
         throttles: 0,
         settled: 1,
-        lastResponse: { statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Error', errorMessage: 'boom' } },
+        lastResponse: { statusCode: 200, functionError: 'Unhandled', executedVersion: '$LATEST', payload: { errorType: 'Error', errorMessage: 'boom' } },
       },
       {
         failures: 1,
         throttles: 0,
         settled: 1,
-        lastResponse: { statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Sandbox.Timedout', errorMessage: 'Task timed out after 5.00 seconds' } },
+        lastResponse: {
+          statusCode: 200,
+          functionError: 'Unhandled',
+          executedVersion: '$LATEST',
+          payload: { errorType: 'Sandbox.Timedout', errorMessage: 'Task timed out after 5.00 seconds' },
+        },
       },
     ]);
   });
@@ -199,12 +205,21 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     expect(Math.round(((failedAt as Date).getTime() - NOW.getTime()) / 1000)).toBe(8);
     // FF's own failure keeps only what the caller may see of it.
     expect([throttled, failed]).toEqual([
-      { failures: 0, throttles: 1, settled: 1, lastResponse: { statusCode: 429, payload: { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded' } } },
+      {
+        failures: 0,
+        throttles: 1,
+        settled: 1,
+        lastResponse: { statusCode: 429, executedVersion: '$LATEST', payload: { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded' } },
+      },
       {
         failures: 0,
         throttles: 4,
         settled: 4,
-        lastResponse: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: 'The invocation failed because of an internal error (request req-2).' } },
+        lastResponse: {
+          statusCode: 500,
+          executedVersion: '$LATEST',
+          payload: { errorType: 'ServiceException', errorMessage: 'The invocation failed because of an internal error (request req-2).' },
+        },
       },
     ]);
   });
@@ -232,6 +247,51 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       ['2', 1, "FF couldn't make the call: the account is not active"],
       ['3', 1, "FF couldn't make the call: the account's credit has run out"],
     ]);
+  });
+
+  it('runs the version or the alias the event named, drawn again at each attempt, a version whatever the state of $LATEST', async () => {
+    const version2 = { version: 2, memory: 128 };
+    functions.findOne.mockResolvedValue({ ...fn, status: FunctionStatus.ERROR });
+    functions.callTarget.mockResolvedValue({ version: version2, alias: 'live' });
+    functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'boom'), invocation: {} });
+
+    await tick(event({ attributes: { qualifier: 'live' } }));
+
+    expect(functions.callTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 'live');
+    expect(functions.call.mock.calls[0][2]).toEqual({ source: InvocationSource.ASYNC, requestId: 'req-1', attempt: 1, target: { version: version2, alias: 'live' } });
+    // Its retry keeps what it named, and the failure says which version it was.
+    expect(queues.retryEvent.mock.calls[0][2]).toEqual({
+      qualifier: 'live',
+      failures: 1,
+      throttles: 0,
+      settled: 1,
+      lastResponse: { statusCode: 200, functionError: 'Unhandled', executedVersion: '2', payload: { errorType: 'Error', errorMessage: 'boom' } },
+    });
+  });
+
+  it("waits while the function isn't ACTIVE for an alias that names $LATEST, as for none", async () => {
+    functions.findOne.mockResolvedValueOnce({ ...fn, status: FunctionStatus.ERROR });
+    functions.callTarget.mockResolvedValueOnce({ alias: 'edge' });
+
+    await tick(event({ attributes: { qualifier: 'edge' } }));
+
+    expect(functions.call).not.toHaveBeenCalled();
+    expect(queues.retryEvent.mock.calls[0][2].lastResponse).toEqual({
+      statusCode: 500,
+      executedVersion: '$LATEST',
+      payload: { errorType: 'ServiceException', errorMessage: "FF couldn't make the call: the function is not ACTIVE" },
+    });
+  });
+
+  it('drops the event of a version or an alias deleted since, without a call or a record, and counts it dropped', async () => {
+    configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: RECORDS_ARN });
+    functions.callTarget.mockRejectedValueOnce(new NotFoundException('Function not found: …:function:orders:live'));
+
+    await tick(event({ attributes: { qualifier: 'live' } }));
+
+    expect([functions.call.mock.calls.length, queues.deleteEvent.mock.calls.length, queues.deleteEventAndSend.mock.calls.length]).toEqual([0, 1, 0]);
+    expect(warnings).toHaveBeenCalledWith('Asynchronous call req-1 of function fn-1 was dropped: the version or the alias it named is gone');
+    expect(asyncCounts.count).toHaveBeenCalledWith({ functionId: 'fn-1', accountId: ACCOUNT, dropped: 1 });
   });
 
   it("deletes the event of a function that's gone", async () => {
@@ -331,6 +391,18 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       responseContext: { statusCode: 200, executedVersion: '$LATEST' },
       responsePayload: { receipt: 'r-42' },
     });
+  });
+
+  it("hands a destination a record of a version's or an alias's call as Lambda's: its ARN qualified by what it named, the version that ran it", async () => {
+    configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: RECORDS_ARN, onFailure: null });
+    functions.callTarget.mockResolvedValueOnce({ version: { version: 3 }, alias: 'live' });
+
+    await tick(event({ attributes: { qualifier: 'live' } }));
+
+    expect([(handed().requestContext as { functionArn: string }).functionArn, handed().responseContext]).toEqual([
+      `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders:live`,
+      { statusCode: 200, executedVersion: '3' },
+    ]);
   });
 
   it('hands a call whose retries are used up to its onFailure destination, with the error its function gave', async () => {

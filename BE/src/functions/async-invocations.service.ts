@@ -9,6 +9,7 @@ import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES } from
 import { FunctionStatus } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 import { MAX_INPUT_BYTES } from './limits';
+import { parseQualifier } from './qualifier';
 
 /** A megabyte, as the plans count what messages hold. */
 const MB = 1024 * 1024;
@@ -25,10 +26,11 @@ function refuseOver(limit: number, size: number): void {
 
 /**
  * The API's invoke with the invocation types Event and DryRun, as AWS
- * Lambda's (ADR 0010). An Event is checked as a call is (the function, its
- * input's size, the account's credit, the plan's rate, which the route
- * counts), then kept in the function's queue, and answered at once with its
- * request ID; FF's worker runs it (AsyncInvokeWorker).
+ * Lambda's (ADR 0010). An Event is checked as a call is (the function and
+ * what its qualifier names, its input's size, the account's credit, the
+ * plan's rate, which the route counts), then kept in the function's queue
+ * with that qualifier, and answered at once with its request ID; FF's worker
+ * runs it (AsyncInvokeWorker), an alias's share drawn at each attempt.
  */
 @Injectable()
 export class AsyncInvocationsService {
@@ -44,14 +46,16 @@ export class AsyncInvocationsService {
    * own, which the answer's x-ff-request-id names too, and which every attempt
    * keeps. The account's messages may hold the plan's queueStorageMb together,
    * this event included; past it, 429 until some are handled. A refused call
-   * keeps nothing.
+   * keeps nothing: 404 for a version or an alias the function hasn't, 400 for
+   * $LATEST while the function isn't ACTIVE, as a call that waits.
    */
-  async queue(accountId: string, id: string, input?: unknown): Promise<{ requestId: string }> {
+  async queue(accountId: string, id: string, input?: unknown, qualifier?: string): Promise<{ requestId: string }> {
     const body = JSON.stringify(input === undefined ? {} : input);
     const size = Buffer.byteLength(body);
     refuseOver(MAX_ASYNC_INPUT_BYTES, size);
     const function_ = await this.functions.findOne(accountId, id);
-    if (function_.status !== FunctionStatus.ACTIVE) throw new BadRequestException('Function is not active');
+    const target = await this.functions.callTarget(function_, qualifier);
+    if (!target.version && function_.status !== FunctionStatus.ACTIVE) throw new BadRequestException('Function is not active');
     await this.credit.admit(accountId);
     const plan = await this.plans.forAccount(accountId);
     // Read before the write: calls at once may pass the limit by their own sizes, which the next ones see.
@@ -69,13 +73,18 @@ export class AsyncInvocationsService {
     }
     const requestId = currentRequestId() ?? randomUUID();
     const expiresAt = new Date(Date.now() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
-    await this.queues.sendEvent(function_, requestId, body, expiresAt);
+    // What the call named, which each attempt runs: none for $LATEST.
+    const attributes = parseQualifier(qualifier) ? { qualifier } : undefined;
+    await this.queues.sendEvent(function_, requestId, body, expiresAt, { attributes });
     return { requestId };
   }
 
-  /** The invocation type DryRun, as Lambda's: the function is the account's, and the input could be sent; nothing runs. */
-  async dryRun(accountId: string, id: string, input?: unknown): Promise<void> {
+  /**
+   * The invocation type DryRun, as Lambda's: the function is the account's, what its qualifier names is the function's,
+   * and the input could be sent; nothing runs.
+   */
+  async dryRun(accountId: string, id: string, input?: unknown, qualifier?: string): Promise<void> {
     refuseOver(MAX_INPUT_BYTES, jsonBytes(input === undefined ? {} : input));
-    await this.functions.findOne(accountId, id);
+    await this.functions.callTarget(await this.functions.findOne(accountId, id), qualifier);
   }
 }

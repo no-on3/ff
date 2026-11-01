@@ -132,7 +132,9 @@ export class QueueStore {
    * Claims up to `limit` asynchronous calls due, of any function, the longest
    * waiting first: each counted as received and hidden for its lease, the
    * longest its attempt can take (a wait for an instance and the call, each
-   * up to the function's timeout, after a cold start), and a minute more.
+   * up to the longest timeout of the function and its versions, which an
+   * event naming a version or an alias may run, after a cold start), and a
+   * minute more.
    */
   async claimEvents(limit: number, now: Date, coldStartSeconds: number): Promise<ClaimedEvent[]> {
     if (limit <= 0) return [];
@@ -140,7 +142,7 @@ export class QueueStore {
       `UPDATE "queue_messages" m
           SET "receive_count" = m."receive_count" + 1,
               "first_received_at" = coalesce(m."first_received_at", $1),
-              "visible_at" = $1::timestamptz + make_interval(secs => 2 * coalesce(f."timeout", $4) + $3 + 60)
+              "visible_at" = $1::timestamptz + make_interval(secs => 2 * coalesce(greatest(f."timeout", (SELECT max(v."timeout") FROM "function_versions" v WHERE v."function_id" = f."id")), $4) + $3 + 60)
          FROM "queues" q LEFT JOIN "functions" f ON f."id" = q."function_id"
         WHERE m."id" IN (SELECT "id" FROM "queue_messages"
                           WHERE "function_id" IS NOT NULL AND "visible_at" <= $1

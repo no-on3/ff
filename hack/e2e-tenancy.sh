@@ -466,6 +466,10 @@ check "  ... which its history through live keeps alone, as CloudWatch's Resourc
 metrics_live="$(as_a GET "/functions/$id/metrics?resource=live&executedVersion=1")"
 check "  ... and its metrics through live of version 1 count, with no instances, which no call's record names" "200 1 false" \
   "$(status) $(jq -r '"\([.metrics.Invocations[]] | add) \(.metrics | has("Instances"))"' <<<"$metrics_live")"
+as_a POST "/functions/$id/invoke" '{"input": {}, "qualifier": "live", "invocationType": "DryRun"}' >/dev/null
+dry_live="$(status)"
+as_a POST "/functions/$id/invoke" '{"input": {}, "qualifier": "9", "invocationType": "DryRun"}' >/dev/null
+check "  ... which a call that doesn't wait names too: a DryRun through live passes, one of a version A hasn't is 404" "204 404" "$dry_live $(status)"
 before="$(snapshot as_a "$id")"
 database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
 check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"

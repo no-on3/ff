@@ -943,7 +943,7 @@ export class FunctionsService {
       });
     }
     const function_ = await this.findOne(accountId, id);
-    const target = await this.targetOf(function_, qualifier);
+    const target = await this.callTarget(function_, qualifier);
     if (!target.version && function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
     }
@@ -1082,10 +1082,10 @@ export class FunctionsService {
   }
 
   /**
-   * What a call naming `qualifier` runs: $LATEST for none; a version; or an alias's version, its share drawn. 404 for a
-   * version or an alias the function hasn't.
+   * What a call naming `qualifier` runs: $LATEST for none; a version; or an alias's version, its share drawn, at each
+   * call, an asynchronous call's attempts included. 404 for a version or an alias the function hasn't.
    */
-  private async targetOf(function_: Function, qualifier: string | undefined): Promise<CallTarget> {
+  async callTarget(function_: Function, qualifier: string | undefined): Promise<CallTarget> {
     const named = parseQualifier(qualifier);
     if (!named) return {};
     const manager = this.functionsRepository.manager;

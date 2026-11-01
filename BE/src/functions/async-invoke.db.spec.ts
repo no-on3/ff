@@ -11,12 +11,14 @@
  * call that ended handed to its destination function in the transaction that
  * deletes it, which then runs it, or to a queue of the account, its body
  * Lambda's record; a call kept, which PostgreSQL's NOTIFY has the worker claim
- * at once; a schedule's run, the schedule's call; the counts of Lambda's
+ * at once; a schedule's run, the schedule's call; an event through an alias
+ * run as its version, leased for the longest timeout of the function and its
+ * versions, and dropped once its alias is gone; the counts of Lambda's
  * metrics of them. Each run works in a scratch database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
-import { Logger } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
@@ -33,6 +35,7 @@ import { Queue } from '../queues/queue.entity';
 import { DEFAULT_SETTINGS, queueArn } from '../queues/sqs-attributes';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
+import { AsyncInvocationsService } from './async-invocations.service';
 import { AsyncInvokeWorker } from './async-invoke.worker';
 import { FunctionEventInvokeConfig } from './entities/function-event-invoke-config.entity';
 import { EventInvokeConfigService } from './event-invoke-config.service';
@@ -69,7 +72,13 @@ run('asynchronous calls, in the database (L2)', () => {
     new AsyncInvokeWorker(
       settings(intervalSeconds),
       queues,
-      calls ? ({ findOne: (accountId: string, id: string) => functions.findOne(accountId, id), call: calls.call } as unknown as FunctionsService) : functions,
+      calls
+        ? ({
+            findOne: (accountId: string, id: string) => functions.findOne(accountId, id),
+            callTarget: (fn: Function, qualifier?: string) => functions.callTarget(fn, qualifier),
+            call: calls.call,
+          } as unknown as FunctionsService)
+        : functions,
       { admit: async () => undefined } as never,
       db.dataSource.getRepository(Account),
       configs,
@@ -111,6 +120,16 @@ run('asynchronous calls, in the database (L2)', () => {
       timeout,
       status: FunctionStatus.ACTIVE,
     });
+  }
+
+  /** Version 1 of `fn`, as published with this memory and timeout, and its alias live. */
+  async function publishLive(fn: Function, memory: number, timeout: number): Promise<void> {
+    await db.dataSource.query(
+      `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+       VALUES ($1, 1, $2, 'nodejs', 'function.handler', 'inline', $3, $4, 37, $4, $5, $6, 'lambda', '{}')`,
+      [fn.id, ACCOUNT, fn.code, 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=', memory, timeout],
+    );
+    await db.dataSource.query(`INSERT INTO function_aliases (function_id, name, account_id, version) VALUES ($1, 'live', $2, 1)`, [fn.id, ACCOUNT]);
   }
 
   beforeAll(async () => {
@@ -238,7 +257,12 @@ run('asynchronous calls, in the database (L2)', () => {
     // Its second failure, the lost one first: retried two minutes after.
     expect([kept.receive_count, kept.attributes, kept.visible_at.getTime() - afterLease.getTime()]).toEqual([
       2,
-      { failures: 2, throttles: 0, settled: 2, lastResponse: { statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Error', errorMessage: 'boom' } } },
+      {
+        failures: 2,
+        throttles: 0,
+        settled: 2,
+        lastResponse: { statusCode: 200, functionError: 'Unhandled', executedVersion: '$LATEST', payload: { errorType: 'Error', errorMessage: 'boom' } },
+      },
       expect.any(Number),
     ]);
     expect(Math.round((kept.visible_at.getTime() - afterLease.getTime()) / 1000)).toBe(120);
@@ -303,6 +327,52 @@ run('asynchronous calls, in the database (L2)', () => {
       input: 'hello',
       output: { done: true },
     });
+  });
+
+  it("runs an Event through an alias as the version it names, whatever $LATEST's state, the history and the bill naming both; drops one whose alias is gone", async () => {
+    const fn = await newFunction(5);
+    await publishLive(fn, 1024, 30);
+    await db.dataSource.query(`UPDATE functions SET status = 'ERROR' WHERE id = $1`, [fn.id]);
+    invoke.mockResolvedValue({ output: { done: true }, durationMs: 3, memoryUsedMb: 40 });
+    const calls = new AsyncInvocationsService(functions, { admit: async () => undefined } as never, onePlan(), queues);
+    const w = worker();
+
+    const { requestId } = await calls.queue(ACCOUNT, fn.id, { order: 7 }, 'live');
+    expect((await message(requestId)).attributes).toEqual({ qualifier: 'live' });
+    await w.tick(new Date(Date.now() + 1000));
+    await w.settled();
+
+    expect(invoke.mock.calls[0][0]).toMatchObject({ id: fn.id, version: 1, memory: 1024, timeout: 30 });
+    expect(await db.dataSource.getRepository(FunctionInvocation).findOneByOrFail({ id: requestId })).toMatchObject({
+      source: InvocationSource.ASYNC,
+      status: InvocationStatus.COMPLETED,
+      version: 1,
+      alias: 'live',
+    });
+    expect(await db.dataSource.query('SELECT version, alias, memory_mb FROM usage_records WHERE request_id = $1', [requestId])).toEqual([
+      { version: 1, alias: 'live', memory_mb: 1024 },
+    ]);
+
+    // Deleted before its attempt: dropped without a call, and counted so.
+    const gone = await calls.queue(ACCOUNT, fn.id, {}, 'live');
+    await db.dataSource.query('DELETE FROM function_aliases WHERE function_id = $1', [fn.id]);
+    await w.tick(new Date(Date.now() + 1000));
+    await w.settled();
+
+    expect([await message(gone.requestId), invoke.mock.calls.length, (await asyncCountsOf(fn.id)).dropped]).toEqual([undefined, 1, 1]);
+    await expect(calls.queue(ACCOUNT, fn.id, {}, 'live')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('leases an event for the longest timeout of its function and its versions, which an event naming one runs', async () => {
+    const fn = await newFunction(5);
+    await publishLive(fn, 128, 30);
+    await send(fn, uuid(450));
+
+    const claimedAt = new Date(Date.now() + 1000);
+    expect(await queues.claimEvents(10, claimedAt, 90)).toHaveLength(1);
+
+    // Twice the version's 30 s, a cold start of 90 s, and a minute.
+    expect((await message(uuid(450))).visible_at.getTime() - claimedAt.getTime()).toBe((2 * 30 + 90 + 60) * 1000);
   });
 
   it('drops an event past its maximum age without a call', async () => {

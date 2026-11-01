@@ -21,7 +21,6 @@ import { Function } from './entities/function.entity';
 import { sendEvents } from './event-stream';
 import { AsyncInvocationsService } from './async-invocations.service';
 import { FunctionView, FunctionsService } from './functions.service';
-import { LATEST } from './qualifier';
 
 const INVOCATION_TYPES = Object.values(InvocationType) as string[];
 
@@ -165,7 +164,8 @@ export class FunctionsController {
       "As AWS Lambda's Invoke, its invocation type in the header X-Amz-Invocation-Type or in invocationType: RequestResponse waits for the call; " +
       "Event keeps it in the function's queue and answers 202 with its request ID at once, then runs it, retried twice on the function's " +
       'failure (a minute, then two minutes later), with a backoff when throttled, for six hours at most, each attempt in the history under ' +
-      'that request ID; DryRun only checks, and answers 204.',
+      'that request ID; DryRun only checks, and answers 204. qualifier names what runs, for each type: $LATEST, a version, or an alias; ' +
+      '404 for one the function hasn\'t.',
   })
   @ApiHeader({ name: 'X-Amz-Invocation-Type', required: false, enum: InvocationType })
   @ApiResponse({ status: 201, description: 'Function invoked successfully', type: FunctionInvocation })
@@ -186,16 +186,13 @@ export class FunctionsController {
   ): Promise<FunctionInvocation | AsyncInvocationView | void> {
     const type = invocationTypeOf(invocationType, invokeFunctionDto.invocationType);
     const { qualifier } = invokeFunctionDto;
-    if (type !== InvocationType.REQUEST_RESPONSE && qualifier !== undefined && qualifier !== LATEST) {
-      throw new BadRequestException(`A call of type ${type} runs $LATEST for now: name a version or an alias in a call that waits, RequestResponse`);
-    }
     if (type === InvocationType.EVENT) {
-      const queued = await this.asyncInvocations.queue(principal.accountId, id, invokeFunctionDto.input);
+      const queued = await this.asyncInvocations.queue(principal.accountId, id, invokeFunctionDto.input, qualifier);
       response.status(202);
       return queued;
     }
     if (type === InvocationType.DRY_RUN) {
-      await this.asyncInvocations.dryRun(principal.accountId, id, invokeFunctionDto.input);
+      await this.asyncInvocations.dryRun(principal.accountId, id, invokeFunctionDto.input, qualifier);
       response.status(204);
       return;
     }

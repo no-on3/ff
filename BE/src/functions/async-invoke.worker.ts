@@ -26,22 +26,27 @@ import {
   Settlement,
   afterAttempt,
   attemptsOf,
+  RecordedEnd,
   invocationRecord,
+  isRecorded,
   keptResponse,
   lastResponseOf,
   onClaim,
+  qualifierOf,
 } from './async-invoke';
 import { Schedule } from '../schedules/schedule.entity';
 import { InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus } from './entities/function.entity';
 import { AsyncSettings, EventInvokeConfigService } from './event-invoke-config.service';
-import { FunctionsService } from './functions.service';
+import { CallTarget, FunctionsService } from './functions.service';
+import { LATEST } from './qualifier';
 
 /** Why an event ended without succeeding, as the server log says it. */
 const ENDS: Record<Exclude<EventEnd, EventEnd.SUCCEEDED>, string> = {
   [EventEnd.RETRIES_EXHAUSTED]: 'its retries are used up',
   [EventEnd.TOO_OLD]: 'it reached its maximum age',
   [EventEnd.FUNCTION_GONE]: 'its function is gone',
+  [EventEnd.QUALIFIER_GONE]: 'the version or the alias it named is gone',
 };
 
 /** An attempt's outcome, how it answered, for the event's record, and in a word, for a schedule's last outcome. */
@@ -58,6 +63,16 @@ const scheduleOf = (attributes: Record<string, unknown> | null): string | undefi
 /** A megabyte, as the plans count what messages hold. */
 const MB = 1024 * 1024;
 
+/** What `find` finds, or undefined once it is gone. */
+async function unlessGone<T>(find: Promise<T>): Promise<T | undefined> {
+  try {
+    return await find;
+  } catch (error) {
+    if (error instanceof NotFoundException) return undefined;
+    throw error;
+  }
+}
+
 /**
  * Runs functions' asynchronous calls (ADR 0010). As each call is kept,
  * PostgreSQL tells it (ff_async), whichever backend kept it, and it claims
@@ -65,15 +80,18 @@ const MB = 1024 * 1024;
  * claiming again as attempts end while there were more than room; every
  * FF_ASYNC_INTERVAL_SECONDS too, for retries come due and a backend's lost
  * claims. Each event is hidden from other backends for its lease, and each
- * attempt made as the API's invoke makes a call: the
- * function ACTIVE, the account active with credit, the record and the bill,
- * the history's source `async` and its attempt, under the event's request ID.
+ * attempt made as the API's invoke makes a call: of what the call named, an
+ * alias's share drawn at each attempt; the function ACTIVE unless that is a
+ * version; the account active with credit; the record and the bill, the
+ * history's source `async` and its attempt, under the event's request ID.
  * The plan's rate was counted when the call came. Then the event is deleted,
  * or put back for its next attempt as Lambda retries, by the function's own
  * settings, else Lambda's defaults (async-invoke.ts, EventInvokeConfigService).
  * An event that ends hands its record, Lambda's, to the destination its
  * function names for how it ended, a function or a queue, in the transaction
  * that deletes it. A
+ * An event whose version or alias was deleted since is dropped, as one
+ * whose function was, without a record. A
  * schedule's run is the schedule's call, its source `schedule`, and each
  * attempt's outcome goes on the schedule, unless a later run has replaced it.
  * A backend that stops during an attempt leaves its event to come back when
@@ -178,12 +196,14 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     const now = () => new Date(Date.now() + offset);
     try {
       await withRequestContext({ requestId: event.requestId }, async () => {
-        const fn = await this.functionOf(event);
+        const fn = await unlessGone(this.functions.findOne(event.accountId, event.functionId));
         if (!fn) return this.settle(event, { end: EventEnd.FUNCTION_GONE, attempts: attemptsOf(event.attributes) });
         const settings = await this.configs.settingsFor(fn.id);
         const claim = onClaim(attemptsOf(event.attributes), event.receiveCount, event.sentAt, claimedAt, settings.policy);
         if (!('run' in claim)) return this.settle(event, claim, { fn, settings, response: lastResponseOf(event.attributes), at: now() });
-        const attempted = await this.run(fn, event, now);
+        const target = await unlessGone(this.functions.callTarget(fn, qualifierOf(event.attributes)));
+        if (!target) return this.settle(event, { end: EventEnd.QUALIFIER_GONE, attempts: claim.run });
+        const attempted = await this.run(fn, target, event, now);
         await this.tellSchedule(event, attempted.word);
         const settlement = afterAttempt(claim.run, attempted.outcome, event.sentAt, now(), settings.policy);
         await this.settle(event, settlement, { fn, settings, response: attempted.response, at: now() });
@@ -195,30 +215,28 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** The event's function, unless it is gone. */
-  private async functionOf(event: ClaimedEvent): Promise<Function | undefined> {
-    try {
-      return await this.functions.findOne(event.accountId, event.functionId);
-    } catch (error) {
-      if (error instanceof NotFoundException) return undefined;
-      throw error;
-    }
-  }
-
   /**
-   * The call, as the API's invoke makes one, its event's age then counted as Lambda's AsyncEventAge; FF's own failure
-   * when the function or the account can't take one now, which calls nothing and counts no age.
+   * The call of `target`, as the API's invoke makes one, its event's age then counted as Lambda's AsyncEventAge; FF's
+   * own failure when the function or the account can't take one now, which calls nothing and counts no age. Each
+   * answer names the version it was for.
    */
-  private async run(fn: Function, event: ClaimedEvent, now: () => Date): Promise<Attempted> {
+  private async run(fn: Function, target: CallTarget, event: ClaimedEvent, now: () => Date): Promise<Attempted> {
+    const executedVersion = target.version ? String(target.version.version) : LATEST;
+    const answer = (outcome: AttemptOutcome, response: Omit<AttemptResponse, 'executedVersion'>, word: string): Attempted => ({
+      outcome,
+      response: { ...response, executedVersion },
+      word,
+    });
     const waits = (why: string): Attempted => {
       this.logger.log(`Asynchronous call ${event.requestId} of function ${event.functionId} waits: ${why}`);
-      return {
-        outcome: AttemptOutcome.SYSTEM_ERROR,
-        response: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: `FF couldn't make the call: ${why}` } },
-        word: `waiting: ${why}`,
-      };
+      return answer(
+        AttemptOutcome.SYSTEM_ERROR,
+        { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: `FF couldn't make the call: ${why}` } },
+        `waiting: ${why}`,
+      );
     };
-    if (fn.status !== FunctionStatus.ACTIVE) return waits('the function is not ACTIVE');
+    // A version runs whatever $LATEST's state, as a call that waits does.
+    if (!target.version && fn.status !== FunctionStatus.ACTIVE) return waits('the function is not ACTIVE');
     const account = await this.accounts.findOne({ where: { id: event.accountId }, select: { id: true, status: true } });
     if (!account || account.status !== AccountStatus.ACTIVE) return waits('the account is not active');
     try {
@@ -232,28 +250,21 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       source: scheduleOf(event.attributes) ? InvocationSource.SCHEDULE : InvocationSource.ASYNC,
       requestId: event.requestId,
       attempt: event.receiveCount,
+      target,
     });
-    if (outcome.ok) return { outcome: AttemptOutcome.SUCCESS, response: { statusCode: 200, payload: outcome.output }, word: 'success' };
+    if (outcome.ok) return answer(AttemptOutcome.SUCCESS, { statusCode: 200, payload: outcome.output }, 'success');
     if (outcome.error instanceof FunctionThrottledError) {
-      return {
-        outcome: AttemptOutcome.THROTTLED,
-        response: { statusCode: 429, payload: { errorType: 'TooManyRequestsException', errorMessage: outcome.visible } },
-        word: 'throttled',
-      };
+      return answer(AttemptOutcome.THROTTLED, { statusCode: 429, payload: { errorType: 'TooManyRequestsException', errorMessage: outcome.visible } }, 'throttled');
     }
     if (outcome.error instanceof FunctionRuntimeError) {
       const failed = outcome.error;
-      return {
-        outcome: AttemptOutcome.FUNCTION_ERROR,
-        response: { statusCode: 200, functionError: 'Unhandled', payload: { errorType: failed.errorType, errorMessage: failed.message } },
-        word: outcome.invocation.status === InvocationStatus.TIMEOUT ? 'timeout' : 'error',
-      };
+      return answer(
+        AttemptOutcome.FUNCTION_ERROR,
+        { statusCode: 200, functionError: 'Unhandled', payload: { errorType: failed.errorType, errorMessage: failed.message } },
+        outcome.invocation.status === InvocationStatus.TIMEOUT ? 'timeout' : 'error',
+      );
     }
-    return {
-      outcome: AttemptOutcome.SYSTEM_ERROR,
-      response: { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: outcome.visible } },
-      word: 'error',
-    };
+    return answer(AttemptOutcome.SYSTEM_ERROR, { statusCode: 500, payload: { errorType: 'ServiceException', errorMessage: outcome.visible } }, 'error');
   }
 
   /** A schedule's run: its attempt's outcome on the schedule, unless a later run has replaced it there. */
@@ -280,9 +291,11 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       // Only a failure is retried: its answer is kept for the record, should the event end at a later claim.
       const lastResponse = context?.response ? keptResponse(context.response) : undefined;
       kept = await this.queues.retryEvent(event, settlement.retryAt, { ...event.attributes, ...settlement.attempts, ...(lastResponse ? { lastResponse } : {}) });
+    } else if (context && isRecorded(settlement.end)) {
+      const destination = settlement.end === EventEnd.SUCCEEDED ? context.settings.onSuccess : context.settings.onFailure;
+      kept = destination ? await this.deliver(event, settlement.end, destination, context) : await this.queues.deleteEvent(event);
     } else {
-      const destination = context && settlement.end !== EventEnd.FUNCTION_GONE ? (settlement.end === EventEnd.SUCCEEDED ? context.settings.onSuccess : context.settings.onFailure) : null;
-      kept = destination && context ? await this.deliver(event, settlement.end as Exclude<EventEnd, EventEnd.FUNCTION_GONE>, destination, context) : await this.queues.deleteEvent(event);
+      kept = await this.queues.deleteEvent(event);
     }
     if (!kept) {
       this.logger.warn(`The attempt of asynchronous call ${event.requestId} ended after its lease: another claim has the event, which stands`);
@@ -305,7 +318,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
    */
   private async deliver(
     event: ClaimedEvent,
-    end: Exclude<EventEnd, EventEnd.FUNCTION_GONE>,
+    end: RecordedEnd,
     destination: string,
     context: { fn: Function; response?: AttemptResponse; at: Date },
   ): Promise<boolean> {
@@ -313,6 +326,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     const record = invocationRecord({
       requestId: event.requestId,
       functionArn,
+      qualifier: qualifierOf(event.attributes),
       end,
       approximateInvokeCount: event.receiveCount,
       requestPayload: JSON.parse(event.body) as unknown,

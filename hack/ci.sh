@@ -41,7 +41,9 @@
 # Heavy steps run one at a time. FF_CI_JOBS=<n> caps the test runners' and Rust's parallelism at n, for a machine
 # others share; unset, each tool takes its own default, but the backend's L1, which takes half the cores, or every one
 # on GitHub. On a machine others share, one stage at a time too, with FF_CI_JOBS=2, each heavy one checking the
-# resources first (hack/check-resources.sh): suggest prints the commands in that order.
+# resources first (hack/check-resources.sh): suggest prints the commands in that order. FF_CI_DB_SUITES=<pattern>
+# runs only L2's suites whose path it matches, Jest's way, a suite fixed after a whole run having failed it; a run
+# whole gives the counts.
 #   hack/ci.sh <stage> [<stage> ...]
 #   FF_CI_JOBS=2 hack/ci.sh unit
 set -euo pipefail
@@ -248,7 +250,7 @@ stage_db() {
     FF_OBJECT_STORE_ENDPOINT=127.0.0.1 FF_OBJECT_STORE_PORT="$s3_port" FF_OBJECT_STORE_USE_SSL=false FF_OBJECT_STORE_ACCESS_KEY="$s3_key"
     FF_OBJECT_STORE_SECRET_KEY="$password")
   step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18, buckets on SeaweedFS ${SEAWEEDFS_IMAGE#*:}" \
-    in_dir BE env "${servers[@]}" npm run test:db
+    in_dir BE env "${servers[@]}" npm run test:db -- ${FF_CI_DB_SUITES:+"$FF_CI_DB_SUITES"}
   step "migrations: exactly the entities' schema" in_dir BE env "${servers[@]}" npm run migration:check
   docker rm -f -v "$name" "$data" "$s3" "$cache" >/dev/null
 }

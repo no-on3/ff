@@ -2,6 +2,7 @@
  * Asynchronous calls, as AWS Lambda makes them (ADR 0010): what is kept of an
  * event's attempts, and when its next attempt comes, or why it has none.
  */
+import { LATEST } from './qualifier';
 
 /** Lambda's limit on an asynchronous call's event, once serialized: 1 MB. */
 export const MAX_ASYNC_INPUT_BYTES = 1024 * 1024;
@@ -56,6 +57,19 @@ export enum EventEnd {
   RETRIES_EXHAUSTED = 'retries-exhausted',
   TOO_OLD = 'too-old',
   FUNCTION_GONE = 'function-gone',
+  /** The version or the alias the call named was deleted since: no attempt can run what it named. */
+  QUALIFIER_GONE = 'qualifier-gone',
+}
+
+/** The ends a destination is told of, as Lambda's conditions name them; an event whose function, version or alias is gone has none. */
+export type RecordedEnd = Exclude<EventEnd, EventEnd.FUNCTION_GONE | EventEnd.QUALIFIER_GONE>;
+
+/** Whether a destination is told of the end. */
+export const isRecorded = (end: EventEnd): end is RecordedEnd => end !== EventEnd.FUNCTION_GONE && end !== EventEnd.QUALIFIER_GONE;
+
+/** What its queue keeps beside a call that named a version or an alias: what it named; none for $LATEST. */
+export function qualifierOf(attributes: Record<string, unknown> | null): string | undefined {
+  return typeof attributes?.qualifier === 'string' ? attributes.qualifier : undefined;
 }
 
 /** How an attempt answered, as a destination's record gives it: Lambda's status, and the function's output or the error. */
@@ -63,6 +77,8 @@ export interface AttemptResponse {
   statusCode: number;
   /** "Unhandled" when the function failed, as Lambda says it. */
   functionError?: 'Unhandled';
+  /** The version the attempt was for, as Lambda's ExecutedVersion: its number, or $LATEST, as a response kept before versions ran is read. */
+  executedVersion?: string;
   payload: unknown;
 }
 
@@ -86,20 +102,23 @@ export function lastResponseOf(attributes: Record<string, unknown> | null): Atte
 }
 
 /** Why a record is sent, as Lambda's condition names it. */
-const CONDITIONS: Record<Exclude<EventEnd, EventEnd.FUNCTION_GONE>, string> = {
+const CONDITIONS: Record<RecordedEnd, string> = {
   [EventEnd.SUCCEEDED]: 'Success',
   [EventEnd.RETRIES_EXHAUSTED]: 'RetriesExhausted',
   [EventEnd.TOO_OLD]: 'EventAgeExceeded',
 };
 
 /**
- * A call's record, as AWS Lambda sends a destination one: the request, why
- * it is sent, the event, and the last attempt's answer, when one ran.
+ * A call's record, as AWS Lambda sends a destination one: the request, with
+ * the function's ARN qualified by what the call named, $LATEST by default;
+ * why it is sent; the event; and the last attempt's answer, when one ran,
+ * with the version that ran it.
  */
 export function invocationRecord(call: {
   requestId: string;
   functionArn: string;
-  end: Exclude<EventEnd, EventEnd.FUNCTION_GONE>;
+  qualifier?: string;
+  end: RecordedEnd;
   approximateInvokeCount: number;
   requestPayload: unknown;
   response?: AttemptResponse;
@@ -111,14 +130,18 @@ export function invocationRecord(call: {
     timestamp: call.timestamp.toISOString(),
     requestContext: {
       requestId: call.requestId,
-      functionArn: `${call.functionArn}:$LATEST`,
+      functionArn: `${call.functionArn}:${call.qualifier ?? LATEST}`,
       condition: CONDITIONS[call.end],
       approximateInvokeCount: call.approximateInvokeCount,
     },
     requestPayload: call.requestPayload,
     ...(response
       ? {
-          responseContext: { statusCode: response.statusCode, executedVersion: '$LATEST', ...(response.functionError ? { functionError: response.functionError } : {}) },
+          responseContext: {
+            statusCode: response.statusCode,
+            executedVersion: response.executedVersion ?? LATEST,
+            ...(response.functionError ? { functionError: response.functionError } : {}),
+          },
           responsePayload: response.payload,
         }
       : {}),

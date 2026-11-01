@@ -1,4 +1,16 @@
-import { AttemptOutcome, EventEnd, LAMBDA_RETRY_POLICY, afterAttempt, attemptsOf, invocationRecord, keptResponse, lastResponseOf, onClaim } from './async-invoke';
+import {
+  AttemptOutcome,
+  EventEnd,
+  LAMBDA_RETRY_POLICY,
+  afterAttempt,
+  attemptsOf,
+  invocationRecord,
+  isRecorded,
+  keptResponse,
+  lastResponseOf,
+  onClaim,
+  qualifierOf,
+} from './async-invoke';
 
 const SENT = new Date('2026-10-23T10:00:00Z');
 const at = (seconds: number) => new Date(SENT.getTime() + seconds * 1000);
@@ -10,6 +22,10 @@ describe('asynchronous calls, as AWS Lambda retries them (L1)', () => {
       expect(attemptsOf(null)).toEqual(none);
       expect(attemptsOf({ failures: 1, throttles: 3, settled: 4, other: 'kept elsewhere' })).toEqual({ failures: 1, throttles: 3, settled: 4 });
       expect(attemptsOf({ failures: '1', throttles: 1.5 })).toEqual(none);
+    });
+
+    it('keeps the version or the alias the call named, none for $LATEST', () => {
+      expect([qualifierOf({ qualifier: 'live', failures: 1 }), qualifierOf({ qualifier: '3' }), qualifierOf({ qualifier: 3 }), qualifierOf(null)]).toEqual(['live', '3', undefined, undefined]);
     });
   });
 
@@ -84,10 +100,23 @@ describe('asynchronous calls, as AWS Lambda retries them (L1)', () => {
       expect([(aged.requestContext as { condition: string }).condition, 'responseContext' in aged, 'responsePayload' in aged]).toEqual(['EventAgeExceeded', false, false]);
     });
 
-    it("keeps a failure's type and the start of its message with its event, and reads it back", () => {
-      const kept = keptResponse({ statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Error', errorMessage: 'y'.repeat(5000), stack: ['a'] } });
+    it('names what the call named in its ARN, and the version that ran it, as Lambda does for a version or an alias', () => {
+      const record = invocationRecord({ ...call, qualifier: 'live', end: EventEnd.SUCCEEDED, response: { statusCode: 200, executedVersion: '2', payload: 'done' } });
 
-      expect(kept).toEqual({ statusCode: 200, functionError: 'Unhandled', payload: { errorType: 'Error', errorMessage: 'y'.repeat(4096) } });
+      expect([record.requestContext, record.responseContext]).toEqual([
+        { requestId: 'req-1', functionArn: 'arn:aws:lambda:tn-tunis-1:000000000001:function:orders:live', condition: 'Success', approximateInvokeCount: 3 },
+        { statusCode: 200, executedVersion: '2' },
+      ]);
+    });
+
+    it('sends no record of an event whose function, version or alias is gone: no destination is told of it', () => {
+      expect(Object.values(EventEnd).filter(isRecorded)).toEqual([EventEnd.SUCCEEDED, EventEnd.RETRIES_EXHAUSTED, EventEnd.TOO_OLD]);
+    });
+
+    it("keeps a failure's type and the start of its message with its event, and reads it back", () => {
+      const kept = keptResponse({ statusCode: 200, functionError: 'Unhandled', executedVersion: '2', payload: { errorType: 'Error', errorMessage: 'y'.repeat(5000), stack: ['a'] } });
+
+      expect(kept).toEqual({ statusCode: 200, functionError: 'Unhandled', executedVersion: '2', payload: { errorType: 'Error', errorMessage: 'y'.repeat(4096) } });
       expect([lastResponseOf({ lastResponse: kept }), lastResponseOf(null), lastResponseOf({ lastResponse: { statusCode: 'x' } })]).toEqual([kept, undefined, undefined]);
     });
   });

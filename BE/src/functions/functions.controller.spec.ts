@@ -98,7 +98,7 @@ describe('FunctionsController route rules (L1, P-12, P-13)', () => {
 
 describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", () => {
   const functions = { invoke: jest.fn(async (..._call: unknown[]) => ({ id: 'inv-1', status: 'COMPLETED', output: 1 })) };
-  const asyncInvocations = { queue: jest.fn(async () => ({ requestId: 'req-1' })), dryRun: jest.fn(async () => undefined) };
+  const asyncInvocations = { queue: jest.fn(async (..._call: unknown[]) => ({ requestId: 'req-1' })), dryRun: jest.fn(async (..._call: unknown[]) => undefined) };
   let app: INestApplication;
   let baseUrl: string;
   const invoke = (body: object, type?: string) =>
@@ -139,18 +139,17 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
     expect(functions.invoke).not.toHaveBeenCalled();
   });
 
-  it('refuses a qualifier but $LATEST in a call that does not wait, for now, saying so', async () => {
+  it('passes the qualifier on to a call that does not wait, an Event or a DryRun, as to one that does', async () => {
     const event = await invoke({ qualifier: 'prod' }, 'Event');
     const dryRun = await invoke({ qualifier: '2', invocationType: 'DryRun' });
     const latest = await invoke({ qualifier: '$LATEST' }, 'Event');
 
-    expect([event.status, (await event.json()).message, dryRun.status, latest.status]).toEqual([
-      400,
-      'A call of type Event runs $LATEST for now: name a version or an alias in a call that waits, RequestResponse',
-      400,
-      202,
+    expect([event.status, dryRun.status, latest.status]).toEqual([202, 204, 202]);
+    expect(asyncInvocations.queue.mock.calls).toEqual([
+      [ACCOUNT, ID, undefined, 'prod'],
+      [ACCOUNT, ID, undefined, '$LATEST'],
     ]);
-    expect([asyncInvocations.queue.mock.calls.length, asyncInvocations.dryRun.mock.calls.length]).toEqual([1, 0]);
+    expect(asyncInvocations.dryRun.mock.calls).toEqual([[ACCOUNT, ID, undefined, '2']]);
   });
 
   it('keeps an Event, named by the header or the body, and answers 202 with its request ID at once', async () => {
@@ -159,8 +158,8 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
 
     expect([byHeader.status, await byHeader.json(), byBody.status]).toEqual([202, { requestId: 'req-1' }, 202]);
     expect(asyncInvocations.queue.mock.calls).toEqual([
-      [ACCOUNT, ID, { a: 1 }],
-      [ACCOUNT, ID, 'x'],
+      [ACCOUNT, ID, { a: 1 }, undefined],
+      [ACCOUNT, ID, 'x', undefined],
     ]);
     expect(functions.invoke).not.toHaveBeenCalled();
   });
@@ -169,7 +168,7 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
     const res = await invoke({ input: { a: 1 } }, 'DryRun');
 
     expect([res.status, await res.text()]).toEqual([204, '']);
-    expect(asyncInvocations.dryRun).toHaveBeenCalledWith(ACCOUNT, ID, { a: 1 });
+    expect(asyncInvocations.dryRun).toHaveBeenCalledWith(ACCOUNT, ID, { a: 1 }, undefined);
     expect([functions.invoke.mock.calls.length, asyncInvocations.queue.mock.calls.length]).toEqual([0, 0]);
   });
 
