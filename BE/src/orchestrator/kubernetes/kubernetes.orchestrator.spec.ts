@@ -42,6 +42,14 @@ const LOAD_FAILED: StoredLine[] = [
   LISTENING,
 ];
 
+/** A JSON merge patch applied, as RFC 7386 says: objects merged key by key, anything else replaced. */
+function merged(target: any, patch: any): any {
+  if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) return patch;
+  const result = typeof target === 'object' && target !== null && !Array.isArray(target) ? { ...target } : {};
+  for (const [key, value] of Object.entries(patch)) result[key] = merged(result[key], value);
+  return result;
+}
+
 /** In-memory stand-in for the API server. */
 class FakeKubeApi implements KubeApi {
   objects = new Map<string, any>();
@@ -85,6 +93,13 @@ class FakeKubeApi implements KubeApi {
   async list<T>(path: string, selector: string): Promise<T[]> {
     this.listed.push({ path, selector });
     return (this.lists.get(path) as T[]) ?? [];
+  }
+  /** The merge patches sent, in order; each merged into the object at its path, if any, as the API server merges it. */
+  patched: Array<{ path: string; patch: any }> = [];
+  async mergePatch(path: string, patch: object): Promise<void> {
+    this.patched.push({ path, patch });
+    const current = this.objects.get(path);
+    if (current) this.objects.set(path, merged(current, patch));
   }
   /** The store's live tail (P-43): what it sends, and the paths asked for. */
   tailText = '';
@@ -374,6 +389,173 @@ describe('KubernetesOrchestrator', () => {
     expect(api.deletedCollections).toEqual([
       { path: `/api/v1/namespaces/${ns}/configmaps`, selector: `ff.dev/function-id=${fn.id}` },
     ]);
+  });
+
+  describe("a version's objects, beside its function's $LATEST (ADR 0015)", () => {
+    const servicePath = `/api/v1/namespaces/${ns}/services/${name}`;
+    const versionName = `${name}-v2`;
+    const versionDeploymentPath = `/apis/apps/v1/namespaces/${ns}/deployments/${versionName}`;
+    const version = (overrides = {}) => workload({ version: 2, lastVersion: 2, ...overrides });
+    /** $LATEST as it runs: its template's labels and its Service's selector, with or without the version label. */
+    const latestRunning = (moved: boolean, deployment = rolledOut(1)) => {
+      const label = moved ? { 'ff.dev/version': 'latest' } : {};
+      api.objects.set(deploymentPath, { ...deployment, spec: { ...deployment.spec, template: { metadata: { labels: { 'ff.dev/function-id': fn.id, ...label } } } } });
+      api.objects.set(servicePath, { metadata: { name }, spec: { selector: { 'ff.dev/function-id': fn.id, ...label } } });
+    };
+    /** The API server keeps what is applied, a Deployment as rolled out at once. */
+    const keepApplied = () => {
+      const apply = api.apply.bind(api);
+      api.apply = async <T>(path: string, manifest: any): Promise<T> => {
+        api.objects.set(path, manifest.kind === 'Deployment' ? { ...manifest, ...rolledOut(manifest.spec.replicas) } : manifest);
+        return apply<T>(path, manifest);
+      };
+    };
+
+    it("moves $LATEST onto its label first, its template then its Service, then makes the version's Secret, Service and Deployment", async () => {
+      latestRunning(false);
+
+      await orchestrator.deployVersion(version({ environment: { revision: 'r1', values: { STAGE: 'v2' } } }));
+
+      expect(api.patched).toEqual([
+        { path: deploymentPath, patch: { spec: { template: { metadata: { labels: { 'ff.dev/version': 'latest' } } } } } },
+        { path: servicePath, patch: { spec: { selector: { 'ff.dev/version': 'latest' } } } },
+      ]);
+      expect(api.applied.map((a) => [a.manifest.kind, a.path])).toEqual([
+        ['Secret', `/api/v1/namespaces/${ns}/secrets/${versionName}-env`],
+        ['Service', `/api/v1/namespaces/${ns}/services/${versionName}`],
+        ['Deployment', versionDeploymentPath],
+      ]);
+      const deployment = api.applied[2].manifest;
+      expect(deployment.spec.replicas).toBe(1);
+      expect(deployment.spec.template.spec.containers[0].envFrom).toEqual([{ secretRef: { name: `${versionName}-env` } }]);
+      expect(api.applied[1].manifest.spec.selector).toEqual({ 'ff.dev/function-id': fn.id, 'ff.dev/version': '2' });
+    });
+
+    it("starts the move at a publish, in $LATEST's template alone, without waiting for its rollout; once done, it only reads", async () => {
+      latestRunning(false, { ...rolledOut(1), metadata: { name, generation: 2 } }); // would never roll out
+
+      await orchestrator.labelLatest(fn);
+
+      expect(api.patched).toEqual([{ path: deploymentPath, patch: { spec: { template: { metadata: { labels: { 'ff.dev/version': 'latest' } } } } } }]);
+      api.patched = [];
+      await orchestrator.labelLatest(fn);
+      expect(api.patched).toEqual([]);
+      expect(api.applied).toEqual([]);
+    });
+
+    it('moves a function once: moved already, its $LATEST is only read; and a version without an environment has no Secret', async () => {
+      latestRunning(true);
+
+      await orchestrator.deployVersion(version());
+
+      expect(api.patched).toEqual([]);
+      expect(api.applied.map((a) => a.manifest.kind)).toEqual(['Service', 'Deployment']);
+    });
+
+    it("gives $LATEST's Service the label only once its rollout is done, so that it never has no pod", async () => {
+      latestRunning(false, { ...rolledOut(1), metadata: { name, generation: 2 } }); // its controller hasn't seen the change yet
+      let rolled = false;
+      setTimeout(() => {
+        rolled = true;
+        latestRunning(true, { ...rolledOut(1), metadata: { name, generation: 2 }, status: { ...rolledOut(1).status, observedGeneration: 2 } });
+      }, 30);
+      const patch = api.mergePatch.bind(api);
+      const rolledWhenPatched: boolean[] = [];
+      api.mergePatch = async (path: string, body: object) => {
+        if (path === servicePath) rolledWhenPatched.push(rolled);
+        return patch(path, body);
+      };
+
+      await orchestrator.deployVersion(version());
+
+      expect(rolledWhenPatched).toEqual([true]);
+    });
+
+    it("keeps $LATEST's Service on its label through an update, whose apply replaces a Service's selector whole", async () => {
+      latestRunning(true);
+
+      await orchestrator.update(workload({ lastVersion: 2 }), tenant());
+
+      const service = api.applied.find((a) => a.manifest.kind === 'Service')?.manifest;
+      expect(service.spec.selector).toEqual({ 'ff.dev/function-id': fn.id, 'ff.dev/version': 'latest' });
+      // Not moved yet, as before a version's first call: the selector stays the function's alone, so that its pods stay in it.
+      api.applied = [];
+      latestRunning(false);
+      await orchestrator.update(workload({ lastVersion: 2 }), tenant());
+      expect(api.applied.find((a) => a.manifest.kind === 'Service')?.manifest.spec.selector).toEqual({ 'ff.dev/function-id': fn.id });
+    });
+
+    it("leaves $LATEST's Service as it was, and makes nothing of the version, when $LATEST can't roll out", async () => {
+      orchestrator = new KubernetesOrchestrator(settings({ readyTimeoutSeconds: 0.05 }), api, 5);
+      latestRunning(false, { ...rolledOut(1), metadata: { name, generation: 2 } });
+
+      await expect(orchestrator.deployVersion(version())).rejects.toThrow('did not become ready');
+
+      expect(api.patched.map((p) => p.path)).toEqual([deploymentPath]);
+      expect(api.applied).toEqual([]);
+    });
+
+    it("makes a version's objects at its first call, from the workload the call gives, and calls its own Service, the cold start counting it", async () => {
+      latestRunning(true);
+      keepApplied();
+      const deploy = jest.fn(async () => version({ environment: { revision: 'r1', values: { STAGE: 'v2' } } }));
+
+      const result = await orchestrator.invoke(version({ codeImage: undefined }), { a: 1 }, 'req-1', deploy);
+
+      expect(deploy).toHaveBeenCalledTimes(1);
+      expect(api.requests[0].path).toBe(`/api/v1/namespaces/${ns}/services/${versionName}:http/proxy/invoke`);
+      expect(result.initMs).toEqual(expect.any(Number));
+
+      // Its next call finds them: nothing made again.
+      await orchestrator.invoke(version({ codeImage: undefined }), { a: 2 }, 'req-2', deploy);
+      expect(deploy).toHaveBeenCalledTimes(1);
+    });
+
+    it('scales a version scaled to zero from zero, its own Deployment; and refuses a version with nothing to run on when the call gives no workload', async () => {
+      api.objects.set(versionDeploymentPath, { ...rolledOut(0), status: { readyReplicas: 0 } });
+
+      await orchestrator.invoke(version(), {});
+
+      expect(api.scaled).toEqual([1]);
+      expect(api.objects.get(versionDeploymentPath)).toEqual(rolledOut(1));
+      api.objects.delete(versionDeploymentPath);
+      await expect(orchestrator.invoke(version(), {})).rejects.toThrow(`Version 2 of function ${fn.id} has no Deployment, and the call gave no way to make one`);
+    });
+
+    it("reads a version's pods by its label, and $LATEST's without any version's, to say why one isn't ready", async () => {
+      const pod = (labels: Record<string, string>, reason: string) => ({
+        metadata: { name: `pod-${reason}`, labels: { 'ff.dev/function-id': fn.id, ...labels }, creationTimestamp: '2026-11-01T10:00:00Z' },
+        status: { containerStatuses: [{ state: { waiting: { reason } } }] },
+      });
+      api.lists.set(`/api/v1/namespaces/${ns}/pods`, [pod({ 'ff.dev/version': '2' }, 'VersionsReason'), pod({ 'ff.dev/version': 'latest' }, 'LatestReason')]);
+      api.objects.set(deploymentPath, { ...rolledOut(1), status: { readyReplicas: 0 } });
+      api.storeRows = [];
+
+      const failure = orchestrator.waitUntilReady(fn, 20);
+
+      await expect(failure).rejects.toThrow('LatestReason');
+      await expect(failure).rejects.not.toThrow('VersionsReason');
+      api.objects.set(versionDeploymentPath, { ...rolledOut(1), status: { readyReplicas: 0 } });
+      await expect(orchestrator.waitUntilReady(version(), 20)).rejects.toThrow();
+      expect(api.listed.at(-1)).toEqual({ path: `/api/v1/namespaces/${ns}/pods`, selector: `ff.dev/function-id=${fn.id},ff.dev/version=2` });
+    });
+
+    it("removes a version's Deployment, Service and Secret by name; a function's removal takes the versions named", async () => {
+      await orchestrator.removeVersion({ id: fn.id, accountId: fn.accountId, version: 2 });
+      expect(api.deleted).toEqual([versionDeploymentPath, `/api/v1/namespaces/${ns}/services/${versionName}`, `/api/v1/namespaces/${ns}/secrets/${versionName}-env`]);
+
+      api.deleted = [];
+      await orchestrator.remove(fn, [1, 2]);
+      expect(api.deleted.slice(0, 6)).toEqual([
+        `/apis/apps/v1/namespaces/${ns}/deployments/${name}-v1`,
+        `/api/v1/namespaces/${ns}/services/${name}-v1`,
+        `/api/v1/namespaces/${ns}/secrets/${name}-v1-env`,
+        versionDeploymentPath,
+        `/api/v1/namespaces/${ns}/services/${versionName}`,
+        `/api/v1/namespaces/${ns}/secrets/${versionName}-env`,
+      ]);
+      expect(api.deleted.slice(6, 8)).toEqual([deploymentPath, servicePath]);
+    });
   });
 
   describe('waitUntilReady', () => {
@@ -1088,6 +1270,16 @@ describe('KubernetesOrchestrator', () => {
 
       expect(Object.fromEntries(await orchestrator.readyInstancesByFunction())).toEqual({ 'f-real': 1 });
     });
+
+    it("counts a function's versions' instances with its $LATEST's (ADR 0015)", async () => {
+      api.lists.set('/apis/apps/v1/deployments', [
+        deployment('ff-t-aaaaaaaaaaaa', { ...ff('f-versions'), 'ff.dev/version': 'latest' }, 2),
+        deployment('ff-t-aaaaaaaaaaaa', { ...ff('f-versions'), 'ff.dev/version': '3' }, 1),
+        deployment('ff-t-aaaaaaaaaaaa', { ...ff('f-versions'), 'ff.dev/version': '4' }, 1),
+      ]);
+
+      expect(Object.fromEntries(await orchestrator.readyInstancesByFunction())).toEqual({ 'f-versions': 4 });
+    });
   });
 
   describe("codeImagesByFunction: the image each function's pods mount, for the restore of lost images", () => {
@@ -1110,6 +1302,17 @@ describe('KubernetesOrchestrator', () => {
 
       expect(api.listed).toEqual([{ path: '/apis/apps/v1/deployments', selector: 'app.kubernetes.io/managed-by=ff-controller' }]);
       expect(Object.fromEntries(images)).toEqual({ 'f-image': IMAGE });
+    });
+
+    it("gives $LATEST's image, never a version's, whose Deployment is made of the registry's image at each first call", async () => {
+      const VERSION_IMAGE = 'registry.ff.internal/ff-code/123456789012@sha256:' + 'b'.repeat(64);
+      const labelled = (version: string, reference: string) => {
+        const d = deployment('ff-t-aaaaaaaaaaaa', 'f-versions', [{ name: 'code', image: { reference } }]);
+        return { ...d, metadata: { ...d.metadata, labels: { ...d.metadata.labels, 'ff.dev/version': version } } };
+      };
+      api.lists.set('/apis/apps/v1/deployments', [labelled('latest', IMAGE), labelled('3', VERSION_IMAGE)]);
+
+      expect(Object.fromEntries(await orchestrator.codeImagesByFunction())).toEqual({ 'f-versions': IMAGE });
     });
   });
 

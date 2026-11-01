@@ -878,11 +878,11 @@ export class FunctionsService {
     const function_ = await this.findOne(accountId, id);
 
     try {
-      await this.orchestrator.remove(function_);
-      
+      // Its versions' pods go with its own; their records go with its record.
+      const versions = await this.functionsRepository.manager.find(FunctionVersion, { where: { functionId: id }, select: { version: true } });
+      await this.orchestrator.remove(function_, versions.map((v) => v.version));
       // Remove the code's copy from object storage
       await this.objectStore.deleteCode(this.codePath(function_));
-      
       // Its key to its account's buckets stops working, then its record goes
       await this.functionKeys.revoke(function_.id);
       await this.functionsRepository.remove(function_);

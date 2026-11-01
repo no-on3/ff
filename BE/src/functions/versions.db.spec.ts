@@ -4,12 +4,14 @@
  * published, their variables sealed for each alone; refused as Lambda's
  * PublishVersion refuses. Aliases naming versions that are there, which can't
  * be deleted while one names them; refused as Lambda's CreateAlias and
- * UpdateAlias refuse. Both gone with their function. Each run works in a
- * scratch database, dropped afterwards.
+ * UpdateAlias refuse. Both gone with their function. A version's pods, as the
+ * service asks the cluster for them: $LATEST's label at a publish, a version's
+ * objects deleted with it. Each run works in a scratch database, dropped
+ * afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
-import { BadRequestException, ConflictException, NotFoundException, PreconditionFailedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, InternalServerErrorException, NotFoundException, PreconditionFailedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
@@ -52,6 +54,18 @@ run("functions' versions and aliases (L2)", () => {
     secrets: { DB_PASSWORD: 'first-password' },
   });
   const numbers = async (id: string) => (await versions.list(ACCOUNT, id)).map((version) => version.version);
+  /** The cluster as the services ask it: what they asked is what each mock was called with. */
+  const orchestrator = {
+    deploy: async () => undefined,
+    update: async () => undefined,
+    waitUntilReady: async () => undefined,
+    scale: async () => undefined,
+    remove: jest.fn(async () => undefined),
+    labelLatest: jest.fn(async () => undefined),
+    removeVersion: jest.fn(async () => undefined),
+  };
+  /** The calls of a mock for one function: the suite's functions share the cluster. */
+  const callsFor = (mock: jest.Mock, id: string) => mock.mock.calls.filter(([fn]) => fn.id === id);
   const query = <T>(sql: string, parameters: unknown[] = []) => db.dataSource.query<T>(sql, parameters);
 
   beforeAll(async () => {
@@ -61,7 +75,6 @@ run("functions' versions and aliases (L2)", () => {
     const keys = [{ id: 'test', key: randomBytes(32) }];
     const store = new EnvironmentStore(db.dataSource.getRepository(FunctionEnvironment), new EncryptionService({ getOrThrow: () => keys } as unknown as ConfigService));
     const audit = new AuditService(db.dataSource.getRepository(AuditEntry));
-    const orchestrator = { deploy: async () => undefined, update: async () => undefined, waitUntilReady: async () => undefined, scale: async () => undefined, remove: async () => undefined };
     const [packages, images] = noPackages();
     functions = new FunctionsService(
       db.dataSource.getRepository(Function),
@@ -80,7 +93,7 @@ run("functions' versions and aliases (L2)", () => {
       noFunctionKeys(),
     );
     const region = { getOrThrow: () => 'tn-tunis-1' } as unknown as ConfigService;
-    versions = new FunctionVersionsService(db.dataSource.getRepository(FunctionVersion), functions, store, packages, audit, region);
+    versions = new FunctionVersionsService(db.dataSource.getRepository(FunctionVersion), functions, store, packages, audit, orchestrator as unknown as Orchestrator, region);
     aliases = new FunctionAliasesService(db.dataSource.getRepository(FunctionAlias), functions, audit, region);
   });
 
@@ -200,13 +213,47 @@ run("functions' versions and aliases (L2)", () => {
     expect(await numbers(fn.id)).toEqual(['1']);
   });
 
-  it('goes with its function', async () => {
+  it('goes with its function, its pods with its own', async () => {
     const fn = await functions.create(ACCOUNT, body('deleted'));
     await versions.publish(ACCOUNT, fn.id, {});
+    await functions.update(ACCOUNT, fn.id, { memory: 256 });
+    await versions.publish(ACCOUNT, fn.id, {});
+    await versions.remove(ACCOUNT, fn.id, 1);
 
     await functions.remove(ACCOUNT, fn.id);
 
     expect(await query(`SELECT * FROM function_versions WHERE function_id = $1`, [fn.id])).toEqual([]);
+    // By its name: the record removed, TypeORM cleared its ID, which the call's argument is.
+    expect(orchestrator.remove).toHaveBeenCalledWith(expect.objectContaining({ accountId: ACCOUNT, name: 'deleted' }), [2]);
+  });
+
+  it("starts moving $LATEST's pods onto their label at each new version, and only then; a failure to doesn't stop the publish", async () => {
+    const fn = await functions.create(ACCOUNT, body('labelled'));
+
+    await versions.publish(ACCOUNT, fn.id, {});
+    await versions.publish(ACCOUNT, fn.id, { description: 'nothing else changed' });
+    expect(callsFor(orchestrator.labelLatest, fn.id)).toEqual([[{ id: fn.id, accountId: ACCOUNT }]]);
+
+    orchestrator.labelLatest.mockRejectedValueOnce(new Error('the API server is down'));
+    await functions.update(ACCOUNT, fn.id, { memory: 256 });
+    expect((await versions.publish(ACCOUNT, fn.id, {})).version).toBe('2');
+    expect(callsFor(orchestrator.labelLatest, fn.id)).toHaveLength(2);
+  });
+
+  it("deletes a version's pods before its record; when they can't be, the version stays, to be deleted again", async () => {
+    const fn = await functions.create(ACCOUNT, body('unpublished'));
+    await versions.publish(ACCOUNT, fn.id, {});
+
+    orchestrator.removeVersion.mockRejectedValueOnce(new Error('the API server is down'));
+    await expect(versions.remove(ACCOUNT, fn.id, 1)).rejects.toBeInstanceOf(InternalServerErrorException);
+    expect(await numbers(fn.id)).toEqual(['1']);
+    const deletions = () => query<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM audit_log WHERE action = 'version.delete' AND resource = $1`, [`function:${fn.id}`]);
+    expect((await deletions())[0].n).toBe(0);
+
+    await versions.remove(ACCOUNT, fn.id, 1);
+    expect(await numbers(fn.id)).toEqual([]);
+    expect(callsFor(orchestrator.removeVersion, fn.id)).toEqual([[{ id: fn.id, accountId: ACCOUNT, version: 1 }], [{ id: fn.id, accountId: ACCOUNT, version: 1 }]]);
+    expect((await deletions())[0].n).toBe(1);
   });
 
   describe('aliases', () => {

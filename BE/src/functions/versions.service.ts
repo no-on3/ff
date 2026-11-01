@@ -1,8 +1,19 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException, PreconditionFailedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  NotFoundException,
+  PreconditionFailedException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
+import { describeError } from '../common/describe-error';
+import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PackagesService } from '../packages/packages.service';
 import { functionArn } from './arns';
 import { FunctionVersionView, PublishVersionDto } from './dto/versions.dto';
@@ -11,6 +22,7 @@ import { FunctionAlias } from './entities/function-alias.entity';
 import { FunctionVersion } from './entities/function-version.entity';
 import { EnvironmentDocument, sameVariables } from './environment';
 import { EnvironmentStore } from './environment.store';
+import { platformFailure } from './failures';
 import { FunctionsService } from './functions.service';
 import { inlinePackage } from './inline-package';
 import { lockedFunction } from './locked-function';
@@ -62,10 +74,12 @@ export function publishRefusal(function_: Pick<Function, 'status' | 'codeSha256'
  * it is, numbered 1, 2, 3… under the function's lock, never a number twice;
  * listed, read with their variables, and deleted, each publish and deletion in
  * the audit log. A version holds its package, which the purge of unused
- * packages keeps while it is there.
+ * packages keeps while it is there, and runs in pods of its own, which its
+ * deletion deletes.
  */
 @Injectable()
 export class FunctionVersionsService {
+  private readonly logger = new Logger(FunctionVersionsService.name);
   private readonly region: string;
 
   constructor(
@@ -74,6 +88,7 @@ export class FunctionVersionsService {
     private readonly environments: EnvironmentStore,
     private readonly packages: PackagesService,
     private readonly audit: AuditService,
+    @Inject(ORCHESTRATOR) private readonly orchestrator: Orchestrator,
     config: ConfigService,
   ) {
     this.region = config.getOrThrow<string>('schedules.region');
@@ -84,7 +99,7 @@ export class FunctionVersionsService {
    * last one when nothing but the description changed since it.
    */
   async publish(accountId: string, id: string, sent: PublishVersionDto): Promise<FunctionVersionView> {
-    return this.versions.manager.transaction(async (manager) => {
+    const { published, made } = await this.versions.manager.transaction(async (manager) => {
       const function_ = await lockedFunction(manager, accountId, id);
       const refusal = publishRefusal(function_, sent);
       if (refusal) throw refusal;
@@ -96,7 +111,7 @@ export class FunctionVersionsService {
         .orderBy('v.version', 'DESC')
         .getOne();
       if (last && sameRelease(last, this.environments.openVersion(id, last.version, last.environment), function_, environment)) {
-        return this.view(function_, last);
+        return { published: this.view(function_, last), made: false };
       }
       const version = (function_.lastVersion ?? 0) + 1;
       // Not through the record, whose save would change its updatedAt: a publish changes nothing of the function's own.
@@ -130,8 +145,22 @@ export class FunctionVersionsService {
         },
         manager,
       );
-      return this.view(function_, saved);
+      return { published: this.view(function_, saved), made: true };
     });
+    if (made) await this.labelLatest(accountId, id);
+    return published;
+  }
+
+  /**
+   * Starts moving $LATEST's pods onto a label of their own, so that a version's first call seldom waits for that
+   * rollout. A failure is only logged: that call moves them then, waiting for it.
+   */
+  private async labelLatest(accountId: string, id: string): Promise<void> {
+    try {
+      await this.orchestrator.labelLatest({ id, accountId });
+    } catch (error) {
+      this.logger.warn(`Could not label function ${id}'s $LATEST pods after a publish, which its version's first call will do: ${describeError(error)}`);
+    }
   }
 
   /** The function's versions, oldest first, as Lambda's ListVersionsByFunction lists them after $LATEST. */
@@ -168,6 +197,12 @@ export class FunctionVersionsService {
       if (naming.length) throw namedByAliases(function_, number, naming.map((alias) => alias.name));
       const { affected } = await manager.delete(FunctionVersion, { functionId: id, version: number });
       if (!affected) throw noSuchVersion(function_, number);
+      // Before the record goes: a failure keeps the version, to be deleted again.
+      try {
+        await this.orchestrator.removeVersion({ id, accountId, version: number });
+      } catch (error) {
+        throw new InternalServerErrorException(platformFailure(this.logger, 'Deleting the version', error));
+      }
       await this.audit.record({ accountId, action: 'version.delete', resource: `function:${id}`, details: { version: number } }, manager);
     });
   }

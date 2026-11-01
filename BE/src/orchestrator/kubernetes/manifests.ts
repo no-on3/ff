@@ -5,7 +5,7 @@
 import { Runtime } from '../../functions/entities/function.entity';
 import { FunctionWorkload, TenantLimits, WorkloadEnvironment } from '../orchestrator.types';
 import { KubernetesSettings } from './kubernetes.settings';
-import { ANNOTATIONS, LABELS, MANAGED_BY, accountHash, functionResourceName } from './naming';
+import { ANNOTATIONS, LABELS, LATEST_VERSION, MANAGED_BY, accountHash, versionLabel, workloadResourceName } from './naming';
 
 export interface K8sObject {
   apiVersion: string;
@@ -67,12 +67,24 @@ function managedLabels(extra: Record<string, string> = {}): Record<string, strin
   return { [LABELS.managedBy]: MANAGED_BY, ...extra };
 }
 
+/** The labels of a function's objects and pods: its ID, its runtime, and the version they run once it has versions. */
 function functionLabels(fn: FunctionWorkload): Record<string, string> {
+  const version = versionLabel(fn);
   return managedLabels({
     [LABELS.name]: 'ff-function',
     [LABELS.functionId]: fn.id,
     [LABELS.runtime]: fn.runtime,
+    ...(version !== undefined ? { [LABELS.version]: version } : {}),
   });
+}
+
+/**
+ * The pods a version's Deployment and Service select: its own, by its number. $LATEST's select the function's ID:
+ * its Deployment's selector can't change, and its ReplicaSets own their pods by their template's hash; its Service
+ * takes LATEST_VERSION too before a version's pods exist, once its pods all carry it (KubernetesOrchestrator).
+ */
+function selectorOf(fn: FunctionWorkload): Record<string, string> {
+  return fn.version === undefined ? { [LABELS.functionId]: fn.id } : { [LABELS.functionId]: fn.id, [LABELS.version]: String(fn.version) };
 }
 
 export function namespaceManifest(name: string, accountId: string): K8sObject {
@@ -108,9 +120,11 @@ export function resourceQuotaManifest(namespace: string, quota: TenantLimits['qu
         'requests.memory': memory,
         'limits.memory': memory,
         configmaps: '60',
-        // Two a function at most: its environment's (environmentSecretManifest).
-        secrets: '60',
-        services: '30',
+        // Two a function at most, its environment's (environmentSecretManifest), and one each version called, which
+        // holds a pod while it has objects: the pods' count is the room versions need.
+        secrets: String(60 + pods),
+        // One a function, and one each version called.
+        services: String(30 + pods),
       },
     },
   };
@@ -233,14 +247,18 @@ export function dataDbCaSecretManifest(namespace: string, ca: string): K8sObject
   };
 }
 
-export function serviceManifest(fn: FunctionWorkload, namespace: string): K8sObject {
+/**
+ * A workload's Service. `latestOnItsLabel` keeps $LATEST's on LATEST_VERSION once its pods were moved onto it: the API
+ * server takes a Service's selector as one field, which an apply replaces whole, whoever set its keys.
+ */
+export function serviceManifest(fn: FunctionWorkload, namespace: string, latestOnItsLabel = false): K8sObject {
   return {
     apiVersion: 'v1',
     kind: 'Service',
-    metadata: { name: functionResourceName(fn.id), namespace, labels: functionLabels(fn) },
+    metadata: { name: workloadResourceName(fn), namespace, labels: functionLabels(fn) },
     spec: {
       type: 'ClusterIP',
-      selector: { [LABELS.functionId]: fn.id },
+      selector: { ...selectorOf(fn), ...(latestOnItsLabel && fn.version === undefined ? { [LABELS.version]: LATEST_VERSION } : {}) },
       ports: [{ name: 'http', port: RUNTIME_PORT, targetPort: 'http', protocol: 'TCP' }],
     },
   };
@@ -274,12 +292,12 @@ export function deploymentManifest(
   return {
     apiVersion: 'apps/v1',
     kind: 'Deployment',
-    metadata: { name: functionResourceName(fn.id), namespace, labels },
+    metadata: { name: workloadResourceName(fn), namespace, labels },
     spec: {
       replicas,
       revisionHistoryLimit: 2,
       progressDeadlineSeconds: 120,
-      selector: { matchLabels: { [LABELS.functionId]: fn.id } },
+      selector: { matchLabels: selectorOf(fn) },
       strategy: { type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } },
       template: {
         metadata: {
@@ -310,7 +328,8 @@ export function deploymentManifest(
               ports: [{ name: 'http', containerPort: RUNTIME_PORT, protocol: 'TCP' }],
               env: [
                 { name: 'FUNCTION_NAME', value: fn.name },
-                { name: 'FUNCTION_VERSION', value: '$LATEST' },
+                // The runtime's context and log lines say the version, as Lambda's do.
+                { name: 'FUNCTION_VERSION', value: fn.version === undefined ? '$LATEST' : String(fn.version) },
                 { name: 'FUNCTION_MEMORY_LIMIT', value: String(fn.memory) },
                 { name: 'FUNCTION_TIMEOUT', value: String(fn.timeout * 1000) },
                 { name: 'FF_MAX_QUEUE_WAIT_MS', value: String(maxQueueWaitMs(fn)) },

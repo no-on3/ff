@@ -147,7 +147,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     const named = (where: { name: string }) => namesInUse.has(where.name);
     transaction.existsBy.mockImplementation(async (_target, where: { name: string }) => named(where) || takenMeanwhile.has(where.name));
     Object.assign(functionsRepo, {
-      manager: { transaction: jest.fn(async (work) => work(transaction)), existsBy: jest.fn(async (_target, where: { name: string }) => named(where)) },
+      manager: {
+        transaction: jest.fn(async (work) => work(transaction)),
+        existsBy: jest.fn(async (_target, where: { name: string }) => named(where)),
+        // No versions, so none to delete nor any version's code to make a one-file package of, unless a test gives some.
+        find: jest.fn(async () => []),
+      },
     });
     // The row as made, with the database's time.
     invocationsRepo.create.mockImplementation((dto) => ({ ...dto, createdAt: new Date('2026-10-17T10:00:00Z') }));
@@ -159,6 +164,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       deploy: jest.fn(),
       update: jest.fn(),
       remove: jest.fn(),
+      deployVersion: jest.fn(),
+      labelLatest: jest.fn(),
+      removeVersion: jest.fn(),
       removeTenant: jest.fn(),
       deleteLogs: jest.fn(),
       waitUntilReady: jest.fn(),
@@ -528,8 +536,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       lockFree = true;
       codeImages.available = true;
       runner.query.mockImplementation(async (sql: string) => (sql.includes('pg_try_advisory_lock') ? [{ locked: lockFree }] : []));
-      // No version's code makes a one-file package, unless a test says one does.
-      Object.assign((functionsRepo as unknown as { manager: object }).manager, { connection: { createQueryRunner: () => runner }, find: jest.fn(async () => []) });
+      Object.assign((functionsRepo as unknown as { manager: object }).manager, { connection: { createQueryRunner: () => runner } });
       working = [];
       functionsRepo.find.mockImplementation(async ({ where }: { where: { packageType?: PackageType } }) =>
         // The functions whose code makes a one-file package; or the working functions' packages.
@@ -969,9 +976,21 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
     await service.remove('user-1', 'fn-1');
 
-    expect(orchestrator.remove).toHaveBeenCalledWith(fn);
+    expect(orchestrator.remove).toHaveBeenCalledWith(fn, []);
     expect(storage.deleteCode).toHaveBeenCalledWith('fn-1/code.ts');
     expect(functionsRepo.remove).toHaveBeenCalledWith(fn);
+  });
+
+  it("remove deletes its versions' pods with its own, by the versions it has", async () => {
+    const fn = activeFunction();
+    functionsRepo.findOne.mockResolvedValue(fn);
+    const { manager } = functionsRepo as unknown as { manager: { find: jest.Mock } };
+    manager.find.mockResolvedValue([{ version: 1 }, { version: 3 }]);
+
+    await service.remove('user-1', 'fn-1');
+
+    expect(manager.find).toHaveBeenCalledWith(FunctionVersion, { where: { functionId: 'fn-1' }, select: { version: true } });
+    expect(orchestrator.remove).toHaveBeenCalledWith(fn, [1, 3]);
   });
 
   it("remove revokes the function's key to its account's buckets before its record goes; a failed removal keeps it", async () => {

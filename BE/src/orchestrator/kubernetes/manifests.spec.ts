@@ -335,8 +335,10 @@ describe('Kubernetes manifests', () => {
       'limits.cpu': '2',
       'requests.memory': '4Gi',
       'limits.memory': '4Gi',
-      // Two a function, for its environment.
-      secrets: '60',
+      // Two a function, for its environment, and one each version called, which holds a pod.
+      secrets: '65',
+      // One a function, and one each version called.
+      services: '35',
     });
   });
 
@@ -347,6 +349,37 @@ describe('Kubernetes manifests', () => {
       type: 'ClusterIP',
       selector: { 'ff.dev/function-id': workload().id },
       ports: [{ name: 'http', port: 8080, targetPort: 'http', protocol: 'TCP' }],
+    });
+  });
+
+  describe("a version's objects, beside its function's $LATEST (ADR 0015)", () => {
+    const id = workload().id;
+
+    it("are its own: named by its number, its pods selected by it, told it as FUNCTION_VERSION", () => {
+      const version = workload({ version: 3, lastVersion: 4 });
+      const svc: any = serviceManifest(version, 'ff-t-abc');
+      const d: any = deploymentManifest(version, 'ff-t-abc', 'hash', settings(), 1);
+
+      expect([svc.metadata.name, d.metadata.name]).toEqual([`fn-${id}-v3`, `fn-${id}-v3`]);
+      expect(svc.spec.selector).toEqual({ 'ff.dev/function-id': id, 'ff.dev/version': '3' });
+      expect(d.spec.selector.matchLabels).toEqual({ 'ff.dev/function-id': id, 'ff.dev/version': '3' });
+      expect(d.spec.template.metadata.labels).toMatchObject({ 'ff.dev/function-id': id, 'ff.dev/version': '3' });
+      expect(container(d).env).toContainEqual({ name: 'FUNCTION_VERSION', value: '3' });
+    });
+
+    it("give $LATEST's pods a label of their own once the function has a version, and nothing else: its selectors stay", () => {
+      const latest: any = deploymentManifest(workload({ lastVersion: 1 }), 'ff-t-abc', 'hash', settings(), 1);
+      const never: any = deploymentManifest(workload(), 'ff-t-abc', 'hash', settings(), 1);
+
+      expect(latest.spec.template.metadata.labels['ff.dev/version']).toBe('latest');
+      expect(never.spec.template.metadata.labels).not.toHaveProperty('ff.dev/version');
+      for (const d of [latest, never]) {
+        expect(d.metadata.name).toBe(`fn-${id}`);
+        expect(d.spec.selector.matchLabels).toEqual({ 'ff.dev/function-id': id });
+        expect(container(d).env).toContainEqual({ name: 'FUNCTION_VERSION', value: '$LATEST' });
+      }
+      // The Service's selector takes the label once the pods all carry it: the orchestrator's move, not the manifest.
+      expect((serviceManifest(workload({ lastVersion: 1 }), 'ff-t-abc') as any).spec.selector).toEqual({ 'ff.dev/function-id': id });
     });
   });
 });

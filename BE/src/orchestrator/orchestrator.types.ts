@@ -33,7 +33,17 @@ export interface FunctionWorkload {
   eventFormat: EventFormat;
   /** Its variables and secrets; none when absent or empty. */
   environment?: WorkloadEnvironment;
+  /** The version it runs, as it was published: none for $LATEST, the function as it is (ADR 0015). */
+  version?: number;
+  /** The function's last version published, 0 or none for none: once it has one, $LATEST's pods carry a label of their own. */
+  lastVersion?: number;
 }
+
+/** A function by what finds its objects: its ID and its account's, which names its namespace. */
+export type FunctionRef = Pick<FunctionWorkload, 'id' | 'accountId'>;
+
+/** A published version of a function, by what names it: its function, the function's account, and its number. */
+export type PublishedVersion = FunctionRef & { version: number };
 
 /** What a function's process gets besides FF's own variables: its variables and its secrets' values. */
 export interface WorkloadEnvironment {
@@ -117,8 +127,22 @@ export interface Orchestrator {
    * do before its first function.
    */
   applyTenantLimits(accountId: string, tenant: TenantLimits): Promise<void>;
-  /** Delete every scheduler resource of the function. */
-  remove(fn: FunctionWorkload): Promise<void>;
+  /** Delete every scheduler resource of the function, those of the `versions` named among them. */
+  remove(fn: FunctionWorkload, versions?: number[]): Promise<void>;
+  /**
+   * Make what a version needs to run, with at least one instance, from its workload as it was published (its
+   * `version`, its code image and its environment), and its function's $LATEST onto a label of its own first, so that
+   * the two never share a call (ADR 0015). Idempotent.
+   */
+  deployVersion(fn: FunctionWorkload): Promise<void>;
+  /**
+   * Start moving $LATEST's pods onto a label of their own as a version of its function is published (ADR 0015): in its
+   * Deployment's template, which rolls them, without waiting, so that a version's first call seldom waits for that
+   * rollout; deployVersion finishes the move. Nothing to do once done.
+   */
+  labelLatest(fn: FunctionRef): Promise<void>;
+  /** Delete what a version runs on; nothing to do for one that has nothing. */
+  removeVersion(version: PublishedVersion): Promise<void>;
   /**
    * Delete the account's namespace and everything in it, and wait until it is
    * gone (P-45, closing an account). Nothing to do when it has none.
@@ -135,25 +159,28 @@ export interface Orchestrator {
    */
   waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void>;
   /**
-   * Calls the function. `requestId` goes to the runtime (X-FF-Request-Id), so the
-   * invocation, its usage record and its log lines share one ID (D6). An error
-   * after a cold start carries its duration: initMsOf().
+   * Calls the function, or the version `fn.version` names. `requestId` goes to the runtime (X-FF-Request-Id), so the
+   * invocation, its usage record and its log lines share one ID. An error after a cold start carries its
+   * duration: initMsOf(). `deploy` gives a version's workload whole, its code image and environment, which the call
+   * asks for only when the version has nothing to run on: its first call, or its first since it went idle; the cold
+   * start's duration counts its making.
    */
-  invoke(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<InvokeResult>;
+  invoke(fn: FunctionWorkload, payload: unknown, requestId?: string, deploy?: () => Promise<FunctionWorkload>): Promise<InvokeResult>;
   scale(fn: FunctionWorkload, replicas: number): Promise<void>;
-  /** Instances that can serve now. */
+  /** Instances that can serve now, of the version `fn.version` names, or $LATEST's. */
   readyInstances(fn: FunctionWorkload): Promise<number>;
-  /** Instances asked for, ready or starting (0 when the function has none). */
+  /** Instances asked for, ready or starting, of the version `fn.version` names, or $LATEST's (0 when it has none). */
   desiredInstances(fn: FunctionWorkload): Promise<number>;
   /**
    * Every function with at least one ready instance, by function ID, with how
-   * many: FF's capacity at this moment, from one call (P-21).
+   * many, its versions' and $LATEST's together: FF's capacity at this moment,
+   * from one call.
    */
   readyInstancesByFunction(): Promise<Map<string, number>>;
   /**
-   * The code image each function's pods mount, by function ID, from one call:
-   * to find those whose image the registry has lost. None for a function whose
-   * pods mount their code from elsewhere, as a code ConfigMap from before.
+   * The code image each function's $LATEST pods mount, by function ID, from one
+   * call: to find those whose image the registry has lost. None for a function
+   * whose pods mount their code from elsewhere, as a code ConfigMap from before.
    */
   codeImagesByFunction(): Promise<Map<string, string>>;
   /** Whether the cluster answers, within `timeoutMs`: for the readiness probe. Rejects with why not. */

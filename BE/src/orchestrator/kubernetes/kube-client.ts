@@ -10,6 +10,11 @@ import * as https from 'node:https';
 import type { Readable } from 'node:stream';
 
 export const FIELD_MANAGER = 'ff-controller';
+/**
+ * Who owns the fields mergePatch sets, a name of its own: they stay when FIELD_MANAGER's applies leave them out, as a
+ * server-side apply removes only fields its own manager set.
+ */
+export const PATCH_MANAGER = 'ff-versions';
 
 export interface KubeClientOptions {
   server: string;
@@ -67,6 +72,8 @@ export interface KubeApi {
   delete(path: string): Promise<boolean>;
   deleteCollection(path: string, labelSelector: string): Promise<void>;
   scaleDeployment(namespace: string, name: string, replicas: number): Promise<void>;
+  /** A JSON merge patch of the fields given, under a field manager of its own, so that server-side applies keep them. */
+  mergePatch(path: string, patch: object): Promise<void>;
   list<T>(path: string, labelSelector: string): Promise<T[]>;
   /** A GET whose answer is read as it comes, for as long as it lasts: no timeout, but `signal` ends it. */
   stream(path: string, signal: AbortSignal): Promise<{ status: number; body: Readable }>;
@@ -218,6 +225,10 @@ export class KubeClient implements KubeApi {
       body: JSON.stringify({ spec: { replicas } }),
       contentType: 'application/merge-patch+json',
     });
+  }
+
+  async mergePatch(path: string, patch: object): Promise<void> {
+    await this.json('PATCH', `${path}?fieldManager=${PATCH_MANAGER}`, { body: JSON.stringify(patch), contentType: 'application/merge-patch+json' });
   }
 
   async list<T>(path: string, labelSelector: string): Promise<T[]> {

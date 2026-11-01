@@ -225,6 +225,49 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     expect((await orchestrator.invoke(fn, {})).output).toEqual({ version: 2, message: 'Hello world' });
   });
 
+  it("runs a version in pods of its own beside $LATEST, each call answered by the one it names; $LATEST's Service keeps its label through an update; both counted together", async () => {
+    const tellsItsVersion = (code: string) => `
+export async function handler(_event: unknown, context: { functionVersion: string }) {
+  return { version: context.functionVersion, code: '${code}' };
+}`;
+    const latest = await imaged({ id: randomUUID(), accountId: tenant, name: 'it-versions', code: tellsItsVersion('a'), memory: 128, timeout: 5 });
+    const servicePath = paths.core(ns, 'services', functionResourceName(latest.id));
+    const selector = async () => (await client.get<{ spec: { selector: Record<string, string> } }>(servicePath))?.spec.selector;
+    try {
+      await orchestrator.deploy(latest, limits());
+      await orchestrator.waitUntilReady(latest, 90_000);
+      // Published: version 1 is the function as it is, whose pods carry no version label yet.
+      const version1 = { ...latest, version: 1, lastVersion: 1 };
+
+      const first = await orchestrator.invoke({ ...version1, codeImage: undefined }, {}, undefined, async () => version1);
+
+      expect(first.output).toEqual({ version: '1', code: 'a' });
+      expect(first.initMs).toBeGreaterThan(0);
+      expect(await selector()).toEqual({ [LABELS.functionId]: latest.id, [LABELS.version]: 'latest' });
+      // $LATEST's code moves on, its pods keeping their label, which its apply now names too.
+      latest.lastVersion = 1;
+      await withCode(latest, tellsItsVersion('b'));
+      await orchestrator.update(latest, limits());
+      await orchestrator.waitUntilReady(latest, 90_000);
+      // The apply left the label in its Service's selector, which another field manager set.
+      expect(await selector()).toEqual({ [LABELS.functionId]: latest.id, [LABELS.version]: 'latest' });
+      // A hundred calls each, each answered by the version it names: $LATEST's Service never takes version 1's pod.
+      for (let i = 0; i < 100; i++) {
+        expect((await orchestrator.invoke(latest, {})).output).toEqual({ version: '$LATEST', code: 'b' });
+        expect((await orchestrator.invoke(version1, {})).output).toEqual({ version: '1', code: 'a' });
+      }
+      await eventually(async () => (await orchestrator.readyInstancesByFunction()).get(latest.id) === 2, 90_000);
+
+      await orchestrator.removeVersion(version1);
+      expect(await client.get(paths.apps(ns, 'deployments', `${functionResourceName(latest.id)}-v1`))).toBeNull();
+      await eventually(async () => (await orchestrator.readyInstancesByFunction()).get(latest.id) === 1, 90_000);
+      expect((await orchestrator.invoke(latest, {})).output).toEqual({ version: '$LATEST', code: 'b' });
+    } finally {
+      await orchestrator.remove(latest, [1]);
+    }
+    expect(await client.get(servicePath)).toBeNull();
+  });
+
   it("counts the function's ready instances in one cluster-wide list, at 1, 2 and 0 replicas (P-21)", async () => {
     const counted = async () => (await orchestrator.readyInstancesByFunction()).get(fn.id);
     expect(await counted()).toBe(1);
