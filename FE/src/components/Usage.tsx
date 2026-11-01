@@ -1,14 +1,26 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { apiErrorMessage } from '../lib/functions';
-import { estimateLines, formatBilledDuration, formatGbMonths, formatGbSeconds, formatMoney, monthLabel, notBilled, pricedFromNote, usageCsvName, usageMonths } from '../lib/usage';
+import { costText, estimateLines, formatBilledDuration, formatExact, formatMoney, monthLabel, notBilled, pricedFromNote, usageCsvName, usageMonths } from '../lib/usage';
 import { MonthlyUsage, usageApi } from '../services/api';
 import { useSession } from '../session/session';
 import { formatSize } from '../lib/databases';
 import { KeyNumber, KeyNumbers } from './KeyNumbers';
 import { saveFile } from '../lib/download';
 
-/** The account's usage, this month or last, per function (P-22), with its estimated cost (P-30): every member reads it. */
+/** A name in one of the page's tables: a link to its page, or the name marked deleted, its usage kept. */
+const ResourceName: React.FC<{ name: string; deleted: boolean; to: string }> = ({ name, deleted, to }) =>
+  deleted ? (
+    <>
+      {name} <span className="text-gray-500">(deleted)</span>
+    </>
+  ) : (
+    <Link to={to} className="text-blue-700 hover:underline">
+      {name}
+    </Link>
+  );
+
+/** The account's usage, this month or last, per function and per resource, with its estimated cost: every member reads it. */
 const Usage: React.FC = () => {
   const { account } = useSession();
   const months = useMemo(() => usageMonths(new Date()), []);
@@ -85,7 +97,7 @@ const Usage: React.FC = () => {
           <KeyNumbers label="The month's figures" className="mb-4 grid-cols-2 lg:grid-cols-4">
             <KeyNumber label="Requests billed" value={usage.totals.requests.toLocaleString('en-US')} />
             <KeyNumber label="Billed duration" value={formatBilledDuration(usage.totals.billedMs)} />
-            <KeyNumber label="GB-seconds" value={formatGbSeconds(usage.totals.gbSeconds)} />
+            <KeyNumber label="GB-seconds" value={formatExact(usage.totals.gbSeconds)} />
             <KeyNumber label="Estimated cost" value={usage.estimate ? formatMoney(usage.estimate.total, usage.estimate.currency) : '–'} />
           </KeyNumbers>
           {unbilled.length > 0 && <p className="text-sm text-gray-600 mb-4">Not billed: {unbilled.join(', ')}.</p>}
@@ -128,21 +140,13 @@ const Usage: React.FC = () => {
                   {usage.functions.map((fn) => (
                     <tr key={fn.functionId} data-function-id={fn.functionId} className="border-t border-gray-200">
                       <td className="py-2 pr-4">
-                        {fn.deleted ? (
-                          <>
-                            {fn.functionName} <span className="text-gray-500">(deleted)</span>
-                          </>
-                        ) : (
-                          <Link to={`/functions/${fn.functionId}`} className="text-blue-700 hover:underline">
-                            {fn.functionName}
-                          </Link>
-                        )}
+                        <ResourceName name={fn.functionName} deleted={fn.deleted} to={`/functions/${fn.functionId}`} />
                       </td>
                       <td className="py-2 pr-4 text-right">{fn.requests.toLocaleString('en-US')}</td>
                       <td className="py-2 pr-4 text-right whitespace-nowrap">{formatBilledDuration(fn.billedMs)}</td>
-                      <td className="py-2 pr-4 text-right">{formatGbSeconds(fn.gbSeconds)}</td>
+                      <td className="py-2 pr-4 text-right">{formatExact(fn.gbSeconds)}</td>
                       <td className="py-2 pr-4 text-right whitespace-nowrap">
-                        {fn.cost !== null && usage.estimate ? formatMoney(fn.cost, usage.estimate.currency) : '–'}
+                        {costText(fn.cost, usage.estimate)}
                       </td>
                       <td className="py-2 text-gray-600">{notBilled(fn).join(', ') || '–'}</td>
                     </tr>
@@ -168,20 +172,12 @@ const Usage: React.FC = () => {
                   {usage.databases.map((database) => (
                     <tr key={database.databaseId} data-database-id={database.databaseId} className="border-t border-gray-200">
                       <td className="py-2 pr-4">
-                        {database.deleted ? (
-                          <>
-                            {database.name} <span className="text-gray-500">(deleted)</span>
-                          </>
-                        ) : (
-                          <Link to={`/databases/${database.databaseId}`} className="text-blue-700 hover:underline">
-                            {database.name}
-                          </Link>
-                        )}
+                        <ResourceName name={database.name} deleted={database.deleted} to={`/databases/${database.databaseId}`} />
                       </td>
                       <td className="py-2 pr-4 text-right">{database.hours.toLocaleString('en-US')}</td>
-                      <td className="py-2 pr-4 text-right">{formatGbMonths(database.gbMonths)}</td>
+                      <td className="py-2 pr-4 text-right">{formatExact(database.gbMonths)}</td>
                       <td className="py-2 pr-4 text-right whitespace-nowrap">{formatSize(database.sizeBytes)}</td>
-                      <td className="py-2 text-right whitespace-nowrap">{database.cost !== null && usage.estimate ? formatMoney(database.cost, usage.estimate.currency) : '–'}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{costText(database.cost, usage.estimate)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -208,22 +204,14 @@ const Usage: React.FC = () => {
                   {usage.buckets.map((bucket) => (
                     <tr key={bucket.bucketId} data-bucket-id={bucket.bucketId} className="border-t border-gray-200">
                       <td className="py-2 pr-4">
-                        {bucket.deleted ? (
-                          <>
-                            {bucket.name} <span className="text-gray-500">(deleted)</span>
-                          </>
-                        ) : (
-                          <Link to={`/buckets/${bucket.name}`} className="text-blue-700 hover:underline">
-                            {bucket.name}
-                          </Link>
-                        )}
+                        <ResourceName name={bucket.name} deleted={bucket.deleted} to={`/buckets/${bucket.name}`} />
                       </td>
-                      <td className="py-2 pr-4 text-right">{formatGbMonths(bucket.gbMonths)}</td>
+                      <td className="py-2 pr-4 text-right">{formatExact(bucket.gbMonths)}</td>
                       <td className="py-2 pr-4 text-right whitespace-nowrap">{bucket.hours > 0 ? formatSize(bucket.sizeBytes) : '–'}</td>
                       <td className="py-2 pr-4 text-right">{bucket.tier1Requests.toLocaleString('en-US')}</td>
                       <td className="py-2 pr-4 text-right">{bucket.tier2Requests.toLocaleString('en-US')}</td>
                       <td className="py-2 pr-4 text-right whitespace-nowrap">{formatSize(bucket.bytesDownloaded)}</td>
-                      <td className="py-2 text-right whitespace-nowrap">{bucket.cost !== null && usage.estimate ? formatMoney(bucket.cost, usage.estimate.currency) : '–'}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{costText(bucket.cost, usage.estimate)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -251,20 +239,12 @@ const Usage: React.FC = () => {
                   {usage.queues.map((queue) => (
                     <tr key={queue.queueId} data-queue-id={queue.queueId} className="border-t border-gray-200">
                       <td className="py-2 pr-4">
-                        {queue.deleted ? (
-                          <>
-                            {queue.name} <span className="text-gray-500">(deleted)</span>
-                          </>
-                        ) : (
-                          <Link to={`/queues/${queue.name}`} className="text-blue-700 hover:underline">
-                            {queue.name}
-                          </Link>
-                        )}
+                        <ResourceName name={queue.name} deleted={queue.deleted} to={`/queues/${queue.name}`} />
                       </td>
                       <td className="py-2 pr-4 text-right">{queue.requests.toLocaleString('en-US')}</td>
                       <td className="py-2 pr-4 text-right">{queue.messagesSent.toLocaleString('en-US')}</td>
                       <td className="py-2 pr-4 text-right">{queue.messagesReceived.toLocaleString('en-US')}</td>
-                      <td className="py-2 text-right whitespace-nowrap">{queue.cost !== null && usage.estimate ? formatMoney(queue.cost, usage.estimate.currency) : '–'}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{costText(queue.cost, usage.estimate)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -292,20 +272,12 @@ const Usage: React.FC = () => {
                   {usage.caches.map((cache) => (
                     <tr key={cache.cacheId} data-cache-id={cache.cacheId} className="border-t border-gray-200">
                       <td className="py-2 pr-4">
-                        {cache.deleted ? (
-                          <>
-                            {cache.name} <span className="text-gray-500">(deleted)</span>
-                          </>
-                        ) : (
-                          <Link to="/caches" className="text-blue-700 hover:underline">
-                            {cache.name}
-                          </Link>
-                        )}
+                        <ResourceName name={cache.name} deleted={cache.deleted} to="/caches" />
                       </td>
                       <td className="py-2 pr-4 text-right">{cache.memoryMb.toLocaleString('en-US')} MB</td>
                       <td className="py-2 pr-4 text-right">{cache.hours.toLocaleString('en-US')}</td>
                       <td className="py-2 pr-4 text-right">{Number(cache.gbHours).toLocaleString('en-US', { maximumFractionDigits: 3 })}</td>
-                      <td className="py-2 text-right whitespace-nowrap">{cache.cost !== null && usage.estimate ? formatMoney(cache.cost, usage.estimate.currency) : '–'}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{costText(cache.cost, usage.estimate)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -329,19 +301,11 @@ const Usage: React.FC = () => {
                   {usage.email.map((identity) => (
                     <tr key={identity.resourceId} data-email-id={identity.resourceId} className="border-t border-gray-200">
                       <td className="py-2 pr-4">
-                        {identity.deleted ? (
-                          <>
-                            {identity.identity} <span className="text-gray-500">(deleted)</span>
-                          </>
-                        ) : (
-                          <Link to="/email" className="text-blue-700 hover:underline">
-                            {identity.identity}
-                          </Link>
-                        )}
+                        <ResourceName name={identity.identity} deleted={identity.deleted} to="/email" />
                       </td>
                       <td className="py-2 pr-4 text-right">{identity.recipients.toLocaleString('en-US')}</td>
                       <td className="py-2 pr-4 text-right">{identity.attachmentBytes > 0 ? formatSize(identity.attachmentBytes) : '–'}</td>
-                      <td className="py-2 text-right whitespace-nowrap">{identity.cost !== null && usage.estimate ? formatMoney(identity.cost, usage.estimate.currency) : '–'}</td>
+                      <td className="py-2 text-right whitespace-nowrap">{costText(identity.cost, usage.estimate)}</td>
                     </tr>
                   ))}
                 </tbody>

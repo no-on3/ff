@@ -117,7 +117,7 @@ import {
 
 // What the console shares with the API and the development realm, read from
 // their files: a console on another port than the realm and the API allow
-// can't log in, and the browser blocks its calls (P-14).
+// can't log in, and the browser blocks its calls.
 
 const port = /const CONSOLE_PORT = (\d+)/.exec(viteConfigSource)?.[1];
 const origin = `http://localhost:${port}`;
@@ -154,7 +154,7 @@ describe("the console's address", () => {
 
   it("is one of the backend's CORS origins in development, by default and in BE/.env.example", () => {
     expect(corsSource).toContain(`const DEV_CORS_ORIGIN = '${origin}';`);
-    // Next to the admin dashboard's (P-70).
+    // Next to the admin dashboard's.
     expect(backendEnvExample).toMatch(new RegExp(`^CORS_ORIGIN=(.*,)?${origin}(,.*)?$`, 'm'));
   });
 });
@@ -181,7 +181,7 @@ describe('API key scopes', () => {
 });
 
 describe("an invocation's status", () => {
-  it("is one of the API's, so the history has a style for each one it may show (P-20 added LOST)", () => {
+  it("is one of the API's, so the history has a style for each one it may show, LOST among them", () => {
     const enumBody = invocationSource.slice(invocationSource.indexOf('export enum InvocationStatus'));
     const backendStatuses = [...enumBody.slice(0, enumBody.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1]);
 
@@ -236,27 +236,22 @@ describe("a function's settings for its asynchronous calls", () => {
   });
 });
 
-describe('the usage of a month (P-22)', () => {
+describe('the usage of a month', () => {
   it("has the API's amounts, so the page shows each one and reads none that isn't there", () => {
-    const body = usageDtoSource.slice(usageDtoSource.indexOf('export class UsageAmountsView {'));
-    const backendAmounts = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+): /gm)].map((match) => match[1]);
-
-    expect(backendAmounts).toEqual([...USAGE_AMOUNTS]);
+    expect(dtoFields(usageDtoSource, 'export class UsageAmountsView {')).toEqual([...USAGE_AMOUNTS]);
   });
 });
 
-describe("the usage of a month's estimated cost (P-30)", () => {
+describe("the usage of a month's estimated cost", () => {
   it("has the API's fields, and each function its cost", () => {
-    const body = usageDtoSource.slice(usageDtoSource.indexOf('export class UsageEstimateView {'));
-    const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+): /gm)].map((match) => match[1]);
     const functionView = usageDtoSource.slice(usageDtoSource.indexOf('export class FunctionUsageView'));
 
-    expect(backendFields).toEqual([...USAGE_ESTIMATE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class UsageEstimateView {')).toEqual([...USAGE_ESTIMATE_FIELDS]);
     expect(functionView.slice(0, functionView.indexOf('\n}'))).toMatch(/^ {2}cost: string \| null;$/m);
   });
 });
 
-describe("the account's balance (P-32)", () => {
+describe("the account's balance", () => {
   it("has the API's fields, so the header reads each one that is there", () => {
     const body = billingDtoSource.slice(billingDtoSource.indexOf('export class BalanceView {'));
     const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
@@ -264,7 +259,7 @@ describe("the account's balance (P-32)", () => {
     expect(backendFields).toEqual([...BALANCE_FIELDS]);
   });
 
-  it("has the API's credit state (P-33), so the banner and the Billing page read each field there is", () => {
+  it("has the API's credit state, so the banner and the Billing page read each field there is", () => {
     const body = billingDtoSource.slice(billingDtoSource.indexOf('export class CreditStateView {'));
     const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
 
@@ -278,7 +273,7 @@ function dtoFields(source: string, start: string): string[] {
   return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) '?(\w+)'?: |^ {2}'?(\w+)'?: /gm)].map((match) => match[1] ?? match[2]);
 }
 
-describe('a pro-forma (P-35)', () => {
+describe('a pro-forma', () => {
   it("has the API's fields, and its transfer too, so the Billing page and the printed pro-forma read each one there is", () => {
     expect(dtoFields(paymentsDtoSource, 'export class ProFormaView {')).toEqual([...PRO_FORMA_FIELDS]);
     expect(dtoFields(paymentsDtoSource, 'export class TransferView {')).toEqual([...TRANSFER_FIELDS]);
@@ -293,14 +288,14 @@ describe('a pro-forma (P-35)', () => {
     expect(dtoFields(paymentsDtoSource, 'export class BankView {')).toEqual([...PRO_FORMA_PARTY_FIELDS.bank]);
   });
 
-  it("quotes at the VAT rate the API gives with the list (P-36), and takes the API's credit limits, so the quote is the pro-forma's", () => {
+  it("quotes at the VAT rate the API gives with the list, and takes the API's credit limits, so the quote is the pro-forma's", () => {
     expect(dtoFields(paymentsDtoSource, 'export class ProFormasPage {')).toEqual([...PRO_FORMAS_PAGE_FIELDS]);
     const limits = /export const CREDIT_LIMITS = \{ min: ([\d_]+)n, max: ([\d_]+)n \};/.exec(proFormaSource);
     expect(limits?.slice(1).map((limit) => Number(limit.replace(/_/g, '')))).toEqual([CREDIT_LIMITS.min, CREDIT_LIMITS.max]);
   });
 });
 
-describe("a function's logs (P-43, P-44)", () => {
+describe("a function's logs", () => {
   it("have the API's fields, so the logs tab shows each one there is", () => {
     expect(dtoFields(logsDtoSource, 'export class FunctionLogLineView {')).toEqual([...LOG_LINE_FIELDS]);
     expect(dtoFields(logsDtoSource, 'export class FunctionLogsView {')).toEqual([...LOGS_PAGE_FIELDS]);
@@ -314,7 +309,7 @@ describe("a function's logs (P-43, P-44)", () => {
   });
 });
 
-describe('an invoice (P-36)', () => {
+describe('an invoice', () => {
   it("has the API's fields, so the Billing page lists each one there is", () => {
     expect(dtoFields(invoicesDtoSource, 'export class InvoiceView {')).toEqual([...INVOICE_FIELDS]);
   });

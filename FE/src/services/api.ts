@@ -35,7 +35,7 @@ export function setApiAccount(id: string | undefined): void {
   accountId = id;
 }
 
-// Each request carries the user's token and the account it acts for (D4).
+// Each request carries the user's token and the account it acts for.
 api.interceptors.request.use(async (request) => {
   for (const [name, value] of Object.entries(requestHeaders(await auth.accessToken(), accountId))) {
     request.headers.set(name, value);
@@ -61,7 +61,7 @@ export type PackageType = (typeof PACKAGE_TYPES)[number];
 export interface Function {
   id: string;
   name: string;
-  /** The account that owns the function (D1). */
+  /** The account that owns the function. */
   accountId: string;
   runtime: Runtime;
   /** Inline code; empty for a package, which the console doesn't edit. */
@@ -113,8 +113,8 @@ export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' 
 
 /**
  * Every status an invocation can have: the API's, which contract.test.ts checks.
- * THROTTLED: no instance could take the call in time (P-15). LOST: the backend
- * stopped during the call, so its answer is unknown (P-20). Neither is billed.
+ * THROTTLED: no instance could take the call in time. LOST: the backend
+ * stopped during the call, so its answer is unknown. Neither is billed.
  * SUCCESS has been in the database's list from the start, but nothing writes it.
  */
 export const INVOCATION_STATUSES = ['SUCCESS', 'ERROR', 'TIMEOUT', 'RUNNING', 'COMPLETED', 'THROTTLED', 'LOST'] as const;
@@ -297,7 +297,7 @@ export const functionsApi = {
     api.get<InvocationPage>(`/functions/${id}/invocations`, { params: { limit } }),
 };
 
-/** A line of a function's log (P-43). contract.test.ts checks these names against the API's. */
+/** A line of a function's log. contract.test.ts checks these names against the API's. */
 export const LOG_LINE_FIELDS = ['time', 'instance', 'requestId', 'stream', 'message'] as const;
 export interface FunctionLogLine {
   /** RFC 3339, UTC, nine decimals. */
@@ -318,7 +318,7 @@ export interface FunctionLogsPage {
   next: string | null;
 }
 
-/** What GET /functions/:id/logs accepts that the console sends (P-43). */
+/** What GET /functions/:id/logs accepts that the console sends. */
 export const LOGS_QUERY_PARAMS = ['limit', 'sinceSeconds', 'q', 'requestId', 'cursor'] as const;
 export type LogsQuery = Partial<Record<'limit' | 'sinceSeconds', number> & Record<'q' | 'requestId' | 'cursor', string>>;
 
@@ -336,7 +336,7 @@ export const logsApi = {
   page: (functionId: string, query: LogsQuery) => api.get<FunctionLogsPage>(`/functions/${functionId}/logs`, { params: query }),
 
   /**
-   * The live tail (P-43): Server-Sent Events, read with fetch, since a browser's
+   * The live tail: Server-Sent Events, read with fetch, since a browser's
    * EventSource can't send the token. Gives each chunk of text as it comes, until
    * the stream ends or `signal` aborts it; rejects with LogStreamError when the API
    * refuses it, as 404 for a function that isn't the account's.
@@ -361,7 +361,7 @@ export const logsApi = {
 };
 
 /**
- * What GET /usage counts for a function and for the account (P-22), as D7 bills
+ * What GET /usage counts for a function and for the account, as FF bills
  * it: requests billed (successes, errors and timeouts), billed duration in ms,
  * GB-seconds, and the calls not billed: throttled, platform errors, lost.
  * contract.test.ts checks these names against the API's.
@@ -376,12 +376,12 @@ export interface FunctionUsage extends UsageAmounts {
   functionName: string;
   /** Deleted since: its usage stays. */
   deleted: boolean;
-  /** Its estimated cost before the free tier, rounded to the minor unit (P-30); null without a price book. */
+  /** Its estimated cost before the free tier, rounded to the minor unit; null without a price book. */
   cost: string | null;
 }
 
 /**
- * The month's estimated cost at FF's prices (P-30, D8): AWS Lambda's, in TND.
+ * The month's estimated cost at FF's prices, AWS Lambda's in TND.
  * Each amount is rounded to the minor unit once, from the exact ones.
  * contract.test.ts checks these names against the API's.
  */
@@ -543,12 +543,12 @@ export const usageApi = {
 };
 
 /**
- * GET /billing/balance (P-32): the account's balance and this month's charges.
+ * GET /billing/balance: the account's balance and this month's charges.
  * Money is a string with every decimal of its currency, never a JSON number.
  * contract.test.ts checks these names against the API's.
  */
 export const BALANCE_FIELDS = ['currency', 'balance', 'shadowMode', 'month', 'charged', 'ratedUntil', 'credit'] as const;
-/** D9's balance check (P-33): whether invokes go on. contract.test.ts checks these names against the API's. */
+/** The balance check: whether invokes go on. contract.test.ts checks these names against the API's. */
 export const CREDIT_STATE_FIELDS = ['state', 'buffer', 'belowBufferSince', 'invokesStopAt'] as const;
 export interface CreditState {
   /** ok: above the buffer, or the billing trial; grace: below it, invokes still go; stopped: invokes answer 402. */
@@ -563,7 +563,7 @@ export interface Balance {
   currency: string;
   /** The credit left; below zero, usage the credit didn't cover. */
   balance: string;
-  /** D9's billing trial: usage is rated each hour and shown, not debited. */
+  /** The billing trial: usage is rated each hour and shown, not debited. */
   shadowMode: boolean;
   /** This month, YYYY-MM, UTC. */
   month: string;
@@ -574,7 +574,7 @@ export interface Balance {
   credit: CreditState;
 }
 
-/** What moved the balance (P-32): a usage debit's hour, a credit. */
+/** What moved the balance: a usage debit's hour, a credit. */
 export interface BillingTransaction {
   id: string;
   kind: string;
@@ -585,20 +585,20 @@ export interface BillingTransaction {
   currency: string;
 }
 
-/** When the owners get a low-balance e-mail (P-33): the account's shares of the last credit, or FF's. */
+/** When the owners get a low-balance e-mail: the account's shares of the last credit, or FF's. */
 export interface Alerts {
   lowBalancePercents: number[] | null;
   defaultPercents: number[];
 }
 
 /**
- * A pro-forma for a bank transfer (P-35, D9): the credit, the VAT on top, the
+ * A pro-forma for a bank transfer: the credit, the VAT on top, the
  * reference for the transfer's label, and the transfer once FF recorded it.
  * contract.test.ts checks these names against the API's.
  */
 export const PRO_FORMA_FIELDS = ['id', 'reference', 'status', 'currency', 'credit', 'vatPercent', 'vat', 'total', 'createdAt', 'buyer', 'seller', 'bank', 'transfer', 'cancelledAt'] as const;
 export const TRANSFER_FIELDS = ['received', 'withheld', 'receivedOn', 'recordedAt', 'credited', 'withheldCreditedAt'] as const;
-/** GET /billing/pro-formas: the account's pro-formas, and the VAT rate one asked for now gets (P-36: rates are dated data). */
+/** GET /billing/pro-formas: the account's pro-formas, and the VAT rate one asked for now gets, since rates are dated. */
 export const PRO_FORMAS_PAGE_FIELDS = ['proFormas', 'vatPercent'] as const;
 export interface ProFormasPage {
   proFormas: ProForma[];
@@ -606,7 +606,7 @@ export interface ProFormasPage {
   vatPercent: number;
 }
 
-/** An issued invoice or credit note (P-36). contract.test.ts checks these names against the API's. */
+/** An issued invoice or credit note. contract.test.ts checks these names against the API's. */
 export const INVOICE_FIELDS = ['id', 'kind', 'number', 'month', 'issuedOn', 'currency', 'subtotal', 'vat', 'stampDuty', 'total', 'corrects', 'reason'] as const;
 export interface Invoice {
   id: string;
@@ -648,7 +648,7 @@ export interface ProForma {
   id: string;
   /** FF-XXXX-XXXX: what the buyer writes in the transfer's label. */
   reference: string;
-  /** pending: waiting for the transfer; paid: FF recorded it; cancelled: an owner or FF cancelled it before any transfer (P-74). */
+  /** pending: waiting for the transfer; paid: FF recorded it; cancelled: an owner or FF cancelled it before any transfer. */
   status: 'pending' | 'paid' | 'cancelled';
   currency: string;
   credit: string;
@@ -679,9 +679,9 @@ export const billingApi = {
   /** The account's last 100, newest first, with the VAT rate a new one gets. */
   getProFormas: () => api.get<ProFormasPage>('/billing/pro-formas'),
   getProForma: (id: string) => api.get<ProForma>(`/billing/pro-formas/${encodeURIComponent(id)}`),
-  /** An owner's, of a pending one (P-74): nobody should pay it any more. */
+  /** An owner's, of a pending one: nobody should pay it any more. */
   cancelProForma: (id: string) => api.post<ProForma>(`/billing/pro-formas/${encodeURIComponent(id)}/cancel`),
-  /** The account's issued invoices and credit notes, newest first (P-36). */
+  /** The account's issued invoices and credit notes, newest first. */
   getInvoices: () => api.get<{ invoices: Invoice[] }>('/billing/invoices'),
   /** An invoice or credit note's PDF, as it was issued. */
   getInvoicePdf: (id: string) => api.get<Blob>(`/billing/invoices/${encodeURIComponent(id)}/pdf`, { responseType: 'blob' }),
@@ -739,7 +739,7 @@ export const metricsApi = {
 export type AccountStatus = 'pending' | 'active' | 'rejected' | 'suspended' | 'closed';
 export type Role = 'owner' | 'developer' | 'viewer';
 
-/** What a plan allows (D5): GET /me gives each account's. */
+/** What a plan allows: GET /me gives each account's. */
 export interface PlanLimits {
   functions: number;
   /** The most memory one function may have, in MB. */
@@ -934,7 +934,7 @@ export interface NewApiKey {
   expiresAt?: string;
 }
 
-/** A member of the account (P-16): GET /members, owners only. */
+/** A member of the account: GET /members, owners only. */
 export interface Member {
   userId: string;
   email: string;

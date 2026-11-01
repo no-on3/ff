@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { UsageEstimate } from '../services/api';
-import { estimateLines, formatBilledDuration, formatGbSeconds, formatMoney, monthLabel, notBilled, pricedFromNote, usageCsvName, usageMonths } from './usage';
+import { costText, estimateLines, formatBilledDuration, formatExact, formatMoney, monthLabel, notBilled, pricedFromNote, usageCsvName, usageMonths } from './usage';
 
 describe('usageMonths', () => {
   it('names this month and last month by the UTC calendar, as the API counts them', () => {
@@ -32,15 +32,15 @@ describe('formatBilledDuration', () => {
   });
 });
 
-describe('formatGbSeconds', () => {
+describe('formatExact', () => {
   it.each([
     ['0', '0'],
     ['0.752', '0.752'],
     ['0.0008818359375', '0.000882'],
     ['0.000000125', '< 0.000001'],
     ['12345.678', '12,345.678'],
-  ])('%s GB-s reads %s, never 0 when something was used', (exact, text) => {
-    expect(formatGbSeconds(exact)).toBe(text);
+  ])('%s GB-s or GB-months reads %s, never 0 when something was used', (exact, text) => {
+    expect(formatExact(exact)).toBe(text);
   });
 });
 
@@ -60,7 +60,7 @@ describe('usageCsvName', () => {
   });
 });
 
-describe('the estimated cost (P-30)', () => {
+describe('the estimated cost', () => {
   const estimate: UsageEstimate = {
     currency: 'TND',
     usage: '28.877',
@@ -79,6 +79,10 @@ describe('the estimated cost (P-30)', () => {
       '-20.655 TND',
       '0.000 TND',
     ]);
+  });
+
+  it('gives a cost with its currency, or a dash when no price applies to the month', () => {
+    expect([costText('1.250', estimate), costText(null, estimate), costText('1.250', null)]).toEqual(['1.250 TND', '–', '–']);
   });
 
   it('lists the usage, the deductions and fees there are, and the total', () => {

@@ -3,7 +3,7 @@ import type { UsageAmounts, UsageEstimate } from '../services/api';
 const MS = { second: 1_000, minute: 60_000, hour: 3_600_000 };
 const decimals = (value: number, digits: number) => value.toLocaleString('en-US', { maximumFractionDigits: digits });
 
-/** This month and last month, as YYYY-MM by the UTC calendar, as the API counts them (P-22). */
+/** This month and last month, as YYYY-MM by the UTC calendar, as the API counts them. */
 export function usageMonths(now: Date): { thisMonth: string; lastMonth: string } {
   const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
   return { thisMonth: now.toISOString().slice(0, 7), lastMonth: last.toISOString().slice(0, 7) };
@@ -23,23 +23,15 @@ export function formatBilledDuration(ms: number): string {
   return `${decimals(ms / MS.hour, 1)} h`;
 }
 
-/** The API's exact GB-seconds to read: at most 6 decimals, and never rounded down to 0. */
-export function formatGbSeconds(exact: string): string {
+/** An exact amount the API counted, GB-seconds or GB-months, to read: at most 6 decimals, and never rounded down to 0. */
+export function formatExact(exact: string): string {
   const value = Number(exact);
   if (value === 0) return '0';
   if (value < 0.000001) return '< 0.000001';
   return decimals(value, 6);
 }
 
-/** A database's GB-months to read: at most 6 decimals, and never rounded down to 0. */
-export function formatGbMonths(exact: string): string {
-  const value = Number(exact);
-  if (value === 0) return '0';
-  if (value < 0.000001) return '< 0.000001';
-  return decimals(value, 6);
-}
-
-/** The calls that weren't billed, by why (D7): "2 throttled", "1 lost". */
+/** The calls that weren't billed, by why: "2 throttled", "1 lost". */
 export function notBilled(amounts: UsageAmounts): string[] {
   const reasons: Array<[number, string]> = [
     [amounts.throttled, 'throttled'],
@@ -58,6 +50,10 @@ export function formatMoney(amount: string, currency: string): string {
   const sign = amount.startsWith('-') ? '-' : '';
   return `${sign}${BigInt(whole).toLocaleString('en-US')}${fraction === undefined ? '' : `.${fraction}`} ${currency}`;
 }
+
+/** A function's or a resource's cost in the month's estimate, or a dash when no price applies to the month. */
+export const costText = (cost: string | null, estimate: UsageEstimate | null): string =>
+  cost !== null && estimate ? formatMoney(cost, estimate.currency) : '–';
 
 /** The estimate's lines, as the page lists them: the usage, then only the deductions and fees there are, then the total. */
 export function estimateLines(estimate: UsageEstimate): Array<[string, string]> {
