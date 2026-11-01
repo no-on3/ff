@@ -1,5 +1,5 @@
 /**
- * L2 (P-45): what the invocation history keeps, against a real PostgreSQL
+ * L2: what the invocation history keeps, against a real PostgreSQL
  * server, in a scratch database dropped after, through the real invoke path
  * (the orchestrator is a stand-in): at most 64 KiB of each input, output and
  * error, marked when cut, and only what PostgreSQL can store; the caller gets
@@ -35,7 +35,7 @@ function expectSame(actual: unknown, expected: string): void {
 /** A JSON string value whose JSON text (with its two quotes) is exactly `size` bytes. */
 const jsonOfSize = (size: number) => 'a'.repeat(size - 2);
 
-run('the invocation history (L2, P-45)', () => {
+run('the invocation history (L2)', () => {
   let db: ScratchDatabase;
   let functions: FunctionsService;
   const invoke = jest.fn<Promise<InvokeResult>, Parameters<Orchestrator['invoke']>>();
@@ -92,7 +92,7 @@ run('the invocation history (L2, P-45)', () => {
   });
 
   it('answers a call whose input and output hold characters PostgreSQL cannot store, NUL and a lone surrogate, and keeps them as U+FFFD', async () => {
-    // Before P-45, the input's NUL made the invoke fail with a 500 before the function ran, and the output's lost the answer.
+    // Before the history replaced them, the input's NUL made the invoke fail with a 500 before the function ran, and the output's lost the answer.
     const fn = await newFunction();
     invoke.mockResolvedValueOnce({ output: { text: 'emoji cut in two \ud83d', nul: 'a\u0000b' }, durationMs: 1, memoryUsedMb: 50 });
 
@@ -135,6 +135,22 @@ run('the invocation history (L2, P-45)', () => {
       calls.map(async (call) => (await db.dataSource.query<Array<{ version: number | null; alias: string | null; memory_mb: number }>>('SELECT version, alias, memory_mb FROM usage_records WHERE request_id = $1', [call.id]))[0]),
     );
     expect(billed.map((record) => [record.version, record.alias, record.memory_mb])).toEqual(ran.map(([version, alias]) => [version, alias, version === null ? 128 : 1024]));
+
+    // The history by what each call named and what ran it, as CloudWatch's Resource and ExecutedVersion.
+    const listed = async (filter: { resource?: string; executedVersion?: string }) => {
+      const page = await functions.getInvocations(ACCOUNT, fn.id, { limit: 100, offset: 0, ...filter });
+      return [page.total, page.invocations.map((call) => calls.findIndex((made) => made.id === call.id)).sort()];
+    };
+    expect(await listed({})).toEqual([4, [0, 1, 2, 3]]);
+    expect(await listed({ resource: 'prod' })).toEqual([1, [2]]);
+    expect(await listed({ resource: '1' })).toEqual([1, [1]]);
+    expect(await listed({ resource: '$LATEST' })).toEqual([1, [0]]);
+    expect(await listed({ resource: 'edge' })).toEqual([1, [3]]);
+    expect(await listed({ executedVersion: '1' })).toEqual([2, [1, 2]]);
+    expect(await listed({ executedVersion: '$LATEST' })).toEqual([2, [0, 3]]);
+    expect(await listed({ resource: 'edge', executedVersion: '$LATEST' })).toEqual([1, [3]]);
+    expect(await listed({ resource: 'prod', executedVersion: '$LATEST' })).toEqual([0, []]);
+    expect(await listed({ resource: '1', executedVersion: '2' })).toEqual([0, []]);
   });
 
   it('keeps the first 64 KiB of an input and an output longer than that, marked truncated, and answers both whole', async () => {

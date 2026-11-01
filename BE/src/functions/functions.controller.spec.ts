@@ -396,3 +396,44 @@ describe("GET /functions/:id/key-uses: what the function's keys used, which an e
     expect(keyUses.of).not.toHaveBeenCalled();
   });
 });
+
+describe('GET /functions/:id/invocations through HTTP (L1)', () => {
+  const functions = { getInvocations: jest.fn(async (..._call: unknown[]) => ({ invocations: [], total: 0 })) };
+  let app: INestApplication;
+  let baseUrl: string;
+  const list = (query: string) => fetch(`${baseUrl}/functions/${ID}/invocations${query}`);
+
+  beforeAll(async () => {
+    ({ app, baseUrl } = await serve('viewer', functions));
+  });
+
+  afterAll(() => app.close());
+  beforeEach(() => jest.clearAllMocks());
+
+  it('passes a page of every call on by default, and the calls a filter keeps: what they named, what ran them, or both', async () => {
+    for (const query of ['', '?limit=5&offset=10', '?resource=live', '?resource=%24LATEST', '?executedVersion=2', '?resource=live&executedVersion=$LATEST']) {
+      expect([query, (await list(query)).status]).toEqual([query, 200]);
+    }
+    expect(functions.getInvocations.mock.calls.map(([, , page]) => page)).toEqual([
+      { limit: 10, offset: 0 },
+      { limit: 5, offset: 10 },
+      { limit: 10, offset: 0, resource: 'live' },
+      { limit: 10, offset: 0, resource: '$LATEST' },
+      { limit: 10, offset: 0, executedVersion: '2' },
+      { limit: 10, offset: 0, resource: 'live', executedVersion: '$LATEST' },
+    ]);
+  });
+
+  it('refuses a resource that is no qualifier and an executed version that is no version, and reads nothing', async () => {
+    const refused = async (query: string) => {
+      const res = await list(query);
+      return [res.status, (await res.json()).message];
+    };
+
+    expect(await refused('?resource=a.b')).toEqual([400, ['resource must be $LATEST, a version number or an alias name']]);
+    expect(await refused('?resource=0')).toEqual([400, ['resource must be $LATEST, a version number or an alias name']]);
+    expect(await refused('?executedVersion=live')).toEqual([400, ['executedVersion must be $LATEST or a version number']]);
+    expect(await refused('?version=2')).toEqual([400, ['property version should not exist']]);
+    expect(functions.getInvocations).not.toHaveBeenCalled();
+  });
+});

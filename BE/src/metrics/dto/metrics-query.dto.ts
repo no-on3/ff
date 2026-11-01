@@ -1,7 +1,8 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, IntersectionType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { IsIn, IsOptional, Matches } from 'class-validator';
 import { PERIODS } from '../customer-metrics';
+import { CallFilterQuery } from '../../functions/dto/call-filter.dto';
 
 /** RFC 3339: a date, a time, and its zone. */
 const RFC3339 = /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d{1,9})?(Z|[+-]\d\d:\d\d)$/;
@@ -25,6 +26,12 @@ export class MetricsQuery {
   period?: number;
 }
 
+/** GET /functions/:id/metrics: a window, and the calls whose metrics it gives, all of them by default. */
+export class FunctionMetricsQuery extends IntersectionType(MetricsQuery, CallFilterQuery) {}
+
+/** Of a view of every call alone: a view by resource or executedVersion hasn't it, as no record says which version it is. */
+const WHOLE = { required: false, description: 'Absent from a view by resource or executedVersion, which no record of it names' };
+
 class DurationSeries {
   @ApiProperty({ type: [Number], nullable: true, description: 'Milliseconds; null for a period without a measured call' }) Average: Array<number | null>;
   @ApiProperty({ type: [Number], nullable: true }) Maximum: Array<number | null>;
@@ -46,14 +53,17 @@ class AsyncEventAgeSeries {
 class MetricSeries {
   @ApiProperty({ type: [Number], description: 'Calls that reached a function, failed or not: all but the throttled' }) Invocations: number[];
   @ApiProperty({ type: [Number], description: "Calls that failed: the function's error or timeout, FF's failure, or lost when the backend stopped" }) Errors: number[];
-  @ApiProperty({ type: [Number], description: 'Calls refused: no instance free in time, or the account\'s rate limit' }) Throttles: number[];
+  @ApiProperty({ type: [Number], description: "Calls refused: no instance free in time, or the account's rate limit, which a view by resource or executedVersion leaves out" })
+  Throttles: number[];
   @ApiProperty({ type: [Number], description: 'Calls that started an instance first' }) ColdStarts: number[];
   @ApiProperty({ type: DurationSeries }) Duration: DurationSeries;
-  @ApiProperty({ type: InstancesSeries }) Instances: InstancesSeries;
-  @ApiProperty({ type: [Number], description: 'Calls kept to run without waiting, as Lambda counts its asynchronous events received' }) AsyncEventsReceived: number[];
-  @ApiProperty({ type: AsyncEventAgeSeries, description: "How long they waited for each attempt: Lambda's AsyncEventAge" }) AsyncEventAge: AsyncEventAgeSeries;
-  @ApiProperty({ type: [Number], description: 'Those that ended without the function succeeding, past their retries or their age, sent to a destination or not' }) AsyncEventsDropped: number[];
-  @ApiProperty({ type: [Number], description: "Records a destination didn't take: gone, too large, or the account's messages full" }) DestinationDeliveryFailures: number[];
+  @ApiProperty({ ...WHOLE, type: InstancesSeries }) Instances?: InstancesSeries;
+  @ApiProperty({ ...WHOLE, type: [Number], description: `Calls kept to run without waiting, as Lambda counts its asynchronous events received. ${WHOLE.description}` }) AsyncEventsReceived?: number[];
+  @ApiProperty({ ...WHOLE, type: AsyncEventAgeSeries, description: `How long they waited for each attempt: Lambda's AsyncEventAge. ${WHOLE.description}` }) AsyncEventAge?: AsyncEventAgeSeries;
+  @ApiProperty({ ...WHOLE, type: [Number], description: `Those that ended without the function succeeding, past their retries or their age, sent to a destination or not. ${WHOLE.description}` })
+  AsyncEventsDropped?: number[];
+  @ApiProperty({ ...WHOLE, type: [Number], description: `Records a destination didn't take: gone, too large, or the account's messages full. ${WHOLE.description}` })
+  DestinationDeliveryFailures?: number[];
 }
 
 /** A point per period of the window, oldest first. */

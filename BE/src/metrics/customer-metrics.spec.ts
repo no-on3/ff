@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 import { Logger } from '@nestjs/common';
-import { MAX_POINTS, MetricsWindow, bucketMetricsView, databaseMetricsView, metricsView, metricsWindow, queueMetricsView, siteMetricsView } from './customer-metrics';
+import { MAX_POINTS, MetricsWindow, bucketMetricsView, callMetricsView, databaseMetricsView, metricsView, metricsWindow, queueMetricsView, siteMetricsView } from './customer-metrics';
 import { MAX_HELD, RefusedInvocationsService } from './refused-invocations.service';
 
 const NOW = new Date('2026-10-19T10:07:30Z');
@@ -169,6 +169,24 @@ describe('metricsView', () => {
       [0, 0, 2],
       [0, 0, 1],
     ]);
+  });
+});
+
+describe('callMetricsView', () => {
+  const window: MetricsWindow = { start: new Date('2026-10-19T09:00:00Z'), end: new Date('2026-10-19T09:10:00Z'), period: 300 };
+
+  it("gives some calls' series alone, those their records measure: no instances and no asynchronous events, which no record says the version of", () => {
+    const row = { bucket: new Date('2026-10-19T09:05:00Z').getTime() / 1000, invocations: 3, errors: 1, throttles: 1, coldStarts: 1 };
+    const view = callMetricsView(window, [{ ...row, durationAverage: 5, durationMaximum: 9, durationP50: 4, durationP95: 8.5, durationP99: 8.9 }]);
+
+    expect(view.metrics).toEqual({
+      Invocations: [0, 3],
+      Errors: [0, 1],
+      Throttles: [0, 1],
+      ColdStarts: [0, 1],
+      Duration: { Average: [null, 5], Maximum: [null, 9], p50: [null, 4], p95: [null, 8.5], p99: [null, 8.9] },
+    });
+    expect([view.period, view.start, view.end, view.timestamps.length]).toEqual([300, window.start, window.end, 2]);
   });
 });
 

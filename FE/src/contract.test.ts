@@ -285,7 +285,8 @@ describe("the account's balance", () => {
 /** The fields of a class in a DTO file, its own only: `  @ApiProperty(...) name:` or `  name:` lines, a name quoted when it starts with a digit. */
 function dtoFields(source: string, start: string): string[] {
   const body = source.slice(source.indexOf(start));
-  return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) '?(\w+)'?: |^ {2}'?(\w+)'?: /gm)].map((match) => match[1] ?? match[2]);
+  // A field may be optional: a function's metrics by version have only the series each call's record measures.
+  return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) '?(\w+)'?\??: |^ {2}'?(\w+)'?\??: /gm)].map((match) => match[1] ?? match[2]);
 }
 
 describe('a pro-forma', () => {

@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, HttpException, HttpStatus, Inte
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Not } from 'typeorm';
+import { IsNull, Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import {
@@ -2127,7 +2127,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
   });
 
-  describe('every method acts for one account (P-10, D4)', () => {
+  describe('every method acts for one account', () => {
     const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
     // One function, of account user-1. The repositories filter as the database would.
     const owned = (): Function => ({ ...activeFunction(), id: ID });
@@ -2274,6 +2274,25 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(invocationsRepo.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({ where: { functionId: ID, function: { accountId: 'user-1' } }, take: 5, skip: 10 }),
       );
+    });
+
+    it("reads the calls a filter keeps, by what they named and what ran them, $LATEST and no alias as null, the account's still", async () => {
+      const account = { functionId: ID, function: { accountId: 'user-1' } };
+      const whereOf = async (filter: object) => {
+        await service.getInvocations('user-1', ID, { limit: 10, offset: 0, ...filter });
+        return invocationsRepo.findAndCount.mock.lastCall?.[0].where;
+      };
+
+      expect(await whereOf({ resource: 'live' })).toEqual({ ...account, alias: 'live' });
+      expect(await whereOf({ resource: '3' })).toEqual({ ...account, version: 3, alias: IsNull() });
+      expect(await whereOf({ resource: '$LATEST' })).toEqual({ ...account, version: IsNull(), alias: IsNull() });
+      expect(await whereOf({ executedVersion: '2' })).toEqual({ ...account, version: 2 });
+      expect(await whereOf({ resource: 'live', executedVersion: '$LATEST' })).toEqual({ ...account, version: IsNull(), alias: 'live' });
+    });
+
+    it('answers no call, and reads none, when what a filter names is not what it ran', async () => {
+      expect(await service.getInvocations('user-1', ID, { limit: 10, offset: 0, resource: '3', executedVersion: '4' })).toEqual({ invocations: [], total: 0 });
+      expect(invocationsRepo.findAndCount).not.toHaveBeenCalled();
     });
   });
 });

@@ -1,9 +1,10 @@
 /**
  * L1: a call's qualifier, as Lambda's: $LATEST, a version's number or an
- * alias's name; and the version an alias's call runs, its share drawn.
+ * alias's name; the version an alias's call runs, its share drawn; and the
+ * calls a view keeps by what they named and what ran them.
  */
 import { ALIAS_NAME } from './dto/aliases.dto';
-import { QUALIFIER, drawVersion, parseQualifier } from './qualifier';
+import { QUALIFIER, callsKept, drawVersion, isFiltered, parseQualifier } from './qualifier';
 
 describe("a call's qualifier (L1)", () => {
   it("takes $LATEST, a version's number and every alias's name, and nothing else", () => {
@@ -49,5 +50,37 @@ describe("an alias's draw (L1)", () => {
     // 99.99 % of runs fall within: a binomial of 1,000 and 0.1 is 100 ± 9.5.
     expect(drawn).toBeGreaterThan(60);
     expect(drawn).toBeLessThan(140);
+  });
+});
+
+describe('the calls a view keeps, by what they named and what ran them (L1)', () => {
+  it('keeps every call when it names neither', () => {
+    expect([callsKept({}), isFiltered({})]).toEqual([{}, false]);
+  });
+
+  it("keeps an alias's calls, whichever of its versions ran them", () => {
+    expect(callsKept({ resource: 'live' })).toEqual({ alias: 'live' });
+  });
+
+  it('keeps the calls that named a version, or $LATEST, through no alias', () => {
+    expect(callsKept({ resource: '3' })).toEqual({ version: 3, alias: null });
+    expect(callsKept({ resource: '$LATEST' })).toEqual({ version: null, alias: null });
+  });
+
+  it('keeps the calls a version ran, or $LATEST, through an alias or not', () => {
+    expect(callsKept({ executedVersion: '2' })).toEqual({ version: 2 });
+    expect(callsKept({ executedVersion: '$LATEST' })).toEqual({ version: null });
+  });
+
+  it("keeps an alias's calls that one of its versions ran, as CloudWatch's two dimensions together", () => {
+    expect(callsKept({ resource: 'live', executedVersion: '2' })).toEqual({ alias: 'live', version: 2 });
+    expect(callsKept({ resource: '3', executedVersion: '3' })).toEqual({ version: 3, alias: null });
+    expect(isFiltered({ executedVersion: '2' })).toBe(true);
+  });
+
+  it('keeps none when what a call named is not what ran it', () => {
+    expect(callsKept({ resource: '3', executedVersion: '4' })).toBeUndefined();
+    expect(callsKept({ resource: '$LATEST', executedVersion: '1' })).toBeUndefined();
+    expect(callsKept({ resource: '1', executedVersion: '$LATEST' })).toBeUndefined();
   });
 });

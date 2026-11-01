@@ -204,7 +204,11 @@ export class FunctionsController {
 
   @Get(':id/invocations')
   @RequireScope('functions:read')
-  @ApiOperation({ summary: 'Get function invocations, newest first' })
+  @ApiOperation({
+    summary: 'Get function invocations, newest first',
+    description:
+      "resource keeps the calls that named an alias or a version, $LATEST those that named neither; executedVersion those a version ran, or $LATEST, as CloudWatch's dimensions of Lambda's.",
+  })
   @ApiResponse({ status: 200, description: 'List of function invocations', type: [FunctionInvocation] })
   async getInvocations(
     @Param('id', ParseUUIDPipe) id: string,

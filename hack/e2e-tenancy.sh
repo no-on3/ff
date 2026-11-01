@@ -460,6 +460,12 @@ check "A points its alias live at it, as Lambda's CreateAlias" "201 arn:aws:lamb
 called_live="$(as_a POST "/functions/$id/invoke" '{"input": {}, "qualifier": "live"}')"
 check "A calls it through live: version 1 runs, in pods of its own" "201 COMPLETED 1 live" \
   "$(status) $(jq -r '"\(.status) \(.version) \(.alias)"' <<<"$called_live")"
+history_live="$(as_a GET "/functions/$id/invocations?resource=live")"
+check "  ... which its history through live keeps alone, as CloudWatch's Resource picks" "200 1 $(jq -r .id <<<"$called_live") 1" \
+  "$(status) $(jq -r '"\(.total) \(.invocations[0].id) \(.invocations[0].version)"' <<<"$history_live")"
+metrics_live="$(as_a GET "/functions/$id/metrics?resource=live&executedVersion=1")"
+check "  ... and its metrics through live of version 1 count, with no instances, which no call's record names" "200 1 false" \
+  "$(status) $(jq -r '"\([.metrics.Invocations[]] | add) \(.metrics | has("Instances"))"' <<<"$metrics_live")"
 before="$(snapshot as_a "$id")"
 database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
 check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"

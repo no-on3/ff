@@ -28,3 +28,49 @@ export function drawVersion(alias: Pick<FunctionAlias, 'version' | 'additionalVe
   if (alias.additionalVersion !== null && alias.additionalWeight !== null && random < alias.additionalWeight) return alias.additionalVersion;
   return alias.version ?? undefined;
 }
+
+/** A version by its number, or $LATEST: what ran a call, as CloudWatch's ExecutedVersion dimension names it. */
+export const EXECUTED_VERSION = /^(\$LATEST|[1-9][0-9]{0,8})$/;
+
+/**
+ * Which of a function's calls a view keeps, as CloudWatch picks Lambda's by
+ * their dimensions: `resource`, what a call named (an alias, a version, or
+ * $LATEST for a call that named neither), and `executedVersion`, what ran it,
+ * through an alias or not. Either left out keeps every call.
+ */
+export interface CallFilter {
+  resource?: string;
+  executedVersion?: string;
+}
+
+/** What the records of the calls a filter keeps hold: a version, null for $LATEST, and an alias, null for none; a field left out holds anything. */
+export interface KeptCalls {
+  version?: number | null;
+  alias?: string | null;
+}
+
+/** The records' fields of the calls `filter` keeps; undefined when no call can be both what it names and what it ran. */
+export function callsKept(filter: CallFilter): KeptCalls | undefined {
+  const kept: KeptCalls = {};
+  if (filter.resource !== undefined) {
+    const named = parseQualifier(filter.resource);
+    if (named && 'alias' in named) kept.alias = named.alias;
+    else {
+      // A version named, or $LATEST, is a call that came through no alias.
+      kept.version = named?.version ?? null;
+      kept.alias = null;
+    }
+  }
+  if (filter.executedVersion !== undefined) {
+    const ran = parseQualifier(filter.executedVersion);
+    const version = ran && 'version' in ran ? ran.version : null;
+    if (kept.version !== undefined && kept.version !== version) return undefined;
+    kept.version = version;
+  }
+  return kept;
+}
+
+/** Whether a filter leaves any call out. */
+export function isFiltered(filter: CallFilter): boolean {
+  return filter.resource !== undefined || filter.executedVersion !== undefined;
+}

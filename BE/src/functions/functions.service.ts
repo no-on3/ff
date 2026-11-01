@@ -14,7 +14,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { Observable } from 'rxjs';
-import { EntityManager, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
+import { EntityManager, FindOptionsWhere, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import { jsonBytes } from '../common/byte-limits';
@@ -78,7 +78,7 @@ import { liveTail } from './live-tail';
 import { logsQuery } from './logs-window';
 import { MAX_INPUT_BYTES } from './limits';
 import { functionNotFound, noSuchAlias, noSuchVersion } from './function-not-found';
-import { drawVersion, parseQualifier } from './qualifier';
+import { callsKept, drawVersion, parseQualifier } from './qualifier';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
 const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat', 'awsEndpoints'] as const;
@@ -1162,16 +1162,21 @@ export class FunctionsService {
     }
   }
 
-  /** One page of a function's history, newest first. */
+  /** One page of a function's history, newest first: every call, or those that named a version or an alias, or that a version ran. */
   async getInvocations(
     accountId: string,
     id: string,
-    page: Pick<ListInvocationsQuery, 'limit' | 'offset'>,
+    page: Pick<ListInvocationsQuery, 'limit' | 'offset' | 'resource' | 'executedVersion'>,
   ): Promise<{ invocations: FunctionInvocation[]; total: number }> {
     await this.findOne(accountId, id); // another account's function is not found
+    const kept = callsKept(page);
+    if (!kept) return { invocations: [], total: 0 };
+    // The account here too, so that this query alone never reads another account's history.
+    const where: FindOptionsWhere<FunctionInvocation> = { functionId: id, function: { accountId } };
+    if (kept.version !== undefined) where.version = kept.version ?? IsNull();
+    if (kept.alias !== undefined) where.alias = kept.alias ?? IsNull();
     const [invocations, total] = await this.invocationsRepository.findAndCount({
-      // The account here too, so that this query alone never reads another account's history.
-      where: { functionId: id, function: { accountId } },
+      where,
       order: { createdAt: 'DESC' },
       take: page.limit,
       skip: page.offset,
@@ -1179,13 +1184,7 @@ export class FunctionsService {
     return { invocations, total };
   }
 
-  /**
-   * GET /functions/:id/logs (P-40): the account's function's newest lines,
-   * read from its running instances. Another account's function is not found.
-   * An instance's lines go with it, at scale to zero too, until the log store
-   * keeps them (P-42), when `next` pages back through them (P-43).
-   */
-  /** A page of the function's log lines, from the log store, within its account's plan's retention (P-43). */
+  /** A page of the function's log lines, from the log store, within its account's plan's retention. Another account's function is not found. */
   async logs(accountId: string, id: string, request: FunctionLogsQuery): Promise<FunctionLogsView> {
     const function_ = await this.findOne(accountId, id);
     const plan = await this.plans.forAccount(accountId);
