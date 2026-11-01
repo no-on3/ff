@@ -34,6 +34,10 @@ export type AuditAction =
   // A function's version, as Lambda's: published with its number and code, and deleted.
   | 'function.publish'
   | 'version.delete'
+  // A function's alias, as Lambda's: made, pointed elsewhere, and deleted.
+  | 'alias.create'
+  | 'alias.update'
+  | 'alias.delete'
   // A function's settings for its asynchronous calls, as Lambda's EventInvokeConfig: set, deleted.
   | 'event_invoke_config.put'
   | 'event_invoke_config.delete'

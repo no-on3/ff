@@ -294,6 +294,7 @@ path_for() {
   path="${path//\{scheduleId\}/$missing}"
   path="${path//\{version\}/1}" # a function's version: A's first
   [[ $path != *'{month}'* ]] || path="${path//\{month\}/$(date -u +%Y-%m)}"
+  [[ $template != /functions/*/aliases/* ]] || path="${path//\{name\}/live}" # A's alias
   path="${path//\{name\}/l5-photos-a}" # a bucket's, or a queue's
   path="${path//\{receiptHandle\}/bm90LWEtaGFuZGxl}"
   path="${path//\{uuid\}/$missing}" # an event source mapping's, which each loop names itself
@@ -317,6 +318,8 @@ body_for() {
     "POST /functions") function_body l5-other ;;
     "PUT /functions/{id}") echo '{"name": "l5-taken-over"}' ;;
     "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}}' ;;
+    "POST /functions/{id}/aliases") echo '{"name": "l5-b", "functionVersion": "1"}' ;;
+    "PUT /functions/{id}/aliases/{name}") echo '{"functionVersion": "$LATEST"}' ;;
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
     "PUT /functions/{id}/event-invoke-config") echo '{"maximumRetryAttempts": 0}' ;;
     "POST /functions/{id}/event-sources") echo "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a\"}" ;;
@@ -451,6 +454,9 @@ check "which anyone may call: its host reaches A's function" '200 {"message":"He
 version_a="$(as_a POST "/functions/$id/versions" '{"description": "l5"}')"
 check "A publishes a version of it, as Lambda's PublishVersion" "201 1 arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:1" \
   "$(status) $(jq -r '"\(.version) \(.functionArn)"' <<<"$version_a")"
+alias_a="$(as_a POST "/functions/$id/aliases" '{"name": "live", "functionVersion": "1"}')"
+check "A points its alias live at it, as Lambda's CreateAlias" "201 arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:live 1" \
+  "$(status) $(jq -r '"\(.aliasArn) \(.functionVersion)"' <<<"$alias_a")"
 before="$(snapshot as_a "$id")"
 database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
 check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"
@@ -848,11 +854,15 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       alarm_now="$(as_a GET "/alarms/$alarm_a")"
       check "  ... which A still has, unchanged" "200 l5 Errors $id" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
       ;;
-    "GET /functions/{id}/versions" | "POST /functions/{id}/versions" | "GET /functions/{id}/versions/{version}" | "DELETE /functions/{id}/versions/{version}")
+    "GET /functions/{id}/versions" | "POST /functions/{id}/versions" | "GET /functions/{id}/versions/{version}" | "DELETE /functions/{id}/versions/{version}" | \
+      "GET /functions/{id}/aliases" | "POST /functions/{id}/aliases" | "GET /functions/{id}/aliases/{name}" | "PUT /functions/{id}/aliases/{name}" | \
+      "DELETE /functions/{id}/aliases/{name}")
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
       versions_now="$(as_a GET "/functions/$id/versions")"
-      check "  ... A's versions as they were" "200 1 l5" "$(status) $(jq -r '"\(map(.version) | join(",")) \(.[0].description)"' <<<"$versions_now")"
+      aliases_now="$(as_a GET "/functions/$id/aliases")"
+      check "  ... A's versions and aliases as they were" "1 l5 live:1" \
+        "$(jq -r '"\(map(.version) | join(",")) \(.[0].description)"' <<<"$versions_now") $(jq -r 'map("\(.name):\(.functionVersion)") | join(",")' <<<"$aliases_now")"
       ;;
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null

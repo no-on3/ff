@@ -1,8 +1,11 @@
 /**
- * L2: functions' versions, on a real PostgreSQL: numbered under the function's
- * lock, never a number twice; frozen as they were published, their variables
- * sealed for each alone; refused as Lambda's PublishVersion refuses; gone with
- * their function. Each run works in a scratch database, dropped afterwards.
+ * L2: functions' versions and aliases, on a real PostgreSQL: versions numbered
+ * under the function's lock, never a number twice; frozen as they were
+ * published, their variables sealed for each alone; refused as Lambda's
+ * PublishVersion refuses. Aliases naming versions that are there, which can't
+ * be deleted while one names them; refused as Lambda's CreateAlias and
+ * UpdateAlias refuse. Both gone with their function. Each run works in a
+ * scratch database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -20,6 +23,8 @@ import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { onePlan } from '../plans/test-fixtures';
 import { FunctionEnvironment } from './entities/function-environment.entity';
 import { FunctionInvocation } from './entities/function-invocation.entity';
+import { FunctionAliasesService } from './aliases.service';
+import { FunctionAlias } from './entities/function-alias.entity';
 import { FunctionVersion } from './entities/function-version.entity';
 import { Function, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
@@ -31,10 +36,11 @@ const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '400000000021';
 const OTHER = '400000000022';
 
-run("functions' versions (L2)", () => {
+run("functions' versions and aliases (L2)", () => {
   let db: ScratchDatabase;
   let functions: FunctionsService;
   let versions: FunctionVersionsService;
+  let aliases: FunctionAliasesService;
 
   const body = (name: string) => ({
     name,
@@ -73,14 +79,9 @@ run("functions' versions (L2)", () => {
       images,
       noFunctionKeys(),
     );
-    versions = new FunctionVersionsService(
-      db.dataSource.getRepository(FunctionVersion),
-      functions,
-      store,
-      packages,
-      audit,
-      { getOrThrow: () => 'tn-tunis-1' } as unknown as ConfigService,
-    );
+    const region = { getOrThrow: () => 'tn-tunis-1' } as unknown as ConfigService;
+    versions = new FunctionVersionsService(db.dataSource.getRepository(FunctionVersion), functions, store, packages, audit, region);
+    aliases = new FunctionAliasesService(db.dataSource.getRepository(FunctionAlias), functions, audit, region);
   });
 
   afterAll(async () => {
@@ -206,5 +207,142 @@ run("functions' versions (L2)", () => {
     await functions.remove(ACCOUNT, fn.id);
 
     expect(await query(`SELECT * FROM function_versions WHERE function_id = $1`, [fn.id])).toEqual([]);
+  });
+
+  describe('aliases', () => {
+    /** A function with versions 1, 2 and 3, each of its memory. */
+    const withVersions = async (name: string) => {
+      const fn = await functions.create(ACCOUNT, body(name));
+      for (const memory of [256, 512, 1024]) {
+        await versions.publish(ACCOUNT, fn.id, {});
+        await functions.update(ACCOUNT, fn.id, { memory });
+      }
+      return fn;
+    };
+    const names = async (id: string) => (await aliases.list(ACCOUNT, id)).map((alias) => `${alias.name}:${alias.functionVersion}`);
+    const audited = async (id: string, action: string) =>
+      (await query<Array<{ details: unknown }>>(`SELECT details FROM audit_log WHERE action = $1 AND resource = $2 ORDER BY id`, [action, `function:${id}`])).map((entry) => entry.details);
+
+    it('names a version or $LATEST, and another version with its share; lists them by name', async () => {
+      const fn = await withVersions('aliased');
+
+      const live = await aliases.create(ACCOUNT, fn.id, { name: 'live', functionVersion: '2', description: 'The shop', routingConfig: { additionalVersionWeights: { '3': 0.1 } } });
+      expect(live).toEqual({
+        aliasArn: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:aliased:live`,
+        name: 'live',
+        functionVersion: '2',
+        description: 'The shop',
+        routingConfig: { additionalVersionWeights: { '3': 0.1 } },
+        revisionId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        createdAt: expect.any(Date),
+        updatedAt: expect.any(Date),
+      });
+      const dev = await aliases.create(ACCOUNT, fn.id, { name: 'dev', functionVersion: '$LATEST' });
+      expect(dev).not.toHaveProperty('routingConfig');
+
+      expect(await names(fn.id)).toEqual(['dev:$LATEST', 'live:2']);
+      expect(await aliases.get(ACCOUNT, fn.id, 'live')).toEqual(live);
+      expect(await audited(fn.id, 'alias.create')).toEqual([
+        { name: 'live', version: '2', additionalVersion: '3', additionalWeight: 0.1 },
+        { name: 'dev', version: '$LATEST' },
+      ]);
+    });
+
+    it("refuses a name the function has, two at once making one; a version it hasn't; a share beside $LATEST or beside its own version", async () => {
+      const fn = await withVersions('refusing');
+
+      const twice = await Promise.allSettled([1, 2].map((n) => aliases.create(ACCOUNT, fn.id, { name: 'live', functionVersion: String(n) })));
+      expect(twice.map((outcome) => outcome.status).sort()).toEqual(['fulfilled', 'rejected']);
+      expect(twice.find((outcome) => outcome.status === 'rejected')).toMatchObject({ reason: expect.any(ConflictException) });
+      await expect(aliases.create(ACCOUNT, fn.id, { name: 'beta', functionVersion: '7' })).rejects.toThrow(
+        new NotFoundException('The function refusing has no version 7: GET /functions/{id}/versions lists them'),
+      );
+      await expect(aliases.create(ACCOUNT, fn.id, { name: 'beta', functionVersion: '1', routingConfig: { additionalVersionWeights: { '7': 0.5 } } })).rejects.toBeInstanceOf(NotFoundException);
+      await expect(aliases.create(ACCOUNT, fn.id, { name: 'beta', functionVersion: '$LATEST', routingConfig: { additionalVersionWeights: { '1': 0.5 } } })).rejects.toBeInstanceOf(BadRequestException);
+      await expect(aliases.create(ACCOUNT, fn.id, { name: 'beta', functionVersion: '1', routingConfig: { additionalVersionWeights: { '1': 0.5 } } })).rejects.toBeInstanceOf(BadRequestException);
+      expect(await names(fn.id)).toHaveLength(1);
+    });
+
+    it('keeps in the database what the service refuses: a share without its version or beyond 0 to 1, another version beside $LATEST', async () => {
+      const fn = await withVersions('checked');
+      const insert = (version: number | null, additionalVersion: number | null, additionalWeight: number | null) =>
+        query(`INSERT INTO function_aliases (function_id, name, account_id, version, additional_version, additional_weight) VALUES ($1, 'x', $2, $3, $4, $5)`, [
+          fn.id,
+          ACCOUNT,
+          version,
+          additionalVersion,
+          additionalWeight,
+        ]);
+
+      const refused: Array<[number | null, number | null, number | null]> = [
+        [1, 2, null],
+        [1, null, 0.5],
+        [1, 2, 1.5],
+        [null, 2, 0.5],
+      ];
+      for (const [version, additionalVersion, additionalWeight] of refused) {
+        await expect(insert(version, additionalVersion, additionalWeight)).rejects.toThrow(/violates check constraint/);
+      }
+      await insert(1, 2, 0.5);
+    });
+
+    it("changes what the request names and keeps the rest, with a new revision; refuses another revision's change", async () => {
+      const fn = await withVersions('changed');
+      const live = await aliases.create(ACCOUNT, fn.id, { name: 'live', functionVersion: '1', description: 'The shop', routingConfig: { additionalVersionWeights: { '2': 0.1 } } });
+
+      const moved = await aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '3', revisionId: live.revisionId });
+      expect(moved).toMatchObject({ functionVersion: '3', description: 'The shop', routingConfig: { additionalVersionWeights: { '2': 0.1 } } });
+      expect(moved.revisionId).not.toBe(live.revisionId);
+      await expect(aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '2', revisionId: live.revisionId })).rejects.toBeInstanceOf(PreconditionFailedException);
+      // Nothing changed: no new revision, nothing audited.
+      expect((await aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '3', description: 'The shop' })).revisionId).toBe(moved.revisionId);
+      // $LATEST with a share is refused, unless the share goes in the same change.
+      await expect(aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '$LATEST' })).rejects.toBeInstanceOf(BadRequestException);
+      const latest = await aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '$LATEST', routingConfig: { additionalVersionWeights: {} } });
+      expect(latest).toMatchObject({ functionVersion: '$LATEST', description: 'The shop' });
+      expect(latest).not.toHaveProperty('routingConfig');
+      await expect(aliases.update(ACCOUNT, fn.id, 'beta', {})).rejects.toThrow(new NotFoundException('The function changed has no alias beta: GET /functions/{id}/aliases lists them'));
+
+      expect(await audited(fn.id, 'alias.update')).toEqual([
+        { name: 'live', before: { version: '1', additionalVersion: '2', additionalWeight: 0.1 }, after: { version: '3', additionalVersion: '2', additionalWeight: 0.1 } },
+        { name: 'live', before: { version: '3', additionalVersion: '2', additionalWeight: 0.1 }, after: { version: '$LATEST' } },
+      ]);
+    });
+
+    it('keeps a version an alias names, as its own or with a share, until the alias points elsewhere or goes', async () => {
+      const fn = await withVersions('kept');
+      await aliases.create(ACCOUNT, fn.id, { name: 'live', functionVersion: '1' });
+      await aliases.create(ACCOUNT, fn.id, { name: 'canary', functionVersion: '2', routingConfig: { additionalVersionWeights: { '1': 0.5 } } });
+
+      await expect(versions.remove(ACCOUNT, fn.id, 1)).rejects.toThrow(
+        new ConflictException('Version 1 of the function kept is named by its aliases canary, live: point them at another version, or delete them, first'),
+      );
+      await aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '3' });
+      await aliases.remove(ACCOUNT, fn.id, 'canary');
+      await versions.remove(ACCOUNT, fn.id, 1);
+
+      expect(await numbers(fn.id)).toEqual(['2', '3']);
+      await expect(aliases.remove(ACCOUNT, fn.id, 'canary')).rejects.toBeInstanceOf(NotFoundException);
+      expect(await audited(fn.id, 'alias.delete')).toEqual([{ name: 'canary' }]);
+    });
+
+    it("is the account's own, and goes with its function", async () => {
+      const fn = await withVersions('owned');
+      await aliases.create(ACCOUNT, fn.id, { name: 'live', functionVersion: '1' });
+
+      for (const call of [
+        aliases.create(OTHER, fn.id, { name: 'other', functionVersion: '1' }),
+        aliases.list(OTHER, fn.id),
+        aliases.get(OTHER, fn.id, 'live'),
+        aliases.update(OTHER, fn.id, 'live', { functionVersion: '2' }),
+        aliases.remove(OTHER, fn.id, 'live'),
+      ]) {
+        await expect(call).rejects.toThrow(new NotFoundException(`Function with ID ${fn.id} not found`));
+      }
+      expect(await names(fn.id)).toEqual(['live:1']);
+
+      await functions.remove(ACCOUNT, fn.id);
+      expect(await query(`SELECT * FROM function_aliases WHERE function_id = $1`, [fn.id])).toEqual([]);
+    });
   });
 });

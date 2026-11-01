@@ -1,18 +1,19 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException, PreconditionFailedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { PackagesService } from '../packages/packages.service';
 import { functionArn } from './arns';
 import { FunctionVersionView, PublishVersionDto } from './dto/versions.dto';
 import { Function, FunctionStatus, PackageType } from './entities/function.entity';
+import { FunctionAlias } from './entities/function-alias.entity';
 import { FunctionVersion } from './entities/function-version.entity';
 import { EnvironmentDocument, sameVariables } from './environment';
 import { EnvironmentStore } from './environment.store';
 import { FunctionsService } from './functions.service';
 import { inlinePackage } from './inline-package';
-import { functionNotFound } from './function-not-found';
+import { lockedFunction } from './locked-function';
 
 /** What a version freezes of its function, but its description and its environment. */
 type Release = Pick<FunctionVersion, 'runtime' | 'handler' | 'packageType' | 'codeSha256' | 'memory' | 'timeout' | 'eventFormat' | 'awsEndpoints'>;
@@ -153,10 +154,18 @@ export class FunctionVersionsService {
     return { ...this.view(function_, version), environment: { ...variables } };
   }
 
-  /** As Lambda's DeleteFunction of a version: it goes, its number never given again. */
+  /** As Lambda's DeleteFunction of a version: it goes, its number never given again; refused while an alias names it. */
   async remove(accountId: string, id: string, number: number): Promise<void> {
     await this.versions.manager.transaction(async (manager) => {
       const function_ = await lockedFunction(manager, accountId, id);
+      const naming = await manager.find(FunctionAlias, {
+        where: [
+          { functionId: id, version: number },
+          { functionId: id, additionalVersion: number },
+        ],
+        order: { name: 'ASC' },
+      });
+      if (naming.length) throw namedByAliases(function_, number, naming.map((alias) => alias.name));
       const { affected } = await manager.delete(FunctionVersion, { functionId: id, version: number });
       if (!affected) throw noSuchVersion(function_, number);
       await this.audit.record({ accountId, action: 'version.delete', resource: `function:${id}`, details: { version: number } }, manager);
@@ -197,21 +206,14 @@ export class FunctionVersionsService {
   }
 }
 
-/**
- * The account's function, its row locked until the transaction ends, with its
- * package and its last version's number: publishes and deletions of one
- * function's versions run one at a time. Another account's is not found.
- */
-async function lockedFunction(manager: EntityManager, accountId: string, id: string): Promise<Function> {
-  const function_ = await manager
-    .createQueryBuilder(Function, 'f')
-    .addSelect(['f.packageSha256', 'f.lastVersion'])
-    .where('f.id = :id AND f.accountId = :accountId', { id, accountId })
-    .setLock('pessimistic_write')
-    .getOne();
-  if (!function_) throw functionNotFound(id);
-  return function_;
-}
-
-const noSuchVersion = (function_: Pick<Function, 'name'>, number: number) =>
+/** The answer for a version the function hasn't. */
+export const noSuchVersion = (function_: Pick<Function, 'name'>, number: number): NotFoundException =>
   new NotFoundException(`The function ${function_.name} has no version ${number}: GET /functions/{id}/versions lists them`);
+
+/** As Lambda refuses to delete a version an alias names, with the aliases' names. */
+export function namedByAliases(function_: Pick<Function, 'name'>, number: number, aliases: string[]): ConflictException {
+  const [them, s] = aliases.length > 1 ? ['them', 'es'] : ['it', ''];
+  return new ConflictException(
+    `Version ${number} of the function ${function_.name} is named by its alias${s} ${aliases.join(', ')}: point ${them} at another version, or delete ${them}, first`,
+  );
+}
