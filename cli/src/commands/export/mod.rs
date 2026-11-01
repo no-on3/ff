@@ -3,14 +3,14 @@
 //! values each takes, a page of `data/` for each kind of resource the account has, `MIGRATION.md`,
 //! its runbook, and `cost-estimate.md`, its last months at AWS's prices.
 
-mod account;
+pub(super) mod account;
 #[cfg(test)]
-mod fixtures;
+pub(super) mod fixtures;
 mod hcl;
 mod kit;
-mod names;
+pub(super) mod names;
 mod roles;
-mod template;
+pub(super) mod template;
 mod terraform;
 mod yaml;
 

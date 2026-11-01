@@ -215,7 +215,8 @@ pub enum Command {
     EventSources(EventSourcesCommand),
 
     /// Check a function's folder, or a file, for what works on FF and not on AWS Lambda: FF's API keys, variables and
-    /// hosts, its original event, files written outside /tmp, a TypeScript handler, a package over Lambda's size
+    /// hosts, its original event, files written outside /tmp, a TypeScript handler, a package over Lambda's size, its
+    /// template; with --deployed, what in the account still points at FF
     Doctor(DoctorArgs),
 
     /// Write what a move to AWS needs in a new folder: a SAM template of the account's functions, queues and
@@ -363,6 +364,10 @@ pub struct DoctorArgs {
     /// Fail on warnings too, not on errors alone
     #[arg(long)]
     pub strict: bool,
+
+    /// Check what is deployed in the account instead, as `ff export` reads it: what in it still points at FF
+    #[arg(long, conflicts_with = "path")]
+    pub deployed: bool,
 }
 
 #[derive(Args)]
@@ -1500,5 +1505,17 @@ impl ConfigKey {
             ConfigKey::AllowHttp => "allow_http",
             ConfigKey::Token => "token",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    /// Clap's own check of every command's definition, those no other test runs among them: a mistake fails here,
+    /// not when someone runs the command.
+    #[test]
+    fn every_command_is_defined_as_clap_takes_it() {
+        super::Cli::command().debug_assert();
     }
 }

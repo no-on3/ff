@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::super::queues::Queue;
 use super::account::{Account, AsyncConfig, BucketRecord, Destination, FunctionRecord, Notification};
-use super::names::{LogicalIds, lambda_names};
+use super::names::{LogicalIds, lambda_names, renamed};
 use super::roles::{self, Role, Target};
 use super::yaml::Yaml;
 use crate::api::types::name_in_arn;
@@ -17,6 +17,8 @@ use crate::api::types::name_in_arn;
 pub const DEFAULT_MAX_INSTANCES: u32 = 3;
 /// The parameter that turns the schedules on at AWS, off until the move, so that none runs twice.
 pub const SCHEDULES_STATE: &str = "ScheduleState";
+/// What a move does with a function that gets FF's original event, after its name.
+pub const WRAPPED_EVENT: &str = "gets FF's original event, its input in `event.body`: move it to Lambda's event on FF first, its handler reading `event` and its `eventFormat` set to `lambda` together, as the guide says, so that it runs as it will on Lambda";
 
 /// A function of the export: its names on FF and on Lambda, its logical ID, its zip, and the
 /// stack's output that gives its URL when it has one.
@@ -294,16 +296,10 @@ impl<'a> Builder<'a> {
             ("Timeout".to_owned(), Yaml::from(function.timeout)),
         ];
         if lambda_name != function.name {
-            self.notes.push(format!(
-                "**{}** is `{lambda_name}` on Lambda, whose rule for names it is outside of: its callers name it so there.",
-                function.name
-            ));
+            self.notes.push(format!("**{}** {}.", function.name, renamed(lambda_name)));
         }
         if function.event_format.as_deref() == Some("wrapped") {
-            self.notes.push(format!(
-                "**{}** gets FF's original event, its input in `event.body`: move it to Lambda's event on FF first, its handler reading `event` and its `eventFormat` set to `lambda` together, as the guide says, so that it runs as it will on Lambda.",
-                function.name
-            ));
+            self.notes.push(format!("**{}** {WRAPPED_EVENT}.", function.name));
         }
         let mut variables = Vec::new();
         let environment = function.environment.iter().flatten();

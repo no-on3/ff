@@ -73,6 +73,11 @@ impl ResourceNames {
     }
 }
 
+/// What a function's callers do with its name on Lambda, when FF's is outside Lambda's rule, after FF's name.
+pub fn renamed(lambda_name: &str) -> String {
+    format!("is `{lambda_name}` on Lambda, whose rule for names it is outside of: its callers name it so there")
+}
+
 /// Each function's name on Lambda, in the order given: its own, as every name made since FF took
 /// Lambda's rule is; a name from before, outside it, with `_` for each character the rule refuses and
 /// cut to 64, a number after it if another function has that name already.

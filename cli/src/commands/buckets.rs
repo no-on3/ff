@@ -48,14 +48,19 @@ fn held(bucket: &Bucket) -> String {
 /// all the account's; naming some, those alone.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StorageKey {
-    id: String,
-    buckets: Option<Vec<String>>,
+pub struct StorageKey {
+    pub id: String,
+    pub buckets: Option<Vec<String>>,
     #[serde(default)]
-    queues: Option<Vec<String>>,
-    read_only: bool,
-    created_at: String,
-    last_used_at: Option<String>,
+    pub queues: Option<Vec<String>>,
+    pub read_only: bool,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+}
+
+/// The account's access keys to its buckets and queues, which owners list.
+pub fn storage_keys(client: &Client) -> Result<Vec<StorageKey>, Error> {
+    client.json(&Call::get("/storage-keys"))
 }
 
 /// A key just made: its secret this once, and where to use it.
@@ -198,7 +203,7 @@ fn column(names: Option<&Vec<String>>, others: Option<&Vec<String>>) -> String {
 }
 
 /// What a key reaches, in words.
-fn reaches(key: &StorageKey) -> String {
+pub fn reaches(key: &StorageKey) -> String {
     let named = |kind: &str, names: &[String]| {
         format!("the {kind}{} {}", if names.len() == 1 { "" } else { "s" }, names.join(", "))
     };
@@ -213,7 +218,7 @@ fn reaches(key: &StorageKey) -> String {
 
 pub fn keys_list(context: &Context) -> Result<(), Error> {
     let client = Client::new(&context.settings()?)?;
-    let keys: Vec<StorageKey> = client.json(&Call::get("/storage-keys"))?;
+    let keys = storage_keys(&client)?;
     context.out.result(&keys, || {
         if keys.is_empty() {
             return "The account has no access key to its buckets and queues: `ff buckets keys create` makes one"

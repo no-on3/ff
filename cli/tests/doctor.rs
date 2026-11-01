@@ -1,9 +1,10 @@
 //! `ff doctor` on folders of code: what it finds, where, how it says so, and the exit code a
-//! script reads: 1 for an error, or with `--strict` a warning. It calls no API.
+//! script reads: 1 for an error, or with `--strict` a warning. It calls no API; with `--deployed`,
+//! it reads the account as `ff export` does, here from a scripted API.
 
 mod common;
 
-use common::{ff, with_key};
+use common::{Reply, Server, ff, with_key};
 use predicates::prelude::*;
 use serde_json::{Value, json};
 
@@ -146,4 +147,78 @@ fn a_template_is_read_as_cloudformation_reads_it_and_lambdas_limits_checked() {
     ff(&settings).arg("doctor").arg(code.path()).assert().code(1).stdout(predicate::str::starts_with(
         "template.yaml:3: error: CloudFormation can't read it, at column 13: an alias (*name)",
     ));
+}
+
+const AT: &str = "2026-10-21T09:00:00.000Z";
+
+/// The replies, in the order `ff doctor --deployed` asks: the account, its function and what calls it or what its
+/// keys used, the queues, buckets, databases, caches and mail, then the storage keys, which a developer can't list.
+fn account() -> Vec<Reply> {
+    let function = json!({ "id": "f1", "name": "orders", "runtime": "nodejs", "code": "", "packageType": "inline",
+                           "handler": "function.handler", "memory": 128, "timeout": 3, "status": "ACTIVE",
+                           "eventFormat": "wrapped", "minInstances": 2, "maxInstances": 3, "scaleToZero": false,
+                           "createdAt": AT, "updatedAt": AT });
+    let not_found = || Reply::json(404, json!({ "statusCode": 404, "message": "none" }));
+    vec![
+        Reply::json(
+            200,
+            json!({ "user": null, "key": { "id": "0123456789ab", "name": "ci", "scopes": ["functions:read"] },
+                    "accounts": [{ "id": "123456789012", "name": "Shop", "status": "active", "role": "developer",
+                                   "plan": { "id": "beta", "name": "Beta", "limits": {} },
+                                   "internetEgress": false, "dataDeletionDueAt": null, "dataDeletedAt": null }] }),
+        ),
+        Reply::json(200, json!([function])),
+        Reply::json(200, function),
+        Reply::json(200, json!({ "secrets": [] })),
+        not_found(),
+        Reply::json(200, json!([])),
+        Reply::json(200, json!([])),
+        not_found(),
+        Reply::json(
+            200,
+            json!({ "uses": [{ "service": "sqs", "resource": "orders", "operation": "SendMessage", "firstDay": "2026-10-22", "lastDay": "2026-10-31" }] }),
+        ),
+        Reply::json(200, json!([])),
+        Reply::json(200, json!([])),
+        Reply::json(200, json!([])),
+        Reply::json(200, json!([])),
+        Reply::json(200, json!([])),
+        Reply::json(403, json!({ "statusCode": 403, "message": "Only the account's owners can do this" })),
+    ]
+}
+
+#[test]
+fn the_account_says_what_still_points_at_ff_and_what_the_token_couldnt_read() {
+    let api = Server::start(account());
+    let settings = with_key(&api.url);
+
+    ff(&settings).args(["doctor", "--deployed"]).assert().success().stdout(
+        "function orders: warning: gets FF's original event, its input in `event.body`: move it to Lambda's event on \
+         FF first, its handler reading `event` and its `eventFormat` set to `lambda` together, as the guide says, so \
+         that it runs as it will on Lambda [wrapped-event]\n\
+         function orders: warning: keeps 2 instances running when idle: AWS bills that as provisioned concurrency, by \
+         the hour, called or not, which the export writes as `ProvisionedConcurrencyConfig` [warm-instances]\n\
+         function orders: warning: reached FF's SQS (orders) through the endpoints FF sets in its environment, last on \
+         2026-10-31: on AWS, AWS's own, its role allowing what it used [ff-endpoints]\n\
+         account 123456789012: 3 warnings, what still points at FF\n",
+    )
+    .stderr(predicate::str::ends_with(
+        "warning: not checked, the account's storage keys: Only the account's owners can do this\n",
+    ));
+    let paths: Vec<String> =
+        api.requests().iter().map(|request| format!("{} {}", request.method, request.path)).collect();
+    assert_eq!(paths.first().map(String::as_str), Some("GET /me"));
+    assert_eq!(paths.last().map(String::as_str), Some("GET /storage-keys"));
+    assert!(paths.iter().all(|path| path.starts_with("GET ")), "{paths:?}");
+
+    let api = Server::start(account());
+    let settings = with_key(&api.url);
+    let output = ff(&settings).args(["doctor", "--deployed", "--strict", "--output", "json"]).output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["warnings"], json!(3));
+    assert_eq!(report["findings"][0]["resource"], json!("function orders"));
+    assert_eq!(report["notChecked"], json!(["the account's storage keys: Only the account's owners can do this"]));
+
+    ff(&settings).args(["doctor", "--deployed", "some/folder"]).assert().code(2);
 }

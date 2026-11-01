@@ -2,8 +2,10 @@
 //! Lambda, before a move: FF's API keys, its variables and hosts, its original event, files
 //! written outside `/tmp`, a TypeScript handler, a package over Lambda's size; and in its SAM
 //! template, what CloudFormation can't read and what is beyond Lambda's limits. Errors stop a
-//! move; warnings are for a person to judge, and fail it too with `--strict`.
+//! move; warnings are for a person to judge, and fail it too with `--strict`. With `--deployed`,
+//! what in the account still points at FF.
 
+mod account;
 mod code;
 mod template;
 
@@ -219,6 +221,9 @@ fn text(report: &Report) -> String {
 }
 
 pub fn run(args: DoctorArgs, context: &Context) -> Result<(), Error> {
+    if args.deployed {
+        return account::run(args.strict, context);
+    }
     if !args.path.exists() {
         return Err(Error::usage(format!("{} isn't there", args.path.display())));
     }

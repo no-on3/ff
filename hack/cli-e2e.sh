@@ -1082,6 +1082,20 @@ for _ in $(seq 75); do
   curl -s "$api/functions/$receipts_id/key-uses" | jq -e '.uses | any(.operation == "SendEmail")' >/dev/null && break
   sleep 1
 done
+ff doctor "$app" --output json
+check "ff doctor finds nothing in the small app's code that works on FF alone, its template-free folder read as its package" \
+  "0 0 0" "$(code) $(out | jq -r '"\(.errors) \(.warnings)"')"
+# What still points at FF: the shop's functions reached its S3, SQS and SES through FF's endpoints, as their keys say.
+endpoints_of() { jq -r --arg resource "function $1" '.findings[] | select(.resource == $resource and .check == "ff-endpoints") | .message' "$work/out"; }
+ff doctor --deployed --output json
+check "ff doctor --deployed: shop-receipts reached FF's S3 and SES, shop-api FF's SQS, through the endpoints FF set them" \
+  "0 true true true" \
+  "$(code) $(endpoints_of shop-receipts | grep -F "S3 (cli-receipts" >/dev/null && echo true || echo false) \
+$(endpoints_of shop-receipts | grep -F "SES (" >/dev/null && echo true || echo false) \
+$(endpoints_of shop-api | grep -F "SQS (cli-new-orders)" >/dev/null && echo true || echo false)"
+deployed="$(jq -c .findings "$work/out")"
+ff doctor --deployed --strict
+check "  ... which --strict fails on, with 1" "1" "$(code)"
 kit="$work/shop-to-aws"
 rm -rf "$kit"
 ff export "$kit" --output json
@@ -1090,6 +1104,9 @@ check "ff export writes the account's kit: the template, terraform/, each functi
     cost-estimate.md; do [ -s "$kit/$file" ] || { echo false; exit; }; done; echo true)"
 check "  ... cost-estimate.md, the last three months at AWS's prices, a column each" "3" \
   "$(grep -F '| US$ |' "$kit/cost-estimate.md" | tr '|' '\n' | grep -cE '^ [0-9]{4}-[0-9]{2}')"
+ff doctor --deployed --output json
+check "  ... and ff doctor --deployed says the same after it: an export changes nothing in the account" "0 true" \
+  "$(code) $([ "$(jq -c .findings "$work/out")" = "$deployed" ] && echo true || echo false)"
 # A function's resource in the template, up to the next one.
 resource_of() { awk -v id="  $1:" '$0 == id { on = 1; next } on && /^  [A-Za-z]/ { exit } on' "$kit/template.yaml"; }
 check "  ... shop-receipts's role writes the receipts and sends from the proved address, as its keys did, and neither reads the bucket nor sends to the queue" "true true false" \
