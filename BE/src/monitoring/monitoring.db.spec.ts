@@ -15,6 +15,7 @@ import { PriceBook } from '../billing/price-book.entity';
 import { PricingService } from '../billing/pricing.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { MonitoringService } from './monitoring.service';
 import { alarmLagSeconds, databaseSizeBytes, deliveriesPending, ratingLagSeconds, reconciliationMismatches } from './operator-metrics';
 import { valueOf } from './test-fixtures';
@@ -53,7 +54,7 @@ run("the operator's gauges (L2)", () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'capacity_samples']) await query('SELECT ff_ensure_month_partition($1, $2::date)', [table, `${Y}-03-01`]);
+    await monthPartitions(db.dataSource, [`${Y}-03`]);
     for (const id of [A, B]) await db.dataSource.getRepository(Account).save({ id, name: `Account ${id}`, planId: 'beta', status: AccountStatus.ACTIVE });
     const pricing = new PricingService(db.dataSource.getRepository(PriceBook), db.dataSource.getRepository(Currency));
     monitoring = new MonitoringService(db.dataSource, pricing, {} as ConfigService);

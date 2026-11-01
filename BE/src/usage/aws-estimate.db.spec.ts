@@ -16,6 +16,7 @@ import { PriceBook } from '../billing/price-book.entity';
 import { PricingService } from '../billing/pricing.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from './usage.service';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
 import { AwsEstimateService } from './aws-estimate.service';
@@ -58,9 +59,7 @@ run("the estimate at AWS's prices (L2)", () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'database_samples', 'cache_samples', 'storage_request_counts', 'queue_request_counts', 'email_sends']) {
-      for (const month of ['01', '02', '03']) await query('SELECT ff_ensure_month_partition($1, $2::date)', [table, `${Y}-${month}-01`]);
-    }
+    await monthPartitions(db.dataSource, [`${Y}-01`, `${Y}-02`, `${Y}-03`]);
     const ds = db.dataSource;
     const pricing = new PricingService(ds.getRepository(PriceBook), ds.getRepository(Currency));
     const plans = new PlansService(ds.getRepository(Plan), ds.getRepository(Account), {} as Orchestrator, new AuditService(ds.getRepository(AuditEntry)));

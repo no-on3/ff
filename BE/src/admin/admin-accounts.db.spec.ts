@@ -31,7 +31,7 @@ import { FunctionWorkload, Orchestrator, TenantLimits } from '../orchestrator/or
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PlansService } from '../plans/plans.service';
 import { UsageRecord } from '../usage/usage-record.entity';
-import { UsageService } from '../usage/usage.service';
+import { UsageService, monthPartitions } from '../usage/usage.service';
 import { AdminAccountsService, utcMinute } from './admin-accounts.service';
 import { AdminCreditsService } from './admin-credits.service';
 import { PlatformSetting } from './platform-setting.entity';
@@ -537,7 +537,7 @@ run('accounts, for operators (L2, P-71)', () => {
       [id, `photos-${id}`, JSON.stringify({ indexDocument: 'index.html', errorDocument: null, singlePageApp: false })],
     );
     await query(`INSERT INTO buckets (account_id, name, store_name, created_at) VALUES ($1, $2, 'ff-0123456789abcdef0123456b', '2026-10-21T10:00:00Z')`, [id, `zz-new-${id}`]);
-    await query(`SELECT ff_ensure_month_partition('bucket_samples', '2026-10-01')`);
+    await monthPartitions(db.dataSource, ['2026-10']);
     for (const [hour, size] of [['2026-10-22T08:00:00Z', 1_000], ['2026-10-22T09:00:00Z', 161_480_253]] as const) {
       await query(`INSERT INTO bucket_samples (bucket_id, hour, account_id, name, size_bytes, objects) VALUES ($1, $2, $3, 'photos', $4, 1204)`, [photos, hour, id, size]);
     }

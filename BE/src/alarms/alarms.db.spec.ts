@@ -19,6 +19,7 @@ import { AuditService } from '../audit/audit.service';
 import type { BillingService } from '../billing/billing.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { CustomerMetricsService } from '../metrics/customer-metrics.service';
 import { alarmChanges, alarmEvaluations } from '../monitoring/operator-metrics';
@@ -117,9 +118,7 @@ run('alarms (L2)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_samples', 'async_event_counts', 'cache_samples']) {
-      await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
-    }
+    await monthPartitions(db.dataSource, ['2026-10']);
     for (const [id, name] of [[A, 'Alarmed'], [B, 'Other']]) await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE });
     const owner = await db.dataSource.getRepository(User).save({ oidcSub: 'kc-alarm-owner', email: 'owner@ff.test', name: null, locale: 'fr-TN' }); // the e-mails in the owner's language
     await db.dataSource.getRepository(Membership).save({ accountId: A, userId: owner.id, role: 'owner' });

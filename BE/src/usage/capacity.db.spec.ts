@@ -11,6 +11,7 @@ import 'dotenv/config';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from './usage.service';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { capacityReport } from './capacity-report';
@@ -71,9 +72,7 @@ run('capacity samples (L2, P-21)', () => {
       await db.dataSource.getRepository(Account).save({ id, name: `Account ${id}`, planId: 'beta', status: AccountStatus.ACTIVE });
     }
     // Months the fixtures use, as the backend's partition job creates them.
-    for (const month of ['2026-08-01', '2026-09-01', '2026-10-01']) {
-      for (const table of ['capacity_samples', 'usage_records']) await query('SELECT ff_ensure_month_partition($1, $2)', [table, month]);
-    }
+    await monthPartitions(db.dataSource, ['2026-08', '2026-09', '2026-10']);
     const orchestrator = { readyInstancesByFunction: async () => ready } as unknown as Orchestrator;
     capacity = new CapacityService(orchestrator, db.dataSource);
   });

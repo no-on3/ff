@@ -10,6 +10,7 @@ import 'dotenv/config';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { Currency } from './currency.entity';
 import { Decimal } from './decimal';
@@ -61,9 +62,7 @@ run('price books and pricing (L2, P-30)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const month of [`${Y}-01-01`, `${Y}-03-01`, `${Y}-04-01`]) {
-      for (const table of ['usage_records', 'capacity_samples']) await query('SELECT ff_ensure_month_partition($1, $2::date)', [table, month]);
-    }
+    await monthPartitions(db.dataSource, [`${Y}-01`, `${Y}-03`, `${Y}-04`]);
     pricing = new PricingService(db.dataSource.getRepository(PriceBook), db.dataSource.getRepository(Currency));
   });
 

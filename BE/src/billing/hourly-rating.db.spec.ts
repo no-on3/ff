@@ -20,6 +20,7 @@ import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { ObjectStoreService } from '../object-store/object-store.service';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { BillingService } from './billing.service';
@@ -47,11 +48,10 @@ const SETTLE = 33 * MINUTE;
 async function ratingWorld() {
   const db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
   await db.dataSource.runMigrations({ transaction: 'each' });
-  for (let month = 1; month <= 9; month++) {
-    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'cache_samples', 'email_sends']) {
-      await db.dataSource.query('SELECT ff_ensure_month_partition($1, $2::date)', [table, `${Y}-${String(month).padStart(2, '0')}-01`]);
-    }
-  }
+  await monthPartitions(
+    db.dataSource,
+    Array.from({ length: 9 }, (_unused, index) => `${Y}-${String(index + 1).padStart(2, '0')}`),
+  );
   const ds = db.dataSource;
   const state = { shadow: true };
   const settings = { get: async () => ({ ...DEFAULT_SETTINGS, billingShadowMode: state.shadow }) } as unknown as PlatformSettingsService;

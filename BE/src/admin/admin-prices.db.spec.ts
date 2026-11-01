@@ -17,6 +17,7 @@ import { PriceBook } from '../billing/price-book.entity';
 import { PricingService } from '../billing/pricing.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
@@ -73,7 +74,7 @@ run('price books and plans, for operators (L2, P-73)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'capacity_samples']) await query('SELECT ff_ensure_month_partition($1, $2::date)', [table, `${Y}-01-01`]);
+    await monthPartitions(db.dataSource, [`${Y}-01`]);
     const ds = db.dataSource;
     const audit = new AuditService(ds.getRepository(AuditEntry));
     // As the request context would name the operator: the audit service takes the actor from it.

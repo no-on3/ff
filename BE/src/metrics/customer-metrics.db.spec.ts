@@ -15,6 +15,7 @@ import { NotFoundException } from '@nestjs/common';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { CustomerQueues } from '../queues/customer-queues';
 import { QueueSamples } from '../queues/queue-samples.service';
@@ -55,9 +56,7 @@ run('metrics (L2)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'queue_samples', 'async_event_counts', 'cache_samples']) {
-      await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
-    }
+    await monthPartitions(db.dataSource, ['2026-10']);
     for (const [id, name] of [[A, 'A'], [B, 'B']]) await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE });
     metrics = new CustomerMetricsService(db.dataSource);
     f1 = await fn(A, 'f1');
