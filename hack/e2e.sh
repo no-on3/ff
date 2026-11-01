@@ -1240,13 +1240,16 @@ check "a suspended account's keys, and those of an account whose storage FF turn
 for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")" = 1 ] && break; sleep 1; done
 check "its hourly measure, within a minute: once in the hour, by its name" "1|e2e-photos" \
   "$(env_q "SELECT count(*), max(name) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")"
-# Each minute, the front door writes the minutes that are over: these within two.
+# Each minute, the front door writes the minutes that are over: these within two. All of them, the minute of the 300 MB
+# among them, not only the first three classes, which an earlier minute may hold.
+photos_requests() {
+  env_q "SELECT count(DISTINCT class) || ' ' || (sum(bytes_in) > 314572800) || ' ' || (sum(bytes_out) > 314572800) || ' ' || (sum(errors4xx) > 0) FROM storage_request_counts WHERE name = 'e2e-photos'" | tr -d '\r'
+}
 for _ in $(seq 150); do
-  [ "$(env_q "SELECT count(DISTINCT class) FROM storage_request_counts WHERE name = 'e2e-photos'")" = 3 ] && break
+  [ "$(photos_requests)" = "3 true true true" ] && break
   sleep 1
 done
-check "the requests counted by the minute, in AWS's three classes, with their bytes, the 300 MB up and down among them" "3 true true true" \
-  "$(env_q "SELECT count(DISTINCT class) || ' ' || (sum(bytes_in) > 314572800) || ' ' || (sum(bytes_out) > 314572800) || ' ' || (sum(errors4xx) > 0) FROM storage_request_counts WHERE name = 'e2e-photos'" | tr -d '\r')"
+check "the requests counted by the minute, in AWS's three classes, with their bytes, the 300 MB up and down among them" "3 true true true" "$(photos_requests)"
 # Its metrics, as CloudWatch names S3's: this hour and the one before, a point an hour. The minute of its last requests
 # may be written between the two reads: both read again until they agree, which a minute's writing settles.
 since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
