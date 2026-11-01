@@ -75,6 +75,11 @@ impl Endpoint {
         &self.url
     }
 
+    /// Its host, lower-case, an IPv6 address without its brackets.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
     /// This machine: where plain http stays on the machine.
     pub fn is_local(&self) -> bool {
         matches!(self.host.as_str(), "localhost" | "127.0.0.1" | "::1")

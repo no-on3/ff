@@ -59,7 +59,7 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 - **Still to change:** nothing in this step.
 
 **62. The cost estimate counts what AWS bills that FF doesn't:** an RDS instance for each database, an ElastiCache node for each cache, cold starts, data out, logs, CloudFront, a NAT gateway, each line with its assumption and a way to leave it out. ✅ Your answer: as recommended. Without them the estimate is far too low for any app with a database.
-- **Changed already:** X-03: those lines' prices in the books (`1cfcc8b`); `GET /usage/aws-estimate`, each line with what it assumes, `without` leaving it out of the totals (`2df7b6c`); `ff usage --aws --without` and the export's `cost-estimate.md` (`f5783f2`); and the console's Usage page, a box a line (this commit).
+- **Changed already:** X-03: those lines' prices in the books (`1cfcc8b`); `GET /usage/aws-estimate`, each line with what it assumes, `without` leaving it out of the totals (`2df7b6c`); `ff usage --aws --without` and the export's `cost-estimate.md` (`f5783f2`); and the console's Usage page, a box a line (`9fc79f7`).
 - **Still to change:** nothing.
 
 **63. The way out is checked offline in every run** (`sam validate --lint`, cfn-lint, `tofu validate`, Moto), **and on a real AWS account once a month once you have one.** ✅ Your answer: as recommended. Until then the docs say the export is checked offline.

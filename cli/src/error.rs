@@ -16,12 +16,15 @@ pub enum Kind {
     InvocationFailed,
     /// Refused because of the account, not the request: no credit, a role or a key's scopes, the plan's rate.
     RefusedByAccount,
+    /// `ff doctor` found what a move to AWS can't take as it is: an error, or with `--strict` a warning.
+    Findings,
 }
 
 impl Kind {
     /// 2 is clap's own code for usage errors, so a bad argument gives 2 whoever finds it.
     pub fn exit_code(self) -> u8 {
         match self {
+            Kind::Findings => 1,
             Kind::Usage => 2,
             Kind::Failed => 3,
             Kind::DeployFailed => 4,
@@ -86,15 +89,22 @@ mod tests {
 
     #[test]
     fn each_kind_has_the_exit_code_scripts_rely_on() {
-        let codes: Vec<(Kind, u8)> =
-            [Kind::Usage, Kind::Failed, Kind::DeployFailed, Kind::InvocationFailed, Kind::RefusedByAccount]
-                .into_iter()
-                .map(|kind| (kind, Error::new(kind, "x").exit_code()))
-                .collect();
+        let codes: Vec<(Kind, u8)> = [
+            Kind::Findings,
+            Kind::Usage,
+            Kind::Failed,
+            Kind::DeployFailed,
+            Kind::InvocationFailed,
+            Kind::RefusedByAccount,
+        ]
+        .into_iter()
+        .map(|kind| (kind, Error::new(kind, "x").exit_code()))
+        .collect();
 
         assert_eq!(
             codes,
             [
+                (Kind::Findings, 1),
                 (Kind::Usage, 2),
                 (Kind::Failed, 3),
                 (Kind::DeployFailed, 4),

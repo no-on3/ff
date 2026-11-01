@@ -214,6 +214,10 @@ pub enum Command {
     #[command(subcommand)]
     EventSources(EventSourcesCommand),
 
+    /// Check a function's folder, or a file, for what works on FF and not on AWS Lambda: FF's API keys, variables and
+    /// hosts, its original event, files written outside /tmp, a TypeScript handler, a package over Lambda's size
+    Doctor(DoctorArgs),
+
     /// Write what a move to AWS needs in a new folder: a SAM template of the account's functions, queues and
     /// buckets, each function's code as Lambda runs it, a page for each kind of resource, and MIGRATION.md
     Export(ExportArgs),
@@ -348,6 +352,17 @@ pub struct ExportArgs {
     /// stay parameters, FF never showing their values back
     #[arg(long)]
     pub with_values: bool,
+}
+
+#[derive(Args)]
+pub struct DoctorArgs {
+    /// The function's folder, or one file of code
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Fail on warnings too, not on errors alone
+    #[arg(long)]
+    pub strict: bool,
 }
 
 #[derive(Args)]

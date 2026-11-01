@@ -9,6 +9,7 @@ mod completion;
 mod config;
 mod db;
 mod deploy;
+mod doctor;
 mod email;
 mod env;
 mod estimate;
@@ -59,6 +60,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Init { name, runtime } => init::run(&name, runtime, context),
         Command::Deploy(args) => deploy::run(args, context),
         Command::Package(args) => package::run(args, context),
+        Command::Doctor(args) => doctor::run(args, context),
         Command::Export(args) => export::run(args, context),
         Command::Invoke(args) => invoke::run(args, context),
         Command::AsyncConfig(args) => async_config::run(args, context),
