@@ -175,7 +175,7 @@ describe('metricsView', () => {
 describe('callMetricsView', () => {
   const window: MetricsWindow = { start: new Date('2026-10-19T09:00:00Z'), end: new Date('2026-10-19T09:10:00Z'), period: 300 };
 
-  it("gives some calls' series alone, those their records measure: no instances and no asynchronous events, which no record says the version of", () => {
+  it("gives some calls' series alone, those their records measure: no asynchronous events, which no record says the version of, and no instances unless given", () => {
     const row = { bucket: new Date('2026-10-19T09:05:00Z').getTime() / 1000, invocations: 3, errors: 1, throttles: 1, coldStarts: 1 };
     const view = callMetricsView(window, [{ ...row, durationAverage: 5, durationMaximum: 9, durationP50: 4, durationP95: 8.5, durationP99: 8.9 }]);
 
@@ -187,6 +187,13 @@ describe('callMetricsView', () => {
       Duration: { Average: [null, 5], Maximum: [null, 9], p50: [null, 4], p95: [null, 8.5], p99: [null, 8.9] },
     });
     expect([view.period, view.start, view.end, view.timestamps.length]).toEqual([300, window.start, window.end, 2]);
+  });
+
+  it("adds the instances of the Deployment that ran them, when given: the calls of one version, or of $LATEST", () => {
+    const view = callMetricsView(window, [], [{ bucket: new Date('2026-10-19T09:00:00Z').getTime() / 1000, maximum: 3, minuteSum: 10 }]);
+
+    expect(view.metrics.Instances).toEqual({ Maximum: [3, 0], Average: [2, 0] });
+    expect(Object.keys(view.metrics)).toEqual(['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration', 'Instances']);
   });
 });
 

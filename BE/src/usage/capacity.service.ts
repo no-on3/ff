@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nest
 import { DataSource } from 'typeorm';
 import { describeError } from '../common/describe-error';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { LATEST_SAMPLED } from './capacity-sample.entity';
 
 const MINUTE_MS = 60_000;
 /** How far into each minute the sample is taken. */
@@ -15,11 +16,12 @@ export function nextSampleDelay(nowMs: number): number {
 }
 
 /**
- * Capacity samples (client-readiness plan, P-21, D6): once a minute, every
- * function with a ready instance gets a row with how many, its minInstances and
- * its memory. D8's cost model weighs that capacity against what is billed, and
- * D8 bills minInstances as provisioned time from it. Runs in every backend
- * replica: a minute sampled twice keeps its first row.
+ * Capacity samples: once a minute, each of a function's Deployments with a
+ * ready instance, $LATEST's and each version's, gets a row with how many, the
+ * minInstances it keeps warm ($LATEST's alone) and its memory, a version's as
+ * published. The cost model weighs that capacity against what is billed, and
+ * the bill prices minInstances as provisioned time from it. Runs in every
+ * backend replica: a minute sampled twice keeps its first rows.
  */
 @Injectable()
 export class CapacityService implements OnModuleInit, OnModuleDestroy {
@@ -52,24 +54,27 @@ export class CapacityService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Samples one minute, by the database's clock unless `at` names it: the ready
-   * instances from one call to the orchestrator, written with each function's
-   * account, minInstances and memory in one statement. A function the
-   * database doesn't know (deleted meanwhile) is skipped, and a minute already
-   * sampled keeps its rows. Returns how many rows it wrote.
+   * Samples one minute, by the database's clock unless `at` names it: each
+   * Deployment's ready instances from one call to the orchestrator, written
+   * with its function's account and its minInstances and memory in one
+   * statement. A function, or a version, the database doesn't know (deleted
+   * meanwhile) is skipped, and a minute already sampled keeps its rows.
+   * Returns how many rows it wrote.
    */
   async sample(at?: Date): Promise<number> {
-    const ready = [...(await this.orchestrator.readyInstancesByFunction())].filter(([functionId]) => UUID.test(functionId));
+    const ready = (await this.orchestrator.workloads()).filter((workload) => workload.ready > 0 && UUID.test(workload.functionId));
     if (ready.length === 0) return 0;
     const written = await this.dataSource.query<Array<{ function_id: string }>>(
-      `INSERT INTO "capacity_samples" ("function_id", "minute", "account_id", "instances", "min_instances", "memory_mb")
-       SELECT f."id", date_trunc('minute', coalesce($3::timestamptz, now()) AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',
-              f."account_id", r."instances", f."min_instances", f."memory"
-         FROM unnest($1::uuid[], $2::int[]) AS r("function_id", "instances")
+      `INSERT INTO "capacity_samples" ("function_id", "version", "minute", "account_id", "instances", "min_instances", "memory_mb")
+       SELECT f."id", r."version", date_trunc('minute', coalesce($4::timestamptz, now()) AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',
+              f."account_id", r."instances", CASE WHEN v."version" IS NULL THEN f."min_instances" ELSE 0 END, coalesce(v."memory", f."memory")
+         FROM unnest($1::uuid[], $2::int[], $3::int[]) AS r("function_id", "version", "instances")
          JOIN "functions" f ON f."id" = r."function_id"
+         LEFT JOIN "function_versions" v ON v."function_id" = r."function_id" AND v."version" = r."version"
+        WHERE r."version" = ${LATEST_SAMPLED} OR v."version" IS NOT NULL
        ON CONFLICT DO NOTHING
        RETURNING "function_id"`,
-      [ready.map(([functionId]) => functionId), ready.map(([, instances]) => instances), at ?? null],
+      [ready.map((workload) => workload.functionId), ready.map((workload) => workload.version ?? LATEST_SAMPLED), ready.map((workload) => workload.ready), at ?? null],
     );
     return written.length;
   }

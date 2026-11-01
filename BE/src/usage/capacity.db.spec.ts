@@ -1,10 +1,9 @@
 /**
  * L2: capacity samples and the capacity report against a real PostgreSQL
- * server (client-readiness plan, P-21, D8), in a scratch database that is
- * dropped after: what a sample copies from the functions table, a minute
- * written once, append-only, and reserved against billed GB-s per account and
- * day. The orchestrator is a stand-in; hack/k8s/test-it.sh lists real
- * Deployments (L3).
+ * server, in a scratch database that is dropped after: what a sample copies
+ * from the functions and versions tables, a minute written once, append-only,
+ * and reserved against billed GB-s per account and day. The orchestrator is a
+ * stand-in; hack/k8s/test-it.sh lists real Deployments (L3).
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -13,7 +12,7 @@ import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { monthPartitions } from './usage.service';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
-import { Orchestrator } from '../orchestrator/orchestrator.types';
+import { Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
 import { capacityReport } from './capacity-report';
 import { CapacityService } from './capacity.service';
 
@@ -23,6 +22,7 @@ const B = '400000000002';
 
 interface SampleRow {
   function_id: string;
+  version: number;
   minute: Date;
   account_id: string;
   instances: number;
@@ -31,17 +31,19 @@ interface SampleRow {
   partition: string;
 }
 
-run('capacity samples (L2, P-21)', () => {
+run('capacity samples (L2)', () => {
   let db: ScratchDatabase;
   let capacity: CapacityService;
-  let ready = new Map<string, number>();
+  let ready: WorkloadInstances[] = [];
+  /** A Deployment of the function, $LATEST's or the version's, with its ready instances. */
+  const deployed = (functionId: string, instances: number, version?: number): WorkloadInstances => ({ functionId, version, desired: instances, ready: instances });
   let n = 0;
 
   const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
   const refusal = (sql: string) => query(sql).then(() => 'accepted', (error: Error) => error.message);
   const samplesOf = (functionId: string) =>
     query<SampleRow[]>(
-      'SELECT *, tableoid::regclass::text AS partition FROM capacity_samples WHERE function_id = $1 ORDER BY minute',
+      'SELECT *, tableoid::regclass::text AS partition FROM capacity_samples WHERE function_id = $1 ORDER BY minute, version',
       [functionId],
     );
   const newFunction = (accountId: string, overrides: Partial<Function> = {}) =>
@@ -57,7 +59,14 @@ run('capacity samples (L2, P-21)', () => {
     });
   /** Writes a sample row as the sampler would, for a minute in the past. */
   const sampleAt = (functionId: string, accountId: string, minute: string, instances: number, minInstances: number, memoryMb: number) =>
-    query('INSERT INTO capacity_samples VALUES ($1, $2, $3, $4, $5, $6)', [functionId, minute, accountId, instances, minInstances, memoryMb]);
+    query('INSERT INTO capacity_samples (function_id, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, $3, $4, $5, $6)', [
+      functionId,
+      minute,
+      accountId,
+      instances,
+      minInstances,
+      memoryMb,
+    ]);
   const usageAt = (accountId: string, startedAt: string, memoryMb: number, billedMs: number, status = 'success') =>
     query(
       `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb,
@@ -73,7 +82,7 @@ run('capacity samples (L2, P-21)', () => {
     }
     // Months the fixtures use, as the backend's partition job creates them.
     await monthPartitions(db.dataSource, ['2026-08', '2026-09', '2026-10']);
-    const orchestrator = { readyInstancesByFunction: async () => ready } as unknown as Orchestrator;
+    const orchestrator = { workloads: async () => ready } as unknown as Orchestrator;
     capacity = new CapacityService(orchestrator, db.dataSource);
   });
 
@@ -84,13 +93,14 @@ run('capacity samples (L2, P-21)', () => {
   it("samples a minute: each ready function's instances, with its account, minInstances and memory from the database", async () => {
     const warm = await newFunction(A, { memory: 512, minInstances: 2, maxInstances: 5 });
     const busy = await newFunction(B);
-    ready = new Map([[warm.id, 3], [busy.id, 1], ['5e2b9c7a-1d4f-4a6e-8b3c-9f0e1d2c3b4a', 2]]); // the last one: no such function
+    ready = [deployed(warm.id, 3), deployed(busy.id, 1), deployed('5e2b9c7a-1d4f-4a6e-8b3c-9f0e1d2c3b4a', 2)]; // the last one: no such function
 
     await expect(capacity.sample(new Date('2026-10-17T10:01:05.123Z'))).resolves.toBe(2);
 
     expect(await samplesOf(warm.id)).toEqual([
       {
         function_id: warm.id,
+        version: 0, // $LATEST's
         minute: new Date('2026-10-17T10:01:00Z'),
         account_id: A,
         instances: 3,
@@ -102,11 +112,34 @@ run('capacity samples (L2, P-21)', () => {
     expect(await samplesOf(busy.id)).toEqual([expect.objectContaining({ account_id: B, instances: 1, min_instances: 0, memory_mb: 128 })]);
   });
 
+  it("samples each version's Deployment apart, at the memory it was published with and with no warm instance, and leaves out a version deleted meanwhile", async () => {
+    const fn = await newFunction(A, { memory: 256, minInstances: 1, maxInstances: 10 });
+    for (const [version, memory] of [[1, 1024], [2, 128]]) {
+      await query(
+        `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+         VALUES ($1, $2, $3, 'nodejs', 'function.handler', 'inline', '', $4, 1, $4, $5, 5, 'lambda', '{}')`,
+        [fn.id, version, A, 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=', memory],
+      );
+    }
+    ready = [deployed(fn.id, 1), deployed(fn.id, 3, 1), deployed(fn.id, 2, 2), deployed(fn.id, 1, 3)]; // version 3: deleted since
+
+    await expect(capacity.sample(new Date('2026-10-17T10:04:05Z'))).resolves.toBe(3);
+
+    expect((await samplesOf(fn.id)).map((row) => [row.version, row.instances, row.min_instances, row.memory_mb])).toEqual([
+      [0, 1, 1, 256],
+      [1, 3, 0, 1024],
+      [2, 2, 0, 128],
+    ]);
+    // A minute sampled again keeps every row of it, a version's too.
+    ready = [deployed(fn.id, 5, 1)];
+    await expect(capacity.sample(new Date('2026-10-17T10:04:30Z'))).resolves.toBe(0);
+  });
+
   it('writes a minute once: a second sample of it keeps the first, the next minute gets its own', async () => {
     const fn = await newFunction(A);
-    ready = new Map([[fn.id, 1]]);
+    ready = [deployed(fn.id, 1)];
     await capacity.sample(new Date('2026-10-17T10:02:05Z'));
-    ready = new Map([[fn.id, 4]]);
+    ready = [deployed(fn.id, 4)];
 
     await expect(capacity.sample(new Date('2026-10-17T10:02:50Z'))).resolves.toBe(0);
     await expect(capacity.sample(new Date('2026-10-17T10:03:05Z'))).resolves.toBe(1);
@@ -119,7 +152,7 @@ run('capacity samples (L2, P-21)', () => {
 
   it("takes the minute by the database's clock when not told, and keeps a deleted function's samples", async () => {
     const fn = await newFunction(A);
-    ready = new Map([[fn.id, 1]]);
+    ready = [deployed(fn.id, 1)];
 
     await expect(capacity.sample()).resolves.toBe(1);
     await db.dataSource.getRepository(Function).delete(fn.id);
@@ -132,7 +165,7 @@ run('capacity samples (L2, P-21)', () => {
 
   it("refuses UPDATE, DELETE and TRUNCATE, on the table and on a month's partition, even to the database's owner", async () => {
     const fn = await newFunction(A);
-    ready = new Map([[fn.id, 1]]);
+    ready = [deployed(fn.id, 1)];
     await capacity.sample(new Date('2026-10-17T10:04:05Z'));
 
     expect(await refusal(`UPDATE capacity_samples SET instances = 0 WHERE function_id = '${fn.id}'`)).toBe(

@@ -601,13 +601,6 @@ export class KubernetesOrchestrator implements Orchestrator {
     return workloads;
   }
 
-  async readyInstancesByFunction(): Promise<Map<string, number>> {
-    const ready = new Map<string, number>();
-    // A function's versions run beside its $LATEST: its instances are all of theirs (ADR 0015).
-    for (const { functionId, ready: instances } of await this.workloads()) if (instances > 0) ready.set(functionId, (ready.get(functionId) ?? 0) + instances);
-    return ready;
-  }
-
   async codeImagesByFunction(): Promise<Map<string, string>> {
     // The same one list of FF's Deployments in every namespace as above.
     const deployments = await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);

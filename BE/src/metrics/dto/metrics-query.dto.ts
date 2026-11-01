@@ -57,7 +57,12 @@ class MetricSeries {
   Throttles: number[];
   @ApiProperty({ type: [Number], description: 'Calls that started an instance first' }) ColdStarts: number[];
   @ApiProperty({ type: DurationSeries }) Duration: DurationSeries;
-  @ApiProperty({ ...WHOLE, type: InstancesSeries }) Instances?: InstancesSeries;
+  @ApiProperty({
+    required: false,
+    type: InstancesSeries,
+    description: "The function's ready instances, its versions' and $LATEST's together; by executedVersion alone, those of the version's pods, or $LATEST's. Absent from a view by resource, as a version's pods run the calls of every alias that names it",
+  })
+  Instances?: InstancesSeries;
   @ApiProperty({ ...WHOLE, type: [Number], description: `Calls kept to run without waiting, as Lambda counts its asynchronous events received. ${WHOLE.description}` }) AsyncEventsReceived?: number[];
   @ApiProperty({ ...WHOLE, type: AsyncEventAgeSeries, description: `How long they waited for each attempt: Lambda's AsyncEventAge. ${WHOLE.description}` }) AsyncEventAge?: AsyncEventAgeSeries;
   @ApiProperty({ ...WHOLE, type: [Number], description: `Those that ended without the function succeeding, past their retries or their age, sent to a destination or not. ${WHOLE.description}` })

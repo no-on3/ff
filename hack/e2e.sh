@@ -429,6 +429,8 @@ as_ver POST "/functions/$versioned_id/versions" '{}' >/dev/null
 check "its version 1 is published" "201 1" "$(status) $(jq -r .version "$work/body")"
 as_ver POST "/functions/$versioned_id/aliases" '{"name": "live", "functionVersion": "1"}' >/dev/null
 check "and its alias live names it" 201 "$(status)"
+as_ver PUT "/functions/$versioned_id" '{"memory": 256}' >/dev/null
+check "\$LATEST given more memory since, as the version keeps its own" 200 "$(status)"
 called="$(as_ver POST "/functions/$versioned_id/invoke" '{"qualifier": "live", "input": {}}')"
 check "the alias's first call makes the version's pods, which know their version" "201 1 live 1" \
   "$(status) $(jq -r '"\(.version) \(.alias) \(.output.ran)"' <<<"$called")"
@@ -445,10 +447,11 @@ for pid in "${burst[@]}"; do wait "$pid" || true; done
 check "four calls at once through the alias scale the version up, on its own calls; \$LATEST keeps its one instance" \
   "201 201 201 201 true 1" \
   "$(cat "$work"/burst-{1,2,3,4} | paste -sd ' ') $([ "$(replicas_in_ver "fn-$versioned_id-v1")" -ge 2 ] && echo true || echo false) $(replicas_in_ver "fn-$versioned_id")"
-# Idle from here on: the scaler's run of the minute after this removes the version's objects (versions_idle).
-sql "UPDATE plans SET limits = limits || '{\"idleSeconds\": 1}' WHERE id = 'e2e-versions'"
+# Idle a minute on, in the background while the sections between run: the version's pods sampled first, at a minute's
+# fifth second, then removed by the scaler's run of the minute after the window (versions_idle).
+(sleep 65 && sql "UPDATE plans SET limits = limits || '{\"idleSeconds\": 1}' WHERE id = 'e2e-versions'") >/dev/null 2>&1 &
 }
-section_def versions section_versions backend budget=25
+section_def versions section_versions backend budget=35
 
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"
@@ -1876,9 +1879,10 @@ section_def sites_counted section_sites_counted sites budget=45
 
 section_versions_idle() {
 section "a version idle past its plan's window: its pods removed, as \$LATEST's are scaled to zero"
-# At the scaler's run of the minute after the window was cut, which the sections since have mostly waited out.
+# At the scaler's run of the minute after the window was cut, a minute after versions: the sections since have mostly
+# waited both out.
 left="" latest=""
-for _ in $(seq 1 90); do
+for _ in $(seq 1 180); do
   left="$(kubectl -n "$ver_ns" get "deployment/fn-$versioned_id-v1" "service/fn-$versioned_id-v1" "secret/fn-$versioned_id-v1-env" \
     --ignore-not-found -o name 2>/dev/null)"
   latest="$(replicas_in_ver "fn-$versioned_id")"
@@ -1889,6 +1893,9 @@ check "the version's Deployment, Service and Secret are removed" "" "$left"
 aliased="$(as_ver GET "/functions/$versioned_id/aliases/live")"
 check "\$LATEST scaled to zero; the version and its alias kept, for the next call to start again" "0 200 1" \
   "$latest $(status) $(jq -r .functionVersion <<<"$aliased")"
+check "the version's pods were sampled apart while they ran, at the memory it was published with, none warm; \$LATEST's at its own" \
+  "128 0 256" \
+  "$(q "SELECT memory_mb, min_instances FROM capacity_samples WHERE function_id = '$versioned_id' AND version = 1 LIMIT 1") $(q "SELECT memory_mb FROM capacity_samples WHERE function_id = '$versioned_id' AND version = 0 ORDER BY minute DESC LIMIT 1")"
 }
 section_def versions_idle section_versions_idle versions budget=5
 

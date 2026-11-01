@@ -1240,14 +1240,14 @@ describe('KubernetesOrchestrator', () => {
     });
   });
 
-  describe("readyInstancesByFunction and workloads: capacity samples, and each Deployment's instances", () => {
+  describe("workloads: each of FF's Deployments with its instances, for the scaler and the capacity samples", () => {
     const deployment = (namespace: string, labels: Record<string, string>, readyReplicas?: number) => ({
       metadata: { name: 'fn-x', namespace, labels },
       status: readyReplicas === undefined ? {} : { readyReplicas },
     });
     const ff = (functionId: string) => ({ 'app.kubernetes.io/managed-by': 'ff-controller', 'ff.dev/function-id': functionId });
 
-    it("lists FF's Deployments in every namespace in one call, and counts each function's ready instances", async () => {
+    it("lists FF's Deployments in every namespace in one call, with each one's ready instances", async () => {
       api.lists.set('/apis/apps/v1/deployments', [
         deployment('ff-t-aaaaaaaaaaaa', ff('f-two'), 2),
         deployment('ff-t-bbbbbbbbbbbb', ff('f-one'), 1),
@@ -1255,10 +1255,13 @@ describe('KubernetesOrchestrator', () => {
         deployment('ff-t-aaaaaaaaaaaa', ff('f-zero')), // scaled to zero: no ready count at all
       ]);
 
-      const ready = await orchestrator.readyInstancesByFunction();
-
+      expect((await orchestrator.workloads()).map(({ functionId, ready }) => [functionId, ready])).toEqual([
+        ['f-two', 2],
+        ['f-one', 1],
+        ['f-starting', 0],
+        ['f-zero', 0],
+      ]);
       expect(api.listed).toEqual([{ path: '/apis/apps/v1/deployments', selector: 'app.kubernetes.io/managed-by=ff-controller' }]);
-      expect(Object.fromEntries(ready)).toEqual({ 'f-two': 2, 'f-one': 1 });
     });
 
     it("leaves out a Deployment outside FF's tenant namespaces, or without a function ID, whatever its labels say", async () => {
@@ -1268,17 +1271,7 @@ describe('KubernetesOrchestrator', () => {
         deployment('ff-t-aaaaaaaaaaaa', ff('f-real'), 1),
       ]);
 
-      expect(Object.fromEntries(await orchestrator.readyInstancesByFunction())).toEqual({ 'f-real': 1 });
-    });
-
-    it("counts a function's versions' instances with its $LATEST's (ADR 0015)", async () => {
-      api.lists.set('/apis/apps/v1/deployments', [
-        deployment('ff-t-aaaaaaaaaaaa', { ...ff('f-versions'), 'ff.dev/version': 'latest' }, 2),
-        deployment('ff-t-aaaaaaaaaaaa', { ...ff('f-versions'), 'ff.dev/version': '3' }, 1),
-        deployment('ff-t-aaaaaaaaaaaa', { ...ff('f-versions'), 'ff.dev/version': '4' }, 1),
-      ]);
-
-      expect(Object.fromEntries(await orchestrator.readyInstancesByFunction())).toEqual({ 'f-versions': 4 });
+      expect((await orchestrator.workloads()).map((workload) => workload.functionId)).toEqual(['f-real']);
     });
 
     const replicas = (namespace: string, labels: Record<string, string>, desired: number, ready?: number) => ({

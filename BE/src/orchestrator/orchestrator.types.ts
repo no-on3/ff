@@ -184,15 +184,10 @@ export interface Orchestrator {
    * The Deployments of the function, $LATEST's and its versions', or of every
    * function without one: each with its instances, asked for and ready, from
    * one call. A function's instances count together against its maxInstances
-   * (ADR 0015), and a version's go when it is idle.
+   * (ADR 0015), and a version's go when it is idle; the capacity samples take
+   * each one's ready instances apart.
    */
   workloads(fn?: FunctionRef): Promise<WorkloadInstances[]>;
-  /**
-   * Every function with at least one ready instance, by function ID, with how
-   * many, its versions' and $LATEST's together: FF's capacity at this moment,
-   * from one call.
-   */
-  readyInstancesByFunction(): Promise<Map<string, number>>;
   /**
    * The code image each function's $LATEST pods mount, by function ID, from one
    * call: to find those whose image the registry has lost. None for a function

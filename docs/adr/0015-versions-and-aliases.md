@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-5 plan](../step-5-plan.md)'s D9, and its choices (its §9, 7), confirmed on 2026-10-31 (the [decision log](../decisions.md)'s 51 to 64); how a version runs on the cluster measured by X-01's spike the same day |
 | **Date** | 2026-10-31 |
-| **Implementation** | Step-5 plan: decision D9; tasks X-05 (versions and aliases in the backend) and X-06 (in the console, `ff` and the admin app), with X-09 and X-10 for Lambda's operations of them. As built: X-05's scaler and idle sweep (below), decision 2 changed |
+| **Implementation** | Step-5 plan: decision D9; tasks X-05 (versions and aliases in the backend) and X-06 (in the console, `ff` and the admin app), with X-09 and X-10 for Lambda's operations of them. As built: X-05's scaler, idle sweep and capacity samples (below), decision 2 changed |
 | **Related** | [ADR 0003](0003-code-delivery.md) (one code image per package, which a version names by digest); [ADR 0014](0014-lambda-api.md) (Lambda's API); [ADR 0016](0016-sam-templates.md) (SAM's `AutoPublishAlias`); the spike, [`hack/spikes/versions`](../../hack/spikes/versions/README.md) |
 
 ## Context
@@ -51,9 +51,9 @@ An alias names a version, or `$LATEST`, and at most one other version with a sha
 
 A version is deleted only when no alias names it; deleting the function deletes its versions and aliases, their Deployments, Services and Secrets. The packages versions name are kept, and count against the account's code storage.
 
-### As built (X-05): the scaler and the idle sweep
+### As built (X-05): the scaler, the idle sweep and the samples
 
-Decision 2 changed: an idle version isn't scaled to zero. After its plan's idle window, and at once when its account is suspended or closed, its Deployment, Service and Secret are removed, so that a function's versions that no one calls hold nothing in the cluster, however many, where each would keep a Deployment and a Service at zero. Its next call makes them again from the version's record: the cold start its first call costs. Decision 4 as built: `$LATEST` and each version called are scaled apart, each on its own calls, up to `maxInstances` less what the function's others ask for, read in one list of the function's Deployments; one that has calls keeps one instance even when the others hold all of `maxInstances`, and the account's quota caps the pods as before.
+Decision 2 changed: an idle version isn't scaled to zero. After its plan's idle window, and at once when its account is suspended or closed, its Deployment, Service and Secret are removed, so that a function's versions that no one calls hold nothing in the cluster, however many, where each would keep a Deployment and a Service at zero. Its next call makes them again from the version's record: the cold start its first call costs. Decision 4 as built: `$LATEST` and each version called are scaled apart, each on its own calls, up to `maxInstances` less what the function's others ask for, read in one list of the function's Deployments; one that has calls keeps one instance even when the others hold all of `maxInstances`, and the account's quota caps the pods as before. The capacity samples take each Deployment apart, a row each minute with its version (0 for `$LATEST`), at the memory it runs with, a version's as published, `minInstances` `$LATEST`'s alone: the bill prices a version's instances at its own memory, never as provisioned time, and the metrics of the calls a version ran have its pods' instances.
 
 ## Consequences
 

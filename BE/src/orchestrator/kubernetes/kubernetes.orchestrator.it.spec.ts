@@ -256,11 +256,13 @@ export async function handler(_event: unknown, context: { functionVersion: strin
         expect((await orchestrator.invoke(latest, {})).output).toEqual({ version: '$LATEST', code: 'b' });
         expect((await orchestrator.invoke(version1, {})).output).toEqual({ version: '1', code: 'a' });
       }
-      await eventually(async () => (await orchestrator.readyInstancesByFunction()).get(latest.id) === 2, 90_000);
+      // The function's ready instances, its Deployments' together.
+      const ready = async () => (await orchestrator.workloads(latest)).reduce((sum, workload) => sum + workload.ready, 0);
+      await eventually(async () => (await ready()) === 2, 90_000);
       // The version scales on its own calls, its function's Deployments listed apart, each with its instances.
       const byVersion = (a: { version?: number }, b: { version?: number }) => (a.version ?? 0) - (b.version ?? 0);
       await orchestrator.scale(version1, 2);
-      await eventually(async () => (await orchestrator.readyInstancesByFunction()).get(latest.id) === 3, 90_000);
+      await eventually(async () => (await ready()) === 3, 90_000);
       expect((await orchestrator.workloads(latest)).sort(byVersion)).toEqual([
         { functionId: latest.id, version: undefined, desired: 1, ready: 1 },
         { functionId: latest.id, version: 1, desired: 2, ready: 2 },
@@ -268,7 +270,7 @@ export async function handler(_event: unknown, context: { functionVersion: strin
 
       await orchestrator.removeVersion(version1);
       expect(await client.get(paths.apps(ns, 'deployments', `${functionResourceName(latest.id)}-v1`))).toBeNull();
-      await eventually(async () => (await orchestrator.readyInstancesByFunction()).get(latest.id) === 1, 90_000);
+      await eventually(async () => (await ready()) === 1, 90_000);
       expect(await orchestrator.workloads(latest)).toEqual([{ functionId: latest.id, version: undefined, desired: 1, ready: 1 }]);
       expect((await orchestrator.invoke(latest, {})).output).toEqual({ version: '$LATEST', code: 'b' });
     } finally {
@@ -277,18 +279,19 @@ export async function handler(_event: unknown, context: { functionVersion: strin
     expect(await client.get(servicePath)).toBeNull();
   });
 
-  it("counts the function's ready instances in one cluster-wide list, at 1, 2 and 0 replicas (P-21)", async () => {
-    const counted = async () => (await orchestrator.readyInstancesByFunction()).get(fn.id);
-    expect(await counted()).toBe(1);
+  it("lists the function's Deployment in one cluster-wide list, as the capacity samples read it, at 1, 2 and 0 replicas", async () => {
+    const counted = async () => (await orchestrator.workloads()).find((workload) => workload.functionId === fn.id);
+    expect(await counted()).toEqual({ functionId: fn.id, version: undefined, desired: 1, ready: 1 });
 
     await orchestrator.scale(fn, 2);
-    await eventually(async () => (await counted()) === 2, 90_000);
+    await eventually(async () => (await counted())?.ready === 2, 90_000);
 
     await orchestrator.scale(fn, 0);
-    await eventually(async () => (await counted()) === undefined, 90_000); // no ready instance: left out
+    await eventually(async () => (await counted())?.ready === 0, 90_000);
+    expect((await counted())?.desired).toBe(0);
 
     await orchestrator.scale(fn, 1); // as the next test expects
-    await eventually(async () => (await counted()) === 1, 90_000);
+    await eventually(async () => (await counted())?.ready === 1, 90_000);
   });
 
   it('scales to zero and cold-starts on the next invocation', async () => {

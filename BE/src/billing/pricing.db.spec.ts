@@ -40,9 +40,11 @@ run('price books and pricing (L2, P-30)', () => {
        VALUES (gen_random_uuid(), $1, $1, $2, $3, 'fn', 'nodejs', $4, $5, $6::numeric, $6::int, $7)`,
       [at, accountId, functionId, fields.memoryMb, fields.minInstances ?? 0, fields.billedMs, fields.status ?? 'success'],
     );
-  const sample = (accountId: string, functionId: string, minute: string, instances: number, minInstances: number, memoryMb: number) =>
-    query('INSERT INTO capacity_samples (function_id, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, $3, $4, $5, $6)', [
+  /** A minute's sample of a function's $LATEST, or of its version's Deployment. */
+  const sample = (accountId: string, functionId: string, minute: string, instances: number, minInstances: number, memoryMb: number, version = 0) =>
+    query('INSERT INTO capacity_samples (function_id, version, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, $3, $4, $5, $6, $7)', [
       functionId,
+      version,
       minute,
       accountId,
       instances,
@@ -145,7 +147,7 @@ run('price books and pricing (L2, P-30)', () => {
     expect(month?.pricedFrom.toISOString()).toBe(`${Y}-01-01T00:00:00.000Z`);
   });
 
-  it("applies the book's minimum billed duration to each call, and prices instance time no call used", async () => {
+  it("applies the book's minimum billed duration to each call, and prices instance time no call used, a version's at its own memory", async () => {
     await addBook(`${Y}-03-01T00:00:00Z`, { minimumBilledMs: 100, idleInstanceGbSecond: '0.001', monthlyPlanFee: '2.500' });
     const accountId = await account();
     const short = fn();
@@ -158,15 +160,19 @@ run('price books and pricing (L2, P-30)', () => {
         [accountId, short],
       );
     }
-    // 10 minutes of 2 instances at 1,024 MB, none of them minInstances: 1,200 GB-s, of which calls used 100.
-    for (let minute = 0; minute < 10; minute++) await sample(accountId, short, `${Y}-03-10T11:${String(minute).padStart(2, '0')}:00Z`, 2, 0, 1024);
+    // 10 minutes of 2 instances at 1,024 MB, none of them minInstances: 1,200 GB-s, of which calls used 100. And version 1's
+    // Deployment beside them, sampled apart at the 2,048 MB it was published with: 1,200 GB-s more.
+    for (let minute = 0; minute < 10; minute++) {
+      await sample(accountId, short, `${Y}-03-10T11:${String(minute).padStart(2, '0')}:00Z`, 2, 0, 1024);
+      await sample(accountId, short, `${Y}-03-10T11:${String(minute).padStart(2, '0')}:00Z`, 1, 0, 2048, 1);
+    }
 
     const month = await pricing.estimate(accountId, `${Y}-03`);
 
     const cost = month?.functions.get(short);
     expect(cost?.duration.toString()).toBe(d('100').times(d(FIRST_PRICE_BOOK.prices.gbSecond[0].price)).toString());
-    expect(cost?.idle.toString()).toBe(d('1100').times(d('0.001')).toString());
-    expect([month?.monthlyFee.toString(), month?.total.toString()]).toEqual(['2.5', d('1.1').plus(d('2.5')).toString()]);
+    expect(cost?.idle.toString()).toBe(d('2300').times(d('0.001')).toString());
+    expect([month?.monthlyFee.toString(), month?.total.toString()]).toEqual(['2.5', d('2.3').plus(d('2.5')).toString()]);
   });
 
   it('lists the books valid in a month: the one at its start, and those that start in it', async () => {

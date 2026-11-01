@@ -86,6 +86,7 @@ const AWS_ESTIMATE_PRICES = migrationNames.find((name) => name.startsWith('AwsEs
 const FUNCTION_VERSIONS = migrationNames.find((name) => name.startsWith('FunctionVersions')) as string;
 const FUNCTION_ALIASES = migrationNames.find((name) => name.startsWith('FunctionAliases')) as string;
 const CODE_STORAGE = migrationNames.find((name) => name.startsWith('CodeStorage')) as string;
+const INVOCATION_VERSIONS = migrationNames.find((name) => name.startsWith('InvocationVersions')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -961,6 +962,45 @@ run('database schema (L2, real PostgreSQL)', () => {
       expect(await dataSource.query(`SELECT count(*)::int AS n FROM usage_records WHERE request_id = $1`, [requestId])).toEqual([{ n: 1 }]);
       await expect(ran()).rejects.toThrow('column i.version does not exist');
       await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the capacity-versions migration keeps the samples before as $LATEST's, samples a version's Deployment beside them, and refuses to revert once one was", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, INVOCATION_VERSIONS);
+      const fn = '6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b'; // a sample has no foreign key: it outlives its function
+      const sampleOf = (version: number, instances: number, memoryMb: number) =>
+        dataSource.query(
+          `INSERT INTO capacity_samples (function_id, version, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, date_trunc('minute', now()), $3, $4, 0, $5)`,
+          [fn, version, ACCOUNT, instances, memoryMb],
+        );
+      await dataSource.query(
+        `INSERT INTO capacity_samples (function_id, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, date_trunc('minute', now()), $2, 2, 1, 256)`,
+        [fn, ACCOUNT],
+      );
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const samples = () => dataSource.query(`SELECT version, instances, memory_mb FROM capacity_samples WHERE function_id = $1 ORDER BY version`, [fn]);
+      expect(await samples()).toEqual([{ version: 0, instances: 2, memory_mb: 256 }]);
+      // While only $LATEST's Deployments were sampled, it reverts.
+      await migrateDownTo(dataSource, INVOCATION_VERSIONS);
+      await expect(samples()).rejects.toThrow('column "version" does not exist');
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      // A version's Deployment the same minute: a row of its own, at its memory, append-only as the others.
+      await sampleOf(1, 3, 1024);
+      await expect(sampleOf(1, 4, 1024)).rejects.toThrow('duplicate key value violates unique constraint "capacity_samples_');
+      expect(await samples()).toEqual([
+        { version: 0, instances: 2, memory_mb: 256 },
+        { version: 1, instances: 3, memory_mb: 1024 },
+      ]);
+      await expect(dataSource.query(`UPDATE capacity_samples SET instances = 1 WHERE function_id = $1 AND version = 1`, [fn])).rejects.toThrow('append-only: UPDATE refused');
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow(
+        "1 capacity sample(s) of versions were taken: reverting would lose them, or count them at $LATEST's memory",
+      );
+      expect(await samples()).toHaveLength(2);
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });

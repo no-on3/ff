@@ -57,8 +57,15 @@ run('metrics (L2)', () => {
     );
     n++;
   }
-  const sample = (f: Function, minute: string, instances: number) =>
-    query(`INSERT INTO capacity_samples (function_id, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, $3, $4, 0, 128)`, [f.id, minute, f.accountId, instances]);
+  /** A minute's sample of the function's $LATEST, or of its version. */
+  const sample = (f: Function, minute: string, instances: number, version = 0) =>
+    query(`INSERT INTO capacity_samples (function_id, version, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, $3, $4, $5, 0, 128)`, [
+      f.id,
+      version,
+      minute,
+      f.accountId,
+      instances,
+    ]);
 
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
@@ -376,7 +383,7 @@ run('metrics (L2)', () => {
     expect(view.timestamps).toEqual([new Date('2026-10-01T08:00:00Z'), new Date('2026-10-01T09:00:00Z')]);
   });
 
-  it("gives some of a function's calls, by what they named and what ran them, as CloudWatch's Resource and ExecutedVersion: their records' series alone", async () => {
+  it("gives some of a function's calls, by what they named and what ran them, as CloudWatch's Resource and ExecutedVersion: their records' series, and by what ran them alone their pods' instances", async () => {
     const v = await fn(B, 'versioned');
     const ran = (version?: number, alias?: string) => ({ version, alias });
     // The first period: a call of $LATEST, one through an alias of $LATEST, one naming version 1 (a cold start that failed),
@@ -387,9 +394,12 @@ run('metrics (L2)', () => {
     await record(v, '2026-10-01T10:03:00Z', 'success', 40, null, ran(1, 'live'));
     await record(v, '2026-10-01T10:06:00Z', 'success', 50, null, ran(2, 'live'));
     await record(v, '2026-10-01T10:07:00Z', 'throttled', 0, null, ran(2, 'live'));
-    // The rate limit's refusals, an instance and calls kept to run later: none names a version.
+    // The rate limit's refusals and calls kept to run later: none names a version.
     await query(`INSERT INTO rate_limited_invocations (function_id, minute, account_id, count) VALUES ($1, '2026-10-01T10:03:00Z', $2, 4)`, [v.id, B]);
+    // $LATEST's two instances, and version 1's three, its Deployment sampled apart; version 2's one the minute after.
     await sample(v, '2026-10-01T10:00:00Z', 2);
+    await sample(v, '2026-10-01T10:00:00Z', 3, 1);
+    await sample(v, '2026-10-01T10:06:00Z', 1, 2);
     const calls = async (filter: { resource?: string; executedVersion?: string }) => {
       const { metrics: m } = await metrics.forCalls(B, v.id, WINDOW, filter);
       return { Invocations: m.Invocations, Errors: m.Errors, Throttles: m.Throttles, ColdStarts: m.ColdStarts, Average: m.Duration.Average };
@@ -408,13 +418,21 @@ run('metrics (L2)', () => {
     expect((await calls({ resource: '1', executedVersion: '2' })).Invocations).toEqual([0, 0, 0]);
     expect((await calls({ resource: 'gone' })).Invocations).toEqual([0, 0, 0]);
 
-    // Only the series a record measures: the instances and the rate limit's refusals are the whole view's.
+    // By what ran them alone, the instances of the pods that did; by what they named, none, as a version's pods run every
+    // alias's calls. The rate limit's refusals are the whole view's, and so are all its instances together.
+    const instances = async (filter: { resource?: string; executedVersion?: string }) => (await metrics.forCalls(B, v.id, WINDOW, filter)).metrics.Instances?.Maximum;
+    expect(await instances({ executedVersion: '$LATEST' })).toEqual([2, 0, 0]);
+    expect(await instances({ executedVersion: '1' })).toEqual([3, 0, 0]);
+    expect(await instances({ executedVersion: '2' })).toEqual([0, 1, 0]);
+    expect(await instances({ executedVersion: '3' })).toEqual([0, 0, 0]); // never sampled: no instance
     expect(Object.keys((await metrics.forCalls(B, v.id, WINDOW, { resource: 'live' })).metrics)).toEqual(['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration']);
+    expect(await instances({ resource: '1' })).toBeUndefined();
+    expect(await instances({ resource: 'live', executedVersion: '1' })).toBeUndefined();
     const whole = await metrics.forFunction(B, v.id, WINDOW);
     expect([whole.metrics.Invocations, whole.metrics.Throttles, whole.metrics.Instances.Maximum]).toEqual([
       [4, 1, 0],
       [4, 1, 0],
-      [2, 0, 0],
+      [5, 1, 0],
     ]);
     await expect(metrics.forCalls(A, v.id, WINDOW, { resource: 'live' })).rejects.toThrow(new NotFoundException(`Function with ID ${v.id} not found`));
   });

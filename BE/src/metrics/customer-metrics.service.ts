@@ -25,6 +25,7 @@ import {
 } from './customer-metrics';
 import { functionNotFound } from '../functions/function-not-found';
 import { CallFilter, KeptCalls, callsKept } from '../functions/qualifier';
+import { LATEST_SAMPLED } from '../usage/capacity-sample.entity';
 
 /** A call that ran: measured by the runtime, and so in the duration's statistics. */
 const RAN = "('success', 'error', 'timeout')";
@@ -40,6 +41,14 @@ interface Scope {
 /** A function's scope. */
 function functionScope(accountId: string, functionId: string): Scope {
   return { where: 't."account_id" = $4 AND t."function_id" = $5', parameters: [accountId, functionId] };
+}
+
+/** A function's Deployment's capacity samples: $LATEST's, or a version's. */
+function deploymentScope(accountId: string, functionId: string, version: number | null): Scope {
+  const scope = functionScope(accountId, functionId);
+  scope.parameters.push(version ?? LATEST_SAMPLED);
+  scope.where += ` AND t."version" = $${3 + scope.parameters.length}`;
+  return scope;
 }
 
 /** A function's calls whose records hold what `kept` says, in a table with their version and alias. */
@@ -77,13 +86,18 @@ export class CustomerMetricsService {
   /**
    * Some of a function's calls', by what they named and what ran them, as
    * CloudWatch's Resource and ExecutedVersion dimensions pick Lambda's: the
-   * series their usage records measure (CallMetricsView). A version or an
+   * series their usage records measure, and, by what ran them alone, the
+   * instances of the Deployment that did (CallMetricsView). A version or an
    * alias the function no longer has still has its calls.
    */
   async forCalls(accountId: string, functionId: string, window: MetricsWindow, filter: CallFilter): Promise<CallMetricsView> {
     await this.assertFunction(accountId, functionId);
     const kept = callsKept(filter);
-    return callMetricsView(window, kept ? await this.calls(window, callsScope(accountId, functionId, kept)) : []);
+    if (!kept) return callMetricsView(window, []);
+    const rows = await this.calls(window, callsScope(accountId, functionId, kept));
+    // By what ran them alone: what they named keeps calls of pods that run others too.
+    const ranBy = filter.resource === undefined ? kept.version : undefined;
+    return callMetricsView(window, rows, ranBy === undefined ? undefined : await this.instances(window, deploymentScope(accountId, functionId, ranBy)));
   }
 
   /** Another account's function is not found. */
