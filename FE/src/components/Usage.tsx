@@ -6,6 +6,7 @@ import { MonthlyUsage, usageApi } from '../services/api';
 import { useSession } from '../session/session';
 import { formatSize } from '../lib/databases';
 import { KeyNumber, KeyNumbers } from './KeyNumbers';
+import AwsEstimate from './AwsEstimate';
 import { saveFile } from '../lib/download';
 
 /** A name in one of the page's tables: a link to its page, or the name marked deleted, its usage kept. */
@@ -20,7 +21,10 @@ const ResourceName: React.FC<{ name: string; deleted: boolean; to: string }> = (
     </Link>
   );
 
-/** The account's usage, this month or last, per function and per resource, with its estimated cost: every member reads it. */
+/**
+ * The account's usage, this month or last, per function and per resource, with its estimated cost; and the last three
+ * months at AWS's prices, an estimate: every member reads it.
+ */
 const Usage: React.FC = () => {
   const { account } = useSession();
   const months = useMemo(() => usageMonths(new Date()), []);
@@ -319,6 +323,8 @@ const Usage: React.FC = () => {
           </button>
         </>
       )}
+
+      <AwsEstimate accountId={account.id} />
     </div>
   );
 };

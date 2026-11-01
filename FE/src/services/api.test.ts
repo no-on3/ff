@@ -1,7 +1,7 @@
 import { AxiosError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { config } from '../config';
-import api, { accountsApi, apiKeysApi, functionsApi, setApiAccount, setApiAuth } from './api';
+import api, { accountsApi, apiKeysApi, functionsApi, setApiAccount, setApiAuth, usageApi } from './api';
 
 // The real client and its interceptors, with the network replaced: each request is recorded and answered.
 const sent: InternalAxiosRequestConfig[] = [];
@@ -87,6 +87,16 @@ describe('the API client', () => {
 
     await expect(functionsApi.getAllFunctions()).rejects.toThrow('Request failed with status code 401');
     expect(onUnauthorized).toHaveBeenCalledWith('The token has expired');
+  });
+
+  it("asks for the estimate at AWS's prices with the lines left out, and with none, no without", async () => {
+    await usageApi.getAwsEstimate(['coldStarts', 'natGateway']);
+    await usageApi.getAwsEstimate([]);
+
+    expect(sent.map((request) => [request.url, request.params])).toEqual([
+      ['/usage/aws-estimate', { without: 'coldStarts,natGateway' }],
+      ['/usage/aws-estimate', {}],
+    ]);
   });
 
   it('leaves any other refusal to the page: a 403 keeps the session', async () => {

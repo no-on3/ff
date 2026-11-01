@@ -5,6 +5,7 @@ import scopesSource from '../../BE/src/api-keys/api-key-format.ts?raw';
 import planLimitsSource from '../../BE/src/plans/plan-limits.ts?raw';
 import invocationSource from '../../BE/src/functions/entities/function-invocation.entity.ts?raw';
 import usageDtoSource from '../../BE/src/usage/usage.dto.ts?raw';
+import awsEstimateSource from '../../BE/src/billing/aws-estimate.ts?raw';
 import billingDtoSource from '../../BE/src/billing/billing.dto.ts?raw';
 import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw';
 import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
@@ -113,6 +114,10 @@ import {
   TRANSFER_FIELDS,
   USAGE_AMOUNTS,
   USAGE_ESTIMATE_FIELDS,
+  AWS_ESTIMATE_FIELDS,
+  AWS_ESTIMATE_LINE_FIELDS,
+  AWS_ESTIMATE_MONTH_FIELDS,
+  AWS_EXTRA_LINES,
 } from './services/api';
 
 // What the console shares with the API and the development realm, read from
@@ -248,6 +253,16 @@ describe("the usage of a month's estimated cost", () => {
 
     expect(dtoFields(usageDtoSource, 'export class UsageEstimateView {')).toEqual([...USAGE_ESTIMATE_FIELDS]);
     expect(functionView.slice(0, functionView.indexOf('\n}'))).toMatch(/^ {2}cost: string \| null;$/m);
+  });
+});
+
+describe('the estimate at AWS prices', () => {
+  it("has the API's fields, a month's and a line's, and the lines of what AWS bills that FF doesn't, which the page can leave out", () => {
+    expect(dtoFields(usageDtoSource, 'export class AwsEstimateView {')).toEqual([...AWS_ESTIMATE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class AwsEstimateMonthView {')).toEqual([...AWS_ESTIMATE_MONTH_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class AwsEstimateLineView {')).toEqual([...AWS_ESTIMATE_LINE_FIELDS]);
+    const extra = /export const EXTRA_LINES = \[([^\]]*)\]/.exec(awsEstimateSource)?.[1] ?? '';
+    expect([...extra.matchAll(/'(\w+)'/g)].map((match) => match[1])).toEqual([...AWS_EXTRA_LINES]);
   });
 });
 

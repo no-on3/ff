@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { UsageEstimate } from '../services/api';
-import { costText, estimateLines, formatBilledDuration, formatExact, formatMoney, monthLabel, notBilled, pricedFromNote, usageCsvName, usageMonths } from './usage';
+import type { AwsEstimate, AwsEstimateLine, UsageEstimate } from '../services/api';
+import { awsEstimateTable, awsPricesNote, costText, estimateLines, formatBilledDuration, formatExact, formatMoney, monthLabel, notBilled, pricedFromNote, toggleLine, usageCsvName, usageMonths } from './usage';
 
 describe('usageMonths', () => {
   it('names this month and last month by the UTC calendar, as the API counts them', () => {
@@ -104,5 +104,83 @@ describe('the estimated cost', () => {
       null,
       'Priced from 2026-10-16 (UTC): no price applies before.',
     ]);
+  });
+});
+
+describe('the estimate at AWS prices', () => {
+  const line = (name: string, label: string, usd: string, assumption: string | null = null): AwsEstimateLine => ({
+    line: name,
+    label,
+    usd,
+    amount: '0.000',
+    extra: assumption !== null,
+    leftOut: name === 'natGateway',
+    assumption,
+  });
+  const estimate: AwsEstimate = {
+    currency: 'TND',
+    usdRate: '3.0080',
+    usdRateDate: '2026-10-14',
+    region: 'us-east-1',
+    pricesReadOn: ['2026-10-17', '2026-10-31'],
+    priceBook: 'book-1',
+    months: [
+      {
+        month: '2026-10',
+        until: null,
+        requests: 50,
+        lines: [
+          line('functions', 'AWS Lambda: requests and duration', '0.83'),
+          line('cacheNodes', 'ElastiCache for Valkey: a cache.t4g.micro for each cache', '0.00', "The smallest node, for each cache's hours"),
+          line('natGateway', 'A NAT gateway', '37.20', 'One, for each hour the account had a database or a cache'),
+        ],
+        totalUsd: '0.83',
+        total: '2.497',
+        ffTotal: '4.901',
+      },
+      {
+        month: '2026-11',
+        until: '2026-11-01T10:00:00.000Z',
+        requests: 0,
+        lines: [
+          line('functions', 'AWS Lambda: requests and duration', '1234.50'),
+          line('cacheNodes', 'ElastiCache for Valkey: a cache.t4g.micro for each cache', '1.28', "The smallest node, for each cache's hours"),
+          line('natGateway', 'A NAT gateway', '5.00', 'One, for each hour the account had a database or a cache'),
+        ],
+        totalUsd: '1235.78',
+        total: '3717.226',
+        ffTotal: null,
+      },
+    ],
+  };
+
+  it('has a column a month, this one so far, each line in US$, then the totals and the months at FF prices', () => {
+    const { months, rows } = awsEstimateTable(estimate);
+
+    expect(months).toEqual(['October 2026', 'November 2026, so far']);
+    expect(rows.map(({ label, extra, leftOut, total, cells }) => [label, extra, leftOut, total, cells])).toEqual([
+      ['AWS Lambda: requests and duration', null, false, false, ['0.83', '1,234.50']],
+      ['ElastiCache for Valkey: a cache.t4g.micro for each cache', 'cacheNodes', false, false, ['0.00', '1.28']],
+      ['A NAT gateway', 'natGateway', true, false, ['37.20', '5.00']],
+      ['Total, in US$', null, false, true, ['0.83', '1,235.78']],
+      ['Total, in TND', null, false, true, ['2.497', '3,717.226']],
+      ["At FF's prices, in TND", null, false, true, ['4.901', '–']],
+    ]);
+  });
+
+  it('says where its prices come from, when FF read them, at which rate, and that it is an estimate', () => {
+    expect(awsPricesNote(estimate)).toBe(
+      "At AWS's US$ list prices in us-east-1, as FF read them from 2026-10-17 to 2026-10-31, with the free tier AWS gives every account every month; " +
+        'in TND at 3.0080 TND a US$, the rate of 2026-10-14. An estimate, not a quote: AWS bills what it measures.',
+    );
+    expect(awsPricesNote({ ...estimate, pricesReadOn: ['2026-10-31', '2026-10-31'], usdRateDate: null })).toContain(
+      'as FF read them on 2026-10-31, with the free tier AWS gives every account every month; in TND at 3.0080 TND a US$. An estimate',
+    );
+  });
+
+  it("leaves a line out or counts it again, in the API's order whatever the order of the clicks", () => {
+    expect(toggleLine([], 'natGateway')).toEqual(['natGateway']);
+    expect(toggleLine(['natGateway'], 'coldStarts')).toEqual(['coldStarts', 'natGateway']);
+    expect(toggleLine(['coldStarts', 'natGateway'], 'natGateway')).toEqual(['coldStarts']);
   });
 });

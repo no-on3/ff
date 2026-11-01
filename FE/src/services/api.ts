@@ -533,6 +533,63 @@ export interface MonthlyUsage {
   estimate: UsageEstimate | null;
 }
 
+/** What AWS bills that FF doesn't, as GET /usage/aws-estimate names its lines, which `without` leaves out: contract.test.ts checks them against the backend's. */
+export const AWS_EXTRA_LINES = ['coldStarts', 'databaseInstances', 'cacheNodes', 'dataOut', 'logs', 'cloudFront', 'natGateway'] as const;
+export type AwsExtraLine = (typeof AWS_EXTRA_LINES)[number];
+
+/** A line of a month at AWS's prices, as the API's AwsEstimateLineView names its fields: contract.test.ts checks them. */
+export const AWS_ESTIMATE_LINE_FIELDS = ['line', 'label', 'usd', 'amount', 'extra', 'leftOut', 'assumption'] as const satisfies ReadonlyArray<keyof AwsEstimateLine>;
+export interface AwsEstimateLine {
+  /** One of FF's counts (functions, databaseStorage, buckets, queues, mail) or of what AWS bills that FF doesn't. */
+  line: string;
+  /** What it is, as AWS bills it. */
+  label: string;
+  /** In US$, to the cent. */
+  usd: string;
+  /** In the price book's currency, at its US$ rate. */
+  amount: string;
+  /** Of what AWS bills that FF doesn't: `without` can leave it out. */
+  extra: boolean;
+  leftOut: boolean;
+  /** What a line of what AWS bills that FF doesn't assumes; null for FF's own counts. */
+  assumption: string | null;
+}
+
+/** A month at AWS's prices, as the API's AwsEstimateMonthView names its fields: contract.test.ts checks them. */
+export const AWS_ESTIMATE_MONTH_FIELDS = ['month', 'until', 'requests', 'lines', 'totalUsd', 'total', 'ffTotal'] as const satisfies ReadonlyArray<keyof AwsEstimateMonth>;
+export interface AwsEstimateMonth {
+  month: string;
+  /** This month's: up to when; null for a month that is over. */
+  until: string | null;
+  /** The calls billed, as AWS Lambda bills them. */
+  requests: number;
+  /** FF's counts at AWS's prices, then what AWS bills that FF doesn't. */
+  lines: AwsEstimateLine[];
+  /** Every line not left out, in US$. */
+  totalUsd: string;
+  /** The same in the price book's currency. */
+  total: string;
+  /** The same month at FF's prices; null without a price book for it. */
+  ffTotal: string | null;
+}
+
+/** GET /usage/aws-estimate: the last months at AWS's prices, an estimate, as the API's AwsEstimateView names its fields: contract.test.ts checks them. */
+export const AWS_ESTIMATE_FIELDS = ['currency', 'usdRate', 'usdRateDate', 'region', 'pricesReadOn', 'priceBook', 'months'] as const satisfies ReadonlyArray<keyof AwsEstimate>;
+export interface AwsEstimate {
+  /** The currency of every amount but the US$ ones: the price book's. */
+  currency: string;
+  /** The book's US$ rate: the currency's units per US$. */
+  usdRate: string;
+  usdRateDate: string | null;
+  /** AWS's region whose prices these are. */
+  region: string;
+  /** The first and the last day FF read AWS's prices on. */
+  pricesReadOn: string[];
+  priceBook: string;
+  /** Oldest first; this month, so far, last. */
+  months: AwsEstimateMonth[];
+}
+
 export const usageApi = {
   /** `month`: YYYY-MM, by the UTC calendar. */
   getMonth: (month: string) => api.get<MonthlyUsage>('/usage', { params: { month } }),
@@ -540,6 +597,10 @@ export const usageApi = {
   /** The same month as CSV, for a spreadsheet. */
   getMonthCsv: (month: string) =>
     api.get<string>('/usage', { params: { month }, headers: { Accept: 'text/csv' }, responseType: 'text' }),
+
+  /** The last three months at AWS's prices, an estimate, the lines of what AWS bills that FF doesn't in `without` left out of the totals. */
+  getAwsEstimate: (without: readonly AwsExtraLine[]) =>
+    api.get<AwsEstimate>('/usage/aws-estimate', { params: without.length > 0 ? { without: without.join(',') } : {} }),
 };
 
 /**

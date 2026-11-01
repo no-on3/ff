@@ -25,8 +25,8 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 ### Step 5: the way out
 
 **51. The order: the export kit first,** with the cost estimate and `ff doctor`, then versions and aliases, keys, Lambda's API, Terraform, SAM. ✅ Your answer: as recommended. The export only reads FF's API as it is, so the promise is kept soonest with the least risk; Lambda's API comes after the versions it must translate.
-- **Changed already:** nothing yet.
-- **Still to change:** X-02 to X-13, in that order.
+- **Changed already:** X-02, the export kit, and X-03, the cost estimate at AWS's prices, done by 1 November.
+- **Still to change:** X-04 to X-13, in that order.
 
 **52. Lambda's API: the 41 operations that AWS's CLI, its SDKs, Terraform's provider and SAM's resources call,** every other one answering a clear "later" in Lambda's shape, which no client retries. ✅ Your answer: as recommended. The same rule as S3's, SQS's and SES's front doors.
 - **Still to change:** X-01's spike confirms the list; X-09 and X-10 build it.
@@ -59,7 +59,8 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 - **Still to change:** nothing in this step.
 
 **62. The cost estimate counts what AWS bills that FF doesn't:** an RDS instance for each database, an ElastiCache node for each cache, cold starts, data out, logs, CloudFront, a NAT gateway, each line with its assumption and a way to leave it out. ✅ Your answer: as recommended. Without them the estimate is far too low for any app with a database.
-- **Still to change:** X-03.
+- **Changed already:** X-03: those lines' prices in the books (`1cfcc8b`); `GET /usage/aws-estimate`, each line with what it assumes, `without` leaving it out of the totals (`2df7b6c`); `ff usage --aws --without` and the export's `cost-estimate.md` (`f5783f2`); and the console's Usage page, a box a line (this commit).
+- **Still to change:** nothing.
 
 **63. The way out is checked offline in every run** (`sam validate --lint`, cfn-lint, `tofu validate`, Moto), **and on a real AWS account once a month once you have one.** ✅ Your answer: as recommended. Until then the docs say the export is checked offline.
 - **Still to change:** X-02, X-15 and T-10.
