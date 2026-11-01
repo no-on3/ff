@@ -31,7 +31,7 @@ import { CALL_FIELDS, CALL_HIT_FIELDS, DOMAIN_FIELDS, FUNCTION_HIT_FIELDS, FUNCT
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
 import { ACCOUNT_EMAIL_FIELDS, EMAIL_CHANGE_FIELDS, ENFORCEMENT } from './lib/email';
 import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
-import { OVERVIEW_FIELDS } from './lib/overview';
+import { OVERVIEW_FIELDS, OVERVIEW_INVOICE_FIELDS } from './lib/overview';
 import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
 import { LIMIT_FIELDS } from './lib/plans';
 import { ESTIMATE_SKUS, SKUS, multiplyDecimals } from './lib/prices';
@@ -230,6 +230,7 @@ describe('credit grants and the account page\'s credit (P-74)', () => {
 
   it("have the API's overview fields, the accounts' statuses among them", () => {
     expect(fieldsOf(adminStatsDtoSource, 'export class OverviewView {')).toEqual([...OVERVIEW_FIELDS]);
+    expect(fieldsOf(adminStatsDtoSource, 'export class OverviewInvoices {')).toEqual([...OVERVIEW_INVOICE_FIELDS]);
     expect(fieldsOf(adminStatsDtoSource, 'export class OverviewCapacityDay {')).toEqual(['day', 'reservedGbS', 'provisionedGbS', 'billedGbS', 'requests']);
     expect(adminStatsDtoSource).toContain('byStatus: Record<AccountStatus, number>;');
   });

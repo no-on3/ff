@@ -372,6 +372,7 @@ transfer() { jq -cn --arg reference "$typed" --arg received "$1" --arg withheld 
 
 section_stack() {
 section "the stack: its database and object storage, Keycloak and Mailpit, the cluster, customers' database, cache and mail servers"
+e2e_within_one_month 8
 e2e_dependencies keycloak mailpit
 e2e_cluster
 # Customers' databases (ADR 0008): the suite's own server, on 10.199.2.0/24, which no other run uses.
@@ -2264,8 +2265,9 @@ check "today's calls, as the usage records count them" \
 check "the credit FF owes, as the wallets hold it, to the millime" \
   "$(sql_value "SELECT to_char(coalesce(sum(greatest(balance, 0)), 0) / 1000.0, 'FM999999990.000') FROM (SELECT sum(e.amount_minor) AS balance FROM ledger_accounts a LEFT JOIN ledger_entries e ON e.ledger_account_id = a.id WHERE a.type = 'wallet' AND a.currency = 'TND' GROUP BY a.id) w")" \
   "$(jq -r '.money[] | select(.currency == "TND") | .balances.owedByFF' <<<"$overview")"
-check "the invoices issued this month, the one above among them" \
-  "$(sql_value "SELECT count(*) FROM invoices WHERE kind = 'invoice' AND issued_on >= date_trunc('month', now() AT TIME ZONE 'UTC')::date")" "$(jq .invoices.issued <<<"$overview")"
+check "the invoices issued this month in Tunisia, where they are dated, the one above among them" \
+  "$(sql_value "SELECT count(*) FROM invoices WHERE kind = 'invoice' AND issued_on >= date_trunc('month', now() AT TIME ZONE 'Africa/Tunis')::date") $(TZ=Africa/Tunis date +%Y-%m)" \
+  "$(jq -r '"\(.invoices.issued) \(.invoices.month)"' <<<"$overview")"
 check "and the last 7 days of capacity against billing" 7 "$(jq '.capacity | length' <<<"$overview")"
 }
 section_def overview section_overview admin budget=5

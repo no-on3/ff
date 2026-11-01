@@ -19,6 +19,7 @@ import { AuditService } from '../../audit/audit.service';
 import { withRequestContext } from '../../common/request-context';
 import { databaseConfiguration } from '../../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../../database/scratch-database';
+import { monthPartitions } from '../../usage/usage.service';
 import { Mail } from '../../mail/mail.service';
 import { capturingMail } from '../../mail/capturing-mail';
 import { ObjectStoreService } from '../../object-store/object-store.service';
@@ -85,6 +86,7 @@ run('monthly invoices (L2, P-36)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
+    await monthPartitions(db.dataSource, ['2026-10']); // the month a quiet account's call is in
     const ds = db.dataSource;
     ledger = new LedgerService(ds);
     const mail = capturingMail(sent);

@@ -1238,7 +1238,7 @@ curl -s "$FF/admin/audit-log?from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z" 
 - the accounts by status, and how many wait for your approval;
 - the functions, and today's calls, failures and throttles;
 - this month's usage charged (debited, or only rated in the billing trial), the credit bought by transfers, the credit FF owes in the wallets, and what accounts in debt owe;
-- the invoices issued this month, and last month's to issue;
+- the invoices issued this month in Tunisia, where they are dated, and last month's to issue;
 - the last 7 days of capacity held against billed;
 - links to the Grafana dashboards when `VITE_GRAFANA_URL` is set (`http://localhost:3001` in `admin/.env.example`, where `hack/k8s/grafana.sh` serves them).
 
@@ -1502,7 +1502,7 @@ cd BE && FF_LOG_FORMAT=json npm run start:dev 2>&1 | jq -rR --unbuffered '(fromj
 | A grant: 409 `idempotencyKey … was used for another grant` | Each grant takes a key of its own; the dashboard makes one each time its dialog opens. The same key with the same grant is a retry: it answers `"replayed": true` and grants nothing more. |
 | The backend won't start: `FF_SELLER_NAME must be set when NODE_ENV=production: pro-formas name the seller and where to pay (P-35)` | In production, set `FF_SELLER_NAME`, `FF_SELLER_TAX_ID`, `FF_SELLER_ADDRESS`, `FF_BANK_NAME` and `FF_BANK_IBAN`: each pro-forma prints them. The development defaults say they are not real, so production refuses them. |
 | 400 `received … and withheld … make …, not the pro-forma's …` when recording a transfer | What arrived and what was withheld at source must add up to the pro-forma's total. A partial payment or an over-payment isn't recorded: sort it out with the buyer first. |
-| 409 `The transfer for FF-… was recorded on …` | The transfer was already recorded: each pro-forma takes one. The Payments page shows it, with what it credited. Cancelling it gets the same answer: a paid pro-forma isn't cancelled. |
+| 409 `The transfer for FF-… was recorded on …` | The transfer was already recorded, on that day in Tunisia: each pro-forma takes one. The Payments page shows it, with what it credited. Cancelling it gets the same answer: a paid pro-forma isn't cancelled. |
 | 409 `2026-11 isn't over in Tunisia: its invoices are issued from the 1st of the next month` | A month's invoices are issued once it is over, in Tunisia's time. The drafts show meanwhile. |
 | An invoice isn't issued: `"…" has a character the PDF's fonts can't write` | The PDF's standard fonts write French and other Latin text, not Arabic script: an account named in Arabic can't be invoiced until a font that writes it is added (see the plan, P-36). Its number goes back, and the other invoices are issued. Meanwhile its owners can give the account its name in Latin letters on the console's Account page, as the company's French name; then issue it again. |
 | `No stamp duty applies on …: add one to tax_rates` (or VAT) | No rate in `tax_rates` covers that day: add the rate in force from its first day, as above. |

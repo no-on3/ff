@@ -52,10 +52,13 @@ export class OverviewMoney {
 }
 
 export class OverviewInvoices {
-  @ApiProperty({ description: 'Invoices issued this month', example: 9 })
+  @ApiProperty({ description: "This month in Tunisia, where invoices are dated, which begins an hour before UTC's", example: '2026-10' })
+  month: string;
+
+  @ApiProperty({ description: 'Invoices issued this month, in Tunisia', example: 9 })
   issued: number;
 
-  @ApiProperty({ description: 'Credit notes issued this month', example: 0 })
+  @ApiProperty({ description: 'Credit notes issued this month, in Tunisia', example: 0 })
   creditNotes: number;
 
   @ApiProperty({

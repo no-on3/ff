@@ -65,6 +65,24 @@ const MONTHLY_TABLES = [
 ];
 
 /**
+ * Each metering table's partition of each month given, YYYY-MM by the UTC calendar, made if it isn't there: the backend's
+ * own months ahead, and the months past a test writes in, which the backend never makes. Returns their names.
+ */
+export async function monthPartitions(dataSource: DataSource, months: readonly string[]): Promise<string[]> {
+  const partitions: string[] = [];
+  for (const table of MONTHLY_TABLES) {
+    for (const month of months) {
+      const [{ partition }] = await dataSource.query<Array<{ partition: string }>>('SELECT "ff_ensure_month_partition"($1, $2::date) AS "partition"', [
+        table,
+        `${month}-01`,
+      ]);
+      partitions.push(partition);
+    }
+  }
+  return partitions;
+}
+
+/**
  * Usage records (client-readiness plan, P-20, D6): written once per
  * invocation, in its final transaction; lost calls reaped; the monthly
  * partitions of the metering tables created ahead of time.
@@ -416,18 +434,8 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
    * This month's partition and the next ones, in UTC, of each metering table:
    * a record or a sample must never find its month missing. Returns their names.
    */
-  async ensurePartitions(now = new Date()): Promise<string[]> {
-    const partitions: string[] = [];
-    for (const table of MONTHLY_TABLES) {
-      for (let ahead = 0; ahead <= MONTHS_AHEAD; ahead++) {
-        const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + ahead, 1)).toISOString().slice(0, 10);
-        const [{ partition }] = await this.dataSource.query<Array<{ partition: string }>>(
-          'SELECT "ff_ensure_month_partition"($1, $2::date) AS "partition"',
-          [table, month],
-        );
-        partitions.push(partition);
-      }
-    }
-    return partitions;
+  ensurePartitions(now = new Date()): Promise<string[]> {
+    const months = Array.from({ length: MONTHS_AHEAD + 1 }, (_unused, ahead) => monthOf(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + ahead, 1))));
+    return monthPartitions(this.dataSource, months);
   }
 }

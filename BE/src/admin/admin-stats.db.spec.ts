@@ -22,6 +22,7 @@ import { PricingService } from '../billing/pricing.service';
 import { withRequestContext } from '../common/request-context';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { capturingMail } from '../mail/capturing-mail';
 import { Mail } from '../mail/mail.service';
@@ -86,9 +87,7 @@ run("the admin dashboard's overview (L2)", () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'capacity_samples']) {
-      for (const month of ['2026-10-01', '2026-11-01']) await query('SELECT ff_ensure_month_partition($1, $2::date)', [table, month]);
-    }
+    await monthPartitions(db.dataSource, ['2026-10', '2026-11']);
     const ds = db.dataSource;
     ledger = new LedgerService(ds);
     const documents = new Map<string, Buffer>();
@@ -179,7 +178,7 @@ run("the admin dashboard's overview (L2)", () => {
           balances: { owedByFF: '167.500', owedToFF: '4.200', walletsInDebt: 1 },
         },
       ],
-      invoices: { issued: 1, creditNotes: 1, toIssue: { month: '2026-10', drafts: 1, issuable: true } },
+      invoices: { month: '2026-11', issued: 1, creditNotes: 1, toIssue: { month: '2026-10', drafts: 1, issuable: true } },
       capacity: [
         ...['14', '15', '16', '17', '18'].map((day) => ({ day: `2026-11-${day}`, reservedGbS: 0, provisionedGbS: 0, billedGbS: 0, requests: 0 })),
         // 10 minutes of one 128 MB instance, its minimum: 75 GB-s; five calls of 2.048 s at 128 MB: 1.28 GB-s.
@@ -188,6 +187,19 @@ run("the admin dashboard's overview (L2)", () => {
         { day: '2026-11-20', reservedGbS: 0, provisionedGbS: 0, billedGbS: 0.063, requests: 5 },
       ],
     });
+  });
+
+  it("counts the invoices of the month in Tunisia, where they are dated: in UTC's last hour of November, December's", async () => {
+    const lastHour = await stats.overview(new Date('2026-11-30T23:30:00Z'));
+
+    // November's invoice and credit note, issued on the 2nd and the 5th, are of a month over in Tunisia; its money is UTC's.
+    expect([lastHour.month, lastHour.invoices.month, lastHour.invoices.issued, lastHour.invoices.creditNotes, lastHour.invoices.toIssue.month]).toEqual([
+      '2026-11',
+      '2026-12',
+      0,
+      0,
+      '2026-11',
+    ]);
   });
 
   it('serves the same overview for a minute, then works it out anew', async () => {

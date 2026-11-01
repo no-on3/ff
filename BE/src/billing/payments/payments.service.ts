@@ -177,7 +177,7 @@ export class PaymentsService {
       if (!found) throw new NotFoundException(`No pro-forma has the reference ${reference}`);
       const exponent = await this.exponentOf(found.currency, manager);
       if (found.status === PaymentStatus.PAID) {
-        throw new ConflictException(`The transfer for ${reference} was recorded on ${(found.recordedAt as Date).toISOString().slice(0, 10)}: ${formatMinor(found.receivedMinor as bigint, exponent)} ${found.currency} received`);
+        throw new ConflictException(`The transfer for ${reference} was recorded on ${tunisDay(found.recordedAt as Date)}: ${formatMinor(found.receivedMinor as bigint, exponent)} ${found.currency} received`);
       }
       const amounts = this.amounts(entry, exponent);
       const problem = transferProblem(found, amounts.received, amounts.withheld, exponent, found.currency);
@@ -259,7 +259,7 @@ export class PaymentsService {
       if (!found) throw new NotFoundException(accountId === null ? `Payment ${id} not found` : `Pro-forma ${id} not found`);
       const exponent = await this.exponentOf(found.currency, manager);
       if (found.status === PaymentStatus.PAID) {
-        throw new ConflictException(`The transfer for ${found.reference} was recorded on ${(found.recordedAt as Date).toISOString().slice(0, 10)}: a paid pro-forma isn't cancelled`);
+        throw new ConflictException(`The transfer for ${found.reference} was recorded on ${tunisDay(found.recordedAt as Date)}: a paid pro-forma isn't cancelled`);
       }
       if (found.status === PaymentStatus.CANCELLED) return { payment: found, exponent, cancelled: false };
       const changes = { status: PaymentStatus.CANCELLED, cancelledAt: now, cancelledBy: currentRequest()?.actor?.id ?? 'system' };
@@ -290,7 +290,7 @@ export class PaymentsService {
       if (!found) throw new NotFoundException(`Payment ${id} not found`);
       if (found.status !== PaymentStatus.PAID) throw new ConflictException(`The transfer for ${found.reference} isn't recorded yet`);
       if (!found.withheldMinor) throw new ConflictException(`Nothing was withheld at source on ${found.reference}: there is no certificate to add`);
-      if (found.certificateKey) throw new ConflictException(`The certificate for ${found.reference} was added on ${(found.certificateAt as Date).toISOString().slice(0, 10)}`);
+      if (found.certificateKey) throw new ConflictException(`The certificate for ${found.reference} was added on ${tunisDay(found.certificateAt as Date)}`);
       const exponent = await this.exponentOf(found.currency, manager);
 
       // Kept before the credit: if the database refuses it, a retry writes the same key again.

@@ -24,6 +24,7 @@ import { Mail } from '../../mail/mail.service';
 import { capturingMail } from '../../mail/capturing-mail';
 import { ObjectStoreService } from '../../object-store/object-store.service';
 import { LedgerService } from '../ledger/ledger.service';
+import { tunisDay } from '../tunisia';
 import { PaymentStatus } from './payment.entity';
 import { PaymentsService } from './payments.service';
 
@@ -168,7 +169,7 @@ run('bank transfers (L2, P-35)', () => {
       expect(sent[0].text).not.toContain('withheld');
 
       await expect(payments.recordTransfer(transfer(proForma.reference, '59.500'), 'Again')).rejects.toThrow(
-        `The transfer for ${proForma.reference} was recorded on ${new Date().toISOString().slice(0, 10)}: 59.500 TND received`,
+        `The transfer for ${proForma.reference} was recorded on ${tunisDay(new Date())}: 59.500 TND received`,
       );
       expect(await ledger.balance(a, 'TND')).toBe(50000n);
     });
@@ -205,7 +206,9 @@ run('bank transfers (L2, P-35)', () => {
       const kept = await payments.certificate(proForma.id);
       expect([kept.body.equals(PDF), kept.contentType, kept.reference]).toEqual([true, 'application/pdf', proForma.reference]);
 
-      await expect(payments.attachCertificate(proForma.id, PDF, 'application/pdf', 'Again')).rejects.toThrow(`The certificate for ${proForma.reference} was added on`);
+      await expect(payments.attachCertificate(proForma.id, PDF, 'application/pdf', 'Again')).rejects.toThrow(
+        `The certificate for ${proForma.reference} was added on ${tunisDay(new Date())}`,
+      );
       expect(await ledger.balance(a, 'TND')).toBe(50000n);
     });
 
@@ -240,7 +243,7 @@ run('bank transfers (L2, P-35)', () => {
       expect([(await payments.proForma(a, proForma.id)).status, await entries(`transfer:${proForma.id}`), await ledger.balance(a, 'TND')]).toEqual(['pending', [], 0n]);
     });
 
-    it("takes a transfer dated today in Tunisia, where the next day begins an hour before UTC's, and not one dated the day after", async () => {
+    it("takes a transfer dated today in Tunisia, where the next day begins an hour before UTC's, not one dated the day after, and says it was recorded that day", async () => {
       const a = await account();
       const proForma = await payments.requestProForma(a, '50.000');
       const lateInUtc = new Date('2026-10-31T23:30:00Z'); // 00:30 on 1 November in Tunisia
@@ -249,6 +252,9 @@ run('bank transfers (L2, P-35)', () => {
         'receivedOn must be a day that has come in Tunisia, not 2026-11-02',
       );
       expect((await payments.recordTransfer(transfer(proForma.reference, '59.500', '0', '2026-11-01'), 'Today there', lateInUtc)).status).toBe('paid');
+      await expect(payments.recordTransfer(transfer(proForma.reference, '59.500', '0', '2026-11-01'), 'Again', lateInUtc)).rejects.toThrow(
+        `The transfer for ${proForma.reference} was recorded on 2026-11-01: 59.500 TND received`,
+      );
     });
 
     it('is recorded once when two operators record it at the same moment', async () => {
@@ -296,7 +302,7 @@ run('bank transfers (L2, P-35)', () => {
 
       await payments.recordTransfer(transfer(proForma.reference, '11.900', '0', '2026-10-15'), 'Paid');
       await expect(payments.cancelProForma(a, proForma.id)).rejects.toThrow(
-        new ConflictException(`The transfer for ${proForma.reference} was recorded on ${new Date().toISOString().slice(0, 10)}: a paid pro-forma isn't cancelled`),
+        new ConflictException(`The transfer for ${proForma.reference} was recorded on ${tunisDay(new Date())}: a paid pro-forma isn't cancelled`),
       );
       await expect(payments.cancelPayment(proForma.id, 'Asked twice')).rejects.toThrow("a paid pro-forma isn't cancelled");
       await expect(payments.cancelPayment('6f1c2d3e-4b5a-4c6d-8e7f-001122334455', 'Asked twice')).rejects.toThrow(

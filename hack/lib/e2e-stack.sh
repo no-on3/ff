@@ -361,6 +361,18 @@ e2e_build() {
   backend_build >/dev/null
 }
 
+# e2e_within_one_month <minutes>: a suite whose checks count this month's usage, which a run across the UTC month's end
+# would count in two months, waits for that end when it comes within <minutes>, about the suite's own run: a run by hand
+# in a month's last minutes waits as long as it runs at most, within its job's time limit; the nightly never does.
+e2e_within_one_month() {
+  local left
+  left=$(($(date -u -d "$(date -u +%Y-%m-01) +1 month" +%s) - $(date -u +%s)))
+  if [ "$left" -lt $(($1 * 60)) ]; then
+    echo "e2e: the UTC month ends in $left s, within this run's $1 minutes: waiting for it, so that the usage it checks is one month's"
+    sleep $((left + 5))
+  fi
+}
+
 # e2e_migrate <VAR=value...>: runs the migrations from the build, as a deploy step would.
 e2e_migrate() {
   (cd "$FF_REPO_ROOT/BE" && env "$@" npm run migration:run:prod) >"$work/migrations.log" 2>&1 ||

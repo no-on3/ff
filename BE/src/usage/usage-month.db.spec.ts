@@ -14,7 +14,7 @@ import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { Function, Runtime } from '../functions/entities/function.entity';
 import { UsageRecord } from './usage-record.entity';
-import { UsageService } from './usage.service';
+import { UsageService, monthPartitions } from './usage.service';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const A = '500000000001';
@@ -46,9 +46,7 @@ run("an account's usage in a month (L2, P-22)", () => {
     for (const id of [A, B]) {
       await db.dataSource.getRepository(Account).save({ id, name: `Account ${id}`, planId: 'beta', status: AccountStatus.ACTIVE });
     }
-    for (const month of ['2026-09-01', '2026-10-01', '2026-11-01']) {
-      for (const table of ['usage_records', 'database_samples', 'bucket_samples', 'storage_request_counts', 'cache_samples', 'email_sends']) await query(`SELECT ff_ensure_month_partition($1, $2)`, [table, month]);
-    }
+    await monthPartitions(db.dataSource, ['2026-09', '2026-10', '2026-11']);
     kept = await db.dataSource.getRepository(Function).save({ name: 'new', accountId: A, runtime: Runtime.NODEJS, code: 'x', memory: 256, timeout: 5 });
     const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
     usage = new UsageService(db.dataSource.getRepository(UsageRecord), db.dataSource, config);

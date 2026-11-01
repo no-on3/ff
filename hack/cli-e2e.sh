@@ -79,6 +79,7 @@ sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform
 
 section_stack() {
 section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
+e2e_within_one_month 12
 e2e_dependencies
 e2e_cluster
 # This machine as the cluster's pods see it, the gateway of the cluster's Docker network: functions reach the S3 front

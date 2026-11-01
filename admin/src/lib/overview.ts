@@ -14,8 +14,16 @@ export interface Overview {
   /** This month, by the UTC calendar. */
   month: string;
   money: OverviewMoney[];
-  invoices: { issued: number; creditNotes: number; toIssue: { month: string; drafts: number; issuable: boolean } };
+  invoices: OverviewInvoices;
   capacity: CapacityDay[];
+}
+
+/** The invoices of this month in Tunisia, where they are dated, which begins an hour before UTC's; and last month's to issue. */
+export interface OverviewInvoices {
+  month: string;
+  issued: number;
+  creditNotes: number;
+  toIssue: { month: string; drafts: number; issuable: boolean };
 }
 
 export interface OverviewMoney {
@@ -34,6 +42,7 @@ export interface CapacityDay {
 }
 
 export const OVERVIEW_FIELDS = ['computedAt', 'accounts', 'functions', 'today', 'month', 'money', 'invoices', 'capacity'] as const;
+export const OVERVIEW_INVOICE_FIELDS = ['month', 'issued', 'creditNotes', 'toIssue'] as const satisfies ReadonlyArray<keyof OverviewInvoices>;
 
 /** GB-seconds, to the thousandth, thousands apart. */
 export const gbS = (value: number): string => value.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });

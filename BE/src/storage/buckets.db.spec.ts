@@ -8,6 +8,7 @@ import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { EncryptionService } from '../encryption/encryption.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { Bucket } from './bucket.entity';
@@ -42,6 +43,7 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
+    await monthPartitions(db.dataSource, ['2026-10']); // the month its buckets are measured in
     await db.dataSource.getRepository(Account).save([
       { id: ACCOUNT, name: 'Photos', planId: 'beta', status: AccountStatus.ACTIVE },
       { id: OTHER, name: 'Other', planId: 'beta', status: AccountStatus.ACTIVE },
