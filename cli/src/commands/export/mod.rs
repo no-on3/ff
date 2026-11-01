@@ -15,7 +15,7 @@ mod terraform;
 mod yaml;
 
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -90,7 +90,7 @@ pub fn run(args: ExportArgs, context: &Context) -> Result<(), Error> {
         }
         Err(error) => return Err(error),
     };
-    let read_on = humantime::format_rfc3339_seconds(SystemTime::now()).to_string()[..10].to_owned();
+    let read_on = crate::table::today();
     let header = format!(
         "# ff export wrote this on {read_on} from FF's account {}: MIGRATION.md says how to deploy it.\n",
         read.id

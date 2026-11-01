@@ -1,5 +1,6 @@
 //! A SAM template's checks, read as CloudFormation reads it: what CloudFormation refuses, at its line; a function's
-//! memory and timeout beyond AWS Lambda's limits; a TypeScript handler that `sam build` won't make JavaScript of.
+//! memory and timeout beyond AWS Lambda's limits; a runtime Lambda has deprecated; a TypeScript handler that
+//! `sam build` won't make JavaScript of.
 //! Whether `ff deploy` takes the template is the subset's to say, with `ff deploy`'s own reading of it.
 
 use std::path::Path;
@@ -7,6 +8,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use super::{Finding, Level};
+use crate::commands::export::template::lambda_runtime;
 use crate::sam::{self, Template};
 
 /// The names SAM looks for a template by, in a project's folder.
@@ -19,6 +21,34 @@ const FUNCTION_TYPES: [&str; 2] = ["AWS::Serverless::Function", "AWS::Lambda::Fu
 const LIMITS: [(&str, i64, i64, &str); 2] = [
     ("MemorySize", 128, 10_240, "a whole number of MB from 128 to 10,240"),
     ("Timeout", 1, 900, "a whole number of seconds from 1 to 900"),
+];
+
+/// Lambda's Node.js and Python runtimes, each with the day AWS deprecates it, no longer patching it, and the day Lambda
+/// stops creating functions on it, as AWS's table of runtimes gave them on 2026-11-01: the days ahead may move.
+const RUNTIMES: [(&str, &str, &str); 23] = [
+    ("nodejs", "2016-08-30", "2016-09-30"),
+    ("nodejs4.3", "2020-03-05", "2020-02-03"),
+    ("nodejs4.3-edge", "2020-03-05", "2019-03-31"),
+    ("nodejs6.10", "2019-08-12", "2019-07-12"),
+    ("nodejs8.10", "2020-03-06", "2020-02-04"),
+    ("nodejs10.x", "2021-07-30", "2021-07-30"),
+    ("nodejs12.x", "2023-03-31", "2023-03-31"),
+    ("nodejs14.x", "2023-12-04", "2024-01-09"),
+    ("nodejs16.x", "2024-06-12", "2027-07-29"),
+    ("nodejs18.x", "2025-09-01", "2027-07-29"),
+    ("nodejs20.x", "2026-04-30", "2027-07-29"),
+    ("nodejs22.x", "2027-04-30", "2027-07-29"),
+    ("nodejs24.x", "2028-04-30", "2028-06-01"),
+    ("python2.7", "2021-07-15", "2021-07-15"),
+    ("python3.6", "2022-07-18", "2022-07-18"),
+    ("python3.7", "2023-12-04", "2024-01-09"),
+    ("python3.8", "2024-10-14", "2027-07-29"),
+    ("python3.9", "2025-12-15", "2027-07-29"),
+    ("python3.10", "2026-10-31", "2027-07-29"),
+    ("python3.11", "2027-06-30", "2027-07-29"),
+    ("python3.12", "2028-10-31", "2028-11-30"),
+    ("python3.13", "2029-06-30", "2029-07-31"),
+    ("python3.14", "2029-06-30", "2029-07-31"),
 ];
 
 /// A number as CloudFormation takes one for an integer: a number, or a string of one. None for an intrinsic
@@ -41,6 +71,8 @@ fn property<'a>(template: &'a Template, id: &str, name: &str) -> Option<(&'a Val
 struct Checking<'a> {
     file: &'a str,
     template: &'a Template,
+    /// Today, `2026-11-01`, for the runtimes' days.
+    today: &'a str,
     findings: Vec<Finding>,
 }
 
@@ -64,6 +96,32 @@ impl Checking<'_> {
                 );
             }
         }
+    }
+
+    /// A runtime AWS Lambda has deprecated by today, where it is written: a warning while Lambda still creates functions
+    /// on it, an error once it doesn't, since CloudFormation's create of the function then fails.
+    fn runtime(&mut self, pointer: &str, owner: &str) {
+        let pointer = format!("{pointer}/Runtime");
+        let Some(runtime) = self.template.value.pointer(&pointer).and_then(Value::as_str) else { return };
+        let Some(&(_, deprecated, blocked)) = RUNTIMES.iter().find(|(name, ..)| *name == runtime) else { return };
+        if deprecated > self.today {
+            return;
+        }
+        let ff = lambda_runtime(if runtime.starts_with("python") { "python" } else { "nodejs" });
+        let (level, then) = if blocked <= self.today {
+            (Level::Error, format!("Lambda has created no function on it since {blocked}, so CloudFormation can't"))
+        } else {
+            (Level::Warning, format!("Lambda creates no function on it from {blocked}"))
+        };
+        self.found(
+            &pointer,
+            level,
+            "deprecated-runtime",
+            format!(
+                "{owner}: Runtime {runtime}, which AWS Lambda deprecated on {deprecated}, no longer patching it: {then}; \
+                 FF runs {ff}"
+            ),
+        );
     }
 
     /// A Node.js function whose handler's module is TypeScript alone, in a folder `sam build` copies as it is.
@@ -100,8 +158,9 @@ impl Checking<'_> {
     }
 }
 
-/// The findings of a template, `file` its name as the report gives it, `folder` where its code is.
-pub fn check(file: &str, text: &str, folder: &Path) -> Vec<Finding> {
+/// The findings of a template, `file` its name as the report gives it, `folder` where its code is, `today` the day
+/// the runtimes are checked on.
+pub fn check(file: &str, text: &str, folder: &Path, today: &str) -> Vec<Finding> {
     let template = match sam::read(text) {
         Ok(template) => template,
         Err(error) => {
@@ -115,8 +174,9 @@ pub fn check(file: &str, text: &str, folder: &Path) -> Vec<Finding> {
             }];
         }
     };
-    let mut checking = Checking { file, template: &template, findings: Vec::new() };
+    let mut checking = Checking { file, template: &template, today, findings: Vec::new() };
     checking.limits("/Globals/Function", "Globals");
+    checking.runtime("/Globals/Function", "Globals");
     let functions: Vec<String> = template
         .value
         .get("Resources")
@@ -130,6 +190,7 @@ pub fn check(file: &str, text: &str, folder: &Path) -> Vec<Finding> {
         .collect();
     for id in &functions {
         checking.limits(&format!("/Resources/{id}/Properties"), id);
+        checking.runtime(&format!("/Resources/{id}/Properties"), id);
         checking.typescript_handler(folder, id);
     }
     checking.findings
@@ -140,11 +201,13 @@ mod tests {
     use super::*;
 
     fn found(text: &str, folder: &Path) -> Vec<(Option<usize>, &'static str, String)> {
-        check("template.yaml", text, folder)
+        check("template.yaml", text, folder, TODAY)
             .into_iter()
             .map(|finding| (finding.line, finding.check, finding.message))
             .collect()
     }
+
+    const TODAY: &str = "2026-11-01";
 
     const TEMPLATE: &str = "\
 Transform: AWS::Serverless-2016-10-31
@@ -233,6 +296,49 @@ Resources:
         // Its JavaScript beside it: what Lambda runs.
         std::fs::write(dir.path().join("orders/src/app.js"), "").unwrap();
         assert!(found(TEMPLATE, dir.path()).iter().all(|(_, check, _)| *check != "typescript-handler"));
+    }
+
+    #[test]
+    fn a_runtime_lambda_deprecated_is_a_warning_and_an_error_once_lambda_creates_no_function_on_it() {
+        let text = "\
+Globals:
+  Function:
+    Runtime: python3.10
+Resources:
+  Old:
+    Type: AWS::Serverless::Function
+    Properties:
+      Runtime: nodejs14.x
+  Current:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs24.x
+";
+        let found: Vec<_> = check("template.yaml", text, Path::new("."), TODAY)
+            .into_iter()
+            .map(|finding| (finding.line, finding.level, finding.message))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (
+                    Some(3),
+                    Level::Warning,
+                    "Globals: Runtime python3.10, which AWS Lambda deprecated on 2026-10-31, no longer patching it: \
+                     Lambda creates no function on it from 2027-07-29; FF runs python3.13"
+                        .to_owned()
+                ),
+                (
+                    Some(8),
+                    Level::Error,
+                    "Old: Runtime nodejs14.x, which AWS Lambda deprecated on 2023-12-04, no longer patching it: Lambda \
+                     has created no function on it since 2024-01-09, so CloudFormation can't; FF runs nodejs24.x"
+                        .to_owned()
+                ),
+            ]
+        );
+        // The day before python3.10's: Lambda still patched it.
+        assert_eq!(check("template.yaml", text, Path::new("."), "2026-10-30").len(), 1);
     }
 
     #[test]

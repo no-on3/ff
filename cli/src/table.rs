@@ -45,6 +45,11 @@ pub fn time(iso: &str) -> String {
     iso.get(..19).map(|text| text.replacen('T', " ", 1)).unwrap_or_else(|| iso.to_owned())
 }
 
+/// Today in UTC, as `2026-11-01`.
+pub fn today() -> String {
+    humantime::format_rfc3339_seconds(std::time::SystemTime::now()).to_string()[..10].to_owned()
+}
+
 /// The first line of a text, cut to `max` characters with an ellipsis.
 pub fn first_line(text: &str, max: usize) -> String {
     let line = text.lines().next().unwrap_or("");

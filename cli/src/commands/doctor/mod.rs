@@ -176,6 +176,7 @@ fn report(path: &Path, hosts: &[String]) -> Result<Report, Error> {
         )
     };
     let (mut files_read, mut files_not_read) = (0, 0);
+    let today = crate::table::today();
     for file in files.iter().filter(|file| !in_libraries(&file.name)) {
         if file.size > MAX_READ_BYTES {
             files_not_read += 1;
@@ -186,7 +187,7 @@ fn report(path: &Path, hosts: &[String]) -> Result<Report, Error> {
         files_read += 1;
         findings.extend(code::check(&file.name, &text, hosts));
         if template::NAMES.contains(&file.name.as_str()) {
-            findings.extend(template::check(&file.name, &text, folder));
+            findings.extend(template::check(&file.name, &text, folder, &today));
         }
     }
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));

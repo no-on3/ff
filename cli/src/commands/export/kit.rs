@@ -274,7 +274,8 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
          1. **An AWS account,** with a billing alarm (AWS Budgets), the AWS CLI and the SAM CLI.\n\
          2. **Lambda's quotas:** a new account's concurrency can start at 10 for all its functions together, in Service Quotas. These functions run up to {most} instances together on FF{}: ask for more before you move, as AWS takes days to answer.\n\
          3. **The template's values:** copy `secrets.template.env` to `secrets.env`, outside any repository, and fill it ({}).\n\
-         4. **A staging account first,** if you can: the same steps there, your app's own tests against it.\n",
+         4. **The code:** `ff doctor` in each function's folder, where you keep its code, names what works on FF and not on Lambda, a line each: fix its errors before the move, and judge its warnings.\n\
+         5. **A staging account first,** if you can: the same steps there, your app's own tests against it.\n",
         if warm > 0 { format!(", {warm} kept warm as provisioned concurrency, which comes from the same quota") } else { String::new() },
         if template.parameters.is_empty() {
             "nothing to fill this time".to_owned()
@@ -433,7 +434,8 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
         "\n## 6. Watch, then leave FF\n\n\
          1. **Watch AWS:** each function's `Errors` and `Throttles` in CloudWatch, its log with `sam logs --stack-name <stack> --tail`.\n\
          2. **Watch FF go quiet:** `ff metrics <function> --since 1d` for each, until nothing calls it.\n\
-         3. **Then delete on FF** what moved, as each page of `data/` says last: the functions (`ff delete <function>`), the queues, the buckets, the databases, the caches, the mail. Until then, FF bills what it keeps.\n",
+         3. **What still points at FF:** `ff doctor --deployed` names it, a line each, a domain to move or a storage key still in use among it; `--strict` fails until nothing does.\n\
+         4. **Then delete on FF** what moved, as each page of `data/` says last: the functions (`ff delete <function>`), the queues, the buckets, the databases, the caches, the mail. Until then, FF bills what it keeps.\n",
     );
     text
 }
@@ -572,6 +574,8 @@ mod tests {
             "`sam deploy --parameter-overrides ScheduleState=ENABLED` turns AWS's on",
             "Each function's role allows what its keys used of the account's buckets, queues and mail on FF from 2026-10-21 to 2026-10-31",
             "**Or with OpenTofu or Terraform,** from `terraform/`",
+            "4. **The code:** `ff doctor` in each function's folder",
+            "3. **What still points at FF:** `ff doctor --deployed` names it",
             "(with Terraform, `bucket_events = true` in `terraform.tfvars`, then `tofu apply`)",
             "(with Terraform, `schedule_state = \"ENABLED\"` in `terraform.tfvars`, then `tofu apply`)",
         ] {
