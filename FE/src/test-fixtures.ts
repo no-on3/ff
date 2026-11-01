@@ -10,6 +10,7 @@ export const BETA_PLAN: Plan = {
     memoryMb: 1024,
     timeoutSeconds: 300,
     instancesPerFunction: 10,
+    codeStorageMb: 5120,
     quota: { pods: 20, cpu: '8', memory: '8Gi' },
     writesPerMinute: 60,
     invokesPerSecond: 100,

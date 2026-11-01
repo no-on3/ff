@@ -203,6 +203,25 @@ function refuseOverPlan(plan: PlanView, change: Sized, current?: Sized): void {
   if (problems.length) throw new BadRequestException(problems);
 }
 
+const MB = 1_048_576;
+
+/**
+ * As Lambda's CodeStorageExceededException: the packages the account's
+ * functions and versions would name, each once, hold more than its plan keeps.
+ * Undefined while they fit.
+ */
+export function codeStorageRefusal(plan: PlanView, bytes: number): BadRequestException | undefined {
+  const allowed = plan.limits.codeStorageMb;
+  if (bytes <= allowed * MB) return undefined;
+  return new BadRequestException({
+    statusCode: HttpStatus.BAD_REQUEST,
+    error: 'CodeStorageExceededException',
+    message:
+      `The ${plan.name} plan keeps ${allowed} MB of code an account, the packages its functions and versions name, each once: ` +
+      `this would make ${Math.ceil(bytes / MB)} MB. Delete the versions and functions you no longer need, then try again`,
+  });
+}
+
 /**
  * Locks the account's row until the transaction ends. Every create and rename
  * takes it, so they run one at a time per account: the plan's count and the
@@ -279,6 +298,7 @@ export class FunctionsService {
     const { environment: variables, secrets, ...fields } = createFunctionDto;
     const handler = fields.handler ?? DEFAULT_HANDLER;
     const code = await this.codeOf(accountId, fields, handler, fields.runtime);
+    await this.refuseOverCodeStorage(plan, accountId, fields.runtime, code);
     const environment = withSecrets(withVariables(NO_ENVIRONMENT, variables ?? {}), storedSecrets(secrets ?? {}, new Date()));
     refuseCombined(environment);
     // The code's image before anything is saved: without it, there is no function to keep.
@@ -343,6 +363,19 @@ export class FunctionsService {
     const problem = packageHandlerProblem(named.files, handler, runtime);
     if (problem) throw new BadRequestException([problem]);
     return { packageType: PackageType.ZIP, code: '', codeSha256: sent.codeSha256, codeSize: named.codeSize };
+  }
+
+  /**
+   * Refuses code whose package would take the account past its plan's code
+   * storage: the packages its functions and versions name, each once, and this
+   * one; the record of the function that `changing` names left out, as the
+   * change replaces its package. Its versions keep theirs.
+   */
+  private async refuseOverCodeStorage(plan: PlanView, accountId: string, runtime: Runtime, code: CodeFields, changing?: string): Promise<void> {
+    const built = code.packageType === PackageType.INLINE ? inlinePackage(code.code, runtime) : undefined;
+    const added = built ? { codeSha256: built.codeSha256, codeSize: built.zip.length } : code;
+    const refusal = codeStorageRefusal(plan, (await this.packages.namedBytes(accountId, added.codeSha256, changing)) + added.codeSize);
+    if (refusal) throw refusal;
   }
 
   /**
@@ -488,6 +521,7 @@ export class FunctionsService {
     let code: CodeFields | undefined;
     if (changes.code !== undefined || changes.codeSha256 !== undefined) {
       code = await this.codeOf(accountId, changes, handler, runtime);
+      await this.refuseOverCodeStorage(plan, accountId, runtime, code, id);
     } else if (changes.handler !== undefined || changes.runtime !== undefined) {
       if (function_.packageType === PackageType.ZIP) await this.codeOf(accountId, { codeSha256: function_.codeSha256 }, handler, runtime);
       else refuseHandler(handler, runtime, PackageType.INLINE);

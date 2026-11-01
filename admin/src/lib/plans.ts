@@ -7,6 +7,7 @@ export interface PlanLimits {
   memoryMb: number;
   timeoutSeconds: number;
   instancesPerFunction: number;
+  codeStorageMb: number;
   quota: { pods: number; cpu: string; memory: string };
   writesPerMinute: number;
   invokesPerSecond: number;
@@ -49,6 +50,7 @@ export const LIMIT_FIELDS: Array<{ path: [keyof PlanLimits] | ['quota', keyof Pl
   { path: ['memoryMb'], label: 'Memory per function', unit: 'MB, 128 to 10,240', kind: 'whole' },
   { path: ['timeoutSeconds'], label: 'Timeout per function', unit: 's, 1 to 900', kind: 'whole' },
   { path: ['instancesPerFunction'], label: 'Instances per function', unit: '1 to 100', kind: 'whole' },
+  { path: ['codeStorageMb'], label: 'Code of the functions', unit: "MB, all together, versions' included", kind: 'whole' },
   { path: ['quota', 'pods'], label: 'Quota: instances', unit: 'all functions together', kind: 'whole' },
   { path: ['quota', 'cpu'], label: 'Quota: CPU', unit: 'such as 8 or 500m', kind: 'quantity' },
   { path: ['quota', 'memory'], label: 'Quota: memory', unit: 'such as 8Gi', kind: 'quantity' },

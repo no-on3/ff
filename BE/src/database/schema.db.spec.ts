@@ -80,6 +80,7 @@ const EMAIL_MESSAGES = migrationNames.find((name) => name.startsWith('EmailMessa
 const KEY_USES = migrationNames.find((name) => name.startsWith('KeyUses')) as string;
 const AWS_ESTIMATE_PRICES = migrationNames.find((name) => name.startsWith('AwsEstimatePrices')) as string;
 const FUNCTION_VERSIONS = migrationNames.find((name) => name.startsWith('FunctionVersions')) as string;
+const FUNCTION_ALIASES = migrationNames.find((name) => name.startsWith('FunctionAliases')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -896,6 +897,29 @@ run('database schema (L2, real PostgreSQL)', () => {
       await dataSource.query(alias, [id, 'live', ACCOUNT]);
       await dataSource.query(`DELETE FROM functions WHERE id = $1`, [id]);
       expect(await dataSource.query(`SELECT count(*)::int AS n FROM function_aliases`)).toEqual([{ n: 0 }]);
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the code-storage migration gives every plan the beta plan's 5 GB, keeps a plan's own, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, FUNCTION_ALIASES);
+      await dataSource.query(`INSERT INTO plans (id, name, limits) SELECT 'shop', 'Shop', limits || '{"codeStorageMb": 20480}'::jsonb FROM plans WHERE id = 'beta'`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const storage = () => dataSource.query<unknown[]>(`SELECT id, limits->'codeStorageMb' AS mb FROM plans WHERE id IN ('beta', 'shop') ORDER BY id`);
+      expect(await storage()).toEqual([
+        { id: 'beta', mb: 5120 },
+        { id: 'shop', mb: 20480 },
+      ]);
+
+      await migrateDownTo(dataSource, FUNCTION_ALIASES);
+      expect(await storage()).toEqual([
+        { id: 'beta', mb: null },
+        { id: 'shop', mb: null },
+      ]);
+      await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });

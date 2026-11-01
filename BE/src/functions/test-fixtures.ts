@@ -141,24 +141,26 @@ export function memoryEnvironments(): EnvironmentStore & { saved: Map<string, Fu
 const noUpload = () => {
   throw new Error('this test uploads no package');
 };
+/** What a test's packages service has of uploads: none to name, and none of the account's code counted against its plan. */
+const NO_UPLOADS = { name: noUpload, namedBytes: async () => 0 };
+
+/** FF without functions' keys to buckets, as where the front door has no address for functions: none made, none to revoke. */
+export function noFunctionKeys(): FunctionKeys {
+  return { credentialsFor: async () => undefined, revoke: async () => undefined } as unknown as FunctionKeys;
+}
 
 /**
  * The packages and code images of a FunctionsService whose orchestrator is a
  * fake, which never pulls an image: inline code's image is a name, made up of
  * its package's SHA-256, and no function names an uploaded package.
  */
-/** FF without functions' keys to buckets, as where the front door has no address for functions: none made, none to revoke. */
-export function noFunctionKeys(): FunctionKeys {
-  return { credentialsFor: async () => undefined, revoke: async () => undefined } as unknown as FunctionKeys;
-}
-
 export function noPackages(): [PackagesService, CodeImagesService] {
   const images = {
     assertAvailable: () => undefined,
     imageFor: async (accountId: string, codeSha256: string) =>
       `registry.test/${codeRepository(accountId)}@sha256:${Buffer.from(codeSha256, 'base64').toString('hex')}`,
   };
-  return [{ name: noUpload, storeInline: async () => undefined } as unknown as PackagesService, images as unknown as CodeImagesService];
+  return [{ ...NO_UPLOADS, storeInline: async () => undefined } as unknown as PackagesService, images as unknown as CodeImagesService];
 }
 
 /** The development registry, which hack/k8s/registry-up.sh runs, as the backend pushes to it and the cluster's node pulls from it. */
@@ -191,7 +193,7 @@ export function inlineCodeImage(code: string, runtime: Runtime, accountId: strin
 export function clusterImages(): [PackagesService, CodeImagesService] {
   const zips = new Map<string, Buffer>();
   const packages = {
-    name: noUpload,
+    ...NO_UPLOADS,
     storeInline: async (_accountId: string, built: InlinePackage) => void zips.set(built.codeSha256, built.zip),
   };
   const images = {

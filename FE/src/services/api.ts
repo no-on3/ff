@@ -808,6 +808,8 @@ export interface PlanLimits {
   /** The longest timeout one function may have, in seconds. */
   timeoutSeconds: number;
   instancesPerFunction: number;
+  /** What the packages the account's functions and versions name may hold together, in MB, as Lambda's code storage. */
+  codeStorageMb: number;
   /** All the account's functions together. */
   quota: { pods: number; cpu: string; memory: string };
   writesPerMinute: number;

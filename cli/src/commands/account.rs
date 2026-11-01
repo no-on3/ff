@@ -79,6 +79,7 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("memoryMb", &|n| format!("{n} MB of memory a function at most"));
     add("timeoutSeconds", &|n| format!("a timeout of {n} s at most"));
     add("instancesPerFunction", &|n| format!("{n} instances a function at most"));
+    add("codeStorageMb", &|n| format!("{n} MB of code, versions' included"));
     add("invokesPerSecond", &|n| format!("{n} invocations a second"));
     add("writesPerMinute", &|n| format!("{n} changes a minute"));
     add("logRetentionDays", &|n| format!("logs kept {n} days"));
@@ -659,7 +660,7 @@ mod tests {
 
     #[test]
     fn a_plans_limits_read_as_sentences() {
-        let limits = serde_json::json!({ "functions": 25, "memoryMb": 1024, "timeoutSeconds": 300, "idleSeconds": 900, "quota": { "pods": 20 } });
+        let limits = serde_json::json!({ "functions": 25, "memoryMb": 1024, "timeoutSeconds": 300, "codeStorageMb": 5120, "idleSeconds": 900, "quota": { "pods": 20 } });
 
         assert_eq!(
             super::limits(limits.as_object().unwrap()),
@@ -667,6 +668,7 @@ mod tests {
                 "25 functions",
                 "1024 MB of memory a function at most",
                 "a timeout of 300 s at most",
+                "5120 MB of code, versions' included",
                 "scaled to zero after 15 min idle"
             ]
         );

@@ -80,7 +80,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   /** D9's balance check (P-33): every account may invoke unless a test says otherwise. */
   const credit = { admit: jest.fn(async (_accountId: string) => undefined) };
   /** The account's packages, and the registry their images go to. */
-  const packages = { name: jest.fn(), storeInline: jest.fn(), named: jest.fn(), restoreInlineZip: jest.fn() };
+  const packages = { name: jest.fn(), storeInline: jest.fn(), named: jest.fn(), restoreInlineZip: jest.fn(), namedBytes: jest.fn() };
   const codeImages = { available: true, assertAvailable: jest.fn(), imageFor: jest.fn(), ensureImage: jest.fn(), hasMounted: jest.fn() };
   /** The image the registry gives a package, by its SHA-256. */
   const imageOf = (codeSha256: string) => `ff-dev-registry:5000/ff-code/user-1@sha256:${Buffer.from(codeSha256, 'base64').toString('hex')}`;
@@ -128,6 +128,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     accountPlan = plan();
     existingFunctions = 0;
     codeImages.imageFor.mockImplementation(async (_accountId: string, codeSha256: string) => imageOf(codeSha256));
+    // The account's other code: none, unless a test says otherwise.
+    packages.namedBytes.mockResolvedValue(0);
     plans.forAccount.mockImplementation(async () => accountPlan);
     underLock = false;
     plans.withTenant.mockImplementation(async (_accountId: string, write: (tenant: unknown) => Promise<unknown>) => {
@@ -393,6 +395,42 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(codeImages.imageFor).toHaveBeenLastCalledWith('user-1', built.codeSha256);
       expect(inline).toMatchObject({ packageType: PackageType.INLINE, ...inlineCodeFacts('export const main = async () => 2;') });
       expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'export const main = async () => 2;');
+    });
+
+    it("refuses code past the plan's code storage, as Lambda's CodeStorageExceededException, the function's own package left out of what it counts", async () => {
+      const MB = 1_048_576;
+      accountPlan = plan({ codeStorageMb: 1 });
+      packages.namedBytes.mockResolvedValue(MB - 4095);
+      const refused = (await service.create('user-1', dto).catch((err: unknown) => err)) as HttpException;
+      expect([refused.getStatus(), refused.getResponse()]).toEqual([
+        400,
+        {
+          statusCode: 400,
+          error: 'CodeStorageExceededException',
+          message:
+            'The Beta plan keeps 1 MB of code an account, the packages its functions and versions name, each once: this would make 2 MB. ' +
+            'Delete the versions and functions you no longer need, then try again',
+        },
+      ]);
+      expect(packages.namedBytes).toHaveBeenLastCalledWith('user-1', PACKAGE, undefined);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+
+      // Up to the byte, it fits.
+      packages.namedBytes.mockResolvedValue(MB - 4096);
+      await service.create('user-1', dto);
+
+      // An update counts the account's packages but the one it replaces; inline code is counted as its one-file package.
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const built = inlinePackage('export const main = async () => 2;', Runtime.NODEJS);
+      packages.namedBytes.mockResolvedValue(MB - built.zip.length + 1);
+      expect((await refusal(service.update('user-1', 'fn-1', { code: 'export const main = async () => 2;', handler: 'function.main' })))[0]).toBe(400);
+      expect(packages.namedBytes).toHaveBeenLastCalledWith('user-1', built.codeSha256, 'fn-1');
+      expect(packages.storeInline).not.toHaveBeenCalledWith('user-1', built);
+
+      // A change that names no new code isn't counted: a function past a plan made smaller keeps working.
+      packages.namedBytes.mockClear();
+      await service.update('user-1', 'fn-1', { memory: 256 });
+      expect(packages.namedBytes).not.toHaveBeenCalled();
     });
 
     it("checks a new handler or runtime against the package's files, keeping the package another hour", async () => {

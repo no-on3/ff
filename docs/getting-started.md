@@ -218,6 +218,8 @@ curl -s "$FF/functions/$ID/scaling-config" | jq -c .
 
 **Aliases, as Lambda's.** `POST /functions/<id>/aliases` names a version, or `$LATEST`, the function as it is: `{"name": "live", "functionVersion": "3"}`, the name 1 to 128 letters, digits, `-` and `_`, not digits alone, which name versions, and its function's once (409 for a second). `routingConfig.additionalVersionWeights` gives one more version a share of its calls, from 0 to 1, as Lambda's weighted aliases do: `{"4": 0.1}`; never beside `$LATEST`, nor beside the alias's own version (400). `GET /functions/<id>/aliases` lists them by name, `GET …/aliases/<name>` gives one, `PUT …/aliases/<name>` changes what its body names and keeps the rest (`"routingConfig": {"additionalVersionWeights": {}}` removes the share), with `revisionId` checked when given (412), and `DELETE` deletes it, the versions it named staying. A version an alias names isn't deleted (409, naming the aliases) until the alias points elsewhere or goes. For now versions and aliases are records: calls run the function as it is, Lambda's `$LATEST`; calling a version or an alias comes next.
 
+**Code storage, as Lambda's.** The packages an account's functions and versions name may hold the plan's `codeStorageMb` together, 5 GB on beta, as Lambda's code storage holds 75 GB a region: each package once, however many functions and versions name it, inline code as the one-file package its pods run. A create or an update whose new code would take the account past it answers 400 `CodeStorageExceededException`, with the total it would make; deleting the versions and functions no longer needed makes room. A publish adds nothing, as a version names its function's package, where Lambda copies each version's code; an upload isn't refused, as it often replaces a package that stops being named, and the packages no one names stay at most 20 and go after an hour. A change of settings alone is never refused, so a function on a plan made smaller keeps working; two changes at once may pass the limit by one package.
+
 ```bash
 curl -s -X POST "$FF/functions/$ID/versions" -H 'content-type: application/json' -d '{"description": "First release"}' | jq -c '{version, functionArn}'
 # {"version":"1","functionArn":"arn:aws:lambda:tn-tunis-1:…:function:hello:1"}
@@ -1346,6 +1348,7 @@ docker compose --profile auth up -d --wait       # imports the realm again, in a
 | Functions per account | 25 | 400 `The Beta plan allows 25 functions per account: delete one first` |
 | Memory, timeout per function | 1,024 MB, 300 s | 400 `memory must be at most 1024 MB on the Beta plan` |
 | Instances per function | 10 | 400 `maxInstances must be at most 10 on the Beta plan` |
+| Code of the functions, versions' included | 5 GB, each package once | 400 `CodeStorageExceededException`: `The Beta plan keeps 5120 MB of code an account…` |
 | Namespace quota | 20 pods, 8 CPU, 8 GiB | a rollout that doesn't fit: `exceeded quota` |
 | Changes (create, update, delete, scaling, keys, accounts) | 60 a minute | 429 `TooManyRequestsException: Rate exceeded…`, with `Retry-After` |
 | Invocations | 100 a second | 429, the same, counted apart from changes |

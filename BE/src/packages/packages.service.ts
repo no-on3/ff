@@ -34,14 +34,17 @@ export type PackageView = Pick<Package, 'codeSha256' | 'codeSize' | 'unpackedSiz
 const viewOf = ({ codeSha256, codeSize, unpackedSize, fileCount, createdAt }: Package): PackageView => ({ codeSha256, codeSize, unpackedSize, fileCount, createdAt });
 
 /**
- * The packages a function or a version of their account names, its pods
- * running them: a package function's own, and the one-file package of inline
- * code (package_sha256); or a package function's code_sha256, as a backend
- * from before packages named inline code saved it. The others are unused.
+ * Whether a function or a version of its account names the package "p", its
+ * pods running it: a package function's own, and the one-file package of
+ * inline code (package_sha256); or a package function's code_sha256, as a
+ * backend from before packages named inline code saved it. The others are
+ * unused. `otherThan`, a query's parameter, leaves one function's record out.
  */
-const NAMED =
-  `(EXISTS (SELECT 1 FROM "functions" "f" WHERE "f"."account_id" = "p"."account_id" AND ("f"."package_sha256" = "p"."code_sha256" OR ("f"."package_type" = 'zip' AND "f"."code_sha256" = "p"."code_sha256")))` +
+const namedBy = (otherThan?: string): string =>
+  `(EXISTS (SELECT 1 FROM "functions" "f" WHERE "f"."account_id" = "p"."account_id"${otherThan ? ` AND "f"."id" <> ${otherThan}` : ''}` +
+  ` AND ("f"."package_sha256" = "p"."code_sha256" OR ("f"."package_type" = 'zip' AND "f"."code_sha256" = "p"."code_sha256")))` +
   ` OR EXISTS (SELECT 1 FROM "function_versions" "v" WHERE "v"."account_id" = "p"."account_id" AND "v"."package_sha256" = "p"."code_sha256"))`;
+const NAMED = namedBy();
 
 const bytes = (n: number): string => n.toLocaleString('en-US');
 const hours = (n: number): string => (n === 1 ? 'an hour' : `${n} hours`);
@@ -211,6 +214,20 @@ export class PackagesService {
       `SELECT "p"."account_id", "p"."code_sha256", "p"."inline" FROM "packages" "p" WHERE ${NAMED} ORDER BY "p"."account_id", "p"."code_sha256"`,
     );
     return rows.map((row) => ({ accountId: row.account_id, codeSha256: row.code_sha256, inline: row.inline }));
+  }
+
+  /**
+   * The bytes of the packages the account's functions and versions name, as
+   * the plan's code storage counts them, each package once; `besides` left
+   * out, a package a change is about to name, and the one `otherThan`'s record
+   * names, which the change replaces, unless another names it too.
+   */
+  async namedBytes(accountId: string, besides: string, otherThan?: string): Promise<number> {
+    const [{ bytes }] = await this.packages.query<Array<{ bytes: string }>>(
+      `SELECT COALESCE(sum("p"."code_size"), 0)::bigint AS "bytes" FROM "packages" "p" WHERE "p"."account_id" = $1 AND "p"."code_sha256" <> $2 AND ${namedBy(otherThan ? '$3' : undefined)}`,
+      otherThan ? [accountId, besides, otherThan] : [accountId, besides],
+    );
+    return Number(bytes);
   }
 
   /** 400 when the account keeps as many uploaded packages as it may that no function names: one must go, or be named. */
