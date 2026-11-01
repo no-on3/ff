@@ -175,6 +175,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       scale: jest.fn(),
       readyInstances: jest.fn(),
       desiredInstances: jest.fn(),
+      workloads: jest.fn(),
       readyInstancesByFunction: jest.fn(),
       codeImagesByFunction: jest.fn(),
       applyTenantLimits: jest.fn(),
@@ -1484,6 +1485,15 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(record()).toMatchObject({ functionId: 'fn-1', version: 2, alias: null, memoryMb: 1024, minInstances: 0 });
       expect(await deploy?.()).toMatchObject({ version: 2, codeImage: imageOf('package2'), environment: { revision: 'v2', values: { STAGE: 'v2' } } });
       expect(codeImages.imageFor).toHaveBeenLastCalledWith('user-1', 'package2');
+    });
+
+    it("counts a version's call as its version's, for its pods to scale on their own calls", async () => {
+      await service.invoke('user-1', 'fn-1', {}, '2');
+
+      expect([metrics.invocationStarted.mock.calls[0][0], metrics.invocationFinished.mock.calls[0][0]]).toEqual([
+        expect.objectContaining({ id: 'fn-1', version: 2, minInstances: 0 }),
+        expect.objectContaining({ id: 'fn-1', version: 2 }),
+      ]);
     });
 
     it("draws an alias's version for each call, its share to its other version, and keeps the alias with each", async () => {

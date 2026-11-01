@@ -45,6 +45,15 @@ export type FunctionRef = Pick<FunctionWorkload, 'id' | 'accountId'>;
 /** A published version of a function, by what names it: its function, the function's account, and its number. */
 export type PublishedVersion = FunctionRef & { version: number };
 
+/** One of a function's Deployments, $LATEST's or a version's, with the instances asked of it and those ready. */
+export interface WorkloadInstances {
+  functionId: string;
+  /** The version it runs; none for $LATEST. */
+  version?: number;
+  desired: number;
+  ready: number;
+}
+
 /** What a function's process gets besides FF's own variables: its variables and its secrets' values. */
 export interface WorkloadEnvironment {
   /** Random, new with every change of the values: the Deployment names it, so a change rolls out. Says nothing about them. */
@@ -171,6 +180,13 @@ export interface Orchestrator {
   readyInstances(fn: FunctionWorkload): Promise<number>;
   /** Instances asked for, ready or starting, of the version `fn.version` names, or $LATEST's (0 when it has none). */
   desiredInstances(fn: FunctionWorkload): Promise<number>;
+  /**
+   * The Deployments of the function, $LATEST's and its versions', or of every
+   * function without one: each with its instances, asked for and ready, from
+   * one call. A function's instances count together against its maxInstances
+   * (ADR 0015), and a version's go when it is idle.
+   */
+  workloads(fn?: FunctionRef): Promise<WorkloadInstances[]>;
   /**
    * Every function with at least one ready instance, by function ID, with how
    * many, its versions' and $LATEST's together: FF's capacity at this moment,

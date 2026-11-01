@@ -1001,7 +1001,7 @@ export class FunctionsService {
     await this.invocationsRepository.insert(invocation as QueryDeepPartialEntity<FunctionInvocation>);
 
     // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once (D14).
-    this.metricsService.invocationStarted(function_);
+    this.metricsService.invocationStarted(running);
     const startTime = Date.now();
     try {
       // The runtime logs the request's ID, and the usage record is keyed by it and the attempt's start (D6).
@@ -1047,7 +1047,7 @@ export class FunctionsService {
       await this.finish(running, invocation, failureStatus(error), initMsOf(error));
       return { invocation, ok: false, error, visible };
     } finally {
-      this.metricsService.invocationFinished(function_);
+      this.metricsService.invocationFinished(running);
     }
   }
 

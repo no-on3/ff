@@ -117,6 +117,14 @@ code_facts() { printf '%s' "$1" | python3 -c 'import base64, hashlib, sys; code 
 code_image_of() { kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}'; }
 in_registry() { [[ "$1" == "$FF_REGISTRY_NAME:5000/ff-code/$tenant@sha256:"* ]] && echo true || echo false; }
 code_configmaps() { kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$1" -o name | wc -l; }
+# as_ver <method> <path> [body] [curl option...]: a call as the versions' account (versions).
+as_ver() {
+  local method=$1 path=$2 body=${3:-}
+  shift $(($# < 3 ? $# : 3))
+  http_at "$api" "$method" "$path" "$body" -H "X-FF-Dev-Account: $ver" "$@"
+}
+# replicas_in_ver <deployment>: the instances it asks for, in the versions' account.
+replicas_in_ver() { kubectl -n "$ver_ns" get deployment "$1" -o jsonpath='{.spec.replicas}'; }
 
 # What more than one section uses: a function's code, and helpers.
 v1='export async function handler(event: { name?: string }) {
@@ -399,6 +407,48 @@ http GET "/functions/$id" >/dev/null
 check "the function record is gone" 404 "$(status)"
 }
 section_def scenario section_scenario backend budget=20
+
+section_versions() {
+section "a version's pods, scaled on its own calls; their removal once idle read a few sections on"
+# An account of its own, on a plan whose idle window is cut to a second once its calls are over: no other account's
+# functions idle with it.
+ver="$(random_account)"
+ver_ns="$(tenant_namespace "$ver")"
+e2e_namespaces+=("$ver_ns")
+as_ver GET /functions >/dev/null
+sql "INSERT INTO plans (id, name, limits) SELECT 'e2e-versions', 'E2E versions', limits FROM plans WHERE id = 'beta'"
+sql "UPDATE accounts SET plan_id = 'e2e-versions' WHERE id = '$ver'"
+sleeper='export async function handler(event: { sleepMs?: number }) {
+  if (event.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.sleepMs));
+  return { ran: process.env.FUNCTION_VERSION };
+}'
+created="$(as_ver POST /functions "$(jq -n --arg code "$sleeper" '{name: "e2e-versioned", runtime: "nodejs", code: $code, memory: 128, timeout: 10}')")"
+check "a function to publish is created" "201 ACTIVE" "$(status) $(jq -r .status <<<"$created")"
+versioned_id="$(jq -r .id <<<"$created")"
+as_ver POST "/functions/$versioned_id/versions" '{}' >/dev/null
+check "its version 1 is published" "201 1" "$(status) $(jq -r .version "$work/body")"
+as_ver POST "/functions/$versioned_id/aliases" '{"name": "live", "functionVersion": "1"}' >/dev/null
+check "and its alias live names it" 201 "$(status)"
+called="$(as_ver POST "/functions/$versioned_id/invoke" '{"qualifier": "live", "input": {}}')"
+check "the alias's first call makes the version's pods, which know their version" "201 1 live 1" \
+  "$(status) $(jq -r '"\(.version) \(.alias) \(.output.ran)"' <<<"$called")"
+check "  ... a Deployment of its own with one instance, beside \$LATEST's" "1 1" \
+  "$(replicas_in_ver "fn-$versioned_id-v1") $(replicas_in_ver "fn-$versioned_id")"
+# Four calls at once, each longer than the others take to arrive: every instance busy, so the version scales up.
+burst=()
+for n in 1 2 3 4; do
+  curl -sS -o /dev/null -w '%{http_code}\n' -X POST -H 'content-type: application/json' -H "X-FF-Dev-Account: $ver" \
+    --data '{"qualifier": "live", "input": {"sleepMs": 3000}}' "$api/functions/$versioned_id/invoke" >"$work/burst-$n" &
+  burst+=($!)
+done
+for pid in "${burst[@]}"; do wait "$pid" || true; done
+check "four calls at once through the alias scale the version up, on its own calls; \$LATEST keeps its one instance" \
+  "201 201 201 201 true 1" \
+  "$(cat "$work"/burst-{1,2,3,4} | paste -sd ' ') $([ "$(replicas_in_ver "fn-$versioned_id-v1")" -ge 2 ] && echo true || echo false) $(replicas_in_ver "fn-$versioned_id")"
+# Idle from here on: the scaler's run of the minute after this removes the version's objects (versions_idle).
+sql "UPDATE plans SET limits = limits || '{\"idleSeconds\": 1}' WHERE id = 'e2e-versions'"
+}
+section_def versions section_versions backend budget=25
 
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"
@@ -1823,6 +1873,24 @@ check "the queues deleted, their messages with them" "0 0" \
 http DELETE "/storage-keys/$queue_key_id" >/dev/null
 }
 section_def sites_counted section_sites_counted sites budget=45
+
+section_versions_idle() {
+section "a version idle past its plan's window: its pods removed, as \$LATEST's are scaled to zero"
+# At the scaler's run of the minute after the window was cut, which the sections since have mostly waited out.
+left="" latest=""
+for _ in $(seq 1 90); do
+  left="$(kubectl -n "$ver_ns" get "deployment/fn-$versioned_id-v1" "service/fn-$versioned_id-v1" "secret/fn-$versioned_id-v1-env" \
+    --ignore-not-found -o name 2>/dev/null)"
+  latest="$(replicas_in_ver "fn-$versioned_id")"
+  [ -z "$left" ] && [ "$latest" = 0 ] && break
+  sleep 1
+done
+check "the version's Deployment, Service and Secret are removed" "" "$left"
+aliased="$(as_ver GET "/functions/$versioned_id/aliases/live")"
+check "\$LATEST scaled to zero; the version and its alias kept, for the next call to start again" "0 200 1" \
+  "$latest $(status) $(jq -r .functionVersion <<<"$aliased")"
+}
+section_def versions_idle section_versions_idle versions budget=5
 
 section_usage_records() {
 section "usage records (P-20)"

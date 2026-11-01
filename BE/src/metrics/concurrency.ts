@@ -1,8 +1,8 @@
 /**
- * Calls in flight per function, and the most at once since the last read: the
- * scaling signal (client-readiness plan, D14). Each instance serves one call at
- * a time, as on Lambda, so a function needs as many instances as it has calls
- * in flight. The backend sends every call, so with one backend replica this
+ * Calls in flight by key, a function or what runs some of its calls, and the
+ * most at once since the last read: the scaling signal. Each instance serves
+ * one call at a time, as on Lambda, so a function needs as many instances as
+ * it has calls in flight. The backend sends every call, so with one backend replica this
  * count is exact; several replicas would need the runtimes to report it.
  */
 export class ConcurrencyTracker {

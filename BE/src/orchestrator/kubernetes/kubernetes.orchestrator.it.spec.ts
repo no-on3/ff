@@ -225,7 +225,7 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     expect((await orchestrator.invoke(fn, {})).output).toEqual({ version: 2, message: 'Hello world' });
   });
 
-  it("runs a version in pods of its own beside $LATEST, each call answered by the one it names; $LATEST's Service keeps its label through an update; both counted together", async () => {
+  it("runs a version in pods of its own beside $LATEST, each call answered by the one it names; $LATEST's Service keeps its label through an update; both counted together, each scaled apart", async () => {
     const tellsItsVersion = (code: string) => `
 export async function handler(_event: unknown, context: { functionVersion: string }) {
   return { version: context.functionVersion, code: '${code}' };
@@ -257,10 +257,19 @@ export async function handler(_event: unknown, context: { functionVersion: strin
         expect((await orchestrator.invoke(version1, {})).output).toEqual({ version: '1', code: 'a' });
       }
       await eventually(async () => (await orchestrator.readyInstancesByFunction()).get(latest.id) === 2, 90_000);
+      // The version scales on its own calls, its function's Deployments listed apart, each with its instances.
+      const byVersion = (a: { version?: number }, b: { version?: number }) => (a.version ?? 0) - (b.version ?? 0);
+      await orchestrator.scale(version1, 2);
+      await eventually(async () => (await orchestrator.readyInstancesByFunction()).get(latest.id) === 3, 90_000);
+      expect((await orchestrator.workloads(latest)).sort(byVersion)).toEqual([
+        { functionId: latest.id, version: undefined, desired: 1, ready: 1 },
+        { functionId: latest.id, version: 1, desired: 2, ready: 2 },
+      ]);
 
       await orchestrator.removeVersion(version1);
       expect(await client.get(paths.apps(ns, 'deployments', `${functionResourceName(latest.id)}-v1`))).toBeNull();
       await eventually(async () => (await orchestrator.readyInstancesByFunction()).get(latest.id) === 1, 90_000);
+      expect(await orchestrator.workloads(latest)).toEqual([{ functionId: latest.id, version: undefined, desired: 1, ready: 1 }]);
       expect((await orchestrator.invoke(latest, {})).output).toEqual({ version: '$LATEST', code: 'b' });
     } finally {
       await orchestrator.remove(latest, [1]);

@@ -1,5 +1,5 @@
 /**
- * Pure scaling decisions (client-readiness plan, D14), so they can be reasoned
+ * Pure scaling decisions, so that they can be reasoned
  * about and tested without timers or a scheduler.
  *
  * Each instance serves one call at a time, as on Lambda, so the signal is
@@ -7,7 +7,9 @@
  * instance busy, the backend raises the replica count (burstTarget). Once a
  * minute, decideReplicas steps it back down, one instance at a time, but never
  * below one while the function has instances or traffic: scaling to zero is
- * the idle sweep's job (shouldScaleToZero).
+ * the idle sweep's job (shouldScaleToZero). A function's $LATEST and each of
+ * its versions scale apart, on their own calls, within what of maxInstances
+ * the others leave them (instancesOf).
  */
 
 export interface ScalingInput {
@@ -58,4 +60,31 @@ export function shouldScaleToZero(input: IdleInput): boolean {
     input.readyInstances > 0 &&
     input.nowMs - input.lastActivityMs >= input.idleSeconds * 1000
   );
+}
+
+/** What runs some of a function's calls: its $LATEST, or one of its versions (ADR 0015). */
+export interface WorkloadRef {
+  id: string;
+  /** None for $LATEST. */
+  version?: number;
+}
+
+/** The key of what runs a call, among the calls counted: its function's ID alone counts the function's calls together. */
+export function workloadKey(workload: WorkloadRef): string {
+  return `${workload.id}:${workload.version ?? '$LATEST'}`;
+}
+
+/**
+ * A workload's instances asked for, undefined when it has no Deployment, and
+ * those of its function's other workloads together: a function's instances
+ * count together against its maxInstances, its versions' and $LATEST's.
+ */
+export function instancesOf(deployments: Array<{ version?: number; desired: number }>, version: number | undefined): { own?: number; others: number } {
+  let own: number | undefined;
+  let others = 0;
+  for (const deployment of deployments) {
+    if (deployment.version === version) own = deployment.desired;
+    else others += deployment.desired;
+  }
+  return { own, others };
 }

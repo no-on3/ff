@@ -11,7 +11,7 @@ import {
 } from '../orchestrator.errors';
 import { describeError } from '../../common/describe-error';
 import { REQUEST_ID_HEADER } from '../../common/request-context';
-import { FunctionLogLine, FunctionLogsPage, FunctionRef, FunctionWorkload, InvokeResult, LogsFilter, LogsQuery, Orchestrator, PublishedVersion, TenantLimits } from '../orchestrator.types';
+import { FunctionLogLine, FunctionLogsPage, FunctionRef, FunctionWorkload, InvokeResult, LogsFilter, LogsQuery, Orchestrator, PublishedVersion, TenantLimits, WorkloadInstances } from '../orchestrator.types';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
 import { LogStore, namespaceFilter, pageQuery, quoted, tailQuery, toLine, toPage } from './log-store';
@@ -583,18 +583,28 @@ export class KubernetesOrchestrator implements Orchestrator {
     if (status !== 200) throw new Error(`the API server answered ${status}`);
   }
 
-  async readyInstancesByFunction(): Promise<Map<string, number>> {
-    // One list of FF's Deployments in every namespace: a read the backend's ClusterRole allows (deploy/k8s/README.md).
-    const deployments = await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);
-    const ready = new Map<string, number>();
+  async workloads(fn?: FunctionRef): Promise<WorkloadInstances[]> {
+    // The function's, in its namespace, by its label; or FF's in every namespace, a read the backend's ClusterRole allows (deploy/k8s/README.md).
+    const deployments = fn
+      ? await this.api.list<Deployment>(paths.apps(this.namespaceOf(fn), 'deployments'), `${LABELS.managedBy}=${MANAGED_BY},${LABELS.functionId}=${fn.id}`)
+      : await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);
+    const workloads: WorkloadInstances[] = [];
     for (const deployment of deployments) {
-      const functionId = deployment.metadata.labels?.[LABELS.functionId];
-      const instances = deployment.status?.readyReplicas ?? 0;
+      const labels = deployment.metadata.labels;
+      const functionId = labels?.[LABELS.functionId];
       // Only FF's tenant namespaces: a label is easy to copy.
-      if (!functionId || instances <= 0 || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
-      // A function's versions run beside its $LATEST: its instances are all of theirs (ADR 0015).
-      ready.set(functionId, (ready.get(functionId) ?? 0) + instances);
+      if (!functionId || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
+      const version = isVersionLabelled(labels) ? Number(labels?.[LABELS.version]) : undefined;
+      if (version !== undefined && !(Number.isInteger(version) && version > 0)) continue; // no version FF names
+      workloads.push({ functionId, version, desired: deployment.spec?.replicas ?? 0, ready: deployment.status?.readyReplicas ?? 0 });
     }
+    return workloads;
+  }
+
+  async readyInstancesByFunction(): Promise<Map<string, number>> {
+    const ready = new Map<string, number>();
+    // A function's versions run beside its $LATEST: its instances are all of theirs (ADR 0015).
+    for (const { functionId, ready: instances } of await this.workloads()) if (instances > 0) ready.set(functionId, (ready.get(functionId) ?? 0) + instances);
     return ready;
   }
 

@@ -26,7 +26,7 @@ BE/src/packages/*                       static unit db l4:package,from_package,l
 BE/src/plans/*                          static unit db l4:plans l5
 BE/src/billing/*                        static unit db l4:usage,priced,rating,balance l5
 BE/src/usage/*                          static unit db l4:usage_records,usage_lost,capacity,usage,priced l5 cli:account
-BE/src/metrics/*                        static unit db l4:async_metrics,usage_records l5 cli:account
+BE/src/metrics/*                        static unit db l4:async_metrics,usage_records,versions,versions_idle l5 cli:account
 BE/src/monitoring/*                     static unit db l4:monitoring l5
 BE/src/notifications/*                  static unit db l4:alarms l5
 BE/src/admin/*                          static unit db l5

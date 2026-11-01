@@ -1240,7 +1240,7 @@ describe('KubernetesOrchestrator', () => {
     });
   });
 
-  describe('readyInstancesByFunction: capacity samples (P-21)', () => {
+  describe("readyInstancesByFunction and workloads: capacity samples, and each Deployment's instances", () => {
     const deployment = (namespace: string, labels: Record<string, string>, readyReplicas?: number) => ({
       metadata: { name: 'fn-x', namespace, labels },
       status: readyReplicas === undefined ? {} : { readyReplicas },
@@ -1279,6 +1279,44 @@ describe('KubernetesOrchestrator', () => {
       ]);
 
       expect(Object.fromEntries(await orchestrator.readyInstancesByFunction())).toEqual({ 'f-versions': 4 });
+    });
+
+    const replicas = (namespace: string, labels: Record<string, string>, desired: number, ready?: number) => ({
+      ...deployment(namespace, labels, ready),
+      spec: { replicas: desired },
+    });
+
+    it("lists a function's Deployments in its namespace by its label: each one's instances asked for and ready, and the version it runs, none for $LATEST", async () => {
+      api.lists.set(`/apis/apps/v1/namespaces/${ns}/deployments`, [
+        replicas(ns, { ...ff(fn.id), 'ff.dev/version': 'latest' }, 2, 1),
+        replicas(ns, { ...ff(fn.id), 'ff.dev/version': '3' }, 1, 1),
+        replicas(ns, { ...ff(fn.id), 'ff.dev/version': '4' }, 1), // starting
+      ]);
+
+      expect(await orchestrator.workloads(fn)).toEqual([
+        { functionId: fn.id, version: undefined, desired: 2, ready: 1 },
+        { functionId: fn.id, version: 3, desired: 1, ready: 1 },
+        { functionId: fn.id, version: 4, desired: 1, ready: 0 },
+      ]);
+      expect(api.listed).toEqual([
+        { path: `/apis/apps/v1/namespaces/${ns}/deployments`, selector: `app.kubernetes.io/managed-by=ff-controller,ff.dev/function-id=${fn.id}` },
+      ]);
+    });
+
+    it("lists every function's without one, $LATEST's of a function never published unlabelled, and leaves out a version label FF never writes", async () => {
+      api.lists.set('/apis/apps/v1/deployments', [
+        replicas('ff-t-aaaaaaaaaaaa', ff('f-never-published'), 1, 1),
+        replicas('ff-t-aaaaaaaaaaaa', { ...ff('f-odd'), 'ff.dev/version': 'v2' }, 1, 1),
+        replicas('ff-t-aaaaaaaaaaaa', { ...ff('f-odd'), 'ff.dev/version': '0' }, 1, 1),
+        replicas('default', { ...ff('f-copied'), 'ff.dev/version': '1' }, 1, 1),
+        deployment('ff-t-bbbbbbbbbbbb', { ...ff('f-idle'), 'ff.dev/version': '2' }), // no replicas field: none asked for
+      ]);
+
+      expect(await orchestrator.workloads()).toEqual([
+        { functionId: 'f-never-published', version: undefined, desired: 1, ready: 1 },
+        { functionId: 'f-idle', version: 2, desired: 0, ready: 0 },
+      ]);
+      expect(api.listed).toEqual([{ path: '/apis/apps/v1/deployments', selector: 'app.kubernetes.io/managed-by=ff-controller' }]);
     });
   });
 
