@@ -46,6 +46,7 @@ import { FunctionInvocation, InvocationSource, InvocationStatus } from './entiti
 import { awsEndpointsOf } from '../common/aws-endpoint';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { FunctionUrl } from './entities/function-url.entity';
+import { FunctionAlias } from './entities/function-alias.entity';
 import { FunctionVersion } from './entities/function-version.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import {
@@ -76,7 +77,8 @@ import { keptJson, keptText } from './history';
 import { liveTail } from './live-tail';
 import { logsQuery } from './logs-window';
 import { MAX_INPUT_BYTES } from './limits';
-import { functionNotFound } from './function-not-found';
+import { functionNotFound, noSuchAlias, noSuchVersion } from './function-not-found';
+import { drawVersion, parseQualifier } from './qualifier';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
 const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat', 'awsEndpoints'] as const;
@@ -129,6 +131,38 @@ export function workloadOf(function_: Function, environment: FunctionEnvironment
 
 /** A function's code, as its record keeps it. */
 type CodeFields = Pick<Function, 'packageType' | 'code' | 'codeSha256' | 'codeSize'>;
+
+/** What a call runs, as the qualifier it named chose it: a version as published, or $LATEST without one; and the alias it named. */
+export interface CallTarget {
+  version?: FunctionVersion;
+  alias?: string;
+}
+
+/** What runs a call: its function as it is, or as a version froze it. */
+type Running = Function & { version?: number };
+
+/**
+ * A version as its calls run it: its function, with the code and settings the
+ * version froze, and no warm instance, which stay $LATEST's.
+ */
+export function versionRun(function_: Function, version: FunctionVersion): Running {
+  return {
+    ...function_,
+    runtime: version.runtime,
+    handler: version.handler,
+    packageType: version.packageType,
+    code: version.code,
+    codeSha256: version.codeSha256,
+    codeSize: version.codeSize,
+    packageSha256: version.packageSha256,
+    memory: version.memory,
+    timeout: version.timeout,
+    eventFormat: version.eventFormat,
+    awsEndpoints: version.awsEndpoints,
+    minInstances: 0,
+    version: version.version,
+  };
+}
 
 /** An environment with these variables, and a new revision when there is anything: a change rolls out. */
 function withVariables(environment: FunctionEnvironmentValues, variables: Record<string, string>): FunctionEnvironmentValues {
@@ -893,7 +927,11 @@ export class FunctionsService {
   }
 
   /** Calls the function with `input` as its event, any JSON value, as AWS Lambda's Invoke does; {} when there is none. */
-  async invoke(accountId: string, id: string, input?: unknown): Promise<FunctionInvocation> {
+  /**
+   * Calls the function, or what `qualifier` names, as Lambda's Invoke with its Qualifier: a version, or an alias, whose
+   * share is drawn for the call. A version runs whatever $LATEST's state, as a rollback needs.
+   */
+  async invoke(accountId: string, id: string, input?: unknown, qualifier?: string): Promise<FunctionInvocation> {
     const payload = input === undefined ? {} : input;
     // As AWS Lambda refuses a synchronous call's payload over 6 MB, with its words and its exception's name.
     const size = jsonBytes(payload);
@@ -905,13 +943,14 @@ export class FunctionsService {
       });
     }
     const function_ = await this.findOne(accountId, id);
-    if (function_.status !== FunctionStatus.ACTIVE) {
+    const target = await this.targetOf(function_, qualifier);
+    if (!target.version && function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
     }
-    // D9: 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
+    // 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
     await this.credit.admit(accountId);
 
-    const outcome = await this.call(function_, payload, { source: InvocationSource.API });
+    const outcome = await this.call(function_, payload, { source: InvocationSource.API, target });
     // A call that failed is named, as the history keeps it: its ID finds its logs, its status says how it ended.
     if (!outcome.ok) {
       const { id: invocationId, status, duration, memoryUsed } = outcome.invocation;
@@ -936,8 +975,10 @@ export class FunctionsService {
   async call(
     function_: Function,
     payload: unknown,
-    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number },
+    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number; target?: CallTarget },
   ): Promise<CallOutcome> {
+    const { version, alias } = options.target ?? {};
+    const running: Running = version ? versionRun(function_, version) : function_;
     // The history keeps a capped copy of the input, output and error (P-45); the caller gets them whole.
     const keptInput = keptJson(options.history === undefined ? payload : options.history);
     const requestId = options.requestId ?? randomUUID();
@@ -949,6 +990,8 @@ export class FunctionsService {
       attempt,
       functionId: function_.id,
       source: options.source,
+      version: running.version ?? null,
+      alias: alias ?? null,
       input: keptInput.value,
       inputTruncated: keptInput.truncated,
       status: InvocationStatus.RUNNING,
@@ -962,7 +1005,9 @@ export class FunctionsService {
     const startTime = Date.now();
     try {
       // The runtime logs the request's ID, and the usage record is keyed by it and the attempt's start (D6).
-      const result = await this.orchestrator.invoke(function_, payload, invocation.requestId);
+      // A version's first call, or its first since it went idle, makes its pods of its workload whole.
+      const deploy = version ? () => this.versionWorkload(running, version.version) : undefined;
+      const result = await this.orchestrator.invoke(running, payload, invocation.requestId, deploy);
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
@@ -978,7 +1023,7 @@ export class FunctionsService {
       invocation.memoryUsed = result.memoryUsedMb;
       invocation.status = InvocationStatus.COMPLETED;
       // Should this fail, the catch below ends the call as a platform failure, unbilled: its outcome couldn't be kept.
-      await this.finish(function_, invocation, UsageStatus.SUCCESS, result.initMs);
+      await this.finish(running, invocation, UsageStatus.SUCCESS, result.initMs);
       return { invocation, ok: true, output: result.output };
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -999,7 +1044,7 @@ export class FunctionsService {
       const keptError = keptText(visible);
       invocation.error = keptError.value;
       invocation.errorTruncated = keptError.truncated;
-      await this.finish(function_, invocation, failureStatus(error), initMsOf(error));
+      await this.finish(running, invocation, failureStatus(error), initMsOf(error));
       return { invocation, ok: false, error, visible };
     } finally {
       this.metricsService.invocationFinished(function_);
@@ -1012,7 +1057,7 @@ export class FunctionsService {
    * the reaper locks it: a call it already marked LOST (the backend was
    * stopped past the call's deadline) stays LOST, with the record it got.
    */
-  private finish(function_: Function, invocation: FunctionInvocation, status: UsageStatus, initMs: number | undefined): Promise<void> {
+  private finish(running: Running, invocation: FunctionInvocation, status: UsageStatus, initMs: number | undefined): Promise<void> {
     return this.invocationsRepository.manager.transaction(async (manager) => {
       const current = await manager.findOne(FunctionInvocation, { where: { id: invocation.id }, lock: { mode: 'pessimistic_write' } });
       if (current && current.status !== InvocationStatus.RUNNING) {
@@ -1022,17 +1067,59 @@ export class FunctionsService {
       // Deleting the function during the call took its history along; the call ran all the same, and is billed.
       const endedAt = current ? (await manager.save(FunctionInvocation, invocation)).updatedAt : new Date();
       await this.usage.record(
-        usageRecord(function_, {
+        usageRecord(running, {
           requestId: invocation.requestId,
           startedAt: invocation.createdAt,
           endedAt,
           status,
           durationMs: invocation.duration ?? 0,
           initMs,
+          alias: invocation.alias,
         }),
         manager,
       );
     });
+  }
+
+  /**
+   * What a call naming `qualifier` runs: $LATEST for none; a version; or an alias's version, its share drawn. 404 for a
+   * version or an alias the function hasn't.
+   */
+  private async targetOf(function_: Function, qualifier: string | undefined): Promise<CallTarget> {
+    const named = parseQualifier(qualifier);
+    if (!named) return {};
+    const manager = this.functionsRepository.manager;
+    let alias: string | undefined;
+    let number: number | undefined;
+    if ('alias' in named) {
+      const found = await manager.findOne(FunctionAlias, { where: { functionId: function_.id, name: named.alias } });
+      if (!found) throw noSuchAlias(function_, named.alias);
+      alias = found.name;
+      number = drawVersion(found);
+    } else {
+      number = named.version;
+    }
+    if (number === undefined) return { alias };
+    const version = await manager
+      .createQueryBuilder(FunctionVersion, 'v')
+      .addSelect('v.packageSha256')
+      .where('v.functionId = :id AND v.version = :number', { id: function_.id, number })
+      .getOne();
+    // An alias's versions are there: none is deleted while an alias names it.
+    if (!version) throw noSuchVersion(function_, number);
+    return { version, alias };
+  }
+
+  /** A version's workload whole, as its first call makes its pods: its environment as published, its package's image, its function's key. */
+  private async versionWorkload(running: Running, number: number): Promise<FunctionWorkload> {
+    const sealed = await this.functionsRepository.manager
+      .createQueryBuilder(FunctionVersion, 'v')
+      .addSelect('v.environment')
+      .where('v.functionId = :id AND v.version = :number', { id: running.id, number })
+      .getOne();
+    if (!sealed) throw new Error(`Version ${number} of function ${running.id} was deleted during its call`);
+    const environment = this.environments.openVersion(running.id, number, sealed.environment);
+    return this.workload(running, environment, await this.codeImages.imageFor(running.accountId, running.packageSha256 as string));
   }
 
   /** What GET /functions/:id/scaling-config answers. */

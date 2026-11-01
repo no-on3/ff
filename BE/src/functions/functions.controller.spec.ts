@@ -97,7 +97,7 @@ describe('FunctionsController route rules (L1, P-12, P-13)', () => {
 });
 
 describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", () => {
-  const functions = { invoke: jest.fn(async () => ({ id: 'inv-1', status: 'COMPLETED', output: 1 })) };
+  const functions = { invoke: jest.fn(async (..._call: unknown[]) => ({ id: 'inv-1', status: 'COMPLETED', output: 1 })) };
   const asyncInvocations = { queue: jest.fn(async () => ({ requestId: 'req-1' })), dryRun: jest.fn(async () => undefined) };
   let app: INestApplication;
   let baseUrl: string;
@@ -121,10 +121,36 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
 
     expect([plain.status, named.status]).toEqual([201, 201]);
     expect(functions.invoke.mock.calls).toEqual([
-      [ACCOUNT, ID, { a: 1 }],
-      [ACCOUNT, ID, 2],
+      [ACCOUNT, ID, { a: 1 }, undefined],
+      [ACCOUNT, ID, 2, undefined],
     ]);
     expect(asyncInvocations.queue).not.toHaveBeenCalled();
+  });
+
+  it("passes a qualifier on as Lambda's: $LATEST, a version's number or an alias's name; anything else is refused, and calls nothing", async () => {
+    for (const qualifier of ['$LATEST', '3', 'prod']) expect((await invoke({ qualifier })).status).toBe(201);
+    expect(functions.invoke.mock.calls.map((call) => call[3])).toEqual(['$LATEST', '3', 'prod']);
+
+    functions.invoke.mockClear();
+    for (const qualifier of ['0', '07', 'a.b', '$latest', 'x'.repeat(129), 3]) {
+      const res = await invoke({ qualifier });
+      expect([qualifier, res.status]).toEqual([qualifier, 400]);
+    }
+    expect(functions.invoke).not.toHaveBeenCalled();
+  });
+
+  it('refuses a qualifier but $LATEST in a call that does not wait, for now, saying so', async () => {
+    const event = await invoke({ qualifier: 'prod' }, 'Event');
+    const dryRun = await invoke({ qualifier: '2', invocationType: 'DryRun' });
+    const latest = await invoke({ qualifier: '$LATEST' }, 'Event');
+
+    expect([event.status, (await event.json()).message, dryRun.status, latest.status]).toEqual([
+      400,
+      'A call of type Event runs $LATEST for now: name a version or an alias in a call that waits, RequestResponse',
+      400,
+      202,
+    ]);
+    expect([asyncInvocations.queue.mock.calls.length, asyncInvocations.dryRun.mock.calls.length]).toEqual([1, 0]);
   });
 
   it('keeps an Event, named by the header or the body, and answers 202 with its request ID at once', async () => {

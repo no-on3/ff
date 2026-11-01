@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException, PreconditionFailedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, PreconditionFailedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
@@ -9,9 +9,9 @@ import { AliasRoutingConfigDto, CreateAliasDto, FunctionAliasView, UpdateAliasDt
 import { FunctionAlias } from './entities/function-alias.entity';
 import { FunctionVersion } from './entities/function-version.entity';
 import { Function } from './entities/function.entity';
+import { noSuchAlias, noSuchVersion } from './function-not-found';
 import { FunctionsService } from './functions.service';
 import { lockedFunction } from './locked-function';
-import { noSuchVersion } from './versions.service';
 
 const LATEST = '$LATEST';
 
@@ -49,9 +49,6 @@ const routeOf = (route: Route) => ({
   version: route.version === null ? LATEST : String(route.version),
   ...(route.additionalVersion !== null ? { additionalVersion: String(route.additionalVersion), additionalWeight: route.additionalWeight } : {}),
 });
-
-const noSuchAlias = (function_: Pick<Function, 'name'>, name: string) =>
-  new NotFoundException(`The function ${function_.name} has no alias ${name}: GET /functions/{id}/aliases lists them`);
 
 /**
  * A function's aliases, as AWS Lambda's: made, changed and deleted under the

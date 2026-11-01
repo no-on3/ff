@@ -141,7 +141,9 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
    * timeout, then its timeout, after a cold start of up to
    * K8S_READY_TIMEOUT_SECONDS; then 30 s more. A function changed since the
    * call started may have had a longer timeout then, so that call gets the
-   * platform's maximum. Times are the database's, as the invocations' are.
+   * platform's maximum; a version's call, its version's, which never changes,
+   * or the maximum once the version is gone. Times are the database's, as the
+   * invocations' are.
    * An asynchronous call's lost attempt is its request's: the record names
    * the request, and the event's next claim counts the attempt as failed.
    */
@@ -159,13 +161,23 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
         memory: number;
         timeout: number;
         min_instances: number;
+        version: number | null;
+        alias: string | null;
       }>
     >(
-      `SELECT i."id", i."request_id", i."created_at", f."id" AS "function_id", f."account_id", f."name", f."runtime", f."memory", f."timeout", f."min_instances"
+      // A version's call ran the version's settings, which never change; warm instances are $LATEST's alone.
+      `SELECT i."id", i."request_id", i."created_at", f."id" AS "function_id", f."account_id", f."name",
+              coalesce(v."runtime"::text, f."runtime"::text) AS "runtime", coalesce(v."memory", f."memory") AS "memory",
+              coalesce(v."timeout", f."timeout") AS "timeout", CASE WHEN i."version" IS NULL THEN f."min_instances" ELSE 0 END AS "min_instances",
+              i."version", i."alias"
          FROM "function_invocations" i JOIN "functions" f ON f."id" = i."function_id"
+         LEFT JOIN "function_versions" v ON v."function_id" = i."function_id" AND v."version" = i."version"
         WHERE i."status" = 'RUNNING'
           AND i."created_at" < coalesce($1::timestamptz, now())
-            - make_interval(secs => 2 * CASE WHEN f."updated_at" > i."created_at" THEN $3 ELSE f."timeout" END + $2 + 30)`,
+            - make_interval(secs => 2 * CASE
+                WHEN i."version" IS NOT NULL THEN coalesce(v."timeout", $3)
+                WHEN f."updated_at" > i."created_at" THEN $3
+                ELSE f."timeout" END + $2 + 30)`,
       [now ?? null, coldStartSeconds, PLATFORM_LIMITS.timeoutSeconds],
     );
     let reaped = 0;
@@ -189,9 +201,10 @@ export class UsageService implements OnModuleInit, OnModuleDestroy {
           memory: row.memory,
           timeout: row.timeout,
           minInstances: row.min_instances,
+          ...(row.version !== null ? { version: row.version } : {}),
         };
         await this.record(
-          usageRecord(fn, { requestId: row.request_id, startedAt: row.created_at, endedAt: ended, status: UsageStatus.LOST, durationMs: 0 }),
+          usageRecord(fn, { requestId: row.request_id, startedAt: row.created_at, endedAt: ended, status: UsageStatus.LOST, durationMs: 0, alias: row.alias }),
           manager,
         );
         return true;

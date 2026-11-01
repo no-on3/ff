@@ -1,7 +1,7 @@
 import { FunctionLoadError, FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError } from '../orchestrator/orchestrator.errors';
 import { UsageRecord, UsageStatus } from './usage-record.entity';
 
-/** What a usage record copies of the function, as it is when invoked (D6). */
+/** What a usage record copies of what ran, the function or one of its versions, as it is when invoked, so that a change of either changes no record. */
 export interface Invoked {
   id: string;
   accountId: string;
@@ -13,6 +13,8 @@ export interface Invoked {
   timeout: number;
   /** Above zero, the call runs on provisioned concurrency, priced apart (D8, P-30). */
   minInstances: number;
+  /** The version that ran: none for $LATEST. */
+  version?: number;
 }
 
 /**
@@ -44,7 +46,7 @@ export function failureStatus(error: unknown): UsageStatus {
 /** The usage record of an invocation that ended. */
 export function usageRecord(
   fn: Invoked,
-  call: { requestId: string; startedAt: Date; endedAt: Date; status: UsageStatus; durationMs: number; initMs?: number },
+  call: { requestId: string; startedAt: Date; endedAt: Date; status: UsageStatus; durationMs: number; initMs?: number; alias?: string | null },
 ): UsageRecord {
   return {
     requestId: call.requestId,
@@ -52,6 +54,8 @@ export function usageRecord(
     accountId: fn.accountId,
     functionId: fn.id,
     functionName: fn.name,
+    version: fn.version ?? null,
+    alias: call.alias ?? null,
     runtime: fn.runtime,
     memoryMb: fn.memory,
     minInstances: fn.minInstances,

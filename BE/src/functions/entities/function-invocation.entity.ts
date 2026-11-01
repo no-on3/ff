@@ -80,6 +80,14 @@ export class FunctionInvocation {
   @Column({ type: 'enum', enum: InvocationSource, default: InvocationSource.API })
   source: InvocationSource;
 
+  /** The version that ran it, as Lambda's ExecutedVersion: null for $LATEST, the function as it is. */
+  @Column({ type: 'integer', nullable: true })
+  version: number | null;
+
+  /** The alias the call named, which chose its version: null for a call that named none. */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  alias: string | null;
+
   @Column('float', { default: 0.0 })
   duration: number;
 

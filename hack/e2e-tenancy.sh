@@ -317,7 +317,7 @@ body_for() {
   case "$1 $2" in
     "POST /functions") function_body l5-other ;;
     "PUT /functions/{id}") echo '{"name": "l5-taken-over"}' ;;
-    "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}}' ;;
+    "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}, "qualifier": "live"}' ;; # A's alias
     "POST /functions/{id}/aliases") echo '{"name": "l5-b", "functionVersion": "1"}' ;;
     "PUT /functions/{id}/aliases/{name}") echo '{"functionVersion": "$LATEST"}' ;;
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
@@ -457,6 +457,9 @@ check "A publishes a version of it, as Lambda's PublishVersion" "201 1 arn:aws:l
 alias_a="$(as_a POST "/functions/$id/aliases" '{"name": "live", "functionVersion": "1"}')"
 check "A points its alias live at it, as Lambda's CreateAlias" "201 arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:live 1" \
   "$(status) $(jq -r '"\(.aliasArn) \(.functionVersion)"' <<<"$alias_a")"
+called_live="$(as_a POST "/functions/$id/invoke" '{"input": {}, "qualifier": "live"}')"
+check "A calls it through live: version 1 runs, in pods of its own" "201 COMPLETED 1 live" \
+  "$(status) $(jq -r '"\(.status) \(.version) \(.alias)"' <<<"$called_live")"
 before="$(snapshot as_a "$id")"
 database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
 check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"

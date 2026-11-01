@@ -53,6 +53,8 @@ describe('usage records (P-20)', () => {
         accountId: '123456789012',
         functionId: 'fn-1',
         functionName: 'hello',
+        version: null,
+        alias: null,
         runtime: 'nodejs',
         memoryMb: 512,
         minInstances: 2,
@@ -61,6 +63,11 @@ describe('usage records (P-20)', () => {
         initMs: 7413,
         status: 'success',
       });
+    });
+
+    it('names the version that ran and the alias the call named, null for $LATEST and none', () => {
+      expect(usageRecord({ ...fn, version: 3 }, { ...call, status: UsageStatus.SUCCESS, durationMs: 1, alias: 'prod' })).toMatchObject({ version: 3, alias: 'prod' });
+      expect(usageRecord(fn, { ...call, status: UsageStatus.SUCCESS, durationMs: 1, alias: null })).toMatchObject({ version: null, alias: null });
     });
 
     it('has no cold start when the call found an instance ready', () => {

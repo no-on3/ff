@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { FindOperator } from 'typeorm';
 import { awsEndpointsOf } from '../common/aws-endpoint';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
-import { FunctionEnvironmentValues, NO_ENVIRONMENT, isEmpty } from './environment';
+import { EnvironmentDocument, FunctionEnvironmentValues, NO_ENVIRONMENT, isEmpty } from './environment';
 import type { EnvironmentStore } from './environment.store';
 import { InlinePackage, inlinePackage } from './inline-package';
 import { codeRepository, pushCodeImage } from '../packages/code-images.service';
@@ -134,6 +134,9 @@ export function memoryEnvironments(): EnvironmentStore & { saved: Map<string, Fu
       if (isEmpty(environment)) saved.delete(fn.id);
       else saved.set(fn.id, environment);
     },
+    // A version's environment, which a test keeps as the document itself, unsealed.
+    openVersion: (_functionId: string, version: number, sealed: EnvironmentDocument | null | undefined): FunctionEnvironmentValues =>
+      sealed ? { revision: `v${version}`, variables: sealed.variables ?? {}, secrets: sealed.secrets ?? {} } : NO_ENVIRONMENT,
   };
   return store as unknown as EnvironmentStore & { saved: Map<string, FunctionEnvironmentValues> };
 }

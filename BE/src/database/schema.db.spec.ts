@@ -81,6 +81,7 @@ const KEY_USES = migrationNames.find((name) => name.startsWith('KeyUses')) as st
 const AWS_ESTIMATE_PRICES = migrationNames.find((name) => name.startsWith('AwsEstimatePrices')) as string;
 const FUNCTION_VERSIONS = migrationNames.find((name) => name.startsWith('FunctionVersions')) as string;
 const FUNCTION_ALIASES = migrationNames.find((name) => name.startsWith('FunctionAliases')) as string;
+const CODE_STORAGE = migrationNames.find((name) => name.startsWith('CodeStorage')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -919,6 +920,42 @@ run('database schema (L2, real PostgreSQL)', () => {
         { id: 'beta', mb: null },
         { id: 'shop', mb: null },
       ]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the invocation-versions migration says what ran each call, $LATEST and no alias for the calls before, a usage record still never changed, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, CODE_STORAGE);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('before', $1, 'nodejs', 'x', 128, 5) RETURNING id`, [
+        ACCOUNT,
+      ]);
+      const [{ request_id: requestId }] = await dataSource.query(
+        `INSERT INTO function_invocations (function_id, input, status) VALUES ($1, '{}', 'COMPLETED') RETURNING request_id`,
+        [id],
+      );
+      await dataSource.query(
+        `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb, duration_ms, billed_ms, status)
+         VALUES ($1, now(), now(), $2, $3, 'before', 'nodejs', 128, 2, 2, 'success')`,
+        [requestId, ACCOUNT, id],
+      );
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const ran = () =>
+        dataSource.query(
+          `SELECT i.version AS "called", i.alias AS "calledThrough", u.version AS "billed", u.alias AS "billedThrough"
+             FROM function_invocations i JOIN usage_records u USING (request_id) WHERE i.function_id = $1`,
+          [id],
+        );
+      expect(await ran()).toEqual([{ called: null, calledThrough: null, billed: null, billedThrough: null }]);
+      await expect(dataSource.query(`UPDATE usage_records SET version = 1 WHERE request_id = $1`, [requestId])).rejects.toThrow('append-only: UPDATE refused');
+
+      await migrateDownTo(dataSource, CODE_STORAGE);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM usage_records WHERE request_id = $1`, [requestId])).toEqual([{ n: 1 }]);
+      await expect(ran()).rejects.toThrow('column i.version does not exist');
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

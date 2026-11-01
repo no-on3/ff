@@ -26,6 +26,7 @@ import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { FunctionUrl } from './entities/function-url.entity';
 import { FunctionVersion } from './entities/function-version.entity';
+import { FunctionAlias } from './entities/function-alias.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { inlineCodeFacts } from './code-package';
 import { inlinePackage } from './inline-package';
@@ -1067,7 +1068,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       expect(outcome.invocation).toMatchObject({ requestId: 'req-3', attempt: 2, source: InvocationSource.ASYNC, status: InvocationStatus.COMPLETED });
       expect(outcome.invocation.id).toMatch(UUID);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, 'req-3');
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, 'req-3', undefined);
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-3' }), ending);
     });
 
@@ -1087,7 +1088,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(inserted).toEqual([
         expect.objectContaining({ id: 'req-1', source: InvocationSource.URL, input: { version: '2.0', headers: { authorization: '***' } }, status: InvocationStatus.RUNNING }),
       ]);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, 'req-1');
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, 'req-1', undefined);
       expect(outcome).toMatchObject({ ok: true, output: { statusCode: 204 }, invocation: { id: 'req-1', status: InvocationStatus.COMPLETED } });
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-1' }), ending);
     });
@@ -1118,7 +1119,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1', { a: 1 });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, created().requestId);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, created().requestId, undefined);
       expect(invocation).toMatchObject({
         status: InvocationStatus.COMPLETED,
         output: { hello: 'world' },
@@ -1157,7 +1158,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1');
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, created().requestId);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, created().requestId, undefined);
       expect(invocation.duration).toBeGreaterThanOrEqual(0);
     });
 
@@ -1428,6 +1429,111 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
   });
 
+  describe("a call naming a version or an alias, as Lambda's Qualifier", () => {
+    const record = () => usage.record.mock.calls[0][0];
+    const version = (number: number, overrides: Partial<FunctionVersion> = {}) =>
+      ({
+        functionId: 'fn-1',
+        version: number,
+        runtime: Runtime.NODEJS,
+        handler: 'function.handler',
+        packageType: PackageType.INLINE,
+        code: `export const handler = async () => ${number};`,
+        codeSha256: `sha-${number}`,
+        codeSize: 40,
+        packageSha256: `package${number}`,
+        memory: 512,
+        timeout: 30,
+        eventFormat: EventFormat.LAMBDA,
+        awsEndpoints: [],
+        environment: { variables: { STAGE: `v${number}` }, secrets: {} },
+        ...overrides,
+      }) as unknown as FunctionVersion;
+    let versions: FunctionVersion[];
+    let aliases: Array<Pick<FunctionAlias, 'name' | 'version' | 'additionalVersion' | 'additionalWeight'>>;
+    const manager = () => (functionsRepo as unknown as { manager: { findOne: jest.Mock; createQueryBuilder: jest.Mock } }).manager;
+
+    beforeEach(() => {
+      versions = [version(1), version(2, { memory: 1024 })];
+      aliases = [
+        { name: 'prod', version: 1, additionalVersion: 2, additionalWeight: 0.25 },
+        { name: 'edge', version: null, additionalVersion: null, additionalWeight: null },
+      ];
+      let number: number;
+      const query = {
+        addSelect: () => query,
+        where: (_sql: string, parameters: { number: number }) => ((number = parameters.number), query),
+        getOne: async () => versions.find((v) => v.version === number) ?? null,
+      };
+      Object.assign(manager(), {
+        findOne: jest.fn(async (_target: unknown, { where }: { where: { name: string } }) => aliases.find((alias) => alias.name === where.name) ?? null),
+        createQueryBuilder: jest.fn(() => query),
+      });
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 'ok', durationMs: 3, memoryUsedMb: 40 });
+    });
+    afterEach(() => jest.restoreAllMocks());
+
+    it("runs a version as it was published, billed at its memory and with no warm instance; its first call's pods made of its workload whole", async () => {
+      const answer = await service.invoke('user-1', 'fn-1', { a: 1 }, '2');
+
+      const [running, payload, , deploy] = orchestrator.invoke.mock.calls[0];
+      expect(running).toMatchObject({ id: 'fn-1', version: 2, memory: 1024, timeout: 30, minInstances: 0, code: 'export const handler = async () => 2;' });
+      expect(payload).toEqual({ a: 1 });
+      expect(answer).toMatchObject({ version: 2, alias: null, output: 'ok' });
+      expect(record()).toMatchObject({ functionId: 'fn-1', version: 2, alias: null, memoryMb: 1024, minInstances: 0 });
+      expect(await deploy?.()).toMatchObject({ version: 2, codeImage: imageOf('package2'), environment: { revision: 'v2', values: { STAGE: 'v2' } } });
+      expect(codeImages.imageFor).toHaveBeenLastCalledWith('user-1', 'package2');
+    });
+
+    it("draws an alias's version for each call, its share to its other version, and keeps the alias with each", async () => {
+      jest.spyOn(Math, 'random').mockReturnValueOnce(0.1).mockReturnValueOnce(0.25);
+
+      const first = await service.invoke('user-1', 'fn-1', {}, 'prod');
+      const second = await service.invoke('user-1', 'fn-1', {}, 'prod');
+
+      expect([first.version, first.alias, second.version, second.alias]).toEqual([2, 'prod', 1, 'prod']);
+      expect(usage.record.mock.calls.map(([made]) => [made.version, made.alias])).toEqual([
+        [2, 'prod'],
+        [1, 'prod'],
+      ]);
+    });
+
+    it('runs $LATEST for an alias of $LATEST, or $LATEST named, nothing to make at a cold start; the alias kept', async () => {
+      await service.invoke('user-1', 'fn-1', {}, 'edge');
+      await service.invoke('user-1', 'fn-1', {}, '$LATEST');
+
+      expect(orchestrator.invoke.mock.calls.map(([running, , , deploy]) => [running.version, deploy])).toEqual([
+        [undefined, undefined],
+        [undefined, undefined],
+      ]);
+      expect(usage.record.mock.calls.map(([made]) => [made.version, made.alias, made.memoryMb])).toEqual([
+        [null, 'edge', 128],
+        [null, null, 128],
+      ]);
+      // $LATEST named looks nothing up.
+      expect(manager().findOne).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs a version whatever $LATEST's state, as a rollback needs; $LATEST itself is refused when not ACTIVE", async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR });
+
+      await expect(service.invoke('user-1', 'fn-1', {}, '1')).resolves.toMatchObject({ version: 1 });
+      await expect(service.invoke('user-1', 'fn-1', {}, 'edge')).rejects.toThrow(new BadRequestException('Function is not active'));
+      await expect(service.invoke('user-1', 'fn-1', {})).rejects.toThrow(new BadRequestException('Function is not active'));
+    });
+
+    it("answers 404 for a version or an alias the function hasn't, before the credit is read or anything runs", async () => {
+      await expect(service.invoke('user-1', 'fn-1', {}, '7')).rejects.toThrow(
+        new NotFoundException('The function hello has no version 7: GET /functions/{id}/versions lists them'),
+      );
+      await expect(service.invoke('user-1', 'fn-1', {}, 'staging')).rejects.toThrow(
+        new NotFoundException('The function hello has no alias staging: GET /functions/{id}/aliases lists them'),
+      );
+      expect([credit.admit.mock.calls.length, invocationsRepo.insert.mock.calls.length, orchestrator.invoke.mock.calls.length]).toEqual([0, 0, 0]);
+    });
+  });
+
   describe('usage records (P-20, D6, D7)', () => {
     const record = () => usage.record.mock.calls[0][0];
 
@@ -1437,7 +1543,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await service.invoke('user-1', 'fn-1', { name: 'x' });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, created().requestId);
+      // $LATEST's pods are there: nothing to make at a cold start.
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, created().requestId, undefined);
       expect(usage.record).toHaveBeenCalledWith(
         {
           requestId: created().requestId,
@@ -1446,6 +1553,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
           accountId: 'user-1',
           functionId: 'fn-1',
           functionName: 'hello',
+          version: null,
+          alias: null,
           runtime: 'nodejs',
           memoryMb: 256,
           minInstances: 1,

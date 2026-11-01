@@ -134,6 +134,8 @@ export const INVOCATION_FIELDS = [
   'output',
   'status',
   'source',
+  'version',
+  'alias',
   'duration',
   'memoryUsed',
   'error',
@@ -159,6 +161,10 @@ export interface FunctionInvocation {
   status: InvocationStatus;
   /** What brought it: the API, the function's URL, a schedule, or an asynchronous call. */
   source: InvocationSource;
+  /** The version that ran it: null for $LATEST, the function as it is. */
+  version: number | null;
+  /** The alias the call named, which chose its version: null for none. */
+  alias: string | null;
   /** Milliseconds, as the runtime measured it. */
   duration: number;
   /** MB: the runtime's peak memory. */

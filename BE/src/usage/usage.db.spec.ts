@@ -91,12 +91,12 @@ run('usage records (L2, P-20)', () => {
     });
   }
 
-  /** A RUNNING invocation that started `secondsAgo` before the database's now. */
-  async function runningSince(fn: Function, secondsAgo: number): Promise<string> {
+  /** A RUNNING invocation that started `secondsAgo` before the database's now, of $LATEST unless it names a version, and its alias. */
+  async function runningSince(fn: Function, secondsAgo: number, ran: { version?: number; alias?: string } = {}): Promise<string> {
     const [{ id }] = await query<Array<{ id: string }>>(
-      `INSERT INTO function_invocations (function_id, input, status, created_at, updated_at)
-       VALUES ($1, '{}', 'RUNNING', now() - make_interval(secs => $2), now() - make_interval(secs => $2)) RETURNING id`,
-      [fn.id, secondsAgo],
+      `INSERT INTO function_invocations (function_id, input, status, created_at, updated_at, version, alias)
+       VALUES ($1, '{}', 'RUNNING', now() - make_interval(secs => $2), now() - make_interval(secs => $2), $3, $4) RETURNING id`,
+      [fn.id, secondsAgo, ran.version ?? null, ran.alias ?? null],
     );
     return id;
   }
@@ -140,7 +140,8 @@ run('usage records (L2, P-20)', () => {
 
     const invocation = await functions.invoke(ACCOUNT, fn.id, { a: 1 });
 
-    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ id: fn.id }), { a: 1 }, invocation.id);
+    // $LATEST's pods are there: nothing to make at a cold start.
+    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ id: fn.id }), { a: 1 }, invocation.id, undefined);
     const saved = (await invocationOf(invocation.id)) as FunctionInvocation;
     expect(saved).toMatchObject({ status: InvocationStatus.COMPLETED, duration: 12.34, memoryUsed: 50 });
     expect(await recordsOf(invocation.id)).toEqual([
@@ -151,6 +152,8 @@ run('usage records (L2, P-20)', () => {
         account_id: ACCOUNT,
         function_id: fn.id,
         function_name: fn.name,
+        version: null, // $LATEST
+        alias: null,
         runtime: 'nodejs',
         memory_mb: 256,
         min_instances: 1,
@@ -241,6 +244,30 @@ run('usage records (L2, P-20)', () => {
     expect(await usage.reapLost()).toBe(0);
     // Out of the way of the next cases: these would soon be past their own deadline.
     await query(`UPDATE function_invocations SET status = 'COMPLETED' WHERE id IN ($1, $2)`, [young, changedYoung]);
+  });
+
+  it("gives a version's call its version's deadline, the platform's once the version is gone, and its LOST record the version, its memory and the alias", async () => {
+    // $LATEST's timeout is 5 s, version 1's 100 s: its longest is 100 s waiting, 100 s running, a 20 s cold start, then 30 s: 250 s.
+    const fn = await newFunction({ memory: 512, minInstances: 1 });
+    await query(`UPDATE functions SET updated_at = now() - interval '1 day' WHERE id = $1`, [fn.id]);
+    await query(
+      `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+       VALUES ($1, 1, $2, 'nodejs', 'function.handler', 'inline', '', $3, 1, $3, 2048, 100, 'lambda', '{}')`,
+      [fn.id, ACCOUNT, 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg='],
+    );
+    const young = await runningSince(fn, 240, { version: 1, alias: 'prod' });
+    const old = await runningSince(fn, 260, { version: 1, alias: 'prod' });
+    // Version 2 deleted during its call: the platform's 900 s, a longest of 1,850 s.
+    const gone = await runningSince(fn, 1_700, { version: 2 });
+
+    expect(await usage.reapLost()).toBe(1);
+
+    expect(await recordsOf(old)).toEqual([
+      expect.objectContaining({ function_id: fn.id, version: 1, alias: 'prod', memory_mb: 2048, min_instances: 0, status: 'lost', billed_ms: 0 }),
+    ]);
+    for (const id of [young, gone]) expect(await invocationOf(id)).toMatchObject({ status: InvocationStatus.RUNNING });
+    // Out of the way of the next cases.
+    await query(`UPDATE function_invocations SET status = 'COMPLETED' WHERE id IN ($1, $2)`, [young, gone]);
   });
 
   it("writes neither when the record can't be written, so the call is reaped as LOST later", async () => {

@@ -21,6 +21,7 @@ import { Function } from './entities/function.entity';
 import { sendEvents } from './event-stream';
 import { AsyncInvocationsService } from './async-invocations.service';
 import { FunctionView, FunctionsService } from './functions.service';
+import { LATEST } from './qualifier';
 
 const INVOCATION_TYPES = Object.values(InvocationType) as string[];
 
@@ -184,6 +185,10 @@ export class FunctionsController {
     @Res({ passthrough: true }) response: Response,
   ): Promise<FunctionInvocation | AsyncInvocationView | void> {
     const type = invocationTypeOf(invocationType, invokeFunctionDto.invocationType);
+    const { qualifier } = invokeFunctionDto;
+    if (type !== InvocationType.REQUEST_RESPONSE && qualifier !== undefined && qualifier !== LATEST) {
+      throw new BadRequestException(`A call of type ${type} runs $LATEST for now: name a version or an alias in a call that waits, RequestResponse`);
+    }
     if (type === InvocationType.EVENT) {
       const queued = await this.asyncInvocations.queue(principal.accountId, id, invokeFunctionDto.input);
       response.status(202);
@@ -194,7 +199,7 @@ export class FunctionsController {
       response.status(204);
       return;
     }
-    return this.functionsService.invoke(principal.accountId, id, invokeFunctionDto.input);
+    return this.functionsService.invoke(principal.accountId, id, invokeFunctionDto.input, qualifier);
   }
 
   @Get(':id/invocations')

@@ -5,7 +5,6 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
-  NotFoundException,
   PreconditionFailedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -23,6 +22,7 @@ import { FunctionVersion } from './entities/function-version.entity';
 import { EnvironmentDocument, sameVariables } from './environment';
 import { EnvironmentStore } from './environment.store';
 import { platformFailure } from './failures';
+import { noSuchVersion } from './function-not-found';
 import { FunctionsService } from './functions.service';
 import { inlinePackage } from './inline-package';
 import { lockedFunction } from './locked-function';
@@ -240,10 +240,6 @@ export class FunctionVersionsService {
     };
   }
 }
-
-/** The answer for a version the function hasn't. */
-export const noSuchVersion = (function_: Pick<Function, 'name'>, number: number): NotFoundException =>
-  new NotFoundException(`The function ${function_.name} has no version ${number}: GET /functions/{id}/versions lists them`);
 
 /** As Lambda refuses to delete a version an alias names, with the aliases' names. */
 export function namedByAliases(function_: Pick<Function, 'name'>, number: number, aliases: string[]): ConflictException {
