@@ -80,11 +80,12 @@ if [ -x "$repo/hack/.rust/cargo/bin/cargo" ]; then
 fi
 
 in_dir() { (cd "$1" && shift && "$@"); } # <directory> <command...>
-# The first of <n> ports in a row that nothing on this machine answers on.
+# The first of <n> ports in a row that nothing on this machine answers on, from 10000 to 19999: under Linux's range for
+# outgoing connections, 32768 to 60999, where a connection can take a port between this check and Docker's bind.
 free_ports() {
   local n=$1 first port
   for _ in $(seq 1 50); do
-    first=$((40000 + RANDOM % 20000))
+    first=$((10000 + RANDOM % (10000 - n + 1)))
     for port in $(seq "$first" $((first + n - 1))); do
       (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && continue 2
     done
