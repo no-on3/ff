@@ -126,3 +126,24 @@ fn a_file_is_checked_alone_and_a_path_not_there_is_a_usage_error() {
         .code(2)
         .stderr(predicate::str::contains("isn't there"));
 }
+
+#[test]
+fn a_template_is_read_as_cloudformation_reads_it_and_lambdas_limits_checked() {
+    let template = "Transform: AWS::Serverless-2016-10-31\nResources:\n  Orders:\n    Type: AWS::Serverless::Function\n    Properties:\n      CodeUri: code/orders.zip\n      Handler: index.handler\n      Runtime: nodejs24.x\n      MemorySize: 64\n";
+    let code = folder(&[("template.yaml", template)]);
+    let settings = tempfile::TempDir::new().unwrap();
+
+    ff(&settings).arg("doctor").arg(code.path()).assert().code(1).stdout(
+        "template.yaml:9: error: Orders: MemorySize 64, where AWS Lambda takes a whole number of MB from 128 to 10,240 \
+         [lambda-limits]\n1 error, 0 warnings in 1 file read\n",
+    );
+
+    std::fs::write(
+        code.path().join("template.yaml"),
+        "Resources:\n  Orders: &orders {Type: AWS::SQS::Queue}\n  Receipts: *orders\n",
+    )
+    .unwrap();
+    ff(&settings).arg("doctor").arg(code.path()).assert().code(1).stdout(predicate::str::starts_with(
+        "template.yaml:3: error: CloudFormation can't read it, at column 13: an alias (*name)",
+    ));
+}

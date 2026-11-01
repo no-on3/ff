@@ -1,5 +1,7 @@
 # Step 5's spike: a SAM template's YAML, read in Rust
 
+**The reader is in `ff` now,** as [`cli/src/sam.rs`](../../../cli/src/sam.rs), which `ff doctor` reads templates with and `ff deploy` will (X-12): this copy is the spike's, as it was measured, and `run.sh` still compares it with cfn-flip.
+
 The step-5 plan's X-01, part 4. `ff deploy` will read a `template.yaml` (X-12), and CloudFormation's YAML has short tags (`!Ref Queue`, `!GetAtt Queue.Arn`, `!Sub …`) that each stand for a long form (`{"Ref": "Queue"}`, `{"Fn::GetAtt": ["Queue", "Arn"]}`, `{"Fn::Sub": …}`). `src/lib.rs` is a reader built on yaml-rust2's events: it gives a template as JSON, each short tag in its long form, and where each value starts, by JSON pointer, for messages that name the line. It is a crate of its own, so that the `ff` command takes on no dependency before this spike chooses one.
 
 ```bash

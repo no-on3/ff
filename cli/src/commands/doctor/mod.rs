@@ -1,9 +1,11 @@
 //! `ff doctor [path]`: what a function's folder, or a file, holds that works on FF and not on AWS
 //! Lambda, before a move: FF's API keys, its variables and hosts, its original event, files
-//! written outside `/tmp`, a TypeScript handler, a package over Lambda's size. Errors stop a move;
-//! warnings are for a person to judge, and fail it too with `--strict`.
+//! written outside `/tmp`, a TypeScript handler, a package over Lambda's size; and in its SAM
+//! template, what CloudFormation can't read and what is beyond Lambda's limits. Errors stop a
+//! move; warnings are for a person to judge, and fail it too with `--strict`.
 
 mod code;
+mod template;
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -18,6 +20,9 @@ use crate::package::{self, FolderFile, Project};
 
 /// The folders of libraries a build installs, which aren't the function's own code to read.
 const LIBRARY_FOLDERS: [&str; 5] = ["node_modules", ".venv", "venv", "site-packages", "dist-packages"];
+
+/// `sam build`'s output, copies of the code, which the folder's own files are read for.
+const SAM_BUILD: &str = ".aws-sam/";
 
 /// Bigger files aren't read: a bundle's or a data file's lines aren't the function's own code.
 const MAX_READ_BYTES: u64 = 1024 * 1024;
@@ -147,11 +152,15 @@ fn size_finding(files: &[FolderFile]) -> Option<Finding> {
 /// The report of a folder, or of one file.
 fn report(path: &Path, hosts: &[String]) -> Result<Report, Error> {
     let mut findings = Vec::new();
-    let files = if path.is_dir() {
-        let files = package::folder_files(path)?;
+    let (folder, files) = if path.is_dir() {
+        let mut files = package::folder_files(path)?;
+        files.retain(|file| !file.name.starts_with(SAM_BUILD));
         findings.extend(size_finding(&files));
-        findings.extend(handler_findings(path, &files));
-        files
+        // A template names its functions' handlers, which its checks find.
+        if !files.iter().any(|file| template::NAMES.contains(&file.name.as_str())) {
+            findings.extend(handler_findings(path, &files));
+        }
+        (path, files)
     } else {
         let metadata = std::fs::metadata(path)
             .map_err(|error| Error::usage(format!("Couldn't read {}: {error}", path.display())))?;
@@ -159,7 +168,10 @@ fn report(path: &Path, hosts: &[String]) -> Result<Report, Error> {
         if is_typescript(&name) {
             findings.push(typescript_handler(&name, &format!("{}.handler", name.split('.').next().unwrap_or(&name))));
         }
-        vec![FolderFile { name, path: path.to_owned(), size: metadata.len() }]
+        (
+            path.parent().unwrap_or(Path::new(".")),
+            vec![FolderFile { name, path: path.to_owned(), size: metadata.len() }],
+        )
     };
     let (mut files_read, mut files_not_read) = (0, 0);
     for file in files.iter().filter(|file| !in_libraries(&file.name)) {
@@ -171,6 +183,9 @@ fn report(path: &Path, hosts: &[String]) -> Result<Report, Error> {
         let Ok(text) = String::from_utf8(std::fs::read(&file.path)?) else { continue };
         files_read += 1;
         findings.extend(code::check(&file.name, &text, hosts));
+        if template::NAMES.contains(&file.name.as_str()) {
+            findings.extend(template::check(&file.name, &text, folder));
+        }
     }
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
     let errors = findings.iter().filter(|finding| finding.level == Level::Error).count();
@@ -320,6 +335,28 @@ mod tests {
         assert_eq!(
             text(&super::report(dir.path(), &[]).unwrap()),
             "0 errors, 0 warnings in 1 file read: nothing found that works on FF alone"
+        );
+    }
+
+    #[test]
+    fn a_folders_template_is_checked_and_sams_build_output_isnt_read() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let template = "Resources:\n  Orders:\n    Type: AWS::Serverless::Function\n    Properties:\n      CodeUri: .\n      Handler: index.handler\n      Runtime: nodejs24.x\n      Timeout: 901\n";
+        write(dir.path(), "template.yaml", template);
+        write(dir.path(), "index.ts", "export const handler = async () => 1;\n");
+        write(dir.path(), ".aws-sam/build/Orders/index.js", "process.env.FUNCTION_NAME\n");
+
+        let report = report(dir.path(), &[]).unwrap();
+
+        // The template's handler found once, by the template, not again as the folder's own.
+        assert_eq!(
+            checks(&report),
+            [("template.yaml", Some(6), "typescript-handler"), ("template.yaml", Some(8), "lambda-limits")]
+        );
+        assert_eq!(report.files_read, 2);
+        assert_eq!(
+            checks(&super::report(&dir.path().join("template.yaml"), &[]).unwrap()),
+            [("template.yaml", Some(6), "typescript-handler"), ("template.yaml", Some(8), "lambda-limits")]
         );
     }
 

@@ -27,7 +27,7 @@ On AWS, an app's functions, URLs, queues, buckets and events are often one file:
 
 ### 2. The template read as CloudFormation reads it
 
-The reader is the spike's grown up (X-12), on yaml-rust2's events: each short tag in its long form, plain scalars typed by YAML 1.1's rules as CloudFormation and AWS's tools type them, and every value's line kept, so that each message names the file and the line. What CloudFormation doesn't take is refused at its line, before anything is made: an alias, a merge, YAML's tags it lists, a tag it doesn't have, a key given twice, a second document. A template FF takes is one AWS takes too.
+The reader is the spike's grown up (`cli/src/sam.rs`, brought into `ff` by X-04's `ff doctor`; X-12 builds on it), on yaml-rust2's events: each short tag in its long form, plain scalars typed by YAML 1.1's rules as CloudFormation and AWS's tools type them, and every value's line kept, so that each message names the file and the line. What CloudFormation doesn't take is refused at its line, before anything is made: an alias, a merge, YAML's tags it lists, a tag it doesn't have, a key given twice, a second document. A template FF takes is one AWS takes too.
 
 ### 3. The subset, and one refusal for what is outside it
 

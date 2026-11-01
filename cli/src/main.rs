@@ -15,6 +15,7 @@ mod output;
 mod package;
 mod progress;
 mod s3;
+mod sam;
 mod table;
 
 use std::process::ExitCode;
