@@ -27,6 +27,10 @@ import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schema
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
+// A test of a migration runs every migration up on a scratch database, then back down to its own: more steps with
+// each migration added. The suite takes 90 s on GitHub's runners and 500 s on a loaded machine, where four of its
+// tests took more than the 20 s the backend's tests are given each.
+jest.setTimeout(120_000);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const migrationNames = MIGRATIONS.map((migration) => (new migration() as { name: string }).name);
 /** A development account: functions belong to accounts since P-12. */
