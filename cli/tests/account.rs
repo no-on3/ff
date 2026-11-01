@@ -176,6 +176,70 @@ fn usage_as_csv_is_the_apis_own_and_a_wrong_month_is_refused_before_calling() {
         .stderr(predicate::str::contains("--month is a month as YYYY-MM"));
 }
 
+/// Two months at AWS's prices as the API gives them, the second this one so far, Lambda's logs left out.
+fn aws_estimate() -> Value {
+    let line = |line: &str, label: &str, usd: &str, extra: bool, assumption: Option<&str>| {
+        json!({ "line": line, "label": label, "usd": usd, "amount": "0.000", "extra": extra, "leftOut": line == "logs",
+                "assumption": assumption })
+    };
+    let month = |month: &str, until: Option<&str>, usd: [&str; 3], totals: [&str; 2], ff_total: Option<&str>| {
+        json!({ "month": month, "until": until, "requests": 50,
+                "lines": [line("functions", "AWS Lambda: requests and duration", usd[0], false, None),
+                          line("logs", "CloudWatch Logs: Lambda's logs", usd[1], true, Some("About 1 KB a call, kept 14 days as the plan keeps them")),
+                          line("natGateway", "A NAT gateway", usd[2], true, Some("One, with its public IPv4 address, for each hour the account had a database or a cache"))],
+                "totalUsd": totals[0], "total": totals[1], "ffTotal": ff_total })
+    };
+    json!({ "currency": "TND", "usdRate": "3.0080", "usdRateDate": "2026-10-14", "region": "us-east-1",
+            "pricesReadOn": ["2026-10-17", "2026-10-31"], "priceBook": "pb1",
+            "months": [month("2026-10", None, ["0.83", "0.01", "37.20"], ["38.03", "114.394"], Some("4.901")),
+                       month("2026-11", Some("2026-11-01T10:00:00.000Z"), ["0.00", "0.00", "5.00"], ["5.00", "15.040"], None)] })
+}
+
+#[test]
+fn usage_aws_shows_the_months_at_awss_prices_line_by_line_beside_ffs_with_what_each_line_of_aws_alone_assumes() {
+    let api = Server::start(vec![Reply::json(200, aws_estimate()), Reply::json(200, aws_estimate())]);
+    let dir = with_key(&api.url);
+
+    ff(&dir).args(["usage", "--aws", "--months", "2", "--without", "logs"]).assert().success().stdout(
+        "At AWS's prices, an estimate: what FF counted, at AWS's US$ list prices in us-east-1, as FF read them from 2026-10-17 to 2026-10-31, \
+         with the free tier AWS gives every account every month; in TND at 3.0080 TND a US$, the rate of 2026-10-14.\n\
+         US$                                              2026-10  2026-11 so far\n\
+         AWS Lambda: requests and duration                0.83     0.00\n\
+         CloudWatch Logs: Lambda's logs (logs, left out)  0.01     0.00\n\
+         A NAT gateway (natGateway)                       37.20    5.00\n\
+         total                                            38.03    5.00\n\
+         total in TND                                     114.394  15.040\n\
+         at FF's prices, in TND                           4.901    -\n\
+         What AWS bills that FF doesn't, each line an estimate of its own, which --without leaves out of the totals:\n  \
+         logs: About 1 KB a call, kept 14 days as the plan keeps them\n  \
+         natGateway: One, with its public IPv4 address, for each hour the account had a database or a cache\n",
+    );
+    let output =
+        ff(&dir).args(["usage", "--aws", "--without", "logs,natGateway", "--output", "json"]).output().unwrap();
+
+    assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(), aws_estimate());
+    let paths: Vec<String> = api.requests().iter().map(|request| request.path.clone()).collect();
+    assert_eq!(paths, ["/usage/aws-estimate?months=2&without=logs", "/usage/aws-estimate?without=logs%2CnatGateway"]);
+}
+
+#[test]
+fn usage_aws_refuses_before_calling_a_line_the_api_has_none_of_more_months_than_it_estimates_and_a_month() {
+    let dir = with_key(&common::unreachable_url());
+
+    for args in [["--months", "2"], ["--without", "logs"]] {
+        ff(&dir).arg("usage").args(args).assert().code(2).stderr(predicate::str::contains(
+            "--months and --without go with --aws, as in `ff usage --aws --months 6`",
+        ));
+    }
+
+    ff(&dir).args(["usage", "--aws", "--without", "natGateway,lambda"]).assert().code(2).stderr(predicate::str::contains(
+        "\"lambda\" is no line of what AWS bills that FF doesn't: coldStarts, databaseInstances, cacheNodes, dataOut, logs, cloudFront, natGateway",
+    ));
+    for args in [["--aws", "--months", "13"], ["--aws", "--month", "2026-10"], ["--aws", "--csv", "--months=1"]] {
+        ff(&dir).arg("usage").args(args).assert().code(2);
+    }
+}
+
 #[test]
 fn usage_without_the_scope_exits_6_naming_it() {
     let api = Server::start(vec![Reply::json(

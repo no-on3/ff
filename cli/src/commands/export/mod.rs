@@ -1,7 +1,7 @@
 //! `ff export <folder>`: what a move to AWS needs, written in a new folder from the account's own
 //! resources: a SAM template and the same for Terraform, each function's code as Lambda runs it, the
-//! values each takes, a page of `data/` for each kind of resource the account has, and
-//! `MIGRATION.md`, its runbook.
+//! values each takes, a page of `data/` for each kind of resource the account has, `MIGRATION.md`,
+//! its runbook, and `cost-estimate.md`, its last months at AWS's prices.
 
 mod account;
 #[cfg(test)]
@@ -20,6 +20,7 @@ use std::time::{Duration, SystemTime};
 use serde::Serialize;
 
 use super::Context;
+use super::estimate::{self, AwsEstimate};
 use super::init::new_folder;
 use crate::api::{Call, Client};
 use crate::cli::ExportArgs;
@@ -28,6 +29,9 @@ use crate::progress::Progress;
 
 /// How long a function's zip may take to come, 50 MB at most.
 const CODE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// The months `cost-estimate.md` prices at AWS's prices: the last three, this one so far last.
+const ESTIMATE_MONTHS: u32 = 3;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,7 +79,17 @@ pub fn run(args: ExportArgs, context: &Context) -> Result<(), Error> {
     let current = super::account::current(&me, &settings)?;
     let progress = Progress::start(context.out, &format!("reading account {}", current.id));
     let read = account::read(&client, current, &args.functions)?;
+    let estimate = client.json::<AwsEstimate>(&estimate::call(Some(ESTIMATE_MONTHS), &[])?);
     progress.stop();
+    let estimate = match estimate {
+        Ok(estimate) => Ok(estimate),
+        // A key that can't read the usage, or an FF without AWS's prices: the kit all the same, saying why.
+        Err(error) if matches!(error.status, Some(403 | 404)) => {
+            context.out.warn(&format!("cost-estimate.md has no estimate: {}", error.message));
+            Err(error.message)
+        }
+        Err(error) => return Err(error),
+    };
     let read_on = humantime::format_rfc3339_seconds(SystemTime::now()).to_string()[..10].to_owned();
     let header = format!(
         "# ff export wrote this on {read_on} from FF's account {}: MIGRATION.md says how to deploy it.\n",
@@ -95,7 +109,7 @@ pub fn run(args: ExportArgs, context: &Context) -> Result<(), Error> {
         write(&args.folder, &exported.code, &zip, false)?;
         files.push(exported.code.clone());
     }
-    for file in kit::files(&read, &template, &terraform, &read_on) {
+    for file in kit::files(&read, &template, &terraform, &estimate, &read_on) {
         write(&args.folder, &file.path, file.text.as_bytes(), file.executable)?;
         files.push(file.path);
     }

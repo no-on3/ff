@@ -11,6 +11,7 @@ mod db;
 mod deploy;
 mod email;
 mod env;
+mod estimate;
 mod event_sources;
 mod export;
 mod functions;
@@ -280,7 +281,12 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),
-        Command::Usage { month, csv } => account::usage(month.as_deref(), csv, context),
+        Command::Usage { aws: true, months, without, .. } => account::aws_estimate(months, &without, context),
+        // Clap takes a flag's default as given, so it can't say these two need --aws.
+        Command::Usage { months, without, .. } if months.is_some() || !without.is_empty() => {
+            Err(Error::usage("--months and --without go with --aws, as in `ff usage --aws --months 6`"))
+        }
+        Command::Usage { month, csv, .. } => account::usage(month.as_deref(), csv, context),
         Command::Balance => account::balance(context),
         Command::Metrics { name, period, since } => account::metrics(name.as_deref(), period, &since, context),
         Command::Config(command) => config::run(command, context),

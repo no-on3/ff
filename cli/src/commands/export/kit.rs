@@ -1,11 +1,13 @@
 //! The kit's other files: the values the template takes, the pages of `data/` for what the account
 //! has, and `MIGRATION.md`, the account's own runbook.
 
+use super::super::estimate::AwsEstimate;
 use super::account::Account;
 use super::roles::seen_between;
 use super::template::{Parameter, SCHEDULES_STATE, Template};
 use super::terraform::Terraform;
 use crate::api::types::name_in_arn;
+use crate::table::markdown_table;
 
 const LAMBDA: &str = include_str!("../../../templates/export/data/lambda.md");
 const POSTGRES: &str = include_str!("../../../templates/export/data/postgres.md");
@@ -59,9 +61,15 @@ fn page(text: &str, in_account: &str) -> String {
     format!("{title}\n\n> **In this account:** {in_account}\n{rest}")
 }
 
-/// The kit's files but the code: the template, `terraform/`, the values each takes, `data/` and
-/// `MIGRATION.md`.
-pub fn files(account: &Account, template: &Template, terraform: &Terraform, read_on: &str) -> Vec<File> {
+/// The kit's files but the code: the template, `terraform/`, the values each takes, `data/`,
+/// `MIGRATION.md` and `cost-estimate.md`, from the estimate or why the API gave none.
+pub fn files(
+    account: &Account,
+    template: &Template,
+    terraform: &Terraform,
+    estimate: &Result<AwsEstimate, String>,
+    read_on: &str,
+) -> Vec<File> {
     let mut files = vec![File::new("template.yaml", template.text.clone())];
     if let Some(before_copy) = &template.before_copy {
         files.push(File::new("template-before-copy.yaml", before_copy.clone()));
@@ -71,7 +79,44 @@ pub fn files(account: &Account, template: &Template, terraform: &Terraform, read
     files.push(File::new("terraform/terraform.tfvars.example", tfvars(terraform)));
     files.extend(data_pages(account));
     files.push(File::new("MIGRATION.md", migration(account, template, read_on)));
+    files.push(File::new("cost-estimate.md", cost_estimate(account, estimate, read_on)));
     files
+}
+
+/// `cost-estimate.md`: the account's last months at AWS's prices, an estimate, line by line, with
+/// what each line of what AWS bills that FF doesn't assumes; or why the API gave none.
+fn cost_estimate(account: &Account, estimate: &Result<AwsEstimate, String>, read_on: &str) -> String {
+    let mut text = format!("# {} at AWS's prices, an estimate\n\n", account.name);
+    let estimate = match estimate {
+        Ok(estimate) => estimate,
+        Err(why) => {
+            text.push_str(&format!(
+                "`ff export` wrote no estimate on {read_on}: FF's API answered \"{why}\". Once it can, `ff usage --aws` makes one.\n"
+            ));
+            return text;
+        }
+    };
+    text.push_str(&format!(
+        "`ff export` wrote this page on {read_on} from FF's account {}: its last {} months, all of its usage, this one so \
+         far last: {}. An estimate, not a quote: AWS bills what the account makes there, and its other regions' prices differ.\n\n",
+        account.id,
+        estimate.months.len(),
+        estimate.priced_with()
+    ));
+    let (headers, rows) = estimate.table();
+    text.push_str(&markdown_table(&headers, &rows));
+    let assumptions = estimate.assumptions();
+    if !assumptions.is_empty() {
+        text.push_str(
+            "\n## What AWS bills that FF doesn't\n\n\
+             Each line an estimate of its own, in the totals above: `ff usage --aws --without natGateway,logs` gives the \
+             months again without those two, as FF counts them then.\n\n",
+        );
+        for (line, label, assumption) in assumptions {
+            text.push_str(&format!("- **{label}** (`{line}`): {assumption}.\n"));
+        }
+    }
+    text
 }
 
 /// Where a value the export doesn't write comes from.
@@ -212,7 +257,8 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
     text.push_str(
         "- `code/`, each function's zip as Lambda runs it;\n\
          - `secrets.template.env`, the values the template takes and this export doesn't write;\n\
-         - `data/`, how each kind of resource moves, a page each.\n\n\
+         - `data/`, how each kind of resource moves, a page each;\n\
+         - `cost-estimate.md`, the account's last months at AWS's prices, an estimate.\n\n\
          The steps go in the order that works: the data first, then the queues, then the functions, each still served by FF until its callers move.\n",
     );
     if !template.notes.is_empty() {
@@ -394,6 +440,7 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::estimate::tests::estimate;
     use super::super::fixtures::shop;
     use super::super::template::template;
     use super::super::terraform::terraform;
@@ -406,7 +453,13 @@ mod tests {
     #[test]
     fn the_kit_has_a_page_for_each_kind_of_resource_the_account_has_its_names_under_the_title() {
         let account = shop();
-        let files = files(&account, &template(&account, false, ""), &terraform(&account, false, ""), "2026-10-31");
+        let files = files(
+            &account,
+            &template(&account, false, ""),
+            &terraform(&account, false, ""),
+            &Ok(estimate()),
+            "2026-10-31",
+        );
 
         let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
         assert_eq!(
@@ -430,6 +483,7 @@ mod tests {
                 "data/s3-website.md",
                 "data/s3-sync.sh",
                 "MIGRATION.md",
+                "cost-estimate.md",
             ]
         );
         assert!(files.iter().all(|file| file.executable == (file.path == "data/s3-sync.sh")));
@@ -450,11 +504,16 @@ mod tests {
         empty.databases.clear();
         empty.caches.clear();
         empty.identities.clear();
-        let paths: Vec<String> =
-            super::files(&empty, &template(&empty, false, ""), &terraform(&empty, false, ""), "2026-10-31")
-                .into_iter()
-                .map(|file| file.path)
-                .collect();
+        let paths: Vec<String> = super::files(
+            &empty,
+            &template(&empty, false, ""),
+            &terraform(&empty, false, ""),
+            &Ok(estimate()),
+            "2026-10-31",
+        )
+        .into_iter()
+        .map(|file| file.path)
+        .collect();
         assert_eq!(
             paths,
             [
@@ -463,7 +522,8 @@ mod tests {
                 "terraform/main.tf",
                 "terraform/variables.tf",
                 "terraform/terraform.tfvars.example",
-                "MIGRATION.md"
+                "MIGRATION.md",
+                "cost-estimate.md"
             ]
         );
     }
@@ -520,5 +580,43 @@ mod tests {
         for note in &template.notes {
             assert!(runbook.contains(&format!("- {note}\n")), "the note {note:?} in the runbook");
         }
+        assert!(
+            runbook.contains("\n- `cost-estimate.md`, the account's last months at AWS's prices, an estimate.\n"),
+            "{runbook}"
+        );
+    }
+
+    #[test]
+    fn the_cost_estimate_is_the_months_at_awss_prices_line_by_line_with_what_each_line_of_aws_alone_assumes() {
+        let account = shop();
+
+        assert_eq!(
+            cost_estimate(&account, &Ok(estimate()), "2026-11-01"),
+            "# Shop at AWS's prices, an estimate\n\n\
+             `ff export` wrote this page on 2026-11-01 from FF's account 123456789012: its last 2 months, all of its usage, \
+             this one so far last: what FF counted, at AWS's US$ list prices in us-east-1, as FF read them from 2026-10-17 to \
+             2026-10-31, with the free tier AWS gives every account every month; in TND at 3.0080 TND a US$, the rate of \
+             2026-10-14. An estimate, not a quote: AWS bills what the account makes there, and its other regions' prices differ.\n\n\
+             | US$ | 2026-10 | 2026-11 so far |\n\
+             |---|---:|---:|\n\
+             | AWS Lambda: requests and duration | 0.83 | 0.00 |\n\
+             | SES: recipients and attachments | 0.00 | 0.30 |\n\
+             | ElastiCache for Valkey: a cache.t4g.micro for each cache (cacheNodes) | 0.00 | 1.28 |\n\
+             | A NAT gateway (natGateway, left out) | 37.20 | 5.00 |\n\
+             | total | 0.83 | 1.58 |\n\
+             | total in TND | 2.497 | 4.753 |\n\
+             | at FF's prices, in TND | 4.901 | - |\n\
+             \n## What AWS bills that FF doesn't\n\n\
+             Each line an estimate of its own, in the totals above: `ff usage --aws --without natGateway,logs` gives the months \
+             again without those two, as FF counts them then.\n\n\
+             - **ElastiCache for Valkey: a cache.t4g.micro for each cache** (`cacheNodes`): The smallest node, for each cache's hours.\n\
+             - **A NAT gateway** (`natGateway`): One, for each hour the account had a database or a cache.\n"
+        );
+        assert_eq!(
+            cost_estimate(&account, &Err("This API key lacks the scope usage:read".into()), "2026-11-01"),
+            "# Shop at AWS's prices, an estimate\n\n\
+             `ff export` wrote no estimate on 2026-11-01: FF's API answered \"This API key lacks the scope usage:read\". Once it \
+             can, `ff usage --aws` makes one.\n"
+        );
     }
 }

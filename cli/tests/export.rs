@@ -34,9 +34,25 @@ fn queue(name: &str, visibility: u32) -> Value {
             "sizeBytes": 0, "createdAt": AT, "updatedAt": AT })
 }
 
+/// The account's last three months at AWS's prices, as the API gives them.
+fn estimate() -> Value {
+    let month = |month: &str, until: Option<&str>, usd: &str| {
+        json!({ "month": month, "until": until, "requests": 12,
+                "lines": [{ "line": "functions", "label": "AWS Lambda: requests and duration", "usd": usd, "amount": "0.000",
+                            "extra": false, "leftOut": false, "assumption": null },
+                          { "line": "dataOut", "label": "Data out to the internet", "usd": "0.00", "amount": "0.000", "extra": true,
+                            "leftOut": false, "assumption": "What the buckets sent out, as FF counts it, past AWS's free 100 GB a month" }],
+                "totalUsd": usd, "total": "0.000", "ffTotal": "0.000" })
+    };
+    json!({ "currency": "TND", "usdRate": "3.0080", "usdRateDate": "2026-10-14", "region": "us-east-1",
+            "pricesReadOn": ["2026-10-17", "2026-10-31"], "priceBook": "pb1",
+            "months": [month("2026-09", None, "0.00"), month("2026-10", None, "0.02"), month("2026-11", Some(AT), "0.00")] })
+}
+
 /// The replies, in the order ff export asks: the account, the function, what calls it and what its
-/// keys used, the queues, the buckets, the databases, caches and mail, then the function's code.
-fn account(zip: &[u8]) -> Vec<Reply> {
+/// keys used, the queues, the buckets, the databases, caches and mail, the estimate at AWS's prices,
+/// then the function's code.
+fn account(zip: &[u8], estimate: Reply) -> Vec<Reply> {
     vec![
         Reply::json(200, me()),
         Reply::json(200, json!([function(None)])),
@@ -93,6 +109,7 @@ fn account(zip: &[u8]) -> Vec<Reply> {
         ),
         Reply::json(200, json!([])),
         Reply::json(200, json!([])),
+        estimate,
         Reply::bytes(200, "application/zip", zip.to_vec()),
     ]
 }
@@ -100,7 +117,7 @@ fn account(zip: &[u8]) -> Vec<Reply> {
 #[test]
 fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook() {
     let zip = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec();
-    let api = Server::start(account(&zip));
+    let api = Server::start(account(&zip, Reply::json(200, estimate())));
     let dir = with_key(&api.url);
     let out = tempfile::TempDir::new().unwrap();
     let folder = out.path().join("to-aws");
@@ -132,10 +149,11 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
             "/databases",
             "/caches",
             "/email/identities",
+            "/usage/aws-estimate?months=3",
             "/functions/f1/code?javascript=true",
         ]
     );
-    assert_eq!(api.requests()[17].header("accept"), Some("application/zip"));
+    assert_eq!(api.requests()[18].header("accept"), Some("application/zip"));
     assert_eq!(std::fs::read(folder.join("code/send-receipts.zip")).unwrap(), zip);
     let read = |path: &str| std::fs::read_to_string(folder.join(path)).unwrap();
     let template = read("template.yaml");
@@ -182,6 +200,41 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
         assert_ne!(std::fs::metadata(folder.join("data/s3-sync.sh")).unwrap().permissions().mode() & 0o111, 0);
     }
     assert!(!folder.join("data/elasticache.md").exists(), "a page for what the account has alone");
+    let estimate = read("cost-estimate.md");
+    for line in [
+        "# Shop at AWS's prices, an estimate\n",
+        "from FF's account 123456789012: its last 3 months, all of its usage, this one so far last: what FF counted, at AWS's US$ list prices in us-east-1",
+        "\n| US$ | 2026-09 | 2026-10 | 2026-11 so far |\n|---|---:|---:|---:|\n| AWS Lambda: requests and duration | 0.00 | 0.02 | 0.00 |\n",
+        "\n- **Data out to the internet** (`dataOut`): What the buckets sent out, as FF counts it, past AWS's free 100 GB a month.\n",
+    ] {
+        assert!(estimate.contains(line), "{line:?} in:\n{estimate}");
+    }
+}
+
+#[test]
+fn an_export_without_the_estimate_says_why_and_writes_the_kit_all_the_same() {
+    let zip = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec();
+    let refused = json!({ "statusCode": 403, "message": "This API key lacks the scope usage:read" });
+    let api = Server::start(account(&zip, Reply::json(403, refused)));
+    let dir = with_key(&api.url);
+    let out = tempfile::TempDir::new().unwrap();
+    let folder = out.path().join("to-aws");
+
+    ff(&dir)
+        .args(["export", folder.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("cost-estimate.md has no estimate: This API key lacks the scope usage:read"));
+
+    assert_eq!(std::fs::read(folder.join("code/send-receipts.zip")).unwrap(), zip);
+    assert!(
+        std::fs::read_to_string(folder.join("cost-estimate.md"))
+            .unwrap()
+            .contains("`ff export` wrote no estimate on 2")
+    );
+    assert!(std::fs::read_to_string(folder.join("cost-estimate.md")).unwrap().contains(
+        ": FF's API answered \"This API key lacks the scope usage:read\". Once it can, `ff usage --aws` makes one.\n"
+    ));
 }
 
 #[test]

@@ -173,7 +173,7 @@ Text output is for people. `--output json` prints one JSON document per command,
 | `ff local start <file\|dir> [--port] [--watch]` | Keep it running on a local port; `--watch` restarts it when files change | 1 |
 | `ff whoami`, `ff accounts` | The token's user and account, and the user's accounts with their roles | 1 |
 | `ff account` | The current account: status, plan, role, internet egress | 1 |
-| `ff usage [--month YYYY-MM] [--csv]`, `ff balance` | The month's usage per function with its estimated cost, and the account's balance | 1 |
+| `ff usage [--month YYYY-MM] [--csv]`, `ff usage --aws [--months N] [--without LINE,...]`, `ff balance` | The month's usage per function with its estimated cost, the last months at AWS's prices (an estimate), and the account's balance | 1 |
 | `ff metrics [<name>] [--period 60\|300\|3600] [--since 1h]` | Invocations, errors, throttles, duration percentiles, cold starts and instances, for one function or the whole account | 1 |
 | `ff package <dir> [-o file.zip] [--container]` | Build a Lambda-compatible zip; `--container` builds inside the runtime image for an exact platform match | 2 |
 | `ff env list\|set\|unset <name> …` | A function's environment variables, with `--env KEY=value` on deploy | 3 |
@@ -399,6 +399,7 @@ A task is done when its tests pass at the levels listed, the docs it touches pas
 - **`ff whoami`** came with C-02: `GET /me`, the user (or the key's name and scopes) and the current account with its role. **`ff accounts`:** the user's accounts, from the same call.
 - **`ff account`:** `GET /accounts/:id` for the current account: name, status, plan, role, internet egress (so a developer whose `fetch` fails learns why), and the plan's limits from its view when the API exposes them.
 - **`ff usage [--month YYYY-MM] [--csv]`:** `GET /usage?month=`, as a table per function (requests, GB-seconds, estimated cost, the calls not billed), or the API's CSV with `Accept: text/csv`.
+- **`ff usage --aws [--months N] [--without LINE,...]`** (step 5's X-03): `GET /usage/aws-estimate`, the last months as FF counted them at AWS's prices, a column a month, each line of what AWS bills that FF doesn't named as `--without` takes it, then the totals in US$ and dinars and FF's own; with what each of those lines assumes. A line the API has none of is refused before calling, exit 2.
 - **`ff balance`:** `GET /billing/balance`, with the low-balance state when the API reports one.
 - **`ff metrics [<name>] [--period 60|300|3600] [--since 1h]`:** `GET /functions/:id/metrics` or `GET /metrics`, a table with a row per period: invocations, errors, throttles, duration (average, p50, p95, p99, maximum), cold starts, instances.
 - **Scopes:** `metrics:read` and `usage:read`; `ff whoami` and `ff account` need none beyond a valid token. A missing scope is named, exit 6.

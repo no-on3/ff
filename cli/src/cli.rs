@@ -227,15 +227,28 @@ pub enum Command {
     /// Show the current account: its status, the role in it, its plan's limits, its internet access
     Account,
 
-    /// Show a month's usage per function, with its estimated cost
+    /// Show a month's usage per function, with its estimated cost; with --aws, the last months at AWS's prices
     Usage {
         /// The month, YYYY-MM, by the UTC calendar [default: this month]
-        #[arg(long)]
+        #[arg(long, conflicts_with = "aws")]
         month: Option<String>,
 
         /// The API's CSV, for a spreadsheet
-        #[arg(long)]
+        #[arg(long, conflicts_with = "aws")]
         csv: bool,
+
+        /// The last months as FF counted them at AWS's prices, an estimate, beside FF's: what they would cost on AWS
+        #[arg(long)]
+        aws: bool,
+
+        /// With --aws, how many months, this one so far last [default: 3]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=12))]
+        months: Option<u32>,
+
+        /// With --aws, lines of what AWS bills that FF doesn't to leave out of the totals: coldStarts,
+        /// databaseInstances, cacheNodes, dataOut, logs, cloudFront, natGateway
+        #[arg(long, value_delimiter = ',', value_name = "LINE,...")]
+        without: Vec<String>,
     },
 
     /// Show the account's balance, this month's charges, and whether calls go on

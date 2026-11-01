@@ -1084,9 +1084,11 @@ done
 kit="$work/shop-to-aws"
 rm -rf "$kit"
 ff export "$kit" --output json
-check "ff export writes the account's kit: the template, terraform/, each function's zip and the runbook" "0 true" \
-  "$(code) $(for file in template.yaml terraform/functions.tf terraform/terraform.tfvars.example code/shop-api.zip code/shop-receipts.zip MIGRATION.md; do
-    [ -s "$kit/$file" ] || { echo false; exit; }; done; echo true)"
+check "ff export writes the account's kit: the template, terraform/, each function's zip, the runbook and the estimate" "0 true" \
+  "$(code) $(for file in template.yaml terraform/functions.tf terraform/terraform.tfvars.example code/shop-api.zip code/shop-receipts.zip MIGRATION.md \
+    cost-estimate.md; do [ -s "$kit/$file" ] || { echo false; exit; }; done; echo true)"
+check "  ... cost-estimate.md, the last three months at AWS's prices, a column each" "3" \
+  "$(grep -F '| US$ |' "$kit/cost-estimate.md" | tr '|' '\n' | grep -cE '^ [0-9]{4}-[0-9]{2}')"
 # A function's resource in the template, up to the next one.
 resource_of() { awk -v id="  $1:" '$0 == id { on = 1; next } on && /^  [A-Za-z]/ { exit } on' "$kit/template.yaml"; }
 check "  ... shop-receipts's role writes the receipts and sends from the proved address, as its keys did, and neither reads the bucket nor sends to the queue" "true true false" \
@@ -1139,6 +1141,15 @@ check "ff usage counts this month's calls of the functions deleted since, by nam
   "$(code) $(out | jq -r '.functions[] | select(.functionName == "cli-hello-ts") | .requests') $(out | jq -r '[.functions[] | select(.functionName == "cli-hello-ts") | .deleted] | first')"
 ff usage --csv
 check "and gives the API's CSV" "0 true" "$(code) $(out | head -1 | grep 'requests' >/dev/null && echo true || echo false)"
+ff usage --aws --months 2 --output json
+check "ff usage --aws: last month and this one so far at AWS's prices, an estimate, Lambda's line and the NAT gateway's among them, beside FF's own" \
+  "0 2 true 2 true" \
+  "$(code) $(out | jq '.months | length') $(out | jq '.months[0].until == null and .months[1].until != null') \
+$(out | jq '[.months[1].lines[] | select(.line == "functions" or .line == "natGateway")] | length') $(out | jq '.months[1] | has("ffTotal")')"
+ff usage --aws --without natGateway,logs
+check "  ... and as text, from the prices' days, the lines left out marked" "0 true true" \
+  "$(code) $(out | head -1 | grep -E "^At AWS's prices, an estimate: .* as FF read them (on|from) [0-9]{4}-" >/dev/null && echo true || echo false) \
+$(out | grep -E '^A NAT gateway \(natGateway, left out\) ' >/dev/null && echo true || echo false)"
 ff balance --output json
 check "ff balance says the balance, in dinars" "0 TND" "$(code) $(out | jq -r .currency)"
 ff metrics --since 2h --output json

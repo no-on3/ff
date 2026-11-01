@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::Context;
+use super::estimate::{self, AwsEstimate};
 use crate::api::types::{Me, MeAccount, function_named};
 use crate::api::{Call, Client};
 use crate::cli::Format;
@@ -413,6 +414,31 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
             usage.month,
             table(&["FUNCTION", "REQUESTS", "GB-SECONDS", "NOT BILLED", "COST"], &rows)
         )
+    })
+}
+
+/// `ff usage --aws`: the last months as FF counted them at AWS's prices, an estimate, beside FF's.
+pub fn aws_estimate(months: Option<u32>, without: &[String], context: &Context) -> Result<(), Error> {
+    let call = estimate::call(months, without)?;
+    let client = Client::new(&context.settings()?)?;
+    let estimate: AwsEstimate = client.json(&call)?;
+    context.out.result(&estimate, || {
+        let (headers, rows) = estimate.table();
+        let mut text = format!(
+            "At AWS's prices, an estimate: {}.\n{}",
+            estimate.priced_with(),
+            table(&headers.iter().map(String::as_str).collect::<Vec<_>>(), &rows)
+        );
+        let assumptions = estimate.assumptions();
+        if !assumptions.is_empty() {
+            text.push_str(
+                "\nWhat AWS bills that FF doesn't, each line an estimate of its own, which --without leaves out of the totals:",
+            );
+            for (line, _, assumption) in assumptions {
+                text.push_str(&format!("\n  {line}: {assumption}"));
+            }
+        }
+        text
     })
 }
 

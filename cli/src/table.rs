@@ -26,6 +26,20 @@ pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
     lines.join("\n")
 }
 
+/// Rows under their headers as a Markdown table, the columns after the first aligned right, as
+/// amounts are.
+pub fn markdown_table(headers: &[String], rows: &[Vec<String>]) -> String {
+    let line = |cells: &[String]| {
+        format!("| {} |\n", cells.iter().map(|cell| cell.replace('|', "\\|")).collect::<Vec<_>>().join(" | "))
+    };
+    let mut text = line(headers);
+    text.push_str(&format!("|---|{}\n", "---:|".repeat(headers.len().saturating_sub(1))));
+    for row in rows {
+        text.push_str(&line(row));
+    }
+    text
+}
+
 /// An API's time, `2026-10-21T09:15:03.123Z`, as `2026-10-21 09:15:03`, in UTC as it was.
 pub fn time(iso: &str) -> String {
     iso.get(..19).map(|text| text.replacen('T', " ", 1)).unwrap_or_else(|| iso.to_owned())
