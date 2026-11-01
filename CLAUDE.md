@@ -1,12 +1,5 @@
 # Working on FF
 
-Rules for everyone who works in this repository, people and coding agents alike. Each plan's working rules (its §6) add the step's own; [Getting started](docs/getting-started.md) says how to run everything.
+Agent and contributor instructions live in [AGENTS.md](AGENTS.md). Each plan's working rules (its §6) add the step's own; [Getting started](docs/getting-started.md) says how to run everything.
 
-1. **One heavy process at a time.** The development machine is shared with other projects' containers and other sessions, and it freezes when too much runs at once. A heavy process is a build (`npm ci`, `cargo`, `docker build`), an image pull or import, a cluster made or changed, or a test suite (L1 to L5, the `ff` suite, a stage of `hack/ci.sh`). Run one, let it end, then start the next: never two suites at once, never a build while a suite runs, and a run in the background counts as running. Run `hack/check-resources.sh` first. Cap the test workers: `FF_CI_JOBS=2 hack/ci.sh <stage>`; Jest and Vitest `--maxWorkers=2`; `CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2` for cargo. No parallel helpers or agents that build or test. The jobs on GitHub's runners run at once, each on a machine of its own: this rule is for one machine.
-2. **Refactor as you go.** When a task touches code, leave it better than it was: one helper where there were copies, a name that says what it holds, dead code removed, a long function split where the split is natural. Behavior stays the same and the tests prove it: the suites' counts before and after go in the plan's log. A refactor bigger than its task gets a commit of its own, before the task's, named in the log. A refactor never drops a check.
-3. **One commit per task or part,** `type(scope): summary (X-xx)`, with its tests and its documents; the plan's progress log in the same commit.
-4. **No task or decision number in the code,** its comments or its tests: say why in plain words.
-5. **A new API route gets its rules in both of L5's loops** (`hack/e2e-tenancy.sh`), or L5 fails.
-6. **The backend's names are mirrored in `ff` and the console:** after changing a DTO or a constant, run `cargo test` and both apps' Vitest; after rewording an API message, search `hack/` for it and run the suite that asserts it.
-7. **ESLint is the style check;** there is no Prettier configuration, and `prettier --write` rewrites whole files.
-8. **Two races the shell scripts must not have,** which `hack/ci.sh static` refuses. Never pipe into `grep -q`: the scripts run under `pipefail`, and `grep -q`'s exit at its first match fails a writer that is still writing, so a match reads as none, on some runs only; read everything (`… | grep pattern >/dev/null`) or grep a file. And wait for a fresh PostgreSQL over TCP (`pg_isready -h 127.0.0.1`), never its socket: its image's first start runs a server on the socket alone, then restarts it, and a check on the socket can pass in between.
+@AGENTS.md
