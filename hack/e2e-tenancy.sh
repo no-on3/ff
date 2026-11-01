@@ -239,7 +239,7 @@ snapshot() {
   local caller=$1 fn=$2
   jq -cn --argjson fn "$("$caller" GET "/functions/$fn")" --argjson history "$("$caller" GET "/functions/$fn/invocations")" \
     --argjson url "$("$caller" GET "/functions/$fn/url")" \
-    '{name: $fn.name, code: $fn.code, status: $fn.status, memory: $fn.memory, timeout: $fn.timeout,
+    '{name: $fn.name, code: $fn.code, status: $fn.status, memory: $fn.memory, timeout: $fn.timeout, revisionId: $fn.revisionId,
       minInstances: $fn.minInstances, maxInstances: $fn.maxInstances, invocations: $history.total,
       url: $url.functionUrl, urlAuthType: $url.authType}'
 }
@@ -292,6 +292,7 @@ path_for() {
   path="${path//\{identity\}/shop.l5.example.tn}" # a domain or an address to send mail from
   path="${path//\{address\}/gone@l5.example.tn}"
   path="${path//\{scheduleId\}/$missing}"
+  path="${path//\{version\}/1}" # a function's version: A's first
   [[ $path != *'{month}'* ]] || path="${path//\{month\}/$(date -u +%Y-%m)}"
   path="${path//\{name\}/l5-photos-a}" # a bucket's, or a queue's
   path="${path//\{receiptHandle\}/bm90LWEtaGFuZGxl}"
@@ -447,6 +448,9 @@ check "A's usage counts the call (P-22)" "1" \
 url_a="$(as_a POST "/functions/$id/url" '{"authType": "NONE"}' | jq -r .functionUrl)"
 check "A gives its function a URL" "201 true" "$(status) $([[ $url_a =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
 check "which anyone may call: its host reaches A's function" '200 {"message":"Hello world"}' "$(call_url "$url_a") $(cat "$work/url-body")"
+version_a="$(as_a POST "/functions/$id/versions" '{"description": "l5"}')"
+check "A publishes a version of it, as Lambda's PublishVersion" "201 1 arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:1" \
+  "$(status) $(jq -r '"\(.version) \(.functionArn)"' <<<"$version_a")"
 before="$(snapshot as_a "$id")"
 database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
 check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"
@@ -843,6 +847,12 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "$route: B gets 404 for A's alarm" "404 Alarm $alarm_a not found" "$(status) $(message)"
       alarm_now="$(as_a GET "/alarms/$alarm_a")"
       check "  ... which A still has, unchanged" "200 l5 Errors $id" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
+      ;;
+    "GET /functions/{id}/versions" | "POST /functions/{id}/versions" | "GET /functions/{id}/versions/{version}" | "DELETE /functions/{id}/versions/{version}")
+      as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
+      check "$route: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
+      versions_now="$(as_a GET "/functions/$id/versions")"
+      check "  ... A's versions as they were" "200 1 l5" "$(status) $(jq -r '"\(map(.version) | join(",")) \(.[0].description)"' <<<"$versions_now")"
       ;;
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null

@@ -7,7 +7,6 @@ import {
   InternalServerErrorException,
   Logger,
   MessageEvent,
-  NotFoundException,
   PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -47,6 +46,7 @@ import { FunctionInvocation, InvocationSource, InvocationStatus } from './entiti
 import { awsEndpointsOf } from '../common/aws-endpoint';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { FunctionUrl } from './entities/function-url.entity';
+import { FunctionVersion } from './entities/function-version.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import {
   FunctionEnvironmentValues,
@@ -76,6 +76,7 @@ import { keptJson, keptText } from './history';
 import { liveTail } from './live-tail';
 import { logsQuery } from './logs-window';
 import { MAX_INPUT_BYTES } from './limits';
+import { functionNotFound } from './function-not-found';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
 const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat', 'awsEndpoints'] as const;
@@ -154,7 +155,7 @@ interface EnvironmentChange {
 }
 
 /** The fields of a function a change asks for, without its environment; with new code, how it comes, its hash and size. */
-type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<CodeFields> & { packageSha256?: string };
+type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<CodeFields> & { packageSha256?: string; revisionId?: string };
 
 /** Each secret's value, by name: to tell which changed, for the audit log, which keeps only the names. */
 const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string> =>
@@ -470,7 +471,7 @@ export class FunctionsService {
   async findOne(accountId: string, id: string): Promise<Function> {
     const function_ = await this.functionsRepository.findOne({ where: { id, accountId } });
     if (!function_) {
-      throw new NotFoundException(`Function with ID ${id} not found`);
+      throw functionNotFound(id);
     }
     return function_;
   }
@@ -564,10 +565,12 @@ export class FunctionsService {
    */
   private async change(
     function_: Function,
-    changes: FieldChanges,
+    sent: FieldChanges,
     environment: EnvironmentChange,
     changed: string[],
   ): Promise<{ saved: Function; environment: FunctionEnvironmentValues }> {
+    // Any change is a new revision, as Lambda's RevisionId: a publish given the one read before it is refused.
+    const changes: FieldChanges = changed.length ? { ...sent, revisionId: randomUUID() } : sent;
     const previousName = function_.name;
     const newName = changes.name !== undefined && changes.name !== previousName ? changes.name : undefined;
     const environmentChanges = environment.after !== environment.before;
@@ -789,14 +792,20 @@ export class FunctionsService {
     return references;
   }
 
-  /** Makes again, of a function's code, a one-file package whose zip object storage lost: false when no function's code makes it. */
+  /** Makes again, of a function's or a version's code, a one-file package whose zip object storage lost: false when no code makes it. */
   private async restoreInlineZip(accountId: string, codeSha256: string): Promise<boolean> {
-    const functions = await this.functionsRepository.find({ where: { accountId, packageType: PackageType.INLINE, packageSha256: codeSha256 } });
-    for (const function_ of functions) {
-      const built = inlinePackage(function_.code, function_.runtime);
+    const where = { accountId, packageType: PackageType.INLINE, packageSha256: codeSha256 };
+    const functions = await this.functionsRepository.find({ where });
+    const versions = await this.functionsRepository.manager.find(FunctionVersion, { where });
+    const sources = [
+      ...functions.map((function_) => ({ ...function_, of: `function ${function_.id}` })),
+      ...versions.map((version) => ({ ...version, of: `version ${version.version} of function ${version.functionId}` })),
+    ];
+    for (const source of sources) {
+      const built = inlinePackage(source.code, source.runtime);
       if (built.codeSha256 !== codeSha256) continue;
       await this.packages.restoreInlineZip(accountId, built);
-      this.logger.warn(`Object storage had lost the one-file package ${codeSha256} of account ${accountId}: made again of function ${function_.id}'s code`);
+      this.logger.warn(`Object storage had lost the one-file package ${codeSha256} of account ${accountId}: made again of ${source.of}'s code`);
       return true;
     }
     return false;

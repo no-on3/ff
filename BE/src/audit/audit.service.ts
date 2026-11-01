@@ -31,6 +31,9 @@ export type AuditAction =
   | 'function.update'
   | 'function.delete'
   | 'function.scaling'
+  // A function's version, as Lambda's: published with its number and code, and deleted.
+  | 'function.publish'
+  | 'version.delete'
   // A function's settings for its asynchronous calls, as Lambda's EventInvokeConfig: set, deleted.
   | 'event_invoke_config.put'
   | 'event_invoke_config.delete'

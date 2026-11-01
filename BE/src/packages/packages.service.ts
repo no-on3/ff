@@ -34,12 +34,14 @@ export type PackageView = Pick<Package, 'codeSha256' | 'codeSize' | 'unpackedSiz
 const viewOf = ({ codeSha256, codeSize, unpackedSize, fileCount, createdAt }: Package): PackageView => ({ codeSha256, codeSize, unpackedSize, fileCount, createdAt });
 
 /**
- * The packages a function of their account names, its pods running them: a
- * package function's own, and the one-file package of inline code
- * (package_sha256); or a package function's code_sha256, as a backend from
- * before packages named inline code saved it. The others are unused.
+ * The packages a function or a version of their account names, its pods
+ * running them: a package function's own, and the one-file package of inline
+ * code (package_sha256); or a package function's code_sha256, as a backend
+ * from before packages named inline code saved it. The others are unused.
  */
-const NAMED = `EXISTS (SELECT 1 FROM "functions" "f" WHERE "f"."account_id" = "p"."account_id" AND ("f"."package_sha256" = "p"."code_sha256" OR ("f"."package_type" = 'zip' AND "f"."code_sha256" = "p"."code_sha256")))`;
+const NAMED =
+  `(EXISTS (SELECT 1 FROM "functions" "f" WHERE "f"."account_id" = "p"."account_id" AND ("f"."package_sha256" = "p"."code_sha256" OR ("f"."package_type" = 'zip' AND "f"."code_sha256" = "p"."code_sha256")))` +
+  ` OR EXISTS (SELECT 1 FROM "function_versions" "v" WHERE "v"."account_id" = "p"."account_id" AND "v"."package_sha256" = "p"."code_sha256"))`;
 
 const bytes = (n: number): string => n.toLocaleString('en-US');
 const hours = (n: number): string => (n === 1 ? 'an hour' : `${n} hours`);
@@ -203,7 +205,7 @@ export class PackagesService {
     await this.storage.putDocument(packageKey(accountId, built.codeSha256), built.zip, 'application/zip');
   }
 
-  /** The packages that functions name, their pods running their images: each one's account and SHA-256, and whether the backend made it of inline code. */
+  /** The packages that functions and versions name, their pods running their images: each one's account and SHA-256, and whether the backend made it of inline code. */
   async named(): Promise<Array<{ accountId: string; codeSha256: string; inline: boolean }>> {
     const rows = await this.packages.query<Array<{ account_id: string; code_sha256: string; inline: boolean }>>(
       `SELECT "p"."account_id", "p"."code_sha256", "p"."inline" FROM "packages" "p" WHERE ${NAMED} ORDER BY "p"."account_id", "p"."code_sha256"`,

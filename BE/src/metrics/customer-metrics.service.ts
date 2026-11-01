@@ -21,6 +21,7 @@ import {
   queueMetricsView,
   siteMetricsView,
 } from './customer-metrics';
+import { functionNotFound } from '../functions/function-not-found';
 
 /** A call that ran: measured by the runtime, and so in the duration's statistics. */
 const RAN = "('success', 'error', 'timeout')";
@@ -49,7 +50,7 @@ export class CustomerMetricsService {
   /** A function's, for its own account only: another account's function is not found. */
   async forFunction(accountId: string, functionId: string, window: MetricsWindow): Promise<MetricsView> {
     const found = await this.dataSource.query<unknown[]>('SELECT 1 FROM "functions" WHERE "id" = $1 AND "account_id" = $2', [functionId, accountId]);
-    if (found.length === 0) throw new NotFoundException(`Function with ID ${functionId} not found`);
+    if (found.length === 0) throw functionNotFound(functionId);
     return this.metrics(window, { where: 't."account_id" = $4 AND t."function_id" = $5', parameters: [accountId, functionId] });
   }
 

@@ -1,13 +1,14 @@
 import {
-  Entity,
   Column,
-  PrimaryGeneratedColumn,
   CreateDateColumn,
-  UpdateDateColumn,
-  OneToMany,
-  ManyToOne,
-  JoinColumn,
+  Entity,
+  Generated,
   Index,
+  JoinColumn,
+  ManyToOne,
+  OneToMany,
+  PrimaryGeneratedColumn,
+  UpdateDateColumn,
 } from 'typeorm';
 import { Account } from '../../accounts/entities/account.entity';
 import { AwsEndpoint, awsEndpointsOf } from '../../common/aws-endpoint';
@@ -147,6 +148,23 @@ export class Function {
   /** Not settable: a function scales to zero exactly when its minInstances is 0. */
   @Column({ default: true })
   scaleToZero: boolean;
+
+  /**
+   * Lambda's RevisionId: new with each change of its code, its settings or its
+   * environment, so that a publish given the one its caller read is refused
+   * once another change came between.
+   */
+  @Column({ type: 'uuid' })
+  @Generated('uuid')
+  revisionId: string;
+
+  /**
+   * The number of its last version, deleted or not: the next is one more, as
+   * Lambda never gives a number twice. Written by the publish alone, under the
+   * function's lock, so never read with the record, which a save writes back.
+   */
+  @Column({ type: 'integer', default: 0, select: false })
+  lastVersion?: number;
 
   @OneToMany(() => FunctionInvocation, invocation => invocation.function)
   invocations: FunctionInvocation[];

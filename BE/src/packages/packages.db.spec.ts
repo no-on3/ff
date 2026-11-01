@@ -227,6 +227,28 @@ run("functions' packages (L2)", () => {
     expect(stored.get(packageKey(b, live.codeSha256))).toBe(live.zip.length);
   });
 
+  it("keeps the package a version names once its function's code has moved on, until the version goes", async () => {
+    const a = await account();
+    const [kept, current] = [zip('exports.handler = async () => "v1";'), zip('exports.handler = async () => "v2";')];
+    for (const bytes of [kept, current]) await upload(a, bytes);
+    await named(a, sha(current));
+    const [{ id }] = await query<Array<{ id: string }>>(`SELECT id FROM functions WHERE account_id = $1`, [a]);
+    await query(
+      `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+       VALUES ($1, 1, $2, 'nodejs', 'app.handler', 'zip', '', $3, 100, $3, 128, 5, 'lambda', '{s3}')`,
+      [id, a, sha(kept)],
+    );
+    for (const bytes of [kept, current]) await usedAgo(a, sha(bytes), 90);
+
+    await expect(packages.purgeUnused()).resolves.toBe(0);
+    const namedOfA = (await packages.named()).filter((found) => found.accountId === a).map((found) => found.codeSha256);
+    expect(namedOfA.sort()).toEqual([sha(current), sha(kept)].sort());
+
+    await query(`DELETE FROM function_versions WHERE function_id = $1`, [id]);
+    await expect(packages.purgeUnused()).resolves.toBe(1);
+    expect(await rowsOf(a)).toEqual([sha(current)]);
+  });
+
   it("deletes all of an account's packages and their zips, and no other account's", async () => {
     const closed = await account();
     const other = await account();

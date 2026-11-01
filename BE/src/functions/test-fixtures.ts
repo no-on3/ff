@@ -88,6 +88,8 @@ export class MemoryRepository<T extends { id?: string }> {
   get manager() {
     return {
       existsBy: (target: unknown, where: Partial<T>) => this.existsBy(target, where),
+      // Another table's rows, such as a function's versions: this repository holds none.
+      find: async () => [],
       transaction: async <R>(work: (manager: unknown) => Promise<R>): Promise<R> =>
         work({
           query: async () => [],

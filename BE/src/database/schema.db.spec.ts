@@ -78,6 +78,7 @@ const CACHE_MEASURES = migrationNames.find((name) => name.startsWith('CacheMeasu
 const EMAIL_IDENTITIES = migrationNames.find((name) => name.startsWith('EmailIdentities')) as string;
 const EMAIL_MESSAGES = migrationNames.find((name) => name.startsWith('EmailMessages')) as string;
 const KEY_USES = migrationNames.find((name) => name.startsWith('KeyUses')) as string;
+const AWS_ESTIMATE_PRICES = migrationNames.find((name) => name.startsWith('AwsEstimatePrices')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -836,6 +837,35 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the function-versions migration gives each function there a revision of its own and no version, a version going with its function, and reverts with versions present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, AWS_ESTIMATE_PRICES);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      for (const name of ['a', 'b']) {
+        await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ($1, $2, 'nodejs', 'v1', 128, 5)`, [name, ACCOUNT]);
+      }
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      const functions = await dataSource.query<Array<{ id: string; revision_id: string; last_version: number }>>(`SELECT id, revision_id, last_version FROM functions ORDER BY name`);
+      expect(functions.map((row) => row.last_version)).toEqual([0, 0]);
+      expect(new Set(functions.map((row) => row.revision_id)).size).toBe(2);
+      const version = `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+        VALUES ($1, $2, $3, 'nodejs', 'function.handler', 'inline', 'v1', 'x', 2, 'y', 128, 5, 'lambda', '{}')`;
+      await dataSource.query(version, [functions[0].id, 1, ACCOUNT]);
+      await expect(dataSource.query(version, [functions[0].id, 1, ACCOUNT])).rejects.toThrow(/duplicate key/);
+      await dataSource.query(version, [functions[1].id, 1, ACCOUNT]);
+      await dataSource.query(`DELETE FROM functions WHERE id = $1`, [functions[1].id]);
+      expect(await dataSource.query(`SELECT function_id, revision_id IS NOT NULL AS revised FROM function_versions`)).toEqual([{ function_id: functions[0].id, revised: true }]);
+
+      await migrateDownTo(dataSource, AWS_ESTIMATE_PRICES);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM functions`)).toEqual([{ n: 1 }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it("the cache-measures migration samples caches by month, append-only, rates their hours beside the others', lets an alarm watch a cache and go with it, gives books not started yet ElastiCache's SKU, adds its own from next month's first hour, and reverts unless a cache's hour is rated", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -1469,6 +1499,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'function_invocations',
         'function_metrics',
         'function_urls',
+        'function_versions',
         'functions',
         'invitations',
         'invoice_counters',

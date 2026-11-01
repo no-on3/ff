@@ -25,6 +25,7 @@ import { withInitMs } from '../orchestrator/orchestrator.errors';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { FunctionUrl } from './entities/function-url.entity';
+import { FunctionVersion } from './entities/function-version.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { inlineCodeFacts } from './code-package';
 import { inlinePackage } from './inline-package';
@@ -489,7 +490,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       lockFree = true;
       codeImages.available = true;
       runner.query.mockImplementation(async (sql: string) => (sql.includes('pg_try_advisory_lock') ? [{ locked: lockFree }] : []));
-      Object.assign((functionsRepo as unknown as { manager: object }).manager, { connection: { createQueryRunner: () => runner } });
+      // No version's code makes a one-file package, unless a test says one does.
+      Object.assign((functionsRepo as unknown as { manager: object }).manager, { connection: { createQueryRunner: () => runner }, find: jest.fn(async () => []) });
       working = [];
       functionsRepo.find.mockImplementation(async ({ where }: { where: { packageType?: PackageType } }) =>
         // The functions whose code makes a one-file package; or the working functions' packages.
@@ -564,6 +566,21 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(packages.restoreInlineZip).toHaveBeenCalledWith('user-1', INLINE);
       expect(functionsRepo.find).toHaveBeenCalledWith({ where: { accountId: 'user-1', packageType: PackageType.INLINE, packageSha256: INLINE.codeSha256 } });
       expect(logged).toHaveBeenCalledWith(expect.stringContaining(`package ${UPLOADED} of account user-1 again: its zip is lost too; restore the packages from the second site`));
+    });
+
+    it("makes a one-file package's zip again of a version's code, once its function's code has moved on", async () => {
+      packages.named.mockResolvedValue([{ accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true }]);
+      codeImages.ensureImage.mockRejectedValueOnce(new StoredObjectMissingError('Object storage has no packages/user-1/….zip'));
+      functionsRepo.find.mockImplementation(async ({ where }: { where: { packageType?: PackageType } }) => (where.packageType === PackageType.INLINE ? [] : working));
+      const { manager } = functionsRepo as unknown as { manager: { find: jest.Mock } };
+      manager.find.mockResolvedValue([{ functionId: 'fn-1', version: 3, code: 'export const handler = async () => 1;', runtime: Runtime.NODEJS }]);
+      const warned = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      expect(await service.restoreCodeImages()).toMatchObject({ zipsMade: 1, failures: 0 });
+      expect(packages.restoreInlineZip).toHaveBeenCalledWith('user-1', INLINE);
+      expect(manager.find).toHaveBeenCalledWith(FunctionVersion, { where: { accountId: 'user-1', packageType: PackageType.INLINE, packageSha256: INLINE.codeSha256 } });
+      expect(warned).toHaveBeenCalledWith(expect.stringContaining("made again of version 3 of function fn-1's code"));
+      expect(logged).not.toHaveBeenCalled();
     });
 
     it('logs a function it could not roll out, and goes on to the next', async () => {

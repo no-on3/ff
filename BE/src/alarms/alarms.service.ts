@@ -10,6 +10,7 @@ import { Bucket } from '../storage/bucket.entity';
 import { Alarm } from './alarm.entity';
 import { AlarmRule, MAX_ALARMS, alarmProblem } from './alarm-rules';
 import { AlarmDto, AlarmView } from './alarms.dto';
+import { functionNotFound } from '../functions/function-not-found';
 
 export const alarmView = (alarm: Alarm): AlarmView => ({
   id: alarm.id,
@@ -159,7 +160,7 @@ export class AlarmsService {
     const problem = alarmProblem({ ...alarm, bucketId: bucketName, queueId: queueName, cacheId: cacheName }) ?? alarm.actions.webhookUrls.map(webhookUrlProblem).find(Boolean);
     if (problem) throw new BadRequestException(problem);
     if (alarm.functionId && !(await manager.getRepository(Function).existsBy({ id: alarm.functionId, accountId }))) {
-      throw new NotFoundException(`Function with ID ${alarm.functionId} not found`);
+      throw functionNotFound(alarm.functionId);
     }
     if (alarm.databaseId && !(await manager.getRepository(Database).existsBy({ id: alarm.databaseId, accountId }))) {
       throw new NotFoundException(`Database ${alarm.databaseId} not found`);
