@@ -501,8 +501,8 @@ py='def handler(event, context):
 created="$(http POST /functions "$(jq -n --arg code "$py" '{name: "e2e-python", runtime: "python", code: $code, memory: 128, timeout: 5}')")"
 check "create returns 201" 201 "$(status)"
 check "function is ACTIVE once ready" ACTIVE "$(jq -r .status <<<"$created")"
-id="$(jq -r .id <<<"$created")"
-invoked="$(http POST "/functions/$id/invoke" '{"input":{"name":"Python"}}')"
+python_id="$(jq -r .id <<<"$created")"
+invoked="$(http POST "/functions/$python_id/invoke" '{"input":{"name":"Python"}}')"
 check "invocation is COMPLETED" COMPLETED "$(jq -r .status <<<"$invoked")"
 check "handler output is returned, with the Lambda context" "Hello Python 128" \
   "$(jq -r '"\(.output.message) \(.output.memory)"' <<<"$invoked")"
@@ -510,16 +510,16 @@ check "handler output is returned, with the Lambda context" "Hello Python 128" \
 py_aws='def lambda_handler(event, context):
     return {"message": "Hello from lambda_handler"}
 '
-http PUT "/functions/$id" "$(jq -n --arg code "$py_aws" '{code: $code, handler: "function.lambda_handler"}')" >/dev/null
+http PUT "/functions/$python_id" "$(jq -n --arg code "$py_aws" '{code: $code, handler: "function.lambda_handler"}')" >/dev/null
 check "a handler named by an update rolls out, and the runtime calls it" "200 function.lambda_handler Hello from lambda_handler" \
-  "$(status) $(http GET "/functions/$id" | jq -r .handler) $(http POST "/functions/$id/invoke" '{"input":{}}' | jq -r .output.message)"
+  "$(status) $(http GET "/functions/$python_id" | jq -r .handler) $(http POST "/functions/$python_id/invoke" '{"input":{}}' | jq -r .output.message)"
 check "its pods are told it" function.lambda_handler \
-  "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FF_HANDLER")].value}')"
-http PUT "/functions/$id" '{"handler": "lambda_function.lambda_handler"}' >/dev/null
+  "$(kubectl -n "$tenant_ns" get deployment "fn-$python_id" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FF_HANDLER")].value}')"
+http PUT "/functions/$python_id" '{"handler": "lambda_function.lambda_handler"}' >/dev/null
 check "a handler in another file than inline code's is refused, naming its file, and the function keeps its own" \
   "400 handler must be function.<name> for inline code, which is the file function.py: function.handler, for example function.lambda_handler" \
-  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$id" | jq -r .handler)"
-http DELETE "/functions/$id" >/dev/null
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$python_id" | jq -r .handler)"
+http DELETE "/functions/$python_id" >/dev/null
 check "delete returns 200" 200 "$(status)"
 }
 section_def python section_python backend budget=15
@@ -669,7 +669,7 @@ section_def from_package section_from_package package budget=30
 
 section_environment() {
 section "environment variables"
-# A variable of its own for the function: the sections below still read $id, the Python function's.
+# A variable of its own for the function, as each section's: the usage section reads $python_id, the Python function's.
 reader='export async function handler() { return { table: process.env.TABLE ?? null, tz: process.env.TZ }; }'
 created="$(http POST /functions "$(jq -n --arg code "$reader" '{name: "e2e-environment", runtime: "nodejs", code: $code, memory: 128, timeout: 5, environment: {TABLE: "orders"}}')")"
 check "a function created with a variable answers with it" "201 ACTIVE orders" "$(status) $(jq -r '"\(.status) \(.environment.TABLE)"' <<<"$created")"
@@ -1218,7 +1218,7 @@ for _ in 4 5 6 7 8 9 10; do extra_keys+=("$(http POST /storage-keys '{}' | jq -r
 http POST /storage-keys '{}' >/dev/null
 check "as many keys as the beta plan allows, ten; listed without their secrets" "400 The Beta plan allows 10 access keys, and the account has 10: revoke one first 10 false" \
   "$(status) $(jq -r .message "$work/body") $(http GET /storage-keys | jq -r 'length, (map(has("secretAccessKey")) | any)' | xargs)"
-for id in "${extra_keys[@]}"; do http DELETE "/storage-keys/$id" >/dev/null; done
+for extra_key in "${extra_keys[@]}"; do http DELETE "/storage-keys/$extra_key" >/dev/null; done
 check "the secret is sealed in FF's database, never in clear" "0" \
   "$(env_q "SELECT count(*) FROM storage_keys WHERE secret::text LIKE '%' || '$key_secret' || '%'")"
 
@@ -2149,7 +2149,7 @@ check "the account's totals are its records' own sums" \
   "$(jq -r '.totals | "\(.requests) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
 # Its two calls: handler's, then lambda_handler's.
 check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 2" \
-  "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
+  "$(jq -r --arg id "$python_id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
 check "the database, deleted earlier, keeps its month: its hours sampled and GB-months, at nothing before the book that prices databases" "true e2e-orders true true 0.000" \
   "$(jq -r --arg id "$db_id" '.databases[] | select(.databaseId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \((.gbMonths | tonumber) > 0) \(.cost)"' <<<"$usage")"
 photos_requests="$(env_q "SELECT coalesce(sum(requests) FILTER (WHERE class = 'tier1'), 0) || ' ' || coalesce(sum(requests) FILTER (WHERE class = 'tier2'), 0)
