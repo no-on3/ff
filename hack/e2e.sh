@@ -1805,7 +1805,7 @@ http DELETE "/storage-keys/$mail_key_id" >/dev/null
 section_def mail_sent section_mail_sent mail budget=20
 
 section_key_life() {
-section "keys that end (ADR 0014, 5): a function's, copied out of it, refused past its end in each service's words; a fresh one from zero, and at half its life"
+section "keys that end (ADR 0014, 5): a function's, copied out of it, refused past its end in each service's words; a fresh one from zero, at half its life, and for one from before keys ended"
 # A function's key lasts 12 hours, which this suite doesn't wait: its times move in SQL, as the hours would move them.
 key_code='export async function handler() { return { key: process.env.AWS_ACCESS_KEY_ID }; }'
 created="$(http POST /functions "$(jq -n --arg code "$key_code" '{name: "e2e-key-life", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
@@ -1858,11 +1858,23 @@ check "  ... the old one revoked once no pod holds it, and the function's only k
 check "  ... every call answered while its pod was replaced" "0 true" "$failed $([ "$calls" -gt 3 ] && echo true || echo false)"
 check "the renewal is in the backend's log" true \
   "$(grep "Deployment(s) rolled onto a new key" "$work/backend.log" >/dev/null && echo true || echo false)"
+
+# A key made before keys ended has none, and would never end on its own: the renewal's next turn replaces it, a function
+# at zero too, its template written with no pod started, and the turn after revokes it.
+kubectl -n "$tenant_ns" scale deployment "fn-$key_fn" --replicas=0 >/dev/null
+for _ in $(seq 60); do [ -z "$(kubectl -n "$tenant_ns" get deployment "fn-$key_fn" -o jsonpath='{.status.readyReplicas}')" ] && break; sleep 1; done
+sql "UPDATE storage_keys SET expires_at = NULL WHERE id = '$renewed_key'"
+for _ in $(seq 60); do [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$renewed_key'")" = t ] && break; sleep 1; done
+ended_key="$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)"
+check "a key from before keys ended is replaced even at zero, no pod started, and revoked the turn after" "t t 0 true 12" \
+  "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$renewed_key'" | tr '|' ' ') \
+$(kubectl -n "$tenant_ns" get deployment "fn-$key_fn" -o jsonpath='{.spec.replicas}') $([[ $ended_key =~ ^AKFF && $ended_key != "$renewed_key" ]] && echo true || echo false) $(key_life "$ended_key")"
+check "  ... the function's next call starts it on the new one" "$ended_key" "$(called_key)"
 http DELETE "/functions/$key_fn" >/dev/null
 check "the function deleted, its key with it" "200 0" \
   "$(status) $(env_q "SELECT count(*) FROM storage_keys WHERE function_id = '$key_fn' AND revoked_at IS NULL")"
 }
-section_def key_life section_key_life queues mail budget=40
+section_def key_life section_key_life queues mail budget=60
 
 section_plans() {
 section "plans and rate limits (P-15)"

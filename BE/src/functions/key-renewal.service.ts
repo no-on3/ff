@@ -32,7 +32,10 @@ export interface KeyRenewalReport {
  * current key, and revokes them: no pod holds a revoked key. An idle
  * function's key is renewed as it starts from zero, which its call does; a
  * Deployment an update is rolling out, or one whose update failed, is left to
- * it, its own rollout giving the pods the current key.
+ * it, its own rollout giving the pods the current key. A lasting key, made
+ * before keys ended, never ends on its own: it is renewed at the first turn,
+ * the function's templates written at zero too, and revoked at the next, or at
+ * once for a function with no Deployment, whose next rollout makes it a key.
  */
 @Injectable()
 export class FunctionKeyRenewal implements OnModuleInit, OnModuleDestroy {
@@ -87,8 +90,8 @@ export class FunctionKeyRenewal implements OnModuleInit, OnModuleDestroy {
   }
 
   private async renew(keys: KeysToRenew, deployments: WorkloadInstances[], report: KeyRenewalReport, now: Date): Promise<void> {
-    // Idle: no pod holds its key, which its start from zero renews.
-    if (!keys.replaced && !deployments.some((deployment) => deployment.desired > 0)) return;
+    // Idle: no pod holds its key, which its start from zero renews, or its end stops; a lasting key has none.
+    if (!keys.replaced && !keys.lasting && !deployments.some((deployment) => deployment.desired > 0)) return;
     let rolled = 0;
     for (const deployment of deployments) {
       // The first workload made renews a key due; the others find the new one.
@@ -108,7 +111,9 @@ export class FunctionKeyRenewal implements OnModuleInit, OnModuleDestroy {
     }
     report.rolled += rolled;
     // Revoked by a turn that finds every Deployment on the current key: for those rolled now, the next one.
-    if (rolled === 0 && keys.replaced) report.revoked += await this.keys.revokeReplaced(keys.functionId, now);
+    if (rolled > 0) return;
+    if (keys.replaced) report.revoked += await this.keys.revokeReplaced(keys.functionId, now);
+    if (keys.lasting && deployments.length === 0) report.revoked += await this.keys.revokeLasting(keys.functionId, now);
   }
 
   private readyTimeoutMs(): number {

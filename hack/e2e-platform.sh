@@ -18,8 +18,9 @@
 # platform's own registry (Zot) and pulled by the node as the node is told to, which no tenant's code reaches;
 # a function with AWS's SDK and no setting writing to its account's bucket with its own key, at the fixed address
 # of the Service ff-storage; a queue made and read through the edge with AWS's SDK, and a function sending to it with
-# its own key at the same address; the bucket a site, at its host under the sites' domain over HTTPS through the edge,
-# and at a customer's own domain proved the same way; who reaches whom inside the cluster; and deploy.sh again, which
+# its own key at the same address; the bucket's function carried across its key's renewal, every call answered; the
+# bucket a site, at its host under the sites' domain over HTTPS through the edge, and at a customer's own domain
+# proved the same way; who reaches whom inside the cluster; and deploy.sh again, which
 # changes nothing.
 #   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
@@ -363,6 +364,33 @@ check "it reached the SQS endpoint at the Service's fixed address, inside the cl
   "$(kubectl -n "$tenant" get secret "$sqs_secret_name" -o jsonpath='{.data.AWS_ENDPOINT_URL_SQS}' | base64 -d)"
 check "the customer receives its messages through the edge, then deletes the queue" \
   '["sent by a Node.js function","sent by a Node.js function, to the URL from outside","sent through the edge"]' "$(through_edge receive | jq -c .bodies)"
+
+section "a function carried across its key's renewal: a new key at half the old one's life, its pod replaced in gVisor, every call answered"
+# db <sql>: FF's database, as its operator reads it.
+db() { docker exec "$prefix-postgres" psql -U postgres -d ff -tA -c "$1"; }
+s3_key_now() {
+  kubectl -n "$tenant" get secret "$(kubectl -n "$tenant" get deployment "fn-$s3_fn" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')" \
+    -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d
+}
+s3_call() { as "$token" "/functions/$s3_fn/invoke" -d '{"input": {"bucket": "e2e-platform-files", "other": "e2e-platform-nobody"}}' >/dev/null; echo "$(status) $(jq -c .output "$work/body")"; }
+s3_answer='201 {"read":"written by a Node.js function","other":"NoSuchBucket"}'
+check "the function runs, warm, with a key of 12 hours" "$s3_answer 12" \
+  "$(s3_call) $(db "SELECT round(extract(epoch FROM expires_at - created_at) / 3600) FROM storage_keys WHERE id = '$(s3_key_now)'")"
+old_s3_key="$(s3_key_now)"
+# Six hours and a minute on, as the hours would move them: past half its life, which the renewal finds within 5 s here.
+db "UPDATE storage_keys SET created_at = created_at - interval '6 hours 1 minute', expires_at = expires_at - interval '6 hours 1 minute' WHERE id = '$old_s3_key'" >/dev/null
+calls=0 lost=0
+for _ in $(seq 90); do
+  calls=$((calls + 1))
+  [ "$(s3_call)" = "$s3_answer" ] || lost=$((lost + 1))
+  [ "$(db "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$old_s3_key'")" = t ] && break
+  sleep 1
+done
+new_s3_key="$(s3_key_now)"
+check "past half its life, its key is renewed, its pod replaced, and the old key revoked once no pod holds it" "true t" \
+  "$([[ $new_s3_key =~ ^AKFF && $new_s3_key != "$old_s3_key" ]] && echo true || echo false) $(db "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$old_s3_key'")"
+check "  ... every call answered meanwhile, each writing and reading its bucket; and with the new key after" "0 true $s3_answer" \
+  "$lost $([ "$calls" -gt 3 ] && echo true || echo false) $(s3_call)"
 
 section "a function's URL, through the edge"
 url="$(as "$token" "/functions/$fn/url" -d '{"authType": "NONE"}' | jq -r .functionUrl)"

@@ -118,7 +118,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
       expect([await keys.isDue(function_.id, at(made, HALF - 1000)), await keys.isDue(function_.id, at(made, HALF))]).toEqual([false, true]);
       expect(keyOf(await keys.credentialsFor(function_, at(made, HALF - 1000)))).toBe(keyOf(first));
       expect(await toRenewOf(function_.id, at(made, HALF - 1000))).toEqual([]);
-      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, due: true, replaced: false }]);
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, due: true, lasting: false, replaced: false }]);
 
       const renewed = await keys.credentialsFor(function_, at(made, HALF));
 
@@ -131,7 +131,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
       // The pods that hold the old one go on reaching the account's buckets until the renewal finds none holding it.
       expect(await directory.key(keyOf(first))).toMatchObject({ functionId: function_.id });
       expect(keyOf(await keys.credentialsFor(function_, at(made, HALF)))).toBe(keyOf(renewed));
-      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, due: false, replaced: true }]);
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, due: false, lasting: false, replaced: true }]);
 
       expect(await keys.revokeReplaced(function_.id)).toBe(1);
 
@@ -162,14 +162,35 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
       expect(keyOf(await keys.credentialsFor(function_))).not.toBe(keyOf(old));
     });
 
-    it("never renews a lasting key, made before keys ended, nor lists it: it is revoked with its function", async () => {
+    it('takes a lasting key, made before keys ended, as due at once: listed for the renewal, and replaced at the next workload by one that ends', async () => {
       const function_ = fn();
       const id = 'AKFFLASTINGLASTINGLA';
       await db.dataSource.getRepository(StorageKey).insert({ id, accountId: ACCOUNT, functionId: function_.id, secret: directory.sealSecret(id, 's'.repeat(40)) });
+      const now = new Date();
 
-      expect(keyOf(await keys.credentialsFor(function_, at(new Date(), 10 * FUNCTION_KEY_LIFE_MS)))).toBe(id);
-      expect(await keys.isDue(function_.id)).toBe(false);
-      expect(await toRenewOf(function_.id, at(new Date(), 10 * FUNCTION_KEY_LIFE_MS))).toEqual([]);
+      expect(await keys.isDue(function_.id, now)).toBe(true);
+      expect(await toRenewOf(function_.id, now)).toEqual([{ functionId: function_.id, due: true, lasting: true, replaced: false }]);
+
+      const renewed = await keys.credentialsFor(function_, now);
+
+      expect(keyOf(renewed)).not.toBe(id);
+      expect(await rowsOf(function_.id)).toEqual([
+        expect.objectContaining({ id, replacedAt: now, revokedAt: null, expiresAt: null }),
+        expect.objectContaining({ id: keyOf(renewed), replacedAt: null, expiresAt: at(now, FUNCTION_KEY_LIFE_MS) }),
+      ]);
+      expect(await toRenewOf(function_.id, now)).toEqual([{ functionId: function_.id, due: false, lasting: false, replaced: true }]);
+    });
+
+    it('revokes a lasting key alone when asked to, a current key that ends left working', async () => {
+      const function_ = fn();
+      const id = 'AKFFLASTINGREVOKEDLA';
+      await db.dataSource.getRepository(StorageKey).insert({ id, accountId: ACCOUNT, functionId: function_.id, secret: directory.sealSecret(id, 's'.repeat(40)) });
+
+      expect(await keys.revokeLasting(function_.id)).toBe(1);
+      expect(await directory.key(id)).toBeNull();
+      const made = await keys.credentialsFor(function_);
+      expect(await keys.revokeLasting(function_.id)).toBe(0);
+      expect(await directory.key(keyOf(made))).toMatchObject({ functionId: function_.id });
     });
 
     it('revokes the current key and those replaced when the function goes', async () => {

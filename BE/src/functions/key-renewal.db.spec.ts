@@ -3,9 +3,10 @@
  * cluster a stand-in that keeps what each Deployment's template holds: a
  * running function's key renewed at half its life, its Deployments rolled
  * onto the new one in turn, each waited for, and the old one revoked by the
- * turn after; an idle function left to its start from zero; a Deployment an
- * update holds left to it; a failure counted, the others renewed. Each run
- * works in a scratch database, dropped afterwards.
+ * turn after; an idle function left to its start from zero; a lasting key,
+ * made before keys ended, renewed even at zero; a Deployment an update holds
+ * left to it; a failure counted, the others renewed. Each run works in a
+ * scratch database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -106,6 +107,8 @@ run("the renewal of functions' keys (L2)", () => {
     query(`UPDATE storage_keys SET created_at = now() - interval '6 hours 1 minute', expires_at = now() + interval '5 hours 59 minutes' WHERE function_id = $1 AND replaced_at IS NULL`, [
       functionId,
     ]);
+  /** Its current key lasting, as one made before keys ended: no end. */
+  const lasting = (functionId: string) => query(`UPDATE storage_keys SET expires_at = NULL WHERE function_id = $1 AND replaced_at IS NULL`, [functionId]);
   /** The key ID a Deployment's template holds, from its revision: the environment's, then the key's. */
   const heldKey = (fn: Pick<FunctionWorkload, 'id' | 'version'>) => cluster.of(fn)?.revision?.split('.').at(-1);
 
@@ -200,6 +203,44 @@ run("the renewal of functions' keys (L2)", () => {
     expect(await renewal.renewDue()).toEqual({ rolled: 1, revoked: 0, waiting: 0, failures: 0 });
     expect(heldKey(fn)).toBe(started?.environment?.values.AWS_ACCESS_KEY_ID);
     expect(await renewal.renewDue()).toEqual({ rolled: 0, revoked: 1, waiting: 0, failures: 0 });
+  });
+
+  it('renews a lasting key at the first turn, even for a function at zero, its template written with no pod started; and revokes it at the next', async () => {
+    const fn = await functions.create(ACCOUNT, body('lasting'));
+    cluster.hold((await functions.runningWorkload(fn.id))!, 0);
+    await lasting(fn.id);
+    const [old] = await keysOf(fn.id);
+    expect(old.life).toBeNull();
+    cluster.asked.length = 0;
+
+    expect(await renewal.renewDue()).toEqual({ rolled: 1, revoked: 0, waiting: 0, failures: 0 });
+
+    const [replaced, current] = await keysOf(fn.id);
+    expect([replaced, current]).toEqual([
+      { id: old.id, replaced: true, revoked: false, life: null },
+      { id: expect.not.stringMatching(old.id), replaced: false, revoked: false, life: 12 * 3600 },
+    ]);
+    expect(cluster.asked).toEqual([`renew ${fn.id}`, `wait ${fn.id}`]);
+    expect([heldKey(fn), cluster.of(fn)?.desired]).toEqual([current.id, 0]);
+
+    expect(await renewal.renewDue()).toEqual({ rolled: 0, revoked: 1, waiting: 0, failures: 0 });
+    expect((await keysOf(fn.id)).map((key) => key.revoked)).toEqual([true, false]);
+    expect(await renewal.renewDue()).toEqual({ rolled: 0, revoked: 0, waiting: 0, failures: 0 });
+  });
+
+  it("revokes at once the lasting key of a function with no Deployment, which no pod holds: its next rollout makes it one that ends", async () => {
+    const fn = await functions.create(ACCOUNT, body('gone'));
+    cluster.deployments.clear();
+    await lasting(fn.id);
+    const [old] = await keysOf(fn.id);
+
+    expect(await renewal.renewDue()).toEqual({ rolled: 0, revoked: 1, waiting: 0, failures: 0 });
+    expect(await keysOf(fn.id)).toEqual([{ id: old.id, replaced: false, revoked: true, life: null }]);
+
+    const next = await functions.runningWorkload(fn.id);
+    expect(next?.environment?.values.AWS_ACCESS_KEY_ID).not.toBe(old.id);
+    expect((await keysOf(fn.id)).map((key) => key.life)).toEqual([null, 12 * 3600]);
+    expect(await renewal.renewDue()).toEqual({ rolled: 0, revoked: 0, waiting: 0, failures: 0 });
   });
 
   it("leaves a Deployment an update is rolling out to it, revoking nothing; and rolls it once it runs the function's code again", async () => {
