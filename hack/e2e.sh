@@ -2030,9 +2030,10 @@ failing='export async function handler(event: { fail?: boolean }) {
 }'
 alarmed_id="$(http POST /functions "$(jq -n --arg code "$failing" '{name: "e2e-alarmed", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
 check "a function to watch" 201 "$(status)"
-http POST "/functions/$alarmed_id/versions" '{}' >/dev/null
-http POST "/functions/$alarmed_id/aliases" '{"name": "live", "functionVersion": "1"}' >/dev/null
-check "  ... published as version 1, its alias live naming it" 201 "$(status)"
+# Its alias names $LATEST, whose instance is up: a version's first call starts pods of its own, and the backend here,
+# restarted in a section before, allows a cold start of 1 s, which a slower machine misses.
+http POST "/functions/$alarmed_id/aliases" '{"name": "live", "functionVersion": "$LATEST"}' >/dev/null
+check "  ... its alias live naming \$LATEST" 201 "$(status)"
 alarm_id="$(http POST /alarms "$(jq -cn --arg fn "$alarmed_id" --arg url "http://127.0.0.1:$receiver_port/ff" \
   '{name: "e2e errors", functionId: $fn, metric: "Errors", statistic: "Sum", period: 60, comparison: "GreaterThanThreshold", threshold: 0,
     evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: [$url]}}')" | jq -r .id)"
@@ -2064,7 +2065,7 @@ check "once that minute is over, the alarm fires" "ALARM" "$(alarm_state_after A
 check "  ... the one on live's calls with it; the one on \$LATEST's, none of which failed, stays OK" "ALARM OK" \
   "$(alarm_state_after ALARM 30 "$live_alarm") $(http GET "/alarms/$latest_alarm" | jq -r .state)"
 check "saying why" "1 of the last 1 period(s) of 60 s breaching Errors Sum > 0 (1 needed); latest 1" "$(http GET "/alarms/$alarm_id" | jq -r .stateReason)"
-check "the next minute, quiet, recovers it" "OK" "$(alarm_state_after OK 90)"
+check "the next minute, quiet, recovers it, and the one on live's calls" "OK OK" "$(alarm_state_after OK 90) $(alarm_state_after OK 30 "$live_alarm")"
 for _ in $(seq 1 20); do [ "$(wc -l <"$work/webhooks.jsonl" | tr -d ' ')" -ge 2 ] && break; sleep 0.5; done
 secret="$(http GET /notifications/webhook-secret | jq -r .secret)"
 told="$(python3 - "$secret" "$work/webhooks.jsonl" <<'PY'
@@ -2258,7 +2259,8 @@ check "the call that failed, and the API's answers by class" "true true true" \
   "$([ "$(metric 'ff_invocations_total{outcome="error"}')" -ge 1 ] && echo true || echo false) \
 $([ "$(metric 'ff_http_responses_total{class="2xx"}')" -gt 0 ] && echo true || echo false) \
 $([ "$(metric 'ff_http_responses_total{class="4xx"}')" -gt 0 ] && echo true || echo false)"
-check "the alarm into ALARM once and into OK twice; the two webhooks delivered; none pending" "1 2 2 0" \
+# The errors' alarm and the one on live's calls each into OK and ALARM, then OK again; the one on $LATEST's into OK.
+check "the alarms into ALARM twice and into OK five times; the two webhooks delivered; none pending" "2 5 2 0" \
   "$(metric 'ff_alarm_state_changes_total{state="ALARM"}') $(metric 'ff_alarm_state_changes_total{state="OK"}') \
 $(metric 'ff_notification_attempts_total{channel="webhook",result="delivered"}') $(metric ff_notification_deliveries_pending)"
 check "the rating's lag, the process's memory and its event loop" "3" \
@@ -2276,7 +2278,8 @@ print(bool(lines) and all({'time', 'level', 'message'} <= line.keys() for line i
 PY
 )"
 }
-section_def monitoring section_monitoring backend budget=5
+# It counts what those sections did: the call marked lost, the one refused for credit, the alarms' changes.
+section_def monitoring section_monitoring usage_lost balance alarms budget=5
 
 section_lost_images() {
 section "code images the registry lost, made again (CLI plan, C-29)"
