@@ -17,7 +17,7 @@ pub(super) struct Schedule {
     id: String,
     /// The version or the alias it runs; none: $LATEST. Kept by `ff schedule set` unless `--qualifier` names another.
     #[serde(default)]
-    qualifier: Option<String>,
+    pub(super) qualifier: Option<String>,
     pub(super) name: String,
     pub(super) description: Option<String>,
     pub(super) expression: String,

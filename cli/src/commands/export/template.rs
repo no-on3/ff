@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use super::super::queues::Queue;
 use super::account::{Account, AsyncConfig, BucketRecord, Destination, FunctionRecord, Notification};
+use super::aliases;
 use super::names::{LogicalIds, lambda_names, renamed};
 use super::roles::{self, Role, Target};
 use super::yaml::Yaml;
@@ -324,15 +325,20 @@ impl<'a> Builder<'a> {
         if let Some(policies) = self.policies(record) {
             properties.push(("Policies".to_owned(), policies));
         }
+        let published = aliases::published(record);
+        if let Some(alias) = published {
+            properties.push(("AutoPublishAlias".to_owned(), Yaml::from(alias)));
+        }
         if function.min_instances > 0 {
-            properties.push(("AutoPublishAlias".to_owned(), Yaml::from("live")));
             properties.push((
                 "ProvisionedConcurrencyConfig".to_owned(),
                 Yaml::map([("ProvisionedConcurrentExecutions", Yaml::from(function.min_instances))]),
             ));
             self.notes.push(format!(
-                "**{}** keeps {} instance(s) warm on FF: on AWS, provisioned concurrency on its alias `live`, billed by the hour while it is set, called or not.",
-                function.name, function.min_instances
+                "**{}** keeps {} instance(s) warm on FF: on AWS, provisioned concurrency on its alias `{}`, billed by the hour while it is set, called or not.",
+                function.name,
+                function.min_instances,
+                published.unwrap_or_default()
             ));
         }
         if function.max_instances != DEFAULT_MAX_INSTANCES {
@@ -368,6 +374,7 @@ impl<'a> Builder<'a> {
         if !events.is_empty() {
             properties.push(("Events".to_owned(), Yaml::Map(events)));
         }
+        self.notes.extend(aliases::notes(self.account, record, lambda_name));
         let resource =
             Yaml::map([("Type", Yaml::from("AWS::Serverless::Function")), ("Properties", Yaml::Map(properties))]);
         (resource, parameters)
@@ -843,6 +850,8 @@ mod tests {
             [
                 "**make-thumbnail** keeps 1 instance(s) warm on FF",
                 "**make-thumbnail** runs 10 instance(s) at most on FF",
+                "**make-thumbnail**'s alias `beta` names version 2, 10% of its calls to version 3 on FF, whose code the export hasn't",
+                "The bucket `photos`'s notification `thumbnails` calls **make-thumbnail** through the alias `beta` on FF",
                 "**report.v1** is `report_v1` on Lambda, whose rule for names it is outside of",
                 "**report.v1** gets FF's original event, its input in `event.body`",
                 "**report.v1**'s keys used no bucket, queue or mail of the account on FF",
@@ -852,6 +861,13 @@ mod tests {
                 "**send-receipts**'s URL takes FF's API keys on FF",
                 "**send-receipts**'s URL answers at `api.shop.tn` on FF",
                 "**send-receipts** sends its calls' records to the function `audit`, which this export doesn't hold",
+                "**send-receipts**'s alias `live` names `$LATEST` on FF",
+                "**send-receipts**'s alias `next` names `$LATEST` on FF too, where the files publish `live`",
+                "**send-receipts**'s alias `stable` names version 4 on FF, whose code the export hasn't",
+                "**send-receipts**'s alias `stable` has a URL of its own on FF, `https",
+                "**send-receipts**'s schedule `weekly` runs the alias `stable` on FF",
+                "**send-receipts** reads the queue `orders` through version 4 on FF",
+                "**send-receipts** sends the record of each call that doesn't wait and succeeds to `audit",
                 "The queue **orders** hides a message it gives for 30 s on FF, less than its readers' timeout",
                 "The bucket **www** is a site",
             ]

@@ -3,6 +3,7 @@
 
 use super::super::estimate::AwsEstimate;
 use super::account::Account;
+use super::aliases;
 use super::roles::seen_between;
 use super::template::{Parameter, SCHEDULES_STATE, Template};
 use super::terraform::Terraform;
@@ -40,7 +41,7 @@ fn joined(items: &[String]) -> String {
 }
 
 /// Names in a sentence, each in backquotes.
-fn listed(names: &[String]) -> String {
+pub(super) fn listed(names: &[String]) -> String {
     joined(&names.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>())
 }
 
@@ -392,8 +393,26 @@ fn migration(account: &Account, template: &Template, read_on: &str) -> String {
                 url.function_url
             ));
         }
-        if !record.domains.is_empty() {
-            moves.push(format!("{} through CloudFront, as `data/lambda.md` says", listed(&record.domains)));
+        for alias_url in &record.alias_urls {
+            let to = match &exported.url_output {
+                Some(output) if aliases::is_the_files_url(record, alias_url) => {
+                    format!("the address in the stack's output `{output}`")
+                }
+                _ => "the address `aws lambda create-function-url-config` answers".to_owned(),
+            };
+            moves.push(format!(
+                "its alias `{}`'s URL's callers from {} to {to}",
+                alias_url.alias, alias_url.url.function_url
+            ));
+        }
+        let domains: Vec<String> = record
+            .domains
+            .iter()
+            .chain(record.alias_urls.iter().flat_map(|alias_url| &alias_url.domains))
+            .cloned()
+            .collect();
+        if !domains.is_empty() {
+            moves.push(format!("{} through CloudFront, as `data/lambda.md` says", listed(&domains)));
         }
         let enabled: Vec<String> =
             record.schedules.iter().filter(|schedule| schedule.enabled).map(|schedule| schedule.name.clone()).collect();
@@ -570,7 +589,7 @@ mod tests {
             "**The buckets' events,** once their files are copied: `sam deploy --template-file template.yaml` adds them",
             "- **make-thumbnail**: called by the events of `photos` on S3 once they are there.",
             "- **report.v1**: `report_v1` on Lambda.",
-            "- **send-receipts**: its URL's callers from https://abc.fn.ff.tn/ to the address in the stack's output `SendReceiptsUrl`; `api.shop.tn` through CloudFront, as `data/lambda.md` says; `ff schedule disable send-receipts nightly`; reads `orders` on AWS once the senders send there.",
+            "- **send-receipts**: its URL's callers from https://abc.fn.ff.tn/ to the address in the stack's output `SendReceiptsUrl`; its alias `stable`'s URL's callers from https://stable.fn.ff.tn/ to the address `aws lambda create-function-url-config` answers; `api.shop.tn` and `stable.shop.tn` through CloudFront, as `data/lambda.md` says; `ff schedule disable send-receipts nightly`; reads `orders` on AWS once the senders send there.",
             "`sam deploy --parameter-overrides ScheduleState=ENABLED` turns AWS's on",
             "Each function's role allows what its keys used of the account's buckets, queues and mail on FF from 2026-10-21 to 2026-10-31",
             "**Or with OpenTofu or Terraform,** from `terraform/`",

@@ -113,6 +113,7 @@ Resources:
               Action:
                 - ses:GetAccount
               Resource: '*'
+      AutoPublishAlias: live
       FunctionUrlConfig:
         AuthType: AWS_IAM
         Cors:

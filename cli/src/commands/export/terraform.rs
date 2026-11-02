@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 
 use super::account::{Account, BucketRecord, Destination, FunctionRecord, Notification};
+use super::aliases;
 use super::hcl::{Block, Hcl, file, literal};
 use super::names::{ResourceNames, lambda_names};
 use super::roles::{self, Target};
@@ -23,8 +24,6 @@ const LOGS: &str = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecution
 /// What Lambda's poller does with a queue a function reads, which SAM's roles get from
 /// `AWSLambdaSQSQueueExecutionRole` and these from a statement on that queue alone.
 const QUEUE_READ: [&str; 3] = ["sqs:DeleteMessage", "sqs:GetQueueAttributes", "sqs:ReceiveMessage"];
-/// The alias a function with warm instances is called through, as SAM's `AutoPublishAlias` names it.
-const ALIAS: &str = "live";
 /// The account's ID and its region, which an ARN of a resource outside the files names.
 const ACCOUNT_ID: &str = "${data.aws_caller_identity.current.account_id}";
 const REGION: &str = "${var.region}";
@@ -38,13 +37,13 @@ pub struct Terraform {
     pub to_fill: Vec<Parameter>,
 }
 
-/// A function's names in the files: its resources', on Lambda, and its alias's when it has warm
-/// instances.
+/// A function's names in the files: its resources', on Lambda, and the alias the files publish, when they publish
+/// one: its resource's and its own.
 #[derive(Clone)]
 struct Names {
     name: String,
     lambda_name: String,
-    alias: Option<String>,
+    alias: Option<(String, String)>,
 }
 
 /// The files of what the export read; `with_values` writes the functions' variables' values,
@@ -166,7 +165,8 @@ impl<'a> Builder<'a> {
         let mut functions = HashMap::new();
         for (record, lambda_name) in account.functions.iter().zip(lambda_names(&ff_names)) {
             let name = names.give("aws_lambda_function", &record.function.name);
-            let alias = (record.function.min_instances > 0).then(|| names.give("aws_lambda_alias", &name));
+            let alias =
+                aliases::published(record).map(|alias| (names.give("aws_lambda_alias", &name), alias.to_owned()));
             functions.insert(record.function.name.as_str(), Names { name, lambda_name, alias });
         }
         let queues = account
@@ -212,7 +212,7 @@ impl<'a> Builder<'a> {
     /// What calls a function: its alias's ARN when it has one, its own otherwise.
     fn invoked(&self, names: &Names) -> Hcl {
         match &names.alias {
-            Some(alias) => Hcl::reference(format!("aws_lambda_alias.{alias}.arn")),
+            Some((alias, _)) => Hcl::reference(format!("aws_lambda_alias.{alias}.arn")),
             None => Hcl::reference(format!("aws_lambda_function.{}.arn", names.name)),
         }
     }
@@ -222,7 +222,7 @@ impl<'a> Builder<'a> {
         let block = block
             .attribute("function_name", Hcl::reference(format!("aws_lambda_function.{}.function_name", names.name)));
         match &names.alias {
-            Some(alias) => block.attribute("qualifier", Hcl::reference(format!("aws_lambda_alias.{alias}.name"))),
+            Some((alias, _)) => block.attribute("qualifier", Hcl::reference(format!("aws_lambda_alias.{alias}.name"))),
             None => block,
         }
     }
@@ -393,13 +393,15 @@ impl<'a> Builder<'a> {
             lambda = lambda.block(Block::new("environment", &[]).attribute("variables", Hcl::Object(variables)));
         }
         blocks.push(lambda);
-        if let Some(alias) = &names.alias {
+        if let Some((alias, alias_name)) = &names.alias {
             blocks.push(
                 resource("aws_lambda_alias", alias)
-                    .attribute("name", ALIAS)
+                    .attribute("name", alias_name.as_str())
                     .attribute("function_name", Hcl::reference(format!("aws_lambda_function.{name}.function_name")))
                     .attribute("function_version", Hcl::reference(format!("aws_lambda_function.{name}.version"))),
             );
+        }
+        if let Some((alias, _)) = names.alias.as_ref().filter(|_| function.min_instances > 0) {
             let warm = self.names.give("aws_lambda_provisioned_concurrency_config", name);
             blocks.push(
                 resource("aws_lambda_provisioned_concurrency_config", &warm)

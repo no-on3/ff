@@ -60,10 +60,24 @@ fn account(zip: &[u8], estimate: Reply) -> Vec<Reply> {
         Reply::json(200, json!({ "secrets": [{ "name": "DATABASE_URL", "updatedAt": AT }] })),
         Reply::json(
             200,
-            json!({ "functionUrl": "https://abc.fn.ff.tn/", "functionId": "f1", "authType": "NONE",
-                                 "cors": { "allowOrigins": ["https://shop.tn"] }, "invokeMode": "BUFFERED", "createdAt": AT, "updatedAt": AT }),
+            json!([{ "functionUrl": "https://abc.fn.ff.tn/", "functionId": "f1", "alias": null, "authType": "NONE",
+                                 "cors": { "allowOrigins": ["https://shop.tn"] }, "invokeMode": "BUFFERED", "createdAt": AT, "updatedAt": AT },
+                   { "functionUrl": "https://beta.fn.ff.tn/", "functionId": "f1", "alias": "beta", "authType": "NONE",
+                                 "cors": null, "invokeMode": "BUFFERED", "createdAt": AT, "updatedAt": AT }]),
         ),
         Reply::json(200, json!([])),
+        Reply::json(
+            200,
+            json!([{ "domain": "beta.shop.tn", "status": "active", "records": { "cname": [], "txt": [] },
+                     "checkedAt": AT, "checkError": null }]),
+        ),
+        Reply::json(
+            200,
+            json!([{ "aliasArn": format!("arn:aws:lambda:tn-tunis-1:{ACCOUNT}:function:send-receipts:beta"), "name": "beta",
+                     "functionVersion": "2", "description": "", "revisionId": "r-2", "createdAt": AT, "updatedAt": AT },
+                   { "aliasArn": format!("arn:aws:lambda:tn-tunis-1:{ACCOUNT}:function:send-receipts:live"), "name": "live",
+                     "functionVersion": "$LATEST", "description": "", "revisionId": "r-1", "createdAt": AT, "updatedAt": AT }]),
+        ),
         Reply::json(
             200,
             json!([{ "id": "s1", "functionId": "f1", "name": "nightly", "description": null, "expression": "cron(0 2 * * ? *)",
@@ -136,8 +150,10 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
             "/functions",
             "/functions/f1",
             "/functions/f1/secrets",
-            "/functions/f1/url",
+            "/functions/f1/urls",
             "/functions/f1/url/domains",
+            "/functions/f1/url/domains?qualifier=beta",
+            "/functions/f1/aliases",
             "/functions/f1/schedules",
             "/functions/f1/event-sources",
             "/functions/f1/event-invoke-config",
@@ -153,7 +169,7 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
             "/functions/f1/code?javascript=true",
         ]
     );
-    assert_eq!(api.requests()[18].header("accept"), Some("application/zip"));
+    assert_eq!(api.requests()[20].header("accept"), Some("application/zip"));
     assert_eq!(std::fs::read(folder.join("code/send-receipts.zip")).unwrap(), zip);
     let read = |path: &str| std::fs::read_to_string(folder.join(path)).unwrap();
     let template = read("template.yaml");
@@ -166,6 +182,7 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
         "            Queue: !GetAtt OrdersQueue.Arn\n",
         "            Destination: !GetAtt FailedReceiptsQueue.Arn\n",
         "            State: !Ref ScheduleState\n",
+        "      AutoPublishAlias: live\n",
         "      BucketName: !Ref UploadsBucketName\n",
         "      VisibilityTimeout: 60\n",
         "        - S3ReadPolicy:\n            BucketName: !Ref UploadsBucketName\n",
@@ -193,6 +210,15 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
     assert!(migration.starts_with("# Moving Shop from FF to AWS\n"), "{migration}");
     assert!(migration.contains("`ff schedule disable send-receipts nightly`"), "{migration}");
     assert!(migration.contains("on FF from 2026-10-21 to 2026-10-31, as FF noted each use"), "{migration}");
+    for note in [
+        "- **send-receipts**'s alias `live` names `$LATEST` on FF: on AWS, it is the template's `AutoPublishAlias`",
+        "- **send-receipts**'s alias `beta` names version 2 on FF, whose code the export hasn't",
+        "- **send-receipts**'s alias `beta` has a URL of its own on FF, `https://beta.fn.ff.tn/`",
+        "; `beta.shop.tn` reaches it through a CloudFront distribution",
+        "its alias `beta`'s URL's callers from https://beta.fn.ff.tn/ to the address `aws lambda create-function-url-config` answers; `beta.shop.tn` through CloudFront",
+    ] {
+        assert!(migration.contains(note), "{note:?} in:\n{migration}");
+    }
     assert!(read("data/postgres.md").contains("> **In this account:** the database `shop` (50 MB)."));
     #[cfg(unix)]
     {

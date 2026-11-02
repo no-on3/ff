@@ -140,6 +140,7 @@ resource "aws_lambda_function" "send_receipts" {
   runtime          = "nodejs24.x"
   memory_size      = 256
   timeout          = 60
+  publish          = true
   environment {
     variables = {
       LOG_LEVEL    = var.send_receipts_log_level
@@ -148,8 +149,15 @@ resource "aws_lambda_function" "send_receipts" {
   }
 }
 
+resource "aws_lambda_alias" "send_receipts" {
+  name             = "live"
+  function_name    = aws_lambda_function.send_receipts.function_name
+  function_version = aws_lambda_function.send_receipts.version
+}
+
 resource "aws_lambda_function_url" "send_receipts" {
   function_name      = aws_lambda_function.send_receipts.function_name
+  qualifier          = aws_lambda_alias.send_receipts.name
   authorization_type = "AWS_IAM"
   cors {
     allow_methods = ["POST"]
@@ -166,7 +174,7 @@ resource "aws_cloudwatch_event_rule" "send_receipts_nightly" {
 
 resource "aws_cloudwatch_event_target" "send_receipts_nightly" {
   rule = aws_cloudwatch_event_rule.send_receipts_nightly.name
-  arn  = aws_lambda_function.send_receipts.arn
+  arn  = aws_lambda_alias.send_receipts.arn
   input = jsonencode({
     report = true
   })
@@ -176,6 +184,7 @@ resource "aws_lambda_permission" "send_receipts_schedule_nightly" {
   statement_id  = "schedule-nightly"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.send_receipts.function_name
+  qualifier     = aws_lambda_alias.send_receipts.name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.send_receipts_nightly.arn
 }
@@ -188,20 +197,21 @@ resource "aws_cloudwatch_event_rule" "send_receipts_weekly" {
 
 resource "aws_cloudwatch_event_target" "send_receipts_weekly" {
   rule = aws_cloudwatch_event_rule.send_receipts_weekly.name
-  arn  = aws_lambda_function.send_receipts.arn
+  arn  = aws_lambda_alias.send_receipts.arn
 }
 
 resource "aws_lambda_permission" "send_receipts_schedule_weekly" {
   statement_id  = "schedule-weekly"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.send_receipts.function_name
+  qualifier     = aws_lambda_alias.send_receipts.name
   principal     = "events.amazonaws.com"
   source_arn    = aws_cloudwatch_event_rule.send_receipts_weekly.arn
 }
 
 resource "aws_lambda_event_source_mapping" "send_receipts_orders" {
   event_source_arn                   = aws_sqs_queue.orders.arn
-  function_name                      = aws_lambda_function.send_receipts.arn
+  function_name                      = aws_lambda_alias.send_receipts.arn
   batch_size                         = 10
   maximum_batching_window_in_seconds = 2
   function_response_types            = ["ReportBatchItemFailures"]
@@ -212,6 +222,7 @@ resource "aws_lambda_event_source_mapping" "send_receipts_orders" {
 
 resource "aws_lambda_function_event_invoke_config" "send_receipts" {
   function_name          = aws_lambda_function.send_receipts.function_name
+  qualifier              = aws_lambda_alias.send_receipts.name
   maximum_retry_attempts = 1
   destination_config {
     on_success {

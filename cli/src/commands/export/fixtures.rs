@@ -5,7 +5,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::account::{Account, BucketRecord, FunctionRecord};
+use super::account::{Account, AliasUrl, BucketRecord, FunctionRecord};
 use super::roles::KeyUse;
 
 const ACCOUNT: &str = "123456789012";
@@ -57,6 +57,19 @@ fn schedule(name: &str, expression: &str, input: Value, enabled: bool) -> Value 
             "createdAt": AT, "updatedAt": AT })
 }
 
+/// A value with one field more, or changed.
+fn with(mut value: Value, field: &str, given: Value) -> Value {
+    value[field] = given;
+    value
+}
+
+/// An alias of the function, naming `$LATEST` or a version, with a share of its calls to another.
+fn alias(function: &str, name: &str, version: &str, share: Option<(&str, f64)>) -> Value {
+    json!({ "aliasArn": format!("{}:{name}", arn("lambda", function)), "name": name, "functionVersion": version, "description": "",
+            "routingConfig": share.map(|(other, weight)| json!({ "additionalVersionWeights": { other: weight } })),
+            "revisionId": "r-1", "createdAt": AT, "updatedAt": AT })
+}
+
 /// The account, as `ff export` reads it.
 pub fn shop() -> Account {
     let send_receipts = FunctionRecord {
@@ -71,13 +84,29 @@ pub fn shop() -> Account {
                                "cors": { "allowOrigins": ["https://shop.tn"], "allowMethods": ["POST"], "maxAge": 300, "allowCredentials": null },
                                "invokeMode": "BUFFERED", "createdAt": AT, "updatedAt": AT }))),
         domains: vec!["api.shop.tn".to_owned()],
+        aliases: [
+            alias("send-receipts", "live", "$LATEST", None),
+            alias("send-receipts", "next", "$LATEST", None),
+            alias("send-receipts", "stable", "4", None),
+        ]
+        .into_iter()
+        .map(read)
+        .collect(),
+        alias_urls: vec![AliasUrl {
+            alias: "stable".to_owned(),
+            url: read(
+                json!({ "functionUrl": "https://stable.fn.ff.tn/", "functionId": "f1", "alias": "stable", "authType": "NONE",
+                              "cors": null, "invokeMode": "BUFFERED", "createdAt": AT, "updatedAt": AT }),
+            ),
+            domains: vec!["stable.shop.tn".to_owned()],
+        }],
         schedules: vec![
             read(schedule("nightly", "cron(0 2 * * ? *)", json!({ "report": true }), true)),
-            read(schedule("weekly", "rate(7 days)", Value::Null, false)),
+            read(with(schedule("weekly", "rate(7 days)", Value::Null, false), "qualifier", json!("stable"))),
         ],
         event_sources: vec![read(
             json!({ "uuid": "9a1c1b52-5c87-4e0e-9a43-0d2f6f0d6c11", "eventSourceArn": arn("sqs", "orders"),
-                                          "functionArn": arn("lambda", "send-receipts"), "batchSize": 10,
+                                          "functionArn": format!("{}:4", arn("lambda", "send-receipts")), "batchSize": 10,
                                           "maximumBatchingWindowInSeconds": 2, "functionResponseTypes": ["ReportBatchItemFailures"],
                                           "scalingConfig": { "maximumConcurrency": 5 }, "state": "Enabled",
                                           "stateTransitionReason": "USER_INITIATED", "lastModified": AT }),
@@ -85,7 +114,7 @@ pub fn shop() -> Account {
         async_config: Some(read(
             json!({ "functionArn": format!("{}:$LATEST", arn("lambda", "send-receipts")), "maximumRetryAttempts": 1,
                                         "maximumEventAgeInSeconds": null,
-                                        "destinationConfig": { "onSuccess": { "destination": arn("lambda", "audit") },
+                                        "destinationConfig": { "onSuccess": { "destination": format!("{}:live", arn("lambda", "audit")) },
                                                                "onFailure": { "destination": arn("sqs", "failed-receipts") } },
                                         "lastModified": AT }),
         )),
@@ -113,6 +142,8 @@ pub fn shop() -> Account {
         secrets: Vec::new(),
         url: None,
         domains: Vec::new(),
+        aliases: vec![read(alias("make-thumbnail", "beta", "2", Some(("3", 0.1))))],
+        alias_urls: Vec::new(),
         schedules: Vec::new(),
         event_sources: Vec::new(),
         async_config: None,
@@ -128,6 +159,8 @@ pub fn shop() -> Account {
         secrets: Vec::new(),
         url: None,
         domains: Vec::new(),
+        aliases: Vec::new(),
+        alias_urls: Vec::new(),
         schedules: Vec::new(),
         event_sources: Vec::new(),
         async_config: None,
@@ -138,7 +171,7 @@ pub fn shop() -> Account {
         notifications: read(json!({
             "lambdaFunctionConfigurations": [{ "id": "thumbnails", "events": ["s3:ObjectCreated:*"],
                                                "filter": { "key": { "filterRules": [{ "name": "prefix", "value": "in/" }, { "name": "suffix", "value": ".jpg" }] } },
-                                               "lambdaFunctionArn": arn("lambda", "make-thumbnail") }],
+                                               "lambdaFunctionArn": format!("{}:beta", arn("lambda", "make-thumbnail")) }],
             "queueConfigurations": [{ "id": "removed", "events": ["s3:ObjectRemoved:Delete", "s3:ObjectRemoved:DeleteMarkerCreated"],
                                       "queueArn": arn("sqs", "orders") }],
         })),

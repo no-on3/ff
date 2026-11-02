@@ -95,24 +95,33 @@ fn function_findings(record: &FunctionRecord, lambda_name: &str) -> Vec<AccountF
             ),
         ));
     }
-    if record.url.as_ref().is_some_and(|url| url.auth_type == "AWS_IAM") {
-        found.push(warning(
-            resource(),
-            "url-keys",
-            "its URL takes FF's API keys: on AWS, `AWS_IAM` asks each caller for a request signed with AWS's keys \
-             (SigV4) instead"
-                .to_owned(),
-        ));
-    }
-    for domain in &record.domains {
-        found.push(warning(
-            resource(),
-            "custom-domain",
-            format!(
-                "{domain} points at its URL on FF: on AWS, CloudFront in front of the function URL with the domain's \
-                 certificate, then its DNS record changed, as `data/lambda.md` says"
-            ),
-        ));
+    // $LATEST's URL and each alias's own, with the domains on each.
+    let urls = record.url.iter().map(|url| ("its URL".to_owned(), url, record.domains.as_slice())).chain(
+        record.alias_urls.iter().map(|alias_url| {
+            (format!("its alias `{}`'s URL", alias_url.alias), &alias_url.url, alias_url.domains.as_slice())
+        }),
+    );
+    for (named, url, domains) in urls {
+        if url.auth_type == "AWS_IAM" {
+            found.push(warning(
+                resource(),
+                "url-keys",
+                format!(
+                    "{named} takes FF's API keys: on AWS, `AWS_IAM` asks each caller for a request signed with AWS's \
+                     keys (SigV4) instead"
+                ),
+            ));
+        }
+        for domain in domains {
+            found.push(warning(
+                resource(),
+                "custom-domain",
+                format!(
+                    "{domain} points at {named} on FF: on AWS, CloudFront in front of the function URL with the \
+                     domain's certificate, then its DNS record changed, as `data/lambda.md` says"
+                ),
+            ));
+        }
     }
     if let Some((services, last)) = reached(record) {
         found.push(warning(
@@ -245,6 +254,7 @@ mod tests {
             ("function report.v1", "wrapped-event"),
             ("function send-receipts", "url-keys"),
             ("function send-receipts", "custom-domain"),
+            ("function send-receipts", "custom-domain"),
             ("function send-receipts", "ff-endpoints"),
             ("bucket www", "custom-domain"),
             ("storage key AKFF0001", "storage-key"),
@@ -256,11 +266,11 @@ mod tests {
     #[test]
     fn each_message_says_what_aws_does_instead() {
         let keys = [key("AKFF0001", None, Some("2026-10-30T18:04:11.000Z")), key("AKFF0002", Some(&["photos"]), None)];
-        let messages: BTreeMap<(String, &str), String> = findings(&shop(), Some(&keys))
-            .into_iter()
-            .map(|finding| ((finding.resource, finding.check), finding.message))
-            .collect();
-        let message = |resource: &str, check: &str| messages[&(resource.to_owned(), check)].clone();
+        let mut messages: BTreeMap<(String, &str), Vec<String>> = BTreeMap::new();
+        for finding in findings(&shop(), Some(&keys)) {
+            messages.entry((finding.resource, finding.check)).or_default().push(finding.message);
+        }
+        let message = |resource: &str, check: &str| messages[&(resource.to_owned(), check)][0].clone();
         assert_eq!(
             message("function send-receipts", "ff-endpoints"),
             "reached FF's S3 (archive, photos, www), SQS (failed-receipts, invoices, orders) and SES (receipts@shop.tn) \
@@ -278,6 +288,11 @@ mod tests {
         );
         assert!(message("function make-thumbnail", "warm-instances").starts_with("keeps 1 instance running when idle"));
         assert!(message("function send-receipts", "custom-domain").starts_with("api.shop.tn points at its URL on FF"));
+        assert!(
+            messages[&("function send-receipts".to_owned(), "custom-domain")][1]
+                .starts_with("stable.shop.tn points at its alias `stable`'s URL on FF")
+        );
+        assert!(message("function send-receipts", "url-keys").starts_with("its URL takes FF's API keys"));
         assert!(message("bucket www", "custom-domain").starts_with("shop.tn points at its site on FF"));
         assert_eq!(
             message("storage key AKFF0001", "storage-key"),

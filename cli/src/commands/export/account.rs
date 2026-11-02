@@ -16,7 +16,7 @@ use super::super::secrets::Secrets;
 use super::super::sites::Website;
 use super::super::url::{Domain, FunctionUrl};
 use super::roles::{KeyUse, KeyUses};
-use crate::api::types::{Function, MeAccount, name_in_arn};
+use crate::api::types::{Function, FunctionAlias, MeAccount, aliases_of, name_in_arn};
 use crate::api::{Call, Client};
 use crate::error::{Error, Kind};
 
@@ -93,14 +93,26 @@ pub struct FunctionRecord {
     pub function: Function,
     /// Its secrets' names, never a value.
     pub secrets: Vec<String>,
+    /// `$LATEST`'s URL.
     pub url: Option<FunctionUrl>,
     /// The account's domains on its URL.
     pub domains: Vec<String>,
+    /// Its aliases, as Lambda's: the one naming `$LATEST` the files publish, the others the runbook says.
+    pub aliases: Vec<FunctionAlias>,
+    /// Its aliases' own URLs.
+    pub alias_urls: Vec<AliasUrl>,
     pub schedules: Vec<Schedule>,
     pub event_sources: Vec<EventSource>,
     pub async_config: Option<AsyncConfig>,
     /// What its keys used of the account's buckets, queues and mail, which its role allows.
     pub uses: Vec<KeyUse>,
+}
+
+/// An alias's own URL, with the account's domains on it.
+pub struct AliasUrl {
+    pub alias: String,
+    pub url: FunctionUrl,
+    pub domains: Vec<String>,
 }
 
 /// A bucket, its notifications, and its site when it is one, with the site's domains.
@@ -127,15 +139,25 @@ fn function_record(client: &Client, listed: &Function) -> Result<FunctionRecord,
     let path = format!("/functions/{}", listed.id);
     let function: Function = client.json(&Call::get(&path))?;
     let secrets: Secrets = client.json(&Call::get(format!("{path}/secrets")))?;
-    let url: Option<FunctionUrl> = client.json_if_any(&Call::get(format!("{path}/url")))?;
-    let domains: Vec<Domain> = match url {
-        Some(_) => client.json(&Call::get(format!("{path}/url/domains")))?,
+    let urls: Vec<FunctionUrl> = client.json(&Call::get(format!("{path}/urls")))?;
+    let (aliases_urls, mut latest_url): (Vec<_>, Vec<_>) = urls.into_iter().partition(|url| url.alias.is_some());
+    let url = latest_url.pop();
+    let domains = match url {
+        Some(_) => domains_of(client, Call::get(format!("{path}/url/domains")))?,
         None => Vec::new(),
     };
+    let mut alias_urls = Vec::new();
+    for url in aliases_urls {
+        let alias = url.alias.clone().unwrap_or_default();
+        let domains = domains_of(client, Call::get(format!("{path}/url/domains")).query("qualifier", &alias))?;
+        alias_urls.push(AliasUrl { alias, url, domains });
+    }
     Ok(FunctionRecord {
         secrets: secrets.secrets.into_iter().map(|secret| secret.name).collect(),
         url,
-        domains: domains.into_iter().map(|domain| domain.domain).collect(),
+        domains,
+        aliases: aliases_of(client, &listed.id)?,
+        alias_urls,
         schedules: client.json(&Call::get(format!("{path}/schedules")))?,
         event_sources: client.json(&Call::get(format!("{path}/event-sources")))?,
         async_config: client.json_if_any(&Call::get(format!("{path}/event-invoke-config")))?,
@@ -144,17 +166,23 @@ fn function_record(client: &Client, listed: &Function) -> Result<FunctionRecord,
     })
 }
 
+/// The names of the domains a URL or a site has.
+fn domains_of(client: &Client, call: Call) -> Result<Vec<String>, Error> {
+    let domains: Vec<Domain> = client.json(&call)?;
+    Ok(domains.into_iter().map(|domain| domain.domain).collect())
+}
+
 fn bucket_record(client: &Client, bucket: Bucket) -> Result<BucketRecord, Error> {
     let path = format!("/buckets/{}", bucket.name);
     let website: Option<Website> = client.json_if_any(&Call::get(format!("{path}/website")))?;
-    let site_domains: Vec<Domain> = match website {
-        Some(_) => client.json(&Call::get(format!("{path}/website/domains")))?,
+    let site_domains = match website {
+        Some(_) => domains_of(client, Call::get(format!("{path}/website/domains")))?,
         None => Vec::new(),
     };
     Ok(BucketRecord {
         notifications: client.json(&Call::get(format!("{path}/notifications")))?,
         website,
-        site_domains: site_domains.into_iter().map(|domain| domain.domain).collect(),
+        site_domains,
         name: bucket.name,
     })
 }

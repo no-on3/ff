@@ -25,7 +25,7 @@ pub(super) struct ScalingConfig {
 pub(super) struct EventSource {
     uuid: String,
     pub(super) event_source_arn: String,
-    function_arn: String,
+    pub(super) function_arn: String,
     pub(super) batch_size: u32,
     pub(super) maximum_batching_window_in_seconds: u32,
     pub(super) function_response_types: Vec<String>,

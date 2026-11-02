@@ -4,6 +4,7 @@
 //! its runbook, and `cost-estimate.md`, its last months at AWS's prices.
 
 pub(super) mod account;
+mod aliases;
 #[cfg(test)]
 pub(super) mod fixtures;
 mod hcl;

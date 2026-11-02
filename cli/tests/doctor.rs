@@ -170,7 +170,9 @@ fn account() -> Vec<Reply> {
         Reply::json(200, json!([function])),
         Reply::json(200, function),
         Reply::json(200, json!({ "secrets": [] })),
-        not_found(),
+        // No URL and no alias; no schedule and no queue read; no settings for calls that don't wait.
+        Reply::json(200, json!([])),
+        Reply::json(200, json!([])),
         Reply::json(200, json!([])),
         Reply::json(200, json!([])),
         not_found(),

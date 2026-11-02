@@ -1142,6 +1142,16 @@ for _ in $(seq 75); do
   curl -s "$api/functions/$receipts_id/key-uses" | jq -e '.uses | any(.operation == "SendEmail")' >/dev/null && break
   sleep 1
 done
+# An alias naming $LATEST, which the files publish as SAM's AutoPublishAlias, and one naming a version, whose code the
+# export hasn't, which MIGRATION.md says.
+ff alias set shop-receipts live latest
+ff publish shop-api
+ff alias set shop-api stable 1
+check "shop-receipts's alias live names \$LATEST, shop-api's stable its version 1" "0 shop-api:stable made: version 1" "$(code) $(out)"
+# stable's own URL, with a domain on it, which the runbook says how to make on AWS and moves at the cutover.
+ff url enable shop-api --alias stable --auth none
+ff domains add shop-api stable.shop-cli.tn --alias stable
+check "  ... stable with a URL of its own, and a domain on it" "0 stable.shop-cli.tn: pending" "$(code) $(out | head -1)"
 ff doctor "$app" --output json
 check "ff doctor finds nothing in the small app's code that works on FF alone, its template-free folder read as its package" \
   "0 0 0" "$(code) $(out | jq -r '"\(.errors) \(.warnings)"')"
@@ -1180,6 +1190,14 @@ $(resource_of ShopApiFunction | grep -A1 -- '- S3ReadPolicy:' | grep 'BucketName
 # The tools AWS's users check a template and Terraform with, as hack/install-tools.sh pins them, the provider from
 # its mirror; the region any, as nothing here reaches AWS.
 tool() { local code=0; "$@" >"$work/out" 2>"$work/err" || code=$?; echo "$code" >"$work/code"; }
+check "  ... shop-receipts's alias live its AutoPublishAlias, and Terraform's alias; shop-api's alias stable in MIGRATION.md, with the commands that make it" \
+  "true true true" \
+  "$(resource_of ShopReceiptsFunction | grep -F 'AutoPublishAlias: live' >/dev/null && echo true || echo false) \
+$(grep -A1 -F 'resource "aws_lambda_alias" "shop_receipts"' "$kit/terraform/functions.tf" | grep -F 'name             = "live"' >/dev/null && echo true || echo false) \
+$(grep -F "**shop-api**'s alias \`stable\` names version 1 on FF" "$kit/MIGRATION.md" | grep -F 'aws lambda create-alias --function-name shop-api --name stable' >/dev/null && echo true || echo false)"
+check "  ... and stable's URL, made with the AWS CLI, its callers and its domain moved at the cutover" "true true" \
+  "$(grep -F "**shop-api**'s alias \`stable\` has a URL of its own on FF" "$kit/MIGRATION.md" | grep -F -e '--qualifier stable --auth-type NONE' | grep -F '`stable.shop-cli.tn` reaches it' >/dev/null && echo true || echo false) \
+$(grep -F "its alias \`stable\`'s URL's callers from http" "$kit/MIGRATION.md" | grep -F '`stable.shop-cli.tn` through CloudFront' >/dev/null && echo true || echo false)"
 tool env -C "$kit" SAM_CLI_TELEMETRY=0 "$FF_REPO_ROOT/hack/bin/sam" validate --lint --region eu-west-3
 check "  ... the template, which sam validate --lint takes, cfn-lint inside it" "0 true" \
   "$(code) $(out | grep 'is a valid SAM Template' >/dev/null && echo true || echo false)"
