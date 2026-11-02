@@ -97,7 +97,8 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 - [ ] **X-15** The step closed:
   - [ ] part 1, the small app as one `template.yaml`: its three functions, its URL, its queue and mapping, its schedule, its receipts' bucket; its database, cache, mail and site made as before, which SAM's resources don't declare; `ff deploy` makes it on FF, `ff export` writes it back, the same file passes `sam validate --lint` and cfn-lint; with an AWS account (the plan's §9, choice 13), `sam deploy` on AWS and the app's smoke test there, in the monthly job (T-10);
   - [ ] part 2, the guide walks through it and `hack/cli-e2e.sh` runs it; What to build next marks step 5 done; the decision log; step 6's plan, from §4 of this list.
-- [ ] **Deploy 3:** step 5 on the development server: `lambda.dev.ffunc.cloud`'s record made by you, `install.sh` run, the smoke test grown (a function made with the AWS CLI through the endpoint, an alias moved, a template deployed), customers' servers left running.
+- [ ] **Deploy 3:** step 5 on the development server: `lambda.dev.ffunc.cloud`'s record made, `install.sh` run, the smoke test grown (a function made with the AWS CLI through the endpoint, an alias moved, a template deployed), customers' servers left running.
+  - [x] step 5 so far, at your request on 2026-11-02: the record made with OVH's API, `master` merged (`89a663b`) and installed, the server's 9 checks and the smoke test's 21 passed; the smoke test grown at the step's end.
 
 ## 3. The pipeline: faster, split, and every failure reported
 
