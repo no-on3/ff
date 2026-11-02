@@ -223,6 +223,10 @@ aws_ff() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$key_id}" AWS_SECRET_ACCESS_KEY="${AWS_
 # code (AWS.SimpleQueueService.NonExistentQueue), SES's name (NotFoundException).
 outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/aws.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"; }
 
+# aws_lambda <arguments…>: the AWS CLI at Lambda's endpoint, from AWS_ENDPOINT_URL_LAMBDA alone, with AWS_KEY's key.
+aws_lambda() { AWS_ACCESS_KEY_ID="$AWS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
+  AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_LAMBDA="http://localhost:$lambda_port" "${aws_cli[@]}" lambda "$@" --output json; }
+
 # written_within <seconds> <table> <id> <since>: true when the backend wrote the table's first row for the id within
 # that many seconds of <since> (seconds since the epoch), else how long after, as its log says: in development, each
 # query with its time. A sample read minutes after it was due is timed there.
@@ -473,6 +477,38 @@ check "  ... and a request to it runs the version the alias names" '200 {"ran":"
 (sleep 65 && sql "UPDATE plans SET limits = limits || '{\"idleSeconds\": 1}' WHERE id = 'e2e-versions'") >/dev/null 2>&1 &
 }
 section_def versions section_versions backend budget=35
+
+section_lambda_reads() {
+section "Lambda's endpoint, read with the AWS CLI: a function, its version and its alias, the account's list and settings, its code's link"
+reader="$(as_ver POST /storage-keys '{"name": "e2e-lambda-reader", "functions": ["*"], "functionAccess": "read"}')"
+# as_reader <aws lambda arguments…>: the AWS CLI at Lambda's endpoint with a key that may read the account's functions.
+as_reader() { AWS_KEY="$(jq -r .id <<<"$reader")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$reader")" aws_lambda "$@"; }
+versioned_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-versioned"
+latest="$(as_reader get-function --function-name e2e-versioned)"
+check "GetFunction gives \$LATEST under Lambda's names, Active, its memory raised since its version" \
+  "$versioned_arn nodejs24.x \$LATEST 256 function.handler Active Successful" \
+  "$(jq -r '.Configuration | "\(.FunctionArn) \(.Runtime) \(.Version) \(.MemorySize) \(.Handler) \(.State) \(.LastUpdateStatus)"' <<<"$latest")"
+check "  ... and its code as a link of FF's, unsigned, which answers its zip" "200 function.ts" \
+  "$(curl -sS -o "$work/lambda-code.zip" -w '%{http_code}' "$(jq -r .Code.Location <<<"$latest")") \
+$(python3 -c 'import sys, zipfile; print(",".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$work/lambda-code.zip")"
+check "  ... through its alias live, the version it names, as published" "$versioned_arn:1 1 128" \
+  "$(as_reader get-function --function-name e2e-versioned --qualifier live | jq -r '.Configuration | "\(.FunctionArn) \(.Version) \(.MemorySize)"')"
+check "GetFunctionConfiguration takes the version in the name, as a partial ARN" "1 Active" \
+  "$(as_reader get-function-configuration --function-name e2e-versioned:1 | jq -r '"\(.Version) \(.State)"')"
+check "ListFunctions lists the account's function, and with every version, its version after it" \
+  "e2e-versioned:\$LATEST e2e-versioned:\$LATEST,e2e-versioned:1" \
+  "$(as_reader list-functions | jq -r '[.Functions[] | "\(.FunctionName):\(.Version)"] | join(",")') \
+$(as_reader list-functions --function-version ALL | jq -r '[.Functions[] | "\(.FunctionName):\(.Version)"] | join(",")')"
+check "GetAccountSettings gives the plan's limits under Lambda's names, and the account's one function" "52428800 1" \
+  "$(as_reader get-account-settings | jq -r '"\(.AccountLimit.CodeSizeZipped) \(.AccountUsage.FunctionCount)"')"
+check "GetFunctionCodeSigningConfig says FF signs no code, as Terraform's provider reads it" '""' \
+  "$(as_reader get-function-code-signing-config --function-name e2e-versioned | jq .CodeSigningConfigArn)"
+check "the CLI's waiter function-active-v2 finds it active" accepted "$(outcome as_reader wait function-active-v2 --function-name e2e-versioned)"
+check "a function the account hasn't, and a version its function hasn't, are ResourceNotFoundException" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException" \
+  "$(outcome as_reader get-function --function-name e2e-missing) $(outcome as_reader get-function --function-name e2e-versioned --qualifier 7)"
+}
+section_def lambda_reads section_lambda_reads versions budget=25
 
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"
@@ -1844,9 +1880,6 @@ copied_key() { jq -n --arg id "$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)" -
 copied="$(copied_key)"
 first_key="$(jq -r .id <<<"$copied")"
 as_copied() { AWS_KEY="$first_key" AWS_SECRET="$(jq -r .secretAccessKey <<<"$copied")" "$@"; }
-# aws_lambda <arguments…>: the AWS CLI at Lambda's endpoint, from AWS_ENDPOINT_URL_LAMBDA alone, with AWS_KEY's key.
-aws_lambda() { AWS_ACCESS_KEY_ID="$AWS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
-  AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_LAMBDA="http://localhost:$lambda_port" "${aws_cli[@]}" lambda "$@" --output json; }
 check "a function's key lasts 12 hours" "12" "$(key_life "$first_key")"
 check "  ... copied out of it, it opens S3, SQS and SES" "accepted accepted accepted" \
   "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities)"

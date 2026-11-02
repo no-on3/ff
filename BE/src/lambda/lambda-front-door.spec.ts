@@ -8,7 +8,7 @@
  * Terraform sent the spike's endpoint (hack/spikes/lambda/recordings),
  * replayed as they were signed.
  */
-import { Logger } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { SignatureV4 } from '@smithy/signature-v4';
@@ -17,10 +17,13 @@ import { IncomingHttpHeaders, OutgoingHttpHeaders, request as httpRequest } from
 import { join } from 'node:path';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { Sha256 } from '../common/test-fixtures';
+import { EncryptionService } from '../encryption/encryption.service';
+import { DEVELOPMENT_KEY } from '../encryption/key-ring';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { ActiveKey, EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
+import { CODE_LINK_MS, LambdaCodeLinks } from './lambda-code-links';
 import { LambdaFrontDoor } from './lambda-front-door';
 import { LambdaCall, LambdaCaller, LambdaHandler, LambdaOperations, operationOf } from './lambda-operations';
 
@@ -89,7 +92,14 @@ describe("Lambda's endpoint (L1)", () => {
     findAll: jest.fn(async (accountId: string, name: string) =>
       (accountId === ACCOUNT && ['orders', 'billing'].includes(name)) || accountId === SPIKE.accountId ? [fn(accountId, name)] : [],
     ),
+    // The code a link names: orders' and its version 3's; any other function is gone.
+    code: jest.fn(async (accountId: string, id: string, { version }: { version?: number } = {}) => {
+      if (accountId !== ACCOUNT || id !== 'f-orders' || (version !== undefined && version !== 3)) throw new NotFoundException('gone');
+      return { name: 'orders', zip: Buffer.from(version === undefined ? 'PK latest' : 'PK version 3') };
+    }),
   } as unknown as FunctionsService;
+  const config = new ConfigService({ lambda: { region: REGION, base: 'http://lambda.ff.test' }, encryption: { keys: [DEVELOPMENT_KEY] } });
+  const links = new LambdaCodeLinks(new EncryptionService(config), config);
   const operations = { handler: (name: string) => built.get(name) } as unknown as LambdaOperations;
   const throttler = {
     increment: async (counter: string) => {
@@ -106,7 +116,7 @@ describe("Lambda's endpoint (L1)", () => {
   const build = (...names: string[]) => names.forEach((name) => built.set(name, recording));
 
   beforeAll(async () => {
-    frontDoor = new LambdaFrontDoor(new ConfigService({ lambda: { region: REGION } }), directory, functions, operations, onePlan(plan({ writesPerMinute: 3 })), throttler);
+    frontDoor = new LambdaFrontDoor(config, directory, functions, operations, links, onePlan(plan({ writesPerMinute: 3 })), throttler);
     port = (await frontDoor.listen(0, '127.0.0.1')).port;
   });
 
@@ -156,11 +166,49 @@ describe("Lambda's endpoint (L1)", () => {
 
   const refusal = (answer: Answer) => [answer.status, answer.headers['x-amzn-errortype'], answer.body.message];
 
+  describe("a link to a function's code, as GetFunction gives it", () => {
+    /** Asks for a link, unsigned, as anyone with it may: its status, its type, its body as text. */
+    async function open(link: string): Promise<[number, string | null, string]> {
+      const answer = await fetch(`http://127.0.0.1:${port}${new URL(link).pathname}`);
+      return [answer.status, answer.headers.get('content-type'), await answer.text()];
+    }
+    const s3Error = (code: string, message: string) => `<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>${code}</Code><Message>${message}</Message></Error>`;
+
+    it("answers the zip, unsigned, at the endpoint's /code/{token}: $LATEST's, or a version's", async () => {
+      const latest = links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders' });
+
+      expect(latest).toMatch(/^http:\/\/lambda\.ff\.test\/code\/[A-Za-z0-9_-]+$/);
+      expect(await open(latest)).toEqual([200, 'application/zip', 'PK latest']);
+      expect(await open(links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders', version: 3 }))).toEqual([200, 'application/zip', 'PK version 3']);
+    });
+
+    it('refuses one past its 10 minutes, and one FF never made or that was changed, as S3 refuses a link', async () => {
+      const old = links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders' }, new Date(Date.now() - CODE_LINK_MS - 1000));
+      const good = links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders' });
+      const token = new URL(good).pathname.slice('/code/'.length);
+      const changed = `${good.slice(0, -token.length)}${token.slice(0, 40)}${token[40] === 'A' ? 'B' : 'A'}${token.slice(41)}`;
+
+      expect(await open(old)).toEqual([403, 'application/xml', s3Error('AccessDenied', 'Request has expired')]);
+      expect(await open(changed)).toEqual([403, 'application/xml', s3Error('AccessDenied', "The link isn't one that GetFunction gave.")]);
+      expect(await open('http://lambda.ff.test/code/bm90LW9uZS1vZi1mZnM')).toEqual([403, 'application/xml', s3Error('AccessDenied', "The link isn't one that GetFunction gave.")]);
+    });
+
+    it("refuses one to an account no longer active, and answers 404 for a function or a version gone since", async () => {
+      accounts.set(ACCOUNT, { ...(accounts.get(ACCOUNT) as NonNullable<AccountRow>), status: AccountStatus.SUSPENDED });
+      expect(await open(links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders' }))).toEqual([403, 'application/xml', s3Error('AccessDenied', 'The account is suspended: its code answers no link.')]);
+      accounts.set(ACCOUNT, { ...(accounts.get(ACCOUNT) as NonNullable<AccountRow>), status: AccountStatus.ACTIVE });
+
+      const gone = s3Error('NoSuchKey', 'The function, or its version, is gone since the link was given.');
+      expect(await open(links.linkFor({ accountId: ACCOUNT, functionId: 'f-billing' }))).toEqual([404, 'application/xml', gone]);
+      expect(await open(links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders', version: 2 }))).toEqual([404, 'application/xml', gone]);
+    });
+  });
+
   describe('answers', () => {
     it("an operation it offers but hasn't built yet, in Lambda's shape: 400 UnknownOperationException, its request ID, its type in the header", async () => {
-      const answer = await send('GET', '/2015-03-31/functions/orders/configuration');
+      const answer = await send('GET', '/2015-03-31/functions/orders/aliases');
 
-      expect(refusal(answer)).toEqual([400, 'UnknownOperationException', "FF doesn't offer GetFunctionConfiguration of Lambda's API yet."]);
+      expect(refusal(answer)).toEqual([400, 'UnknownOperationException', "FF doesn't offer ListAliases of Lambda's API yet."]);
       expect(answer.body.Type).toBe('User');
       expect(answer.headers['x-amzn-requestid']).toMatch(/^[0-9a-f-]{36}$/);
       expect(answer.headers['content-type']).toBe('application/json');
@@ -398,7 +446,15 @@ describe("the requests AWS's tools sent Lambda's API, replayed as they were sign
     } as unknown as StorageDirectory;
     const functions = { findAll: async (accountId: string, name: string) => [fn(accountId, name)] } as unknown as FunctionsService;
     const throttler = { increment: async () => ({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 }) } as unknown as ThrottlerStorage;
-    frontDoor = new LambdaFrontDoor(new ConfigService({ lambda: { region: REGION } }), directory, functions, { handler: () => answered } as unknown as LambdaOperations, onePlan(), throttler);
+    frontDoor = new LambdaFrontDoor(
+      new ConfigService({ lambda: { region: REGION } }),
+      directory,
+      functions,
+      { handler: () => answered } as unknown as LambdaOperations,
+      {} as LambdaCodeLinks,
+      onePlan(),
+      throttler,
+    );
     port = (await frontDoor.listen(0, '127.0.0.1')).port;
     // The clock alone is the recording's, so that each signature's time is within its 15 minutes.
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'queueMicrotask', 'hrtime', 'performance'] });

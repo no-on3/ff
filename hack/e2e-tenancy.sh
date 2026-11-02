@@ -1102,9 +1102,12 @@ check "B's key doesn't find A's function, by its name or by its ARN: each accoun
 check "  ... nor its alias, nor deletes it, nor invokes it" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" get-alias --function-name l5-a --name live) $(lambda_with "${lambda_b[@]}" delete-function --function-name "$arn_a") \
 $(lambda_with "${lambda_b[@]}" invoke --function-name l5-a /dev/null)"
-# A's own key finds it: what answers then is the operation, which FF doesn't offer yet.
-check "A's key finds it, by its name and by its ARN" "refused UnknownOperationException refused UnknownOperationException" \
-  "$(lambda_with "${lambda_a[@]}" get-function --function-name l5-a) $(lambda_with "${lambda_a[@]}" get-function --function-name "$arn_a")"
+check "A's key finds it, by its name and by its ARN" "$arn_a $arn_a" \
+  "$(lambda_with "${lambda_a[@]}" get-function --function-name l5-a --query Configuration.FunctionArn) $(lambda_with "${lambda_a[@]}" get-function --function-name "$arn_a" --query Configuration.FunctionArn)"
+# listed <key ID> <secret>: the functions the key's ListFunctions gives, by name, one a line.
+listed() { lambda_with "$@" list-functions --query 'Functions[].FunctionName' | tr '\t' '\n'; }
+check "  ... and lists it, where B's key lists none of A's functions" "true false" \
+  "$(listed "${lambda_a[@]}" | grep -x l5-a >/dev/null && echo true || echo false) $(listed "${lambda_b[@]}" | grep -x l5-a >/dev/null && echo true || echo false)"
 check "  ... and a key that reaches no function, such as the one each account's buckets are reached with, none" "refused AccessDeniedException refused AccessDeniedException" \
   "$(lambda_with "$key_a_id" "$key_a_secret" list-functions) $(lambda_with "$key_b_id" "$key_b_secret" get-function --function-name l5-a)"
 as_a DELETE "/storage-keys/${lambda_a[0]}" >/dev/null

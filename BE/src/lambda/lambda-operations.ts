@@ -161,6 +161,11 @@ export interface LambdaAnswer {
 
 export type LambdaHandler = (call: LambdaCall, caller: LambdaCaller) => Promise<LambdaAnswer>;
 
+/** A group of operations built over FF's services: each one's handler, by the operation's name. */
+export interface LambdaHandlers {
+  readonly handlers: Record<string, LambdaHandler>;
+}
+
 /**
  * What each of Lambda's operations does, by its name, over FF's own services:
  * an operation without one answers that FF doesn't offer it yet, in Lambda's
@@ -169,6 +174,16 @@ export type LambdaHandler = (call: LambdaCall, caller: LambdaCaller) => Promise<
 @Injectable()
 export class LambdaOperations {
   private readonly handlers = new Map<string, LambdaHandler>();
+
+  constructor(...groups: LambdaHandlers[]) {
+    for (const group of groups) {
+      for (const [name, handler] of Object.entries(group.handlers)) {
+        if (this.handlers.has(name)) throw new Error(`Two handlers for Lambda's ${name}`);
+        if (!LAMBDA_OPERATIONS.some((operation) => operation.name === name)) throw new Error(`A handler for ${name}, which isn't among Lambda's operations here`);
+        this.handlers.set(name, handler);
+      }
+    }
+  }
 
   /** What an operation does; undefined for one not built yet. */
   handler(name: string): LambdaHandler | undefined {

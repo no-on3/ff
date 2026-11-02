@@ -553,15 +553,19 @@ export class FunctionsService {
    * from object storage; inline code as the one-file package its pods run, or, with javascript, Node.js code as the
    * JavaScript Lambda's runtime loads, in `function.js`, which `function.handler` names as it named `function.ts`.
    */
-  async code(accountId: string, id: string, { javascript = false } = {}): Promise<{ name: string; zip: Buffer }> {
+  async code(accountId: string, id: string, { javascript = false, version }: { javascript?: boolean; version?: number } = {}): Promise<{ name: string; zip: Buffer }> {
     const function_ = await this.findOne(accountId, id);
-    if (function_.packageType === PackageType.ZIP) {
-      return { name: function_.name, zip: (await this.objectStore.getDocument(packageKey(accountId, function_.codeSha256))).body };
-    }
-    if (javascript && function_.runtime === Runtime.NODEJS) {
-      return { name: function_.name, zip: oneFileZip('function.js', Buffer.from(await lambdaJavaScript(function_.code), 'utf8')) };
-    }
-    return { name: function_.name, zip: inlinePackage(function_.code, function_.runtime).zip };
+    if (version === undefined) return { name: function_.name, zip: await this.zipOf(accountId, function_, javascript) };
+    const published = await this.publishedVersion(id, version);
+    if (!published) throw noSuchVersion(function_, version);
+    return { name: function_.name, zip: await this.zipOf(accountId, published, javascript) };
+  }
+
+  /** The zip of code as $LATEST or a version holds it: its package from object storage, or inline code's one-file package. */
+  private async zipOf(accountId: string, code: Pick<Function, 'packageType' | 'codeSha256' | 'code' | 'runtime'>, javascript: boolean): Promise<Buffer> {
+    if (code.packageType === PackageType.ZIP) return (await this.objectStore.getDocument(packageKey(accountId, code.codeSha256))).body;
+    if (javascript && code.runtime === Runtime.NODEJS) return oneFileZip('function.js', Buffer.from(await lambdaJavaScript(code.code), 'utf8'));
+    return inlinePackage(code.code, code.runtime).zip;
   }
 
   /** The account's function; another account's is not found, exactly like one that doesn't exist (D4). */

@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectThrottlerStorage, ThrottlerStorage } from '@nestjs/throttler';
 import { randomUUID } from 'node:crypto';
@@ -29,6 +29,7 @@ import {
   unknownOperation,
   unrecognizedClient,
 } from './lambda-error';
+import { CODE_LINK_PATH, LambdaCodeLinks } from './lambda-code-links';
 import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaOperation, LambdaOperations, PAYLOAD_BYTES, operationOf } from './lambda-operations';
 import { checkLambdaSignature, readLambdaSignature } from './lambda-signature';
 
@@ -53,7 +54,8 @@ const bodyRefusals = (operation: LambdaOperation | null): BodyRefusals => ({
  * or an alias after it; another account's answers as one that doesn't exist.
  * Changes count against the plan's changes a minute, with FF's API's. Each
  * answer carries its request ID, x-amzn-RequestId; each error its name in
- * x-amzn-ErrorType.
+ * x-amzn-ErrorType. At /code/{token} it answers, unsigned, the code that a
+ * link GetFunction gave names, for its 10 minutes.
  */
 @Injectable()
 export class LambdaFrontDoor implements OnModuleDestroy {
@@ -68,6 +70,7 @@ export class LambdaFrontDoor implements OnModuleDestroy {
     private readonly directory: StorageDirectory,
     private readonly functions: FunctionsService,
     private readonly operations: LambdaOperations,
+    private readonly links: LambdaCodeLinks,
     private readonly plans: PlansService,
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
   ) {
@@ -122,6 +125,9 @@ export class LambdaFrontDoor implements OnModuleDestroy {
     const { rawPath, rawQuery } = requestTarget(request.url);
     const route = operationOf(method, rawPath);
     const body = await readBody(request, route?.operation.maxBodyBytes ?? PAYLOAD_BYTES, bodyRefusals(route?.operation ?? null));
+    // A link to a function's code, which GetFunction gave: unsigned, its token the proof.
+    const link = method === 'GET' ? CODE_LINK_PATH.exec(rawPath) : null;
+    if (link) return this.code(link[1]);
     const signature = readLambdaSignature(request.headers);
     if (!signature) throw missingAuthenticationToken();
     const key = await this.directory.key(signature.accessKeyId);
@@ -157,6 +163,26 @@ export class LambdaFrontDoor implements OnModuleDestroy {
   }
 
   /**
+   * The code a link names, as a zip; refused as S3 refuses a link, Lambda's
+   * being S3's: one FF didn't make, one past its 10 minutes, or one of an
+   * account that is no longer active; and a function or a version gone since.
+   */
+  private async code(token: string): Promise<LambdaAnswer> {
+    const target = this.links.open(token);
+    if (target === 'expired') return s3Refusal(403, 'AccessDenied', 'Request has expired');
+    if (!target) return s3Refusal(403, 'AccessDenied', "The link isn't one that GetFunction gave.");
+    const account = await this.directory.account(target.accountId);
+    if (!account || account.status !== AccountStatus.ACTIVE) return s3Refusal(403, 'AccessDenied', `The account is ${account?.status ?? 'gone'}: its code answers no link.`);
+    try {
+      const { zip } = await this.functions.code(target.accountId, target.functionId, target.version === undefined ? {} : { version: target.version });
+      return { status: 200, body: zip, headers: { 'content-type': 'application/zip' } };
+    } catch (error) {
+      if (error instanceof NotFoundException) return s3Refusal(404, 'NoSuchKey', 'The function, or its version, is gone since the link was given.');
+      throw error;
+    }
+  }
+
+  /**
    * What the operation names, and whether the key may make it with that: a
    * function, by its name, at the operation's level, then found in the key's
    * account, where a path or a tag names it; the account, for a key that
@@ -180,6 +206,12 @@ export class LambdaFrontDoor implements OnModuleDestroy {
     if (!function_) throw missing();
     caller.function_ = function_;
   }
+}
+
+/** A refusal of a code link, in S3's XML, as Lambda's links are S3's. */
+function s3Refusal(status: number, code: string, message: string): LambdaAnswer {
+  const body = `<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>${code}</Code><Message>${message}</Message></Error>`;
+  return { status, body: Buffer.from(body, 'utf8'), headers: { 'content-type': 'application/xml' } };
 }
 
 /** The request's JSON body, an object; {} for none. */

@@ -52,6 +52,7 @@ import { FunctionKeyRenewal } from './key-renewal.service';
   ],
   controllers: [FunctionsController, EventInvokeConfigController, FunctionVersionsController, FunctionAliasesController],
   providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionKeyRenewal],
-  exports: [FunctionsService],
+  // Lambda's endpoint reads versions and aliases as FF's API does.
+  exports: [FunctionsService, FunctionVersionsService, FunctionAliasesService],
 })
 export class FunctionsModule {}
