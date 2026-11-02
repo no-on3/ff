@@ -28,6 +28,8 @@ const RULE: AlarmRule = {
   bucketId: null,
   queueId: null,
   cacheId: null,
+  resource: null,
+  executedVersion: null,
   metric: 'Errors',
   statistic: 'Sum',
   period: 60,
@@ -62,6 +64,46 @@ describe('what an alarm may be', () => {
       'Balance is read as it is: evaluationPeriods and datapointsToAlarm must be 1',
       'Balance has the statistic Latest, not Sum',
     ]);
+  });
+});
+
+describe("an alarm on some of a function's calls", () => {
+  it("names them as CloudWatch's Resource and ExecutedVersion dimensions do, for the metrics they have: the instances by what ran them alone", () => {
+    expect([
+      alarmProblem({ ...RULE, resource: 'live' }),
+      alarmProblem({ ...RULE, resource: '$LATEST', metric: 'Duration', statistic: 'p95' }),
+      alarmProblem({ ...RULE, executedVersion: '3', metric: 'Instances', statistic: 'Maximum' }),
+      alarmProblem({ ...RULE, resource: 'live', executedVersion: '3', metric: 'Throttles' }),
+      alarmProblem({ ...RULE, resource: '3', executedVersion: '3', metric: 'ColdStarts' }),
+    ]).toEqual([null, null, null, null, null]);
+  });
+
+  it("refuses them without a function, for a metric counted by function alone, and calls that can't be", () => {
+    expect([
+      alarmProblem({ ...RULE, functionId: null, resource: 'live' }),
+      alarmProblem({ ...RULE, executedVersion: '3', metric: 'AsyncEventsDropped' }),
+      alarmProblem({ ...RULE, resource: 'live', metric: 'Instances', statistic: 'Maximum' }),
+      alarmProblem({ ...RULE, resource: '3', executedVersion: '4' }),
+      alarmProblem({ ...RULE, resource: '$LATEST', executedVersion: '2' }),
+      alarmProblem({ ...RULE, functionId: null, databaseId: RULE.functionId, resource: 'live', metric: 'DatabaseConnections', statistic: 'Maximum', period: 3600 }),
+    ]).toEqual([
+      "A resource picks some of a function's calls: the alarm names its functionId",
+      "An executedVersion goes with a function's Invocations, Errors, Throttles, ColdStarts, Duration, Instances: AsyncEventsDropped is counted by function alone",
+      "Instances goes with an executedVersion alone: a version's instances run the calls of every alias that names it",
+      'No call names 3 and is run by 4: a call naming version 3 runs it',
+      'No call names $LATEST and is run by 2: a call naming no alias or version runs $LATEST',
+      "A resource picks some of a function's calls: the alarm names its functionId",
+    ]);
+  });
+
+  it("reads its datapoints from a view of those calls, which has no series they haven't", () => {
+    const calls = { metrics: { Invocations: [2, 1], Errors: [1, 0], Throttles: [0, 0], ColdStarts: [1, 0], Duration: { Average: [8, 4], Maximum: [9, 4], p50: [8, 4], p95: [9, 4], p99: [9, 4] } } } as unknown as MetricsView;
+
+    expect([datapointsOf(calls, 'Errors', 'Sum'), datapointsOf(calls, 'Duration', 'Maximum')]).toEqual([
+      [1, 0],
+      [9, 4],
+    ]);
+    expect(() => datapointsOf(calls, 'Instances', 'Maximum')).toThrow("Instances isn't in a view of some calls");
   });
 });
 
@@ -457,6 +499,17 @@ describe("an alarm's e-mail", () => {
         'Vos alarmes : https://console.ff.tn/alarms',
       ].join('\n'),
     });
+  });
+
+  it('names the calls it watches, by what they named and what ran them, in both languages', () => {
+    const live = { ...change, functionName: 'checkout:live', executedVersion: '3' };
+
+    expect(alarmMail(live, 'en').text.split('\n')[0]).toBe(
+      'Your alarm "Checkout errors" on the function "checkout:live" (the calls its version 3 runs) of the account "Tunis Labs" (000000000042) went from OK to ALARM at 2026-10-20 10:07 UTC.',
+    );
+    expect(alarmMail(live, 'fr').text.split('\n')[0]).toBe(
+      "Votre alarme « Checkout errors » sur la fonction « checkout:live » (les appels qu'exécute sa version 3) du compte « Tunis Labs » (000000000042) est passée de OK à ALARME le 20 octobre 2026 à 10:07 UTC.",
+    );
   });
 
   it("names a database's alarm by the database, in both languages", () => {

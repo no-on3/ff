@@ -1,7 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Length, Max, MaxLength, Min, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsString, IsUUID, Length, Matches, Max, MaxLength, Min, ValidateNested } from 'class-validator';
 import { MAX_URL_LENGTH } from '../notifications/webhook-target';
+import { EXECUTED_VERSION, QUALIFIER } from '../functions/qualifier';
 import {
   ALARM_PERIODS,
   ALL_STATISTICS,
@@ -79,6 +80,25 @@ export class AlarmDto {
   @MaxLength(40)
   cacheName?: string | null;
 
+  @ApiPropertyOptional({
+    nullable: true,
+    example: 'live',
+    description:
+      "The function's calls that named this alias or this version, or $LATEST for those naming neither, as CloudWatch's Resource dimension: for Invocations, Errors, Throttles, ColdStarts and Duration; none for all of them",
+  })
+  @IsOptional()
+  @Matches(QUALIFIER, { message: 'resource must be $LATEST, a version number or an alias name' })
+  resource?: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    example: '3',
+    description: "The function's calls this version ran, or $LATEST, through an alias or not, as CloudWatch's ExecutedVersion dimension: for the same metrics and Instances; none for all of them",
+  })
+  @IsOptional()
+  @Matches(EXECUTED_VERSION, { message: 'executedVersion must be $LATEST or a version number' })
+  executedVersion?: string | null;
+
   @ApiProperty({ enum: METRICS })
   @IsIn(METRICS, { message: `metric must be one of ${METRICS.join(', ')}` })
   metric: Metric;
@@ -139,6 +159,8 @@ export class AlarmView {
   @ApiProperty({ nullable: true, type: String }) bucketName: string | null;
   @ApiProperty({ nullable: true, type: String }) queueName: string | null;
   @ApiProperty({ nullable: true, type: String }) cacheName: string | null;
+  @ApiProperty({ nullable: true, type: String, description: "The calls it watches by what they named, as CloudWatch's Resource dimension; null: all of them" }) resource: string | null;
+  @ApiProperty({ nullable: true, type: String, description: "The calls it watches by what ran them, as CloudWatch's ExecutedVersion dimension; null: all of them" }) executedVersion: string | null;
   @ApiProperty({ enum: METRICS }) metric: Metric;
   @ApiProperty({ enum: ALL_STATISTICS }) statistic: Statistic;
   @ApiProperty({ enum: ALARM_PERIODS }) period: number;

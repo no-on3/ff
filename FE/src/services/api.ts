@@ -1161,6 +1161,10 @@ export interface AlarmBody {
   queueName?: string | null;
   /** The cache watched, by its name, for its memory, connections, hits, misses and evictions, an hour at a time; null otherwise. */
   cacheName?: string | null;
+  /** The function's calls watched by what they named, as CloudWatch's Resource dimension: an alias, a version, or $LATEST for those naming neither; null for all of them. */
+  resource?: string | null;
+  /** The function's calls watched by what ran them, as CloudWatch's ExecutedVersion dimension: a version, or $LATEST; null for all of them. */
+  executedVersion?: string | null;
   metric: string;
   statistic: string;
   /** Seconds per datapoint: 60, 300 or 3600. */
@@ -1183,6 +1187,8 @@ export const ALARM_FIELDS = [
   'bucketName',
   'queueName',
   'cacheName',
+  'resource',
+  'executedVersion',
   'metric',
   'statistic',
   'period',

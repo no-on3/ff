@@ -3,7 +3,7 @@
  * after: an account's alarms and their audit entries, what they refuse, and
  * the evaluator, from usage records written here, through the notifications'
  * queue: an error alarm that fires and recovers, telling each change once;
- * missing data; an account's alarm; the money; a database's and a cache's,
+ * one on an alias's calls alone; missing data; an account's alarm; the money; a database's and a cache's,
  * from their hourly samples; the account's mail's, from its messages; two
  * backends at once.
  *   docker compose up -d --wait postgres && npm run test:db
@@ -53,13 +53,26 @@ run('alarms (L2)', () => {
   const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
   const fn = (accountId: string, name: string) =>
     db.dataSource.getRepository(Function).save({ name, accountId, runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5, status: FunctionStatus.ACTIVE });
-  /** A call of the function, started at the time. */
-  const call = (fnc: Function, at: string, status = 'success', durationMs = 10) =>
+  /** A call of the function, started at the time, run by a version or $LATEST, through an alias or not. */
+  const call = (fnc: Function, at: string, status = 'success', durationMs = 10, ran: { version?: number; alias?: string } = {}) =>
     query(
-      `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb, duration_ms, billed_ms, status)
-       VALUES (gen_random_uuid(), $1, $1, $2, $3, $4, 'nodejs', 128, $5, ceil($5::numeric)::int, $6)`,
-      [at, fnc.accountId, fnc.id, fnc.name, durationMs, status],
+      `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb, duration_ms, billed_ms, status, version, alias)
+       VALUES (gen_random_uuid(), $1, $1, $2, $3, $4, 'nodejs', 128, $5, ceil($5::numeric)::int, $6, $7, $8)`,
+      [at, fnc.accountId, fnc.id, fnc.name, durationMs, status, ran.version ?? null, ran.alias ?? null],
     );
+  /** The function's version 1, and its alias live naming it; undone by `withoutVersions`. */
+  const withLive = async (fnc: Function) => {
+    await query(
+      `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+       VALUES ($1, 1, $2, 'nodejs', 'function.handler', 'inline', 'x', $3, 1, $3, 128, 5, 'lambda', '{}')`,
+      [fnc.id, fnc.accountId, 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg='],
+    );
+    await query(`INSERT INTO function_aliases (function_id, name, account_id, version) VALUES ($1, 'live', $2, 1)`, [fnc.id, fnc.accountId]);
+  };
+  const withoutVersions = async (fnc: Function) => {
+    await query(`DELETE FROM function_aliases WHERE function_id = $1`, [fnc.id]);
+    await query(`DELETE FROM function_versions WHERE function_id = $1`, [fnc.id]);
+  };
   const alarm = (change: Partial<AlarmDto> = {}): AlarmDto => ({
     name: 'Errors',
     functionId: f.id,
@@ -172,6 +185,24 @@ run('alarms (L2)', () => {
       expect(await alarms.list(B)).toEqual([]);
     });
 
+    it("watch some of their function's calls, by an alias or a version it has, each checked when named anew", async () => {
+      await withLive(f);
+      try {
+        const live = await alarms.create(A, alarm({ resource: 'live', executedVersion: '1' }));
+        expect(live).toMatchObject({ functionId: f.id, resource: 'live', executedVersion: '1' });
+        expect(await alarms.create(A, alarm({ resource: '$LATEST' }))).toMatchObject({ resource: '$LATEST', executedVersion: null });
+        await expect(alarms.create(A, alarm({ resource: 'beta' }))).rejects.toThrow(new BadRequestException('resource: the function has no alias beta'));
+        await expect(alarms.create(A, alarm({ executedVersion: '2' }))).rejects.toThrow(new BadRequestException('executedVersion: the function has no version 2'));
+        await expect(alarms.create(A, alarm({ resource: 'live', metric: 'AsyncEventsDropped' }))).rejects.toThrow(BadRequestException);
+        // The alias gone since, its calls are still named: a change of threshold keeps it, another function's refused.
+        await query(`DELETE FROM function_aliases WHERE function_id = $1`, [f.id]);
+        expect(await alarms.update(A, live.id, alarm({ resource: 'live', executedVersion: '1', threshold: 3 }))).toMatchObject({ resource: 'live', threshold: 3 });
+        await expect(alarms.update(A, live.id, alarm({ functionId: quiet.id, resource: 'live' }))).rejects.toThrow(new BadRequestException('resource: the function has no alias live'));
+      } finally {
+        await withoutVersions(f);
+      }
+    });
+
     it("go with their function", async () => {
       const doomed = await fn(A, 'doomed');
       const watching = await alarms.create(A, alarm({ functionId: doomed.id }));
@@ -282,6 +313,28 @@ run('alarms (L2)', () => {
         datapoints: [1],
         at: '2026-10-20T10:01:05.000Z',
       });
+    });
+
+    it("judges an alarm on an alias's calls by those alone, as CloudWatch's Resource dimension, its e-mail and webhook naming them", async () => {
+      await withLive(f);
+      try {
+        const watching = await alarms.create(A, alarm({ name: 'Live errors', resource: 'live' }));
+        await call(f, '2026-10-20T17:00:10Z', 'error'); // $LATEST's
+        await evaluator.tick(new Date('2026-10-20T17:01:05Z'));
+        expect((await stateOf(watching.id)).state).toBe('OK');
+
+        await call(f, '2026-10-20T17:01:10Z', 'error', 10, { version: 1, alias: 'live' });
+        await call(f, '2026-10-20T17:01:20Z', 'error'); // $LATEST's again, not counted
+        await evaluator.tick(new Date('2026-10-20T17:02:05Z'));
+        expect(await stateOf(watching.id)).toMatchObject({ state: 'ALARM', stateReason: '1 of the last 1 period(s) of 60 s breaching Errors Sum > 0 (1 needed); latest 1' });
+        const told = await db.dataSource.getRepository(NotificationDelivery).find({ where: { kind: 'alarm' }, order: { channel: 'ASC' } });
+        const mail = told.find((d) => d.channel === DeliveryChannel.EMAIL)?.payload as { text: string };
+        const webhook = told.find((d) => d.channel === DeliveryChannel.WEBHOOK)?.payload as { data: { alarm: Record<string, unknown> } };
+        expect(mail.text.split('\n')[0]).toContain('sur la fonction « checkout:live » du compte « Alarmed »');
+        expect(webhook.data.alarm).toMatchObject({ functionId: f.id, resource: 'live', executedVersion: null });
+      } finally {
+        await withoutVersions(f);
+      }
     });
 
     it('waits for the settling time before judging a period, so that a call ending late still counts', async () => {

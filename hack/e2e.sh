@@ -68,8 +68,9 @@
 # invocation, with the runtime
 # given the invocation's ID, and a call lost when the backend is killed during
 # it, which the restarted backend marks LOST without billing it, read after an
-# alarm: a function's error fires it, a quiet minute recovers it, and each
-# change reaches a local webhook receiver, signed. Then capacity
+# alarm: a function's error, through its alias, fires it and the alarm on the
+# alias's calls alone, not the one on $LATEST's; a quiet minute recovers it, and
+# each change reaches a local webhook receiver, signed. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
 # Then GET /usage (P-22) against the raw records, as JSON and as CSV, the deleted
 # database's, bucket's and queue's months in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
@@ -2004,7 +2005,7 @@ restarted_pid="${e2e_pids[${#e2e_pids[@]}-1]}" # the processes started after it 
 section_def usage_records section_usage_records backend budget=70
 
 section_alarms() {
-section "alarms: an error fires an alarm, a quiet minute recovers it, each change told to a webhook"
+section "alarms: an error fires an alarm, and the alarm on its alias's calls, a quiet minute recovers it, each change told to a webhook"
 receiver_port="$(free_port)"
 cat >"$work/receiver.py" <<'PY'
 import json, sys
@@ -2029,24 +2030,39 @@ failing='export async function handler(event: { fail?: boolean }) {
 }'
 alarmed_id="$(http POST /functions "$(jq -n --arg code "$failing" '{name: "e2e-alarmed", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
 check "a function to watch" 201 "$(status)"
+http POST "/functions/$alarmed_id/versions" '{}' >/dev/null
+http POST "/functions/$alarmed_id/aliases" '{"name": "live", "functionVersion": "1"}' >/dev/null
+check "  ... published as version 1, its alias live naming it" 201 "$(status)"
 alarm_id="$(http POST /alarms "$(jq -cn --arg fn "$alarmed_id" --arg url "http://127.0.0.1:$receiver_port/ff" \
   '{name: "e2e errors", functionId: $fn, metric: "Errors", statistic: "Sum", period: 60, comparison: "GreaterThanThreshold", threshold: 0,
     evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: [$url]}}')" | jq -r .id)"
 check "an alarm on its errors, each minute, telling the receiver" "201 INSUFFICIENT_DATA" "$(status) $(jq -r .state "$work/body")"
-# alarm_state_after <state> <seconds>: waits for the alarm to reach the state, then prints it.
+# An alarm on some of its calls, by what they named, as CloudWatch's Resource dimension: an alias's, or $LATEST's.
+alarm_on_calls() {
+  http POST /alarms "$(jq -cn --arg fn "$alarmed_id" --arg resource "$1" \
+    '{name: "e2e errors \($resource)", functionId: $fn, resource: $resource, metric: "Errors", statistic: "Sum", period: 60,
+      comparison: "GreaterThanThreshold", threshold: 0, evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: []}}')" | jq -r .id
+}
+live_alarm="$(alarm_on_calls live)"
+latest_alarm="$(alarm_on_calls '$LATEST')"
+check "  ... one on the calls through its alias live alone, another on those naming no alias or version" "201 live \$LATEST" \
+  "$(status) $(http GET "/alarms/$live_alarm" | jq -r .resource) $(http GET "/alarms/$latest_alarm" | jq -r .resource)"
+# alarm_state_after <state> <seconds> [alarm ID]: waits for the alarm, the errors' by default, to reach the state, then prints it.
 alarm_state_after() {
   local state=""
   for _ in $(seq 1 "$2"); do
-    state="$(http GET "/alarms/$alarm_id" | jq -r .state)"
+    state="$(http GET "/alarms/${3:-$alarm_id}" | jq -r .state)"
     [ "$state" = "$1" ] && break
     sleep 1
   done
   echo "$state"
 }
 check "its first evaluation judges a quiet minute: OK, and tells nobody" "OK 0" "$(alarm_state_after OK 30) $(wc -l <"$work/webhooks.jsonl" | tr -d ' ')"
-http POST "/functions/$alarmed_id/invoke" '{"input": {"fail": true}}' >/dev/null
-check "the function fails" "400 Error: asked to fail" "$(status) $(jq -r .message "$work/body")"
+http POST "/functions/$alarmed_id/invoke" '{"qualifier": "live", "input": {"fail": true}}' >/dev/null
+check "the function fails, called through its alias live" "400 Error: asked to fail" "$(status) $(jq -r .message "$work/body")"
 check "once that minute is over, the alarm fires" "ALARM" "$(alarm_state_after ALARM 90)"
+check "  ... the one on live's calls with it; the one on \$LATEST's, none of which failed, stays OK" "ALARM OK" \
+  "$(alarm_state_after ALARM 30 "$live_alarm") $(http GET "/alarms/$latest_alarm" | jq -r .state)"
 check "saying why" "1 of the last 1 period(s) of 60 s breaching Errors Sum > 0 (1 needed); latest 1" "$(http GET "/alarms/$alarm_id" | jq -r .stateReason)"
 check "the next minute, quiet, recovers it" "OK" "$(alarm_state_after OK 90)"
 for _ in $(seq 1 20); do [ "$(wc -l <"$work/webhooks.jsonl" | tr -d ' ')" -ge 2 ] && break; sleep 0.5; done

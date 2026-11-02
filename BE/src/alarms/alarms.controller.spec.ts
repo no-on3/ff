@@ -92,6 +92,8 @@ describe('the alarm routes (L1)', () => {
     expect(await refused({ datapointsToAlarm: 0 })).toEqual(['datapointsToAlarm must not be less than 1']);
     expect(await refused({ treatMissingData: 'zero' })).toEqual(['treatMissingData must be one of missing, notBreaching, breaching, ignore']);
     expect(await refused({ functionId: 'checkout' })).toEqual(['functionId must be a UUID']);
+    expect(await refused({ resource: '01' })).toEqual(['resource must be $LATEST, a version number or an alias name']);
+    expect(await refused({ executedVersion: 'live' })).toEqual(['executedVersion must be $LATEST or a version number']);
     expect(await refused({ name: '' })).toEqual(['name must be longer than or equal to 1 characters']);
     expect(await refused({ actions: { email: true, webhookUrls: Array(6).fill('https://example.tn') } })).toEqual(['actions.webhookUrls must contain no more than 5 elements']);
     expect(await refused({ actions: { email: 'yes', webhookUrls: [] } })).toEqual(['actions.email must be a boolean value']);

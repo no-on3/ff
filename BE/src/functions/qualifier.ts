@@ -21,6 +21,9 @@ export function parseQualifier(qualifier: string | null | undefined): Named {
   return /^\d+$/.test(qualifier) ? { version: Number(qualifier) } : { alias: qualifier };
 }
 
+/** A function's name with what a call names, as Lambda writes a qualified name: `checkout:live`; the name alone for none. */
+export const qualifiedName = (name: string, qualifier: string | null | undefined): string => (qualifier ? `${name}:${qualifier}` : name);
+
 /** What a record keeps of a qualifier: a version's number or an alias's name; null for $LATEST, which none names. */
 export function storedQualifier(qualifier: string | null | undefined): string | null {
   return parseQualifier(qualifier) ? (qualifier as string) : null;

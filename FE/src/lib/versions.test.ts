@@ -4,9 +4,13 @@ import {
   aliasBody,
   aliasesOn,
   aliasFormOf,
+  callsChoices,
+  callsText,
   emptyAliasForm,
   newestVersion,
   percentText,
+  pickOf,
+  pickValue,
   qualifierChoices,
   rollbackBody,
   rollbackTarget,
@@ -120,5 +124,33 @@ describe('what a schedule or a queue reader runs', () => {
       { value: '', label: '$LATEST, the function as it is' },
       { value: '7', label: 'Version 7, deleted since' },
     ]);
+  });
+});
+
+describe("some of a function's calls, as CloudWatch's Resource and ExecutedVersion pick them", () => {
+  it('offers every call, those through each alias, naming each version or neither, and run by each version or $LATEST, keeping one gone since', () => {
+    expect(callsChoices(versions.slice(0, 2), [canary, alias({ name: 'beta' })], { resource: 'gone', executedVersion: '9' })).toEqual([
+      { value: '|', label: 'Every call' },
+      { value: 'beta|', label: 'Through alias beta' },
+      { value: 'live|', label: 'Through alias live' },
+      { value: '2|', label: 'Naming version 2' },
+      { value: '1|', label: 'Naming version 1' },
+      { value: '$LATEST|', label: 'Naming no alias or version: $LATEST' },
+      { value: '|2', label: 'Run by version 2, however named' },
+      { value: '|1', label: 'Run by version 1, however named' },
+      { value: '|$LATEST', label: 'Run by $LATEST, however named' },
+      { value: 'gone|9', label: 'Calls through alias gone, run by version 9' },
+    ]);
+  });
+
+  it('says them in words, and goes to and from a select\'s value', () => {
+    expect([
+      callsText({ resource: 'live', executedVersion: '' }),
+      callsText({ resource: '3', executedVersion: '3' }),
+      callsText({ resource: '$LATEST', executedVersion: '' }),
+      callsText({ resource: '', executedVersion: '$LATEST' }),
+      callsText({ resource: '', executedVersion: '' }),
+    ]).toEqual(['calls through alias live', 'calls naming version 3, run by version 3', 'calls naming no alias or version', 'calls run by $LATEST', null]);
+    expect([pickValue({ resource: 'live', executedVersion: '2' }), pickOf('live|2'), pickOf('|')]).toEqual(['live|2', { resource: 'live', executedVersion: '2' }, { resource: '', executedVersion: '' }]);
   });
 });

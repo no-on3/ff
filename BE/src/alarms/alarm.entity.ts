@@ -18,7 +18,8 @@ export interface AlarmActions {
  * bucket's, a queue's, a cache's, or the account's when it names none;
  * evaluated every minute, telling its actions when it goes into ALARM and
  * when it leaves it. It goes with its function, database, bucket, queue or
- * cache.
+ * cache. A function's may watch some of its calls, by what they named and
+ * what ran them, as CloudWatch's Resource and ExecutedVersion dimensions.
  */
 @Entity('alarms')
 @Check(`"state" IN ('OK', 'ALARM', 'INSUFFICIENT_DATA')`)
@@ -81,6 +82,14 @@ export class Alarm {
   @ManyToOne(() => Cache, { onDelete: 'CASCADE', nullable: true })
   @JoinColumn({ name: 'cache_id' })
   cache?: Cache;
+
+  /** The calls of its function it watches by what they named: an alias, a version, or $LATEST for those naming neither; null: all of them. */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  resource: string | null;
+
+  /** The calls of its function it watches by what ran them: a version, or $LATEST; null: all of them. */
+  @Column({ type: 'varchar', length: 10, nullable: true })
+  executedVersion: string | null;
 
   @Column({ type: 'text' })
   name: string;

@@ -5,6 +5,7 @@ import { BillingService } from '../billing/billing.service';
 import { describeError } from '../common/describe-error';
 import { Period } from '../metrics/customer-metrics';
 import { CustomerMetricsService } from '../metrics/customer-metrics.service';
+import { isFiltered, qualifiedName } from '../functions/qualifier';
 import { NotificationsService } from '../notifications/notifications.service';
 import { Alarm } from './alarm.entity';
 import { alarmMail } from './alarm-mail';
@@ -138,7 +139,11 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
       return cacheDatapointsOf(await this.metrics.cacheMetrics(alarm.accountId, alarm.cacheId as string, window), alarm.metric, alarm.statistic);
     }
     if (EMAIL_METRICS.includes(alarm.metric)) return emailDatapointsOf(await this.metrics.emailMetrics(alarm.accountId, window), alarm.metric);
-    const view = alarm.functionId ? await this.metrics.forFunction(alarm.accountId, alarm.functionId, window) : await this.metrics.forAccount(alarm.accountId, window);
+    if (!alarm.functionId) return datapointsOf(await this.metrics.forAccount(alarm.accountId, window), alarm.metric, alarm.statistic);
+    const filter = { resource: alarm.resource ?? undefined, executedVersion: alarm.executedVersion ?? undefined };
+    const view = isFiltered(filter)
+      ? await this.metrics.forCalls(alarm.accountId, alarm.functionId, window, filter)
+      : await this.metrics.forFunction(alarm.accountId, alarm.functionId, window);
     return datapointsOf(view, alarm.metric, alarm.statistic);
   }
 
@@ -171,7 +176,8 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
     const change = {
       account,
       alarm,
-      functionName: alarm.function?.name ?? null,
+      functionName: alarm.function ? qualifiedName(alarm.function.name, alarm.resource) : null,
+      executedVersion: alarm.executedVersion,
       databaseName: alarm.database?.name ?? null,
       bucketName: alarm.bucket?.name ?? null,
       queueName: alarm.queue?.name ?? null,
@@ -195,6 +201,8 @@ export class AlarmEvaluator implements OnModuleInit, OnModuleDestroy {
             bucketName: alarm.bucket?.name ?? null,
             queueName: alarm.queue?.name ?? null,
             cacheName: alarm.cache?.name ?? null,
+            resource: alarm.resource,
+            executedVersion: alarm.executedVersion,
             metric: alarm.metric,
             statistic: alarm.statistic,
             period: alarm.period,

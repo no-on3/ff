@@ -55,7 +55,7 @@ import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
 import { MAX_ATTEMPTS } from './lib/notifications';
-import { CACHE_METRICS, COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
+import { CACHE_METRICS, CALL_METRICS, COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS, emptyForm, toBody } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME, ORIGIN } from './lib/function-url';
 import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
@@ -368,9 +368,9 @@ describe('the notifications', () => {
 });
 
 describe('the alarms', () => {
-  /** A literal list in the backend's source: \`export const NAME = [...]\`. */
+  /** A literal list in the backend's source: \`export const NAME = [...]\`, its type written or not. */
   const listIn = (source: string, name: string) =>
-    /export const \w+ = \[([^\]]*)\]/.exec(source.slice(source.indexOf(`export const ${name} =`)))?.[1].split(',').map((item) => item.trim().replace(/'/g, '')).filter(Boolean);
+    new RegExp(`export const ${name}(?::[^=]+)? = \\[([^\\]]*)\\]`).exec(source)?.[1].split(',').map((item) => item.trim().replace(/'/g, '')).filter(Boolean);
 
   it("offer the API's metrics, each with its statistics", () => {
     const block = alarmRulesSource.slice(alarmRulesSource.indexOf('export const STATISTICS = {'), alarmRulesSource.indexOf('} as const;'));
@@ -387,6 +387,11 @@ describe('the alarms', () => {
     expect(alarmRulesSource).toContain(`export const MAX_EVALUATION_PERIODS = ${MAX_EVALUATION_PERIODS};`);
     expect(alarmRulesSource).toContain(`export const MAX_WEBHOOKS = ${MAX_WEBHOOKS};`);
     expect(dtoFields(alarmsDtoSource, 'export class AlarmView {')).toEqual([...ALARM_FIELDS]);
+  });
+
+  it("send what the API takes, some of a function's calls with the metrics they have", () => {
+    expect(dtoFields(alarmsDtoSource, 'export class AlarmDto {')).toEqual(Object.keys(toBody(emptyForm())));
+    expect(listIn(alarmRulesSource, 'CALL_METRICS')).toEqual([...CALL_METRICS]);
   });
 });
 

@@ -212,3 +212,62 @@ export function qualifierChoices(
   }
   return choices;
 }
+
+/**
+ * Some of a function's calls, as CloudWatch keeps Lambda's metrics by their
+ * Resource and ExecutedVersion dimensions: by what they named (an alias, a
+ * version, or $LATEST for those naming neither) and by what ran them (a
+ * version, or $LATEST). '' for either keeps every call.
+ */
+export interface CallsPick {
+  resource: string;
+  executedVersion: string;
+}
+
+export const EVERY_CALL: CallsPick = { resource: '', executedVersion: '' };
+
+/** A pick as a select's value, `resource|executedVersion`; `|` for every call. */
+export const pickValue = (pick: CallsPick): string => `${pick.resource}|${pick.executedVersion}`;
+
+/** The pick a select's value holds. */
+export function pickOf(value: string): CallsPick {
+  const [resource = '', executedVersion = ''] = value.split('|');
+  return { resource, executedVersion };
+}
+
+/** A pick in words: "calls through alias live", "calls naming version 3, run by version 3"; null for every call. */
+export function callsText(pick: CallsPick): string | null {
+  const parts: string[] = [];
+  if (pick.resource === LATEST) parts.push('calls naming no alias or version');
+  else if (pick.resource) parts.push(isVersionNumber(pick.resource) ? `calls naming version ${pick.resource}` : `calls through alias ${pick.resource}`);
+  if (pick.executedVersion) parts.push(`${parts.length ? '' : 'calls '}run by ${pick.executedVersion === LATEST ? LATEST : `version ${pick.executedVersion}`}`);
+  return parts.length ? parts.join(', ') : null;
+}
+
+/**
+ * The calls a metrics view or an alarm may pick: every one; those through
+ * each alias; those naming each version, newest first, or neither; those each
+ * version ran, or $LATEST, however they were named. One picked whose alias or
+ * version is gone since is kept, as its calls still are.
+ */
+export function callsChoices(
+  versions: Pick<FunctionVersion, 'version'>[],
+  aliases: Pick<FunctionAlias, 'name'>[],
+  current: CallsPick = EVERY_CALL,
+): Array<{ value: string; label: string }> {
+  const newest = [...versions].sort((a, b) => Number(b.version) - Number(a.version));
+  const choices = [
+    { value: pickValue(EVERY_CALL), label: 'Every call' },
+    ...[...aliases].sort((a, b) => a.name.localeCompare(b.name)).map((alias) => ({ value: `${alias.name}|`, label: `Through alias ${alias.name}` })),
+    ...newest.map((version) => ({ value: `${version.version}|`, label: `Naming version ${version.version}` })),
+    { value: `${LATEST}|`, label: `Naming no alias or version: ${LATEST}` },
+    ...newest.map((version) => ({ value: `|${version.version}`, label: `Run by version ${version.version}, however named` })),
+    { value: `|${LATEST}`, label: `Run by ${LATEST}, however named` },
+  ];
+  const value = pickValue(current);
+  if (!choices.some((choice) => choice.value === value)) {
+    const text = callsText(current) ?? '';
+    choices.push({ value, label: `${text.charAt(0).toUpperCase()}${text.slice(1)}` });
+  }
+  return choices;
+}
