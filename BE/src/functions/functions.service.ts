@@ -318,9 +318,20 @@ export class FunctionsService {
     private functionKeys: FunctionKeys,
   ) {}
 
-  /** The function as its pods run it, with its key to its account's buckets, made at its first deploy. */
+  /**
+   * The function as its pods run it, with its key to its account's buckets, made at its first deploy, and its last
+   * version's number, which its record isn't read with: once it has one, $LATEST's pods and Service keep a label of
+   * their own, which a rollout without it would take off, its Service then sending calls to a version's pods too.
+   */
   private async workload(function_: Function, environment: FunctionEnvironmentValues, codeImage: string): Promise<FunctionWorkload> {
-    return workloadOf(function_, environment, codeImage, await this.functionKeys.credentialsFor(function_));
+    const lastVersion = function_.lastVersion ?? (await this.lastVersionOf(function_.id));
+    return workloadOf({ ...function_, lastVersion }, environment, codeImage, await this.functionKeys.credentialsFor(function_));
+  }
+
+  /** The number of the function's last version published; 0 for none, or for a function not saved yet. */
+  private async lastVersionOf(id: string): Promise<number> {
+    const row = await this.functionsRepository.manager.findOne(Function, { where: { id }, select: { id: true, lastVersion: true } });
+    return row?.lastVersion ?? 0;
   }
 
   private readyTimeoutMs(): number {

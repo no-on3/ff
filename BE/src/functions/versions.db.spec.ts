@@ -60,7 +60,7 @@ run("functions' versions and aliases (L2)", () => {
   /** The cluster as the services ask it: what they asked is what each mock was called with. */
   const orchestrator = {
     deploy: async () => undefined,
-    update: async () => undefined,
+    update: jest.fn(async () => undefined),
     waitUntilReady: async () => undefined,
     scale: async () => undefined,
     remove: jest.fn(async () => undefined),
@@ -128,6 +128,18 @@ run("functions' versions and aliases (L2)", () => {
     expect(await numbers(fn.id)).toEqual(['1', '2']);
     const audited = await query<Array<{ details: unknown }>>(`SELECT details FROM audit_log WHERE action = 'function.publish' AND resource = $1 ORDER BY id`, [`function:${fn.id}`]);
     expect(audited.map((entry) => entry.details)).toEqual([{ version: 1, codeSha256: fn.codeSha256, description: 'First' }, { version: 2, codeSha256: fn.codeSha256 }]);
+  });
+
+  it("rolls $LATEST out with its last version's number once it has one, which keeps its pods and Service on a label of their own", async () => {
+    const fn = await functions.create(ACCOUNT, body('labelled'));
+    await functions.update(ACCOUNT, fn.id, { memory: 160 });
+    await versions.publish(ACCOUNT, fn.id, {});
+    await functions.update(ACCOUNT, fn.id, { memory: 192 });
+    await versions.publish(ACCOUNT, fn.id, {});
+
+    await functions.update(ACCOUNT, fn.id, { memory: 256 });
+
+    expect(callsFor(orchestrator.update, fn.id).map(([workload]) => (workload as { lastVersion?: number }).lastVersion)).toEqual([0, 1, 2]);
   });
 
   it("keeps a version as it was published: its function's changes don't reach it, its environment's either, and its secrets stay sealed", async () => {
