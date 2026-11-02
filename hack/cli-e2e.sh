@@ -854,7 +854,7 @@ check "  ... as the AWS CLI sees it" "3600" \
   "$(aws_sqs get-queue-attributes --queue-url "$queue_url" --attribute-names MessageRetentionPeriod 2>/dev/null | jq -r .Attributes.MessageRetentionPeriod)"
 ff queues list --profile b
 check "the other account has none of them" "0 The account has no queue: \`ff queues create <name>\` makes one" "$(code) $(out)"
-# Its key's last use is above: revoked now, so that the account's two keys are free for the sections after.
+# Its key's last use is above: revoked now, so that the sections after find the account's keys as they left them.
 ff buckets keys revoke "$queue_key" --yes
 }
 section_def queues section_queues buckets budget=15

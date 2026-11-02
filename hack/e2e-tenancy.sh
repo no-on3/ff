@@ -1665,6 +1665,13 @@ with_token "$key_1" GET /buckets >/dev/null
 check "a key without storage:read can't list the account's buckets" "403 This API key lacks the scope storage:read" "$(status) $(message)"
 with_token "$key_1" POST /buckets '{"name": "l5-by-key"}' >/dev/null
 check "nor make one without storage:write" "403 This API key lacks the scope storage:write" "$(status) $(message)"
+key_storage="$(as_user_1 POST /api-keys '{"name": "l5 storage", "scopes": ["storage:write", "functions:invoke"]}' | jq -r .key)"
+with_token "$key_storage" POST /storage-keys '{"functions": ["*"], "functionAccess": "write"}' >/dev/null
+check "a key with storage:write makes an access key to functions at a level its scopes have alone" \
+  "403 This API key lacks the scope functions:write, which a key that may write functions needs" "$(status) $(message)"
+invoker_key="$(with_token "$key_storage" POST /storage-keys '{"functions": ["*"], "functionAccess": "invoke"}')"
+check "  ... functions:invoke, then, for one that invokes them" "201 invoke" "$(status) $(jq -r .functionAccess <<<"$invoker_key")"
+as_user_1 DELETE "/storage-keys/$(jq -r .id <<<"$invoker_key")" >/dev/null
 with_token "$key_1" GET /queues >/dev/null
 check "a key without queues:read can't list the account's queues" "403 This API key lacks the scope queues:read" "$(status) $(message)"
 with_token "$key_1" POST /queues/l5-orders-1/messages '{"body": "by key"}' >/dev/null
@@ -1773,7 +1780,7 @@ section_audit() {
 section "the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create email.identity.create email.suppression.put bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create email.identity.create email.suppression.put bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add storage_key.create api_key.create storage_key.create storage_key.delete function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"

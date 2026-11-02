@@ -83,6 +83,8 @@ export const planLimitsSchema = z.strictObject({
   emailsPerDay: z.number().int().min(0),
   /** Messages a second, as SES's MaxSendRate. */
   emailsPerSecond: positive,
+  /** The account's own access keys, each named: IAM gives a user two, and an account has many users. */
+  accessKeys: positive,
 });
 
 export type PlanLimits = z.infer<typeof planLimitsSchema>;

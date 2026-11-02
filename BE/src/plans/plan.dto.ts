@@ -42,6 +42,7 @@ export class PlanLimitsView implements PlanLimits {
   @ApiProperty({ example: 2, description: 'The domains the account may send mail from, its proved addresses apart' }) emailIdentities: number;
   @ApiProperty({ example: 200, description: "Messages a day, each recipient one, as SES's Max24HourSend" }) emailsPerDay: number;
   @ApiProperty({ example: 1, description: "Messages a second, as SES's MaxSendRate" }) emailsPerSecond: number;
+  @ApiProperty({ example: 10, description: "The account's own access keys, each named, for AWS's SDKs and CLI" }) accessKeys: number;
 }
 
 /** An account's plan. */

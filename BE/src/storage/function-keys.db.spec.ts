@@ -7,6 +7,7 @@ import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
+import { onePlan, plan } from '../plans/test-fixtures';
 import { AwsEndpoint, awsEndpointsOf } from '../common/aws-endpoint';
 import { Bucket } from './bucket.entity';
 import { FunctionCredentials, FunctionKeys } from './function-keys.service';
@@ -103,9 +104,9 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
     expect((await rowsOf(function_.id)).map((row) => row.revokedAt === null)).toEqual([false, true]);
   });
 
-  it("is never one of the account's own keys: not listed with them, nor counted against their two", async () => {
+  it("is never one of the account's own keys: not listed with them, nor counted against the plan's two", async () => {
     const audit = new AuditService(db.dataSource.getRepository(AuditEntry));
-    const own = new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, audit, config());
+    const own = new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, audit, onePlan(plan({ accessKeys: 2 })), config());
     const function_ = fn();
     await keys.credentialsFor(function_);
 

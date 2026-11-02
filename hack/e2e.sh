@@ -1207,9 +1207,18 @@ key_secret="$(jq -r .secretAccessKey <<<"$key")"
 read_only="$(http POST /storage-keys '{"readOnly": true, "buckets": ["e2e-photos"]}')"
 ro_id="$(jq -r .id <<<"$read_only")"
 ro_secret="$(jq -r .secretAccessKey <<<"$read_only")"
+invoker="$(http POST /storage-keys '{"name": "e2e-invoker", "functions": ["*"], "functionAccess": "invoke"}')"
+check "a key named, to every function at one level, reaching neither bucket nor queue" "201 e2e-invoker * invoke null null" \
+  "$(status) $(jq -r '"\(.name) \(.functions | join(",")) \(.functionAccess) \(.buckets) \(.queues)"' <<<"$invoker")"
+http POST /storage-keys '{"name": "e2e-invoker"}' >/dev/null
+check "a name once among the account's working keys; functions with a level, and a level with functions" "409 400 400" \
+  "$(status) $(http POST /storage-keys '{"functions": ["orders"]}' >/dev/null; status) $(http POST /storage-keys '{"functionAccess": "write"}' >/dev/null; status)"
+extra_keys=("$(jq -r .id <<<"$invoker")")
+for _ in 4 5 6 7 8 9 10; do extra_keys+=("$(http POST /storage-keys '{}' | jq -r .id)"); done
 http POST /storage-keys '{}' >/dev/null
-check "two keys at most, as IAM gives a user; listed without their secrets" "409 2 false" \
-  "$(status) $(http GET /storage-keys | jq -r 'length, (map(has("secretAccessKey")) | any)' | xargs)"
+check "as many keys as the beta plan allows, ten; listed without their secrets" "400 The Beta plan allows 10 access keys, and the account has 10: revoke one first 10 false" \
+  "$(status) $(jq -r .message "$work/body") $(http GET /storage-keys | jq -r 'length, (map(has("secretAccessKey")) | any)' | xargs)"
+for id in "${extra_keys[@]}"; do http DELETE "/storage-keys/$id" >/dev/null; done
 check "the secret is sealed in FF's database, never in clear" "0" \
   "$(env_q "SELECT count(*) FROM storage_keys WHERE secret::text LIKE '%' || '$key_secret' || '%'")"
 

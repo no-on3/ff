@@ -234,9 +234,12 @@ mod tests {
     fn key(id: &str, buckets: Option<&[&str]>, last_used_at: Option<&str>) -> StorageKey {
         StorageKey {
             id: id.to_owned(),
+            name: None,
             buckets: buckets.map(|names| names.iter().map(|name| name.to_string()).collect()),
             queues: None,
             read_only: false,
+            functions: None,
+            function_access: None,
             created_at: "2026-10-01T09:00:00.000Z".to_owned(),
             last_used_at: last_used_at.map(str::to_owned),
         }

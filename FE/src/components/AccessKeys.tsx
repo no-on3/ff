@@ -3,6 +3,7 @@ import { formatWhen } from '../lib/accounts';
 import { exportLines, keyReach } from '../lib/buckets';
 import { apiErrorMessage } from '../lib/functions';
 import { Bucket, CreatedStorageKey, Queue, StorageKey, bucketsApi, queuesApi, storageKeysApi } from '../services/api';
+import { useSession } from '../session/session';
 import Copyable from './Copyable';
 import { Panel } from './Panel';
 
@@ -36,8 +37,9 @@ const reachOf = (choice: string): { buckets?: string[]; queues?: string[] } =>
 /**
  * The account's access keys, which AWS's SDKs and CLI use for its buckets and
  * its queues alike (ADR 0009, ADR 0010): its owners see, make and revoke them,
- * two at most. A key reaches every bucket and queue of the account, or one of
- * them alone. The page gives what it has listed; the rest is read here.
+ * as many as the plan allows. A key made here reaches every bucket and queue of
+ * the account, or one of them alone. The page gives what it has listed; the
+ * rest is read here.
  */
 const AccessKeys: React.FC<{ buckets?: Bucket[] | null; queues?: Queue[] | null; open: boolean }> = ({ buckets, queues, open }) => {
   const [keys, setKeys] = useState<StorageKey[] | null>(null);
@@ -48,6 +50,7 @@ const AccessKeys: React.FC<{ buckets?: Bucket[] | null; queues?: Queue[] | null;
   const [revoking, setRevoking] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const limit = useSession().account?.plan.limits.accessKeys ?? 0;
 
   const load = useCallback(async () => {
     try {
@@ -99,7 +102,7 @@ const AccessKeys: React.FC<{ buckets?: Bucket[] | null; queues?: Queue[] | null;
   return (
     <>
       {made && <KeyOnce made={made} command={command(made)} onDone={() => setMade(null)} />}
-      <Panel title="Access keys" description="AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for AWS's SDKs and CLI, for the account's buckets and its queues alike. Two at most, so that one can replace the other.">
+      <Panel title="Access keys" description={`AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for AWS's SDKs and CLI, for the account's buckets and its queues alike. ${limit} at most, as its plan allows.`}>
         {error && (
           <p role="alert" className="mb-3 text-red-700">
             {error}
@@ -150,7 +153,7 @@ const AccessKeys: React.FC<{ buckets?: Bucket[] | null; queues?: Queue[] | null;
             ))}
           </ul>
         )}
-        {open && (keys?.length ?? 0) < 2 && (
+        {open && (keys?.length ?? 0) < limit && (
           <form onSubmit={makeKey} className="flex flex-wrap items-center gap-3" aria-label="New access key">
             <select aria-label="What it reaches" className="select" value={choice} onChange={(e) => setChoice(e.target.value)}>
               <option value="">Every bucket and queue</option>

@@ -899,6 +899,8 @@ export interface PlanLimits {
   emailsPerDay: number;
   /** Messages a second, as SES's MaxSendRate. */
   emailsPerSecond: number;
+  /** The account's own access keys, each named, for AWS's SDKs and CLI. */
+  accessKeys: number;
 }
 
 export interface Plan {
@@ -1518,7 +1520,14 @@ export interface CacheMetrics {
 export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'siteUrl', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
 
 /** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
-export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'queues', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
+export const STORAGE_KEY_FIELDS = ['id', 'name', 'buckets', 'queues', 'readOnly', 'functions', 'functionAccess', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
+
+/** What a key may do with the functions it names, as IAM groups Lambda's actions. */
+export const FUNCTION_ACCESS = ['read', 'invoke', 'write'] as const;
+export type FunctionAccess = (typeof FUNCTION_ACCESS)[number];
+
+/** A key's functions: every one of the account's. */
+export const ALL_FUNCTIONS = '*';
 
 /** A bucket, as AWS S3 gives one, behind FF's S3 front door (ADR 0009). */
 export interface Bucket {
@@ -1553,15 +1562,22 @@ export interface BucketMetrics {
   metrics: { BucketSizeBytes: { Average: Array<number | null> }; NumberOfObjects: { Average: Array<number | null> } } & Record<BucketRequestMetric, { Sum: number[] }>;
 }
 
-/** An access key to the account's buckets: never its secret. */
+/** An access key to the account's buckets, queues, mail and functions: never its secret. */
 export interface StorageKey {
   /** AWS_ACCESS_KEY_ID: AKFF and 16 characters. */
   id: string;
-  /** The buckets it names; null for none named. Naming neither buckets nor queues, it reaches all the account's. */
+  /** Its name, as an IAM user's; a key made before keys had names has its ID. */
+  name: string;
+  /** The buckets it names; null for none named. Naming nothing, it reaches all the account's buckets, queues and mail. */
   buckets: string[] | null;
   /** The queues it names; null for none named. */
   queues: string[] | null;
+  /** Its buckets, queues and mail read and listed only. */
   readOnly: boolean;
+  /** The functions it names, or [ALL_FUNCTIONS]; null for none. */
+  functions: string[] | null;
+  /** What it may do with them; null while it names none. */
+  functionAccess: FunctionAccess | null;
   createdAt: string;
   lastUsedAt: string | null;
 }
@@ -1645,7 +1661,8 @@ export interface NotificationConfigurationBody {
 export const storageKeysApi = {
   list: () => api.get<StorageKey[]>('/storage-keys'),
   /** Naming neither buckets nor queues, it reaches all the account's; naming some, those alone. */
-  create: (body: { buckets?: string[]; queues?: string[]; readOnly?: boolean }) => api.post<CreatedStorageKey>('/storage-keys', body),
+  create: (body: { name?: string; buckets?: string[]; queues?: string[]; readOnly?: boolean; functions?: string[]; functionAccess?: FunctionAccess }) =>
+    api.post<CreatedStorageKey>('/storage-keys', body),
   revoke: (id: string) => api.delete(`/storage-keys/${id}`),
 };
 

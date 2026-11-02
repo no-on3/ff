@@ -34,6 +34,7 @@ export interface PlanLimits {
   emailIdentities: number;
   emailsPerDay: number;
   emailsPerSecond: number;
+  accessKeys: number;
 }
 
 export interface Plan {
@@ -79,6 +80,7 @@ export const LIMIT_FIELDS: Array<{ path: [keyof PlanLimits] | ['quota', keyof Pl
   { path: ['emailIdentities'], label: 'Domains to send mail from', unit: 'all together, proved addresses apart', kind: 'whole' },
   { path: ['emailsPerDay'], label: 'E-mails a day', unit: 'each recipient one', kind: 'whole' },
   { path: ['emailsPerSecond'], label: 'E-mails a second', unit: 'at most', kind: 'whole' },
+  { path: ['accessKeys'], label: 'Access keys', unit: "the account's own, for AWS's SDKs and CLI", kind: 'whole' },
 ];
 
 const QUANTITY = /^\d+(\.\d+)?(m|k|M|G|T|Ki|Mi|Gi|Ti)?$/;

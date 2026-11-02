@@ -1,4 +1,4 @@
-import type { Bucket, BucketMetrics, CreatedStorageKey, MeAccount, StorageKey } from '../services/api';
+import { ALL_FUNCTIONS, type Bucket, type BucketMetrics, type CreatedStorageKey, type MeAccount, type StorageKey } from '../services/api';
 
 /** A bucket's name, as the API takes it: AWS's rule without dots. contract.test.ts checks it against the API's. */
 export const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
@@ -14,11 +14,17 @@ export function bucketNameProblem(name: string): string | null {
   return null;
 }
 
-/** What a key reaches, in words: every bucket and queue of the account when it names neither, else those it names. */
-export function keyReach(key: Pick<StorageKey, 'buckets' | 'queues' | 'readOnly'>): string {
-  const named = [key.buckets && `buckets ${key.buckets.join(', ')}`, key.queues && `queues ${key.queues.join(', ')}`].filter(Boolean).join('; ');
-  const reach = named ? named.charAt(0).toUpperCase() + named.slice(1) : 'Every bucket and queue';
-  return key.readOnly ? `${reach}, read-only` : reach;
+/**
+ * What a key reaches, in words: every bucket and queue of the account when it
+ * names nothing, else those it names, its read-only theirs, and its functions
+ * at their level.
+ */
+export function keyReach(key: Pick<StorageKey, 'buckets' | 'queues' | 'readOnly' | 'functions' | 'functionAccess'>): string {
+  const storage = [key.buckets && `buckets ${key.buckets.join(', ')}`, key.queues && `queues ${key.queues.join(', ')}`].filter(Boolean).join('; ');
+  const functions = key.functions && `${key.functions.includes(ALL_FUNCTIONS) ? 'every function' : `functions ${key.functions.join(', ')}`}, to ${key.functionAccess}`;
+  if (!storage && !functions) return key.readOnly ? 'Every bucket and queue, read-only' : 'Every bucket and queue';
+  const reach = [storage && (key.readOnly ? `${storage}, read-only` : storage), functions].filter(Boolean).join('; ');
+  return reach.charAt(0).toUpperCase() + reach.slice(1);
 }
 
 /** The variables AWS's SDKs and CLI read, for a key just made: to export in a shell, or set as a function's secrets. */

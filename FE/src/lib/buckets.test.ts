@@ -24,9 +24,12 @@ describe("a bucket's name, as the API takes it", () => {
 describe('an access key', () => {
   const key: CreatedStorageKey = {
     id: 'AKFF7Q2MLKX4RTZB3W5N',
+    name: 'AKFF7Q2MLKX4RTZB3W5N',
     buckets: ['photos'],
     queues: null,
     readOnly: true,
+    functions: null,
+    functionAccess: null,
     createdAt: '2026-10-23T06:36:00.000Z',
     lastUsedAt: null,
     secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
@@ -36,13 +39,23 @@ describe('an access key', () => {
     region: 'tn-tunis-1',
   };
 
-  it('says what it reaches: every bucket and queue when it names neither, else those it names', () => {
+  it('says what it reaches: every bucket and queue when it names nothing, else those it names, and its functions at their level', () => {
+    const none = { buckets: null, queues: null, readOnly: false, functions: null, functionAccess: null };
     expect([
       keyReach(key),
-      keyReach({ buckets: null, queues: null, readOnly: false }),
-      keyReach({ buckets: null, queues: ['orders'], readOnly: false }),
-      keyReach({ buckets: ['photos'], queues: ['orders', 'invoices'], readOnly: true }),
-    ]).toEqual(['Buckets photos, read-only', 'Every bucket and queue', 'Queues orders', 'Buckets photos; queues orders, invoices, read-only']);
+      keyReach(none),
+      keyReach({ ...none, queues: ['orders'] }),
+      keyReach({ ...none, buckets: ['photos'], queues: ['orders', 'invoices'], readOnly: true }),
+      keyReach({ ...none, functions: ['*'], functionAccess: 'invoke', readOnly: true }),
+      keyReach({ ...none, buckets: ['photos'], functions: ['orders', 'thumbnails'], functionAccess: 'write' }),
+    ]).toEqual([
+      'Buckets photos, read-only',
+      'Every bucket and queue',
+      'Queues orders',
+      'Buckets photos; queues orders, invoices, read-only',
+      'Every function, to invoke',
+      'Buckets photos; functions orders, thumbnails, to write',
+    ]);
   });
 
   it("gives the six variables AWS's SDKs and CLI read, the S3, SQS and SES endpoints among them, as shell lines too", () => {

@@ -7,6 +7,7 @@ import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { originForm } from '../storage/front-door';
+import { reachesMail } from '../storage/key-reach';
 import { KeyUses } from '../storage/key-uses.service';
 import { StorageDirectory } from '../storage/storage-directory.service';
 import { EmailIdentitiesService } from './email-identities.service';
@@ -127,8 +128,7 @@ export class SesFrontDoor implements OnModuleDestroy {
     const method = request.method ?? 'GET';
     checkSesSignature({ method, rawPath, rawQuery, rawHeaders: request.rawHeaders }, body, signature, key.secret, new Date());
     this.directory.touch(key.id);
-    // A key that names buckets or queues reaches those alone, as at the S3 front door and the SQS endpoint.
-    if (key.buckets !== null || key.queues !== null) throw accessDenied(`The access key ${key.id} names buckets or queues, and reaches those alone: not the account's mail.`);
+    if (!reachesMail(key)) throw accessDenied(`The access key ${key.id} names buckets, queues or functions, and reaches those alone: not the account's mail.`);
     const account = await this.directory.account(key.accountId);
     if (!account || account.status !== AccountStatus.ACTIVE) throw accessDenied(`The account is ${account?.status ?? 'gone'}: its mail answers no key.`);
     let input: Record<string, unknown> = {};

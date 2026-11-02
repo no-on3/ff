@@ -174,7 +174,7 @@ export class SqsFrontDoor implements OnModuleDestroy {
     return this.operations.run(operation, input, {
       ...caller,
       endpoint: this.endpointOf(request),
-      reach: { buckets: key.buckets, queues: key.queues },
+      reach: { buckets: key.buckets, queues: key.queues, functions: key.functions },
       // Changes are the key's in the audit log, which a request here doesn't name otherwise.
       actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` },
       ip: request.socket.remoteAddress,

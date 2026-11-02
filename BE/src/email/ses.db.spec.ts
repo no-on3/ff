@@ -76,6 +76,7 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
   const reader = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const theirs = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const photosOnly = { id: newAccessKeyId(), secret: newSecretAccessKey() };
+  const functionsOnly = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const suspended = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   /** The DNS, as the stand-in answers it: the records published so far. */
   const zone = { txt: new Map<string, string[]>(), mx: new Map<string, string[]>() };
@@ -151,6 +152,7 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
       { id: reader.id, accountId: ACCOUNT, readOnly: true, secret: directory.sealSecret(reader.id, reader.secret) },
       { id: theirs.id, accountId: OTHER, secret: directory.sealSecret(theirs.id, theirs.secret) },
       { id: photosOnly.id, accountId: ACCOUNT, buckets: ['photos'], secret: directory.sealSecret(photosOnly.id, photosOnly.secret) },
+      { id: functionsOnly.id, accountId: ACCOUNT, functions: ['*'], functionAccess: 'write', secret: directory.sealSecret(functionsOnly.id, functionsOnly.secret) },
       { id: suspended.id, accountId: SUSPENDED, secret: directory.sealSecret(suspended.id, suspended.secret) },
     ]);
     const plans = onePlan(plan({ emailIdentities: 2, emailsPerDay: 200, emailsPerSecond: 1 }));
@@ -293,10 +295,15 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
       expect(await ses('POST', '/v2/email/identities', { input: { EmailIdentity: 'more.example.tn' }, as: reader })).toMatchObject({ status: 403, error: 'AccessDeniedException' });
     });
 
-    it("shows another account nothing of this one's, and refuses a key that names buckets, and a suspended account's", async () => {
+    it("shows another account nothing of this one's, and refuses a key that names buckets or functions, and a suspended account's", async () => {
       expect((await ses('POST', '/v2/email/list-identities', { input: {}, as: theirs })).body.EmailIdentities).toEqual([]);
       expect((await ses('GET', identityPath('shop.example.tn'), { as: theirs })).error).toBe('NotFoundException');
       expect((await ses('GET', '/v2/email/account', { as: photosOnly })).error).toBe('AccessDeniedException');
+      expect(await ses('GET', '/v2/email/account', { as: functionsOnly })).toMatchObject({
+        status: 403,
+        error: 'AccessDeniedException',
+        body: { message: `The access key ${functionsOnly.id} names buckets, queues or functions, and reaches those alone: not the account's mail.` },
+      });
       expect(await ses('GET', '/v2/email/account', { as: suspended })).toMatchObject({ status: 403, error: 'AccessDeniedException', body: { message: 'The account is suspended: its mail answers no key.' } });
     });
 

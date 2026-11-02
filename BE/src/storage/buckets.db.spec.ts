@@ -33,7 +33,7 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
   let directory: StorageDirectory;
   let audit: AuditService;
   const service = (limits = {}, buckets = storeBuckets) => new BucketsService(db.dataSource.getRepository(Bucket), buckets, onePlan(plan(limits)), audit, config);
-  const keys = () => new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, audit, config);
+  const keys = (limits = {}) => new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, audit, onePlan(plan(limits)), config);
   const rowOf = (name: string) => db.dataSource.getRepository(Bucket).findOneBy({ name });
   const actions = async (accountId: string) =>
     (await db.dataSource.getRepository(AuditEntry).find({ where: { accountId }, order: { at: 'ASC' } })).map((entry) => `${entry.action} ${entry.resource}`);
@@ -147,11 +147,14 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
     await expect(service().create(OTHER, { name: full })).resolves.toMatchObject({ name: full });
   });
 
-  it('gives an account two access keys at most, each secret shown once and sealed, opening for the front door alone, and revokes them', async () => {
-    const first = await keys().create(ACCOUNT, {});
-    const second = await keys().create(ACCOUNT, { buckets: ['photos'], queues: ['orders'], readOnly: true });
+  it("gives an account as many access keys as its plan allows, each named once, its secret shown once and sealed, opening for the front door alone, and revokes them", async () => {
+    const two = { accessKeys: 2 };
+    const first = await keys(two).create(ACCOUNT, {});
+    const second = await keys(two).create(ACCOUNT, { name: 'shop@uploads', buckets: ['photos'], queues: ['orders'], readOnly: true, functions: ['thumbnails'], functionAccess: 'invoke' });
 
-    await expect(keys().create(ACCOUNT, {})).rejects.toThrow(ConflictException);
+    await expect(keys(two).create(ACCOUNT, {})).rejects.toThrow(new BadRequestException('The Beta plan allows 2 access keys, and the account has 2: revoke one first'));
+    await expect(keys().create(ACCOUNT, { name: 'shop@uploads' })).rejects.toThrow(new ConflictException('The account has an access key named "shop@uploads" already'));
+    await expect(keys().create(OTHER, { name: 'shop@uploads' })).resolves.toMatchObject({ name: 'shop@uploads' });
     expect(first).toMatchObject({
       id: expect.stringMatching(/^AKFF[A-Z2-7]{16}$/),
       secretAccessKey: expect.stringMatching(/^[A-Za-z0-9+/]{40}$/),
@@ -160,25 +163,33 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
       sesEndpoint: 'https://email.example.tn',
       region: 'tn-tunis-1',
     });
+    const noFunctions = { functions: null, functionAccess: null };
     expect(await keys().list(ACCOUNT)).toEqual([
-      { id: first.id, buckets: null, queues: null, readOnly: false, createdAt: expect.any(Date), lastUsedAt: null },
-      { id: second.id, buckets: ['photos'], queues: ['orders'], readOnly: true, createdAt: expect.any(Date), lastUsedAt: null },
+      { id: first.id, name: first.id, buckets: null, queues: null, readOnly: false, ...noFunctions, createdAt: expect.any(Date), lastUsedAt: null },
+      { id: second.id, name: 'shop@uploads', buckets: ['photos'], queues: ['orders'], readOnly: true, functions: ['thumbnails'], functionAccess: 'invoke', createdAt: expect.any(Date), lastUsedAt: null },
     ]);
     const row = await db.dataSource.getRepository(StorageKey).findOneByOrFail({ id: first.id });
     expect(JSON.stringify(row.secret)).not.toContain(first.secretAccessKey);
-    expect(await directory.key(first.id)).toMatchObject({ accountId: ACCOUNT, secret: first.secretAccessKey, buckets: null, queues: null, readOnly: false });
-    expect(await directory.key(second.id)).toMatchObject({ buckets: ['photos'], queues: ['orders'] });
+    expect(await directory.key(first.id)).toMatchObject({ accountId: ACCOUNT, secret: first.secretAccessKey, buckets: null, queues: null, functions: null, readOnly: false });
+    expect(await directory.key(second.id)).toMatchObject({ buckets: ['photos'], queues: ['orders'], functions: ['thumbnails'] });
+    const created = await db.dataSource.getRepository(AuditEntry).findOneByOrFail({ accountId: ACCOUNT, resource: `storage_key:${second.id}` });
+    expect(created.details).toEqual({ name: 'shop@uploads', buckets: ['photos'], queues: ['orders'], functions: ['thumbnails'], functionAccess: 'invoke', readOnly: true });
 
     await expect(keys().revoke(OTHER, first.id)).rejects.toThrow(NotFoundException);
     await keys().revoke(ACCOUNT, first.id);
 
     expect(await directory.key(first.id)).toBeNull();
     await expect(keys().revoke(ACCOUNT, first.id)).rejects.toThrow(NotFoundException);
-    await expect(keys().create(ACCOUNT, {})).resolves.toMatchObject({ id: expect.any(String) });
+    await expect(keys(two).create(ACCOUNT, {})).resolves.toMatchObject({ id: expect.any(String) });
+    // A revoked key's name is free again.
+    await keys().revoke(ACCOUNT, second.id);
+    await expect(keys().create(ACCOUNT, { name: 'shop@uploads' })).resolves.toMatchObject({ name: 'shop@uploads' });
     expect((await actions(ACCOUNT)).filter((action) => action.startsWith('storage_key'))).toEqual([
       `storage_key.create storage_key:${first.id}`,
       `storage_key.create storage_key:${second.id}`,
       `storage_key.delete storage_key:${first.id}`,
+      expect.stringMatching(/^storage_key\.create storage_key:AKFF/),
+      `storage_key.delete storage_key:${second.id}`,
       expect.stringMatching(/^storage_key\.create storage_key:AKFF/),
     ]);
   });

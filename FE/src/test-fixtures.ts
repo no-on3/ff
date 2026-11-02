@@ -37,5 +37,6 @@ export const BETA_PLAN: Plan = {
     emailIdentities: 2,
     emailsPerDay: 200,
     emailsPerSecond: 1,
+    accessKeys: 10,
   },
 };

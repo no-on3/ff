@@ -33,6 +33,7 @@ const BETA: PlanLimits = {
   emailIdentities: 2,
   emailsPerDay: 200,
   emailsPerSecond: 1,
+  accessKeys: 10,
 };
 
 describe("a plan's limits, in a form (P-73)", () => {

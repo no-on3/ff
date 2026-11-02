@@ -36,6 +36,7 @@ export const BETA_LIMITS: PlanLimits = {
   emailIdentities: 2,
   emailsPerDay: 200,
   emailsPerSecond: 1,
+  accessKeys: 10,
 };
 
 /** A plan: the beta plan, with the given limits changed. */

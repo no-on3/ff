@@ -44,18 +44,34 @@ fn held(bucket: &Bucket) -> String {
     }
 }
 
-/// An access key, as `GET /storage-keys` lists it: never its secret. Naming neither buckets nor queues, it reaches
-/// all the account's; naming some, those alone.
+/// An access key, as `GET /storage-keys` lists it: never its secret. Naming nothing, it reaches all the account's
+/// buckets and queues, and no function; naming buckets, queues or functions, those alone.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StorageKey {
     pub id: String,
+    /// Its name; an API from before keys had names gives none.
+    #[serde(default)]
+    pub name: Option<String>,
     pub buckets: Option<Vec<String>>,
     #[serde(default)]
     pub queues: Option<Vec<String>>,
     pub read_only: bool,
+    /// The functions it names, or `*` for all; none for none.
+    #[serde(default)]
+    pub functions: Option<Vec<String>>,
+    /// What it may do with them: read, invoke or write.
+    #[serde(default)]
+    pub function_access: Option<String>,
     pub created_at: String,
     pub last_used_at: Option<String>,
+}
+
+impl StorageKey {
+    /// Whether it names nothing, and so reaches every bucket and queue of the account.
+    fn names_nothing(&self) -> bool {
+        self.buckets.is_none() && self.queues.is_none() && self.functions.is_none()
+    }
 }
 
 /// The account's access keys to its buckets and queues, which owners list.
@@ -193,12 +209,12 @@ pub fn delete(name: &str, force: bool, yes: bool, context: &Context) -> Result<(
     })
 }
 
-/// The buckets or the queues a key reaches, for a column: all, those it names, or none when it names the others alone.
-fn column(names: Option<&Vec<String>>, others: Option<&Vec<String>>) -> String {
-    match (names, others) {
-        (Some(names), _) => names.join(","),
-        (None, Some(_)) => "-".to_owned(),
-        (None, None) => "all".to_owned(),
+/// The buckets or the queues a key reaches, for a column: all, those it names, or none when it names others alone.
+fn column(names: Option<&Vec<String>>, key: &StorageKey) -> String {
+    match names {
+        Some(names) => names.join(","),
+        None if key.names_nothing() => "all".to_owned(),
+        None => "-".to_owned(),
     }
 }
 
@@ -207,13 +223,29 @@ pub fn reaches(key: &StorageKey) -> String {
     let named = |kind: &str, names: &[String]| {
         format!("the {kind}{} {}", if names.len() == 1 { "" } else { "s" }, names.join(", "))
     };
-    let reach = match (&key.buckets, &key.queues) {
-        (None, None) => "every bucket and queue of the account".to_owned(),
-        (Some(buckets), None) => named("bucket", buckets),
-        (None, Some(queues)) => named("queue", queues),
-        (Some(buckets), Some(queues)) => format!("{} and {}", named("bucket", buckets), named("queue", queues)),
-    };
-    if key.read_only { format!("{reach}, read-only") } else { reach }
+    if key.names_nothing() {
+        let reach = "every bucket and queue of the account";
+        return if key.read_only { format!("{reach}, read-only") } else { reach.to_owned() };
+    }
+    let storage: Vec<String> = [("bucket", &key.buckets), ("queue", &key.queues)]
+        .into_iter()
+        .filter_map(|(kind, names)| names.as_ref().map(|names| named(kind, names)))
+        .collect();
+    let mut reach = storage.join(" and ");
+    if key.read_only && !storage.is_empty() {
+        reach.push_str(", read-only");
+    }
+    if let Some(functions) = &key.functions {
+        let which = if functions.iter().any(|name| name == "*") {
+            "every function of the account".to_owned()
+        } else {
+            named("function", functions)
+        };
+        let level = key.function_access.as_deref().unwrap_or("read");
+        reach =
+            if reach.is_empty() { format!("{which}, to {level}") } else { format!("{reach}, and {which}, to {level}") };
+    }
+    reach
 }
 
 pub fn keys_list(context: &Context) -> Result<(), Error> {
@@ -229,8 +261,8 @@ pub fn keys_list(context: &Context) -> Result<(), Error> {
             .map(|key| {
                 vec![
                     key.id.clone(),
-                    column(key.buckets.as_ref(), key.queues.as_ref()),
-                    column(key.queues.as_ref(), key.buckets.as_ref()),
+                    column(key.buckets.as_ref(), key),
+                    column(key.queues.as_ref(), key),
                     if key.read_only { "read-only" } else { "read-write" }.to_owned(),
                     key.last_used_at.as_deref().map(time).unwrap_or_else(|| "never".to_owned()),
                     time(&key.created_at),
@@ -324,9 +356,12 @@ mod tests {
         let names = |names: Option<&[&str]>| names.map(|names| names.iter().map(|name| name.to_string()).collect());
         StorageKey {
             id: "AKFF7Q2MLKX4RTZB3W5N".into(),
+            name: None,
             buckets: names(buckets),
             queues: names(queues),
             read_only,
+            functions: None,
+            function_access: None,
             created_at: "2026-10-24T08:00:00.000Z".into(),
             last_used_at: None,
         }
@@ -347,12 +382,25 @@ mod tests {
                 "the bucket photos and the queue orders"
             ]
         );
-        let columns = |key: &StorageKey| {
-            (column(key.buckets.as_ref(), key.queues.as_ref()), column(key.queues.as_ref(), key.buckets.as_ref()))
-        };
+        let columns = |key: &StorageKey| (column(key.buckets.as_ref(), key), column(key.queues.as_ref(), key));
         assert_eq!(columns(&all), ("all".into(), "all".into()));
         assert_eq!(columns(&photos), ("photos".into(), "-".into()));
         assert_eq!(columns(&orders), ("-".into(), "orders,orders-dlq".into()));
+        // A key that names functions alone reaches no bucket and no queue; its read-only says nothing of them.
+        let functions = |names: &[&str], level: &str, of: StorageKey| StorageKey {
+            functions: Some(names.iter().map(|name| name.to_string()).collect()),
+            function_access: Some(level.into()),
+            ..of
+        };
+        let invoker = functions(&["*"], "invoke", key(None, None, true));
+        assert_eq!(columns(&invoker), ("-".into(), "-".into()));
+        assert_eq!(
+            [reaches(&invoker), reaches(&functions(&["orders"], "write", key(Some(&["photos"]), None, true)))],
+            [
+                "every function of the account, to invoke",
+                "the bucket photos, read-only, and the function orders, to write"
+            ]
+        );
         // An API before queues says nothing of them: such a key reaches what its buckets say.
         let older: StorageKey = serde_json::from_value(json!({ "id": "AKFF7Q2MLKX4RTZB3W5N", "buckets": null, "readOnly": false, "createdAt": "x", "lastUsedAt": null })).unwrap();
         assert_eq!(reaches(&older), "every bucket and queue of the account");

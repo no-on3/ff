@@ -35,6 +35,7 @@ describe('planLimitRows', () => {
       ['Memory of a cache', '64 MB; past it, the least recently used keys go'],
       ['Domains to send mail from', '2'],
       ['E-mails', '200 a day, 1 a second; each recipient one'],
+      ["Access keys for AWS's SDKs and CLI", '10'],
     ]);
   });
 

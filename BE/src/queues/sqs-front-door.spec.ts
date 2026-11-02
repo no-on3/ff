@@ -21,7 +21,7 @@ import { SqsFrontDoor } from './sqs-front-door';
 import { SqsOperations } from './sqs-operations';
 
 const BASE = 'http://localhost:3003';
-const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, queues: null, readOnly: false, secret: 'a'.repeat(40) };
+const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, queues: null, functions: null, readOnly: false, secret: 'a'.repeat(40) };
 const OTHERS: ActiveKey = { ...KEY, id: 'AKFFCCCCCCCCCCCCCCCC', accountId: '000000000002' };
 const URL_ = `${BASE}/${KEY.accountId}/orders`;
 const ORDERS: Queue = Object.assign(new Queue(), {

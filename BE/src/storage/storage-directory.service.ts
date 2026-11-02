@@ -20,6 +20,8 @@ export interface ActiveKey {
   buckets: string[] | null;
   /** The queues it names; null for none named. */
   queues: string[] | null;
+  /** The functions it names; null for none. */
+  functions: string[] | null;
   readOnly: boolean;
   secret: string;
 }
@@ -53,7 +55,16 @@ export class StorageDirectory {
   async key(accessKeyId: string, now = new Date()): Promise<ActiveKey | null> {
     const key = await this.keys.findOneBy({ id: accessKeyId, revokedAt: IsNull() });
     if (!key || (key.expiresAt !== null && key.expiresAt <= now)) return null;
-    return { id: key.id, accountId: key.accountId, functionId: key.functionId, buckets: key.buckets, queues: key.queues, readOnly: key.readOnly, secret: this.secretOf(key) };
+    return {
+      id: key.id,
+      accountId: key.accountId,
+      functionId: key.functionId,
+      buckets: key.buckets,
+      queues: key.queues,
+      functions: key.functions,
+      readOnly: key.readOnly,
+      secret: this.secretOf(key),
+    };
   }
 
   /** The account a key belongs to: its status, whether FF turned its storage off, and whether its buckets are full; null for none. */

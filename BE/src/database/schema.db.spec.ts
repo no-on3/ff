@@ -90,6 +90,7 @@ const INVOCATION_VERSIONS = migrationNames.find((name) => name.startsWith('Invoc
 const CAPACITY_VERSIONS = migrationNames.find((name) => name.startsWith('CapacityVersions')) as string;
 const URL_ALIASES = migrationNames.find((name) => name.startsWith('UrlAliases')) as string;
 const TRIGGER_QUALIFIERS = migrationNames.find((name) => name.startsWith('TriggerQualifiers')) as string;
+const ALARM_DIMENSIONS = migrationNames.find((name) => name.startsWith('AlarmDimensions')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -1092,6 +1093,53 @@ run('database schema (L2, real PostgreSQL)', () => {
       await dataSource.query(`UPDATE event_source_mappings SET qualifier = NULL`);
       await migrateDownTo(dataSource, URL_ALIASES);
       await expect(qualifiers()).rejects.toThrow('column "qualifier" does not exist');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the access-key-functions migration names each of an account's own keys its ID, a deploy's none, gives no key a function, every plan 10 keys but one with its own, and reverts revoking a key that named functions alone", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, ALARM_DIMENSIONS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(`INSERT INTO plans (id, name, limits) SELECT 'shop', 'Shop', limits || '{"accessKeys": 3}'::jsonb FROM plans WHERE id = 'beta'`);
+      const key = (id: string, more = '') => dataSource.query(`INSERT INTO storage_keys (id, account_id, secret${more ? ', expires_at' : ''}) VALUES ($1, $2, '{}'${more})`, [id, ACCOUNT]);
+      await key('AKFFAAAAAAAAAAAAAAAA');
+      await key('AKFFBBBBBBBBBBBBBBBB', ", now() + interval '1 hour'");
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const keys = () => dataSource.query(`SELECT id, name, functions, function_access AS "functionAccess", revoked_at IS NOT NULL AS revoked FROM storage_keys ORDER BY id`);
+      expect(await keys()).toEqual([
+        { id: 'AKFFAAAAAAAAAAAAAAAA', name: 'AKFFAAAAAAAAAAAAAAAA', functions: null, functionAccess: null, revoked: false },
+        { id: 'AKFFBBBBBBBBBBBBBBBB', name: null, functions: null, functionAccess: null, revoked: false },
+      ]);
+      const plans = () => dataSource.query(`SELECT id, limits->'accessKeys' AS keys FROM plans WHERE id IN ('beta', 'shop') ORDER BY id`);
+      expect(await plans()).toEqual([
+        { id: 'beta', keys: 10 },
+        { id: 'shop', keys: 3 },
+      ]);
+      // A name once among the account's working keys; functions with their level, and a level with functions, alone.
+      const named = (id: string, columns: string, values: string) => dataSource.query(`INSERT INTO storage_keys (id, account_id, secret, ${columns}) VALUES ($1, $2, '{}', ${values})`, [id, ACCOUNT]);
+      await expect(named('AKFFCCCCCCCCCCCCCCCC', 'name', `'AKFFAAAAAAAAAAAAAAAA'`)).rejects.toThrow('UQ_storage_keys_name');
+      await expect(named('AKFFCCCCCCCCCCCCCCCC', 'name, functions', `'c', '{orders}'`)).rejects.toThrow('violates check constraint');
+      await expect(named('AKFFCCCCCCCCCCCCCCCC', 'name, function_access', `'c', 'invoke'`)).rejects.toThrow('violates check constraint');
+      await expect(named('AKFFCCCCCCCCCCCCCCCC', 'name, functions, function_access', `'c', '{orders}', 'run'`)).rejects.toThrow('violates check constraint');
+      await named('AKFFCCCCCCCCCCCCCCCC', 'name, functions, function_access', `'functions', '{*}', 'write'`);
+      await named('AKFFDDDDDDDDDDDDDDDD', 'name, buckets, functions, function_access', `'photos', '{photos}', '{orders}', 'invoke'`);
+
+      await migrateDownTo(dataSource, ALARM_DIMENSIONS);
+      expect((await dataSource.query(`SELECT id, revoked_at IS NOT NULL AS revoked FROM storage_keys ORDER BY id`)).map(({ id, revoked }: { id: string; revoked: boolean }) => `${id} ${revoked}`)).toEqual([
+        'AKFFAAAAAAAAAAAAAAAA false',
+        'AKFFBBBBBBBBBBBBBBBB false',
+        'AKFFCCCCCCCCCCCCCCCC true',
+        'AKFFDDDDDDDDDDDDDDDD false',
+      ]);
+      expect(await plans()).toEqual([
+        { id: 'beta', keys: null },
+        { id: 'shop', keys: null },
+      ]);
+      await expect(keys()).rejects.toThrow('column "name" does not exist');
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

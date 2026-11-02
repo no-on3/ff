@@ -33,6 +33,7 @@ export const PLAN_LIMIT_KEYS = [
   'emailIdentities',
   'emailsPerDay',
   'emailsPerSecond',
+  'accessKeys',
 ] as const satisfies ReadonlyArray<keyof PlanLimits>;
 
 // A limit missing from the list above stops the build.
@@ -88,5 +89,6 @@ export function planLimitRows({ limits }: Pick<Plan, 'limits'>): Array<[label: s
     ['Memory of a cache', `${formatMegabytes(limits.cacheMb)}; past it, the least recently used keys go`],
     ['Domains to send mail from', String(limits.emailIdentities)],
     ['E-mails', `${limits.emailsPerDay} a day, ${limits.emailsPerSecond} a second; each recipient one`],
+    ["Access keys for AWS's SDKs and CLI", String(limits.accessKeys)],
   ];
 }
