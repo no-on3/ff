@@ -102,7 +102,7 @@ export class LambdaFrontDoor implements OnModuleDestroy {
       this.reply(request, response, id, await this.answer(request, id));
     } catch (error) {
       // FF's services refuse as FF's API answers: the same refusal, under Lambda's name.
-      const known = error instanceof LambdaError ? error : error instanceof HttpException ? lambdaErrorOf(error) : undefined;
+      const known = error instanceof LambdaError ? error : error instanceof HttpException ? lambdaErrorOf(error, this.region) : undefined;
       if (!known) this.logger.error(`A Lambda request failed (request ${id}): ${describeError(error)}`, error instanceof Error ? error.stack : undefined);
       const refusal = known ?? serviceException();
       this.reply(request, response, id, { status: refusal.status, document: refusal.document(), headers: { 'x-amzn-errortype': refusal.type, ...refusal.headers } });

@@ -1112,6 +1112,15 @@ check "  ... nor creates a function in A's account by an ARN of A's, nor with co
   "$(lambda_with "${lambda_b[@]}" create-function --function-name "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-b-made" "${made_by_b[@]}" --code S3Bucket=l5-b-code,S3Key=code.zip) \
 $(lambda_with "${lambda_b[@]}" create-function --function-name l5-b-made "${made_by_b[@]}" --code S3Bucket=l5-photos-a,S3Key=code.zip) \
 $(as_a GET '/functions?name=l5-b-made' | jq length) $(as_b GET '/functions?name=l5-b-made' | jq length)"
+# A's function as A's key reads it before B's attempts: its revision, its timeout, its code.
+seen_by_a() { lambda_with "${lambda_a[@]}" get-function-configuration --function-name l5-a --query '[RevisionId, Timeout, CodeSha256]'; }
+before_b="$(seen_by_a)"
+check "  ... nor changes its configuration or its code, by its name or its ARN, with code of B's or A's: A's function as it was" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException true" \
+  "$(lambda_with "${lambda_b[@]}" update-function-configuration --function-name "$arn_a" --timeout 9) \
+$(lambda_with "${lambda_b[@]}" update-function-code --function-name l5-a --s3-bucket l5-b-code --s3-key code.zip) \
+$(lambda_with "${lambda_b[@]}" update-function-code --function-name "$arn_a" --s3-bucket l5-photos-a --s3-key code.zip) \
+$([ "$(seen_by_a)" = "$before_b" ] && echo true || echo false)"
 check "A's key finds it, by its name and by its ARN" "$arn_a $arn_a" \
   "$(lambda_with "${lambda_a[@]}" get-function --function-name l5-a --query Configuration.FunctionArn) $(lambda_with "${lambda_a[@]}" get-function --function-name "$arn_a" --query Configuration.FunctionArn)"
 # listed <key ID> <secret>: the functions the key's ListFunctions gives, by name, one a line.

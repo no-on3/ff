@@ -94,6 +94,7 @@ const ALARM_DIMENSIONS = migrationNames.find((name) => name.startsWith('AlarmDim
 const FUNCTION_KEY_RENEWAL = migrationNames.find((name) => name.startsWith('FunctionKeyRenewal')) as string;
 const LAMBDA_ENDPOINT = migrationNames.find((name) => name.startsWith('LambdaEndpoint')) as string;
 const RESOURCE_TAGS = migrationNames.find((name) => name.startsWith('ResourceTags')) as string;
+const FUNCTION_DESCRIPTIONS = migrationNames.find((name) => name.startsWith('FunctionDescriptions')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -1237,6 +1238,38 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await migrateDownTo(dataSource, RESOURCE_TAGS);
       expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'functions' AND column_name IN ('description', 'role')`)).toEqual([]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the function-updates migration gives a function being created its change under way since its creation, one in ERROR its last update Failed for its error, every other one Successful, and reverts with all three", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, FUNCTION_DESCRIPTIONS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const insert = (name: string, status: string, error: string | null) =>
+        dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout, status, error, created_at) VALUES ($1, $2, 'nodejs', 'v1', 128, 5, $3, $4, '2026-11-02T12:00:00Z')`, [
+          name,
+          ACCOUNT,
+          status,
+          error,
+        ]);
+      await insert('active', 'ACTIVE', null);
+      await insert('creating', 'CREATING', null);
+      await insert('failed', 'ERROR', 'Runtime.ImportModuleError: no module');
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT name, update_status, update_reason, update_started_at FROM functions ORDER BY name`)).toEqual([
+        { name: 'active', update_status: 'Successful', update_reason: null, update_started_at: null },
+        { name: 'creating', update_status: 'InProgress', update_reason: null, update_started_at: new Date('2026-11-02T12:00:00Z') },
+        { name: 'failed', update_status: 'Failed', update_reason: 'Runtime.ImportModuleError: no module', update_started_at: null },
+      ]);
+      await expect(dataSource.query(`UPDATE functions SET update_status = 'Pending'`)).rejects.toThrow(/invalid input value for enum/);
+
+      await migrateDownTo(dataSource, FUNCTION_DESCRIPTIONS);
+      expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'functions' AND column_name IN ('update_status', 'update_reason', 'update_started_at')`)).toEqual([]);
+      expect(await dataSource.query(`SELECT to_regtype('functions_update_status_enum') AS t`)).toEqual([{ t: null }]);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

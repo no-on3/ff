@@ -73,6 +73,7 @@ import { FunctionKeyRenewal1793620000000 } from './1793620000000-FunctionKeyRene
 import { LambdaEndpoint1793630000000 } from './1793630000000-LambdaEndpoint';
 import { ResourceTags1793640000000 } from './1793640000000-ResourceTags';
 import { FunctionDescriptions1793650000000 } from './1793650000000-FunctionDescriptions';
+import { FunctionUpdates1793660000000 } from './1793660000000-FunctionUpdates';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -155,4 +156,5 @@ export const MIGRATIONS: Array<new () => object> = [
   LambdaEndpoint1793630000000,
   ResourceTags1793640000000,
   FunctionDescriptions1793650000000,
+  FunctionUpdates1793660000000,
 ];

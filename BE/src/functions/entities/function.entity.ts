@@ -21,6 +21,16 @@ export enum FunctionStatus {
   DELETED = 'DELETED',
 }
 
+/**
+ * How the function's last change went, as Lambda's LastUpdateStatus says it, in
+ * its words: a create's or an update's rollout under way, then live, or failed.
+ */
+export enum UpdateStatus {
+  IN_PROGRESS = 'InProgress',
+  SUCCESSFUL = 'Successful',
+  FAILED = 'Failed',
+}
+
 export enum Runtime {
   NODEJS = 'nodejs',
   PYTHON = 'python',
@@ -149,6 +159,27 @@ export class Function {
   /** Why the function is in ERROR: the last failed deploy or update. Cleared once a rollout succeeds. */
   @Column({ type: 'varchar', nullable: true })
   error?: string | null;
+
+  /**
+   * How its last change went: InProgress while a create, an update or a delete
+   * runs, which holds every other change off; then Successful, or Failed with
+   * its reason, the previous version still live unless the function is in ERROR.
+   */
+  @Column({ type: 'enum', enum: UpdateStatus, default: UpdateStatus.SUCCESSFUL })
+  updateStatus: UpdateStatus;
+
+  /** Why its last change failed, as Lambda's LastUpdateStatusReason; none otherwise. */
+  @Column({ type: 'varchar', nullable: true })
+  updateReason: string | null;
+
+  /**
+   * When the change under way started: it holds the function until then and
+   * for its bound, past which it was stopped, by a restart of the backend, and
+   * another change may take over; it alone saves its outcome while it holds the
+   * function. None while no change runs.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  updateStartedAt: Date | null;
 
   /** Instances kept even when idle (provisioned concurrency on Lambda, billed as such: D8). */
   @Column({ default: 0 })

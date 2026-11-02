@@ -226,6 +226,16 @@ outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused 
 # aws_lambda <arguments…>: the AWS CLI at Lambda's endpoint, from AWS_ENDPOINT_URL_LAMBDA alone, with AWS_KEY's key.
 aws_lambda() { AWS_ACCESS_KEY_ID="$AWS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
   AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_LAMBDA="http://localhost:$lambda_port" "${aws_cli[@]}" lambda "$@" --output json; }
+# lambda_zip <zip> <index.mjs's code>: a package of one module, as Lambda takes one; its CodeSha256 printed. Defined here,
+# as a section passes on only the functions it adds: one it defines again, as zip_of, stays the suite's in the next.
+lambda_zip() {
+  python3 - "$@" <<'PY'
+import base64, hashlib, sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w') as archive:
+    archive.writestr('index.mjs', sys.argv[2])
+print(base64.b64encode(hashlib.sha256(open(sys.argv[1], 'rb').read()).digest()).decode())
+PY
+}
 
 # written_within <seconds> <table> <id> <since>: true when the backend wrote the table's first row for the id within
 # that many seconds of <since> (seconds since the epoch), else how long after, as its log says: in development, each
@@ -539,16 +549,7 @@ maker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-maker", "functions": ["
 check "a key that may change every function of the account, and reach the bucket of its code" 201 "$(status)"
 # as_maker <aws arguments…>: the AWS CLI with that key, at Lambda's endpoint (aws_lambda) or at the buckets' (aws_ff).
 as_maker() { AWS_KEY="$(jq -r .id <<<"$maker")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$maker")" "$@"; }
-# zip_of <zip> <index.mjs's code>: a package of one module, as Lambda takes one; its CodeSha256 printed.
-zip_of() {
-  python3 - "$@" <<'PY'
-import base64, hashlib, sys, zipfile
-with zipfile.ZipFile(sys.argv[1], 'w') as archive:
-    archive.writestr('index.mjs', sys.argv[2])
-print(base64.b64encode(hashlib.sha256(open(sys.argv[1], 'rb').read()).digest()).decode())
-PY
-}
-made_sha="$(zip_of "$work/made.zip" 'export const handler = async (event) => ({ made: "by the AWS CLI", stage: process.env.STAGE, event });')"
+made_sha="$(lambda_zip "$work/made.zip" 'export const handler = async (event) => ({ made: "by the AWS CLI", stage: process.env.STAGE, event });')"
 role="arn:aws:iam::$ver:role/e2e-made"
 created="$(as_maker aws_lambda create-function --function-name e2e-made --runtime nodejs24.x --role "$role" --handler index.handler \
   --zip-file "fileb://$work/made.zip" --description "Made by the AWS CLI" --environment 'Variables={STAGE=e2e}' --tags team=e2e --publish)"
@@ -573,7 +574,7 @@ as_maker aws_lambda wait function-active-v2 --function-name e2e-made-s3 >/dev/nu
 check "its code read from the account's bucket instead, the same zip; Lambda's defaults, 128 MB and 3 seconds" "Active $made_sha 128 3" \
   "$(as_reader get-function-configuration --function-name e2e-made-s3 | jq -r '"\(.State) \(.CodeSha256) \(.MemorySize) \(.Timeout)"')"
 
-zip_of "$work/broken.zip" 'throw new Error("boom at import");' >/dev/null
+lambda_zip "$work/broken.zip" 'throw new Error("boom at import");' >/dev/null
 as_maker aws_lambda create-function --function-name e2e-made-broken --runtime nodejs24.x --role "$role" --handler index.handler \
   --zip-file "fileb://$work/broken.zip" >/dev/null
 check "a function whose code fails at its import: the waiter stops at Failed" refused "$(outcome as_maker aws_lambda wait function-active-v2 --function-name e2e-made-broken | xargs)"
@@ -599,6 +600,65 @@ as_maker aws_ff s3 rm s3://e2e-lambda-code/builds/made.zip --only-show-errors
 as_ver DELETE /buckets/e2e-lambda-code >/dev/null
 }
 section_def lambda_changes section_lambda_changes lambda_reads budget=90
+
+section_lambda_updates() {
+section "Lambda's UpdateFunctionCode and UpdateFunctionConfiguration with the AWS CLI: answered InProgress, then Successful; a change while one runs refused, a RevisionId read before one too; new code that fails rolled back; a version once new code is live"
+# updated_code <zip> <name>: a package whose handler answers its code's name and its STAGE; its CodeSha256 printed.
+updated_code() { lambda_zip "$1" "export const handler = async () => ({ code: \"$2\", stage: process.env.STAGE });"; }
+# runs: the code's name and its STAGE, as the function answers through FF's API.
+runs() { as_ver POST "/functions/$updated_id/invoke" '{"input": {}}' >/dev/null; jq -c '[.output.code, .output.stage]' "$work/body"; }
+updated_code "$work/v1.zip" v1 >/dev/null
+as_maker aws_lambda create-function --function-name e2e-updated --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/v1.zip" --environment 'Variables={STAGE=one}' >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-updated >/dev/null 2>&1 || true
+updated_id="$(as_ver GET '/functions?name=e2e-updated' | jq -r '.[0].id')"
+read_revision="$(as_reader get-function-configuration --function-name e2e-updated | jq -r .RevisionId)"
+v2_sha="$(updated_code "$work/v2.zip" v2)"
+answer="$(as_maker aws_lambda update-function-code --function-name e2e-updated --zip-file "fileb://$work/v2.zip" --revision-id "$read_revision")"
+check "UpdateFunctionCode answers at once, the function Active, its last update InProgress, with the new zip's CodeSha256 and a new RevisionId" \
+  "Active InProgress $v2_sha true" \
+  "$(jq -r --arg read "$read_revision" '"\(.State) \(.LastUpdateStatus) \(.CodeSha256) \(.RevisionId != $read)"' <<<"$answer")"
+# FF's API first: its call is the quicker, while the new version rolls out.
+check "  ... while it rolls out, another change is refused, through FF's API and Lambda's" "409 refused ResourceConflictException" \
+  "$(as_ver PUT "/functions/$updated_id" '{"timeout": 10}' >/dev/null; status) $(outcome as_maker aws_lambda update-function-configuration --function-name e2e-updated --timeout 10)"
+check "  ... the CLI's waiter function-updated-v2 waits for it to be Successful, and the new code runs" 'accepted ["v2","one"]' \
+  "$(outcome as_maker aws_lambda wait function-updated-v2 --function-name e2e-updated) $(runs)"
+
+configured="$(as_maker aws_lambda update-function-configuration --function-name e2e-updated --timeout 10 --description "Updated by the AWS CLI" \
+  --environment 'Variables={STAGE=two}')"
+check "UpdateFunctionConfiguration changes what it sends, InProgress, the code as it was" "InProgress 10 Updated by the AWS CLI {\"STAGE\":\"two\"} $v2_sha" \
+  "$(jq -r '"\(.LastUpdateStatus) \(.Timeout) \(.Description) \(.Environment.Variables | tojson) \(.CodeSha256)"' <<<"$configured")"
+as_maker aws_lambda wait function-updated-v2 --function-name e2e-updated >/dev/null 2>&1 || true
+check "  ... live once Successful, its new variables with it" 'Successful 10 ["v2","two"]' \
+  "$(as_reader get-function-configuration --function-name e2e-updated | jq -r '"\(.LastUpdateStatus) \(.Timeout)"') $(runs)"
+check "a RevisionId read before a change is refused, as Lambda refuses it" "refused PreconditionFailedException" \
+  "$(outcome as_maker aws_lambda update-function-configuration --function-name e2e-updated --timeout 12 --revision-id "$read_revision")"
+
+lambda_zip "$work/broken-update.zip" 'throw new Error("boom at import");' >/dev/null
+as_maker aws_lambda update-function-code --function-name e2e-updated --zip-file "fileb://$work/broken-update.zip" >/dev/null
+check "new code that fails at its import: the waiter stops at Failed" refused "$(outcome as_maker aws_lambda wait function-updated-v2 --function-name e2e-updated | xargs)"
+check "  ... the function still Active, its last update Failed with FF's diagnosis, rolled back: the code before it still runs" \
+  "Active Failed true true $v2_sha [\"v2\",\"two\"]" \
+  "$(as_reader get-function-configuration --function-name e2e-updated | jq -r \
+    '"\(.State) \(.LastUpdateStatus) \(.LastUpdateStatusReason | contains("boom at import")) \(.LastUpdateStatusReason | contains("rolled back")) \(.CodeSha256)"') $(runs)"
+
+as_ver POST /buckets '{"name": "e2e-lambda-code"}' >/dev/null
+v3_sha="$(updated_code "$work/v3.zip" v3)"
+as_maker aws_ff s3 cp "$work/v3.zip" s3://e2e-lambda-code/builds/v3.zip --only-show-errors
+check "with DryRun, the code in the bucket read and nothing changed" "Failed $v2_sha" \
+  "$(as_maker aws_lambda update-function-code --function-name e2e-updated --s3-bucket e2e-lambda-code --s3-key builds/v3.zip --dry-run | jq -r '"\(.LastUpdateStatus) \(.CodeSha256)"')"
+as_maker aws_lambda update-function-code --function-name e2e-updated --s3-bucket e2e-lambda-code --s3-key builds/v3.zip --publish >/dev/null
+as_maker aws_lambda wait function-updated-v2 --function-name e2e-updated >/dev/null 2>&1 || true
+check "with Publish, its code from the account's bucket: version 1, of the new code, once it is live" "1 $v3_sha $v3_sha [\"v3\",\"two\"]" \
+  "$(as_reader get-function-configuration --function-name e2e-updated --qualifier 1 | jq -r '"\(.Version) \(.CodeSha256)"') \
+$(as_reader get-function-configuration --function-name e2e-updated | jq -r .CodeSha256) $(runs)"
+check "the audit log names each update, and the key that made it" "function.update access_key:$(jq -r .id <<<"$maker")" \
+  "$(as_ver GET /audit-log | jq -r --arg r "function:$updated_id" '[.entries[] | select(.resource == $r and .action == "function.update")] | "\(map(.action) | unique | join(" ")) \(map(.actor) | unique | join(" "))"')"
+as_maker aws_lambda delete-function --function-name e2e-updated >/dev/null
+as_maker aws_ff s3 rm s3://e2e-lambda-code/builds/v3.zip --only-show-errors
+as_ver DELETE /buckets/e2e-lambda-code >/dev/null
+}
+section_def lambda_updates section_lambda_updates lambda_changes budget=120
 
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"

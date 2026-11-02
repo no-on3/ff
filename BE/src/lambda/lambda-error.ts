@@ -1,4 +1,7 @@
 import { HttpException } from '@nestjs/common';
+import { functionArn } from '../functions/arns';
+import { ChangeUnderWayException } from '../functions/change-under-way';
+import { FunctionStatus } from '../functions/entities/function.entity';
 
 /**
  * An error as AWS Lambda answers it, in its REST JSON protocol (ADR 0014): an
@@ -59,13 +62,28 @@ const NAMES: Record<number, string> = {
 };
 
 /**
+ * A change refused while another runs, in Lambda's own words, which the tools
+ * wait on: a function being created is Pending, else an update is in
+ * progress, the function named by its ARN in `region`.
+ */
+function changeUnderWay({ function_ }: ChangeUnderWayException, region: string): LambdaError {
+  return resourceConflict(
+    function_.status === FunctionStatus.CREATING
+      ? 'The operation cannot be performed at this time. The function is currently in the following state: Pending'
+      : `The operation cannot be performed at this time. An update is in progress for resource: ${functionArn(region, function_.accountId, function_.name)}`,
+  );
+}
+
+/**
  * A refusal of FF's services, which FF's API answers, as Lambda's: its status
  * and its message, under the name Lambda gives that status, or the one of
- * Lambda's that the refusal names (CodeStorageExceededException); a failure
- * of the platform's, 500 or 503, Lambda's ServiceException, which the SDKs
- * try again.
+ * Lambda's that the refusal names (CodeStorageExceededException); a change
+ * refused while another runs in Lambda's words, its function in `region`; a
+ * failure of the platform's, 500 or 503, Lambda's ServiceException, which the
+ * SDKs try again.
  */
-export function lambdaErrorOf(error: HttpException): LambdaError {
+export function lambdaErrorOf(error: HttpException, region: string): LambdaError {
+  if (error instanceof ChangeUnderWayException) return changeUnderWay(error, region);
   const status = error.getStatus();
   const answer = error.getResponse();
   const { message: said, error: named } = typeof answer === 'string' ? { message: answer, error: undefined } : (answer as { message?: unknown; error?: unknown });

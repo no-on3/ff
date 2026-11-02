@@ -7,7 +7,7 @@
 import { ConfigService } from '@nestjs/config';
 import { NotFoundException } from '@nestjs/common';
 import { FunctionVersionView } from '../functions/dto/versions.dto';
-import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from '../functions/entities/function.entity';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime, UpdateStatus } from '../functions/entities/function.entity';
 import { FunctionAliasesService } from '../functions/aliases.service';
 import { FunctionsService } from '../functions/functions.service';
 import { FunctionVersionsService } from '../functions/versions.service';
@@ -41,6 +41,9 @@ const fn = (name: string, more: Partial<Function> = {}): Function =>
     timeout: 30,
     status: FunctionStatus.ACTIVE,
     error: null,
+    updateStatus: UpdateStatus.SUCCESSFUL,
+    updateReason: null,
+    updateStartedAt: null,
     description: '',
     role: null,
     revisionId: `rev-${name}`,
@@ -178,7 +181,8 @@ describe("Lambda's reads of functions (L1)", () => {
     });
 
     it('says a deploy under way is Pending, and one that failed Failed with its diagnosis, as the waiters read them', () => {
-      expect(statesOf({ status: FunctionStatus.CREATING, error: null })).toEqual({
+      const states = (status: FunctionStatus, updateStatus: UpdateStatus, error: string | null = null) => statesOf({ status, error, updateStatus, updateReason: error });
+      expect(states(FunctionStatus.CREATING, UpdateStatus.IN_PROGRESS)).toEqual({
         State: 'Pending',
         StateReason: 'The function is being created.',
         StateReasonCode: 'Creating',
@@ -186,13 +190,29 @@ describe("Lambda's reads of functions (L1)", () => {
         LastUpdateStatusReason: 'The function is being created.',
         LastUpdateStatusReasonCode: 'Creating',
       });
-      expect(statesOf({ status: FunctionStatus.ACTIVE, error: null })).toEqual({ State: 'Active', LastUpdateStatus: 'Successful' });
-      expect(statesOf({ status: FunctionStatus.ERROR, error: 'The handler threw at its import' })).toEqual({
+      expect(states(FunctionStatus.ACTIVE, UpdateStatus.SUCCESSFUL)).toEqual({ State: 'Active', LastUpdateStatus: 'Successful' });
+      expect(states(FunctionStatus.ERROR, UpdateStatus.FAILED, 'The handler threw at its import')).toEqual({
         State: 'Failed',
         StateReason: 'The handler threw at its import',
         StateReasonCode: 'InvalidConfiguration',
         LastUpdateStatus: 'Failed',
         LastUpdateStatusReason: 'The handler threw at its import',
+        LastUpdateStatusReasonCode: 'InvalidConfiguration',
+      });
+    });
+
+    it("says an update apart from the function's state: InProgress while it rolls out, Failed with its reason once rolled back, the function Active throughout", () => {
+      const rolledBack = 'The function failed to load: Error: boom. The update was rolled back: the previous version is still live.';
+      expect(statesOf({ status: FunctionStatus.ACTIVE, error: null, updateStatus: UpdateStatus.IN_PROGRESS, updateReason: null })).toEqual({
+        State: 'Active',
+        LastUpdateStatus: 'InProgress',
+        LastUpdateStatusReason: 'The function is being created.',
+        LastUpdateStatusReasonCode: 'Creating',
+      });
+      expect(statesOf({ status: FunctionStatus.ACTIVE, error: null, updateStatus: UpdateStatus.FAILED, updateReason: rolledBack })).toEqual({
+        State: 'Active',
+        LastUpdateStatus: 'Failed',
+        LastUpdateStatusReason: rolledBack,
         LastUpdateStatusReasonCode: 'InvalidConfiguration',
       });
     });

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, HttpException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, PayloadTooLargeException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, HttpException, HttpStatus, InternalServerErrorException, Logger, MessageEvent, NotFoundException, PayloadTooLargeException, PreconditionFailedException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -32,7 +32,7 @@ import { inlineCodeFacts } from './code-package';
 import { inlinePackage } from './inline-package';
 import { lambdaJavaScript } from './lambda-javascript';
 import { AwsEndpoint, awsEndpointsOf } from '../common/aws-endpoint';
-import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime, UpdateStatus } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { CodeImagesService } from '../packages/code-images.service';
 import { packageKey } from '../packages/package.entity';
@@ -49,6 +49,22 @@ import { Observable } from 'rxjs';
 const internal = (action: string) => new RegExp(`^${action} failed because of an internal error \\(request [0-9a-f-]{36}\\)\\.$`);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+/** Whether a row's value meets a condition of TypeORM's, as PostgreSQL decides it: a value, a time, or Not, IsNull or LessThan of one. */
+function meets(value: unknown, condition: unknown): boolean {
+  if (condition instanceof FindOperator) {
+    if (condition.type === 'not') return !meets(value, condition.value);
+    if (condition.type === 'isNull') return value === null || value === undefined;
+    if (condition.type === 'lessThan') return value instanceof Date && value.getTime() < (condition.value as Date).getTime();
+    throw new Error(`no ${condition.type} here`);
+  }
+  if (condition instanceof Date) return value instanceof Date && value.getTime() === condition.getTime();
+  return value === condition;
+}
+
+/** Whether a row meets each of a condition's values; an undefined one is no condition, as TypeORM leaves it out. */
+const matches = (row: Function, condition: Partial<Record<keyof Function, unknown>>): boolean =>
+  Object.entries(condition).every(([field, wanted]) => wanted === undefined || meets(row[field as keyof Function], wanted));
+
 describe('FunctionsService (orchestrator-agnostic)', () => {
   let service: FunctionsService;
   let orchestrator: jest.Mocked<Orchestrator>;
@@ -58,6 +74,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   const functionsRepo = {
     create: jest.fn(),
     save: jest.fn(),
+    update: jest.fn(),
     find: jest.fn(),
     findOne: jest.fn(),
     remove: jest.fn(),
@@ -72,8 +89,20 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   let underLock: boolean;
   const plans = { forAccount: jest.fn(), withTenant: jest.fn() };
   const transaction = { query: jest.fn(), countBy: jest.fn(), save: jest.fn(), existsBy: jest.fn(), update: jest.fn(), findOneByOrFail: jest.fn() };
-  /** Each function's row as the last save left it: a create's end changes it while it is still CREATING. */
+  /** Each function's row as the last save or update left it: a change takes it, then ends it, while it holds it. */
   let rows: Map<string, Function>;
+  /** A conditional UPDATE of functions, as TypeORM runs it: an array of conditions is an OR. */
+  const updateRows = async (_target: unknown, where: Partial<Record<keyof Function, unknown>> | Array<Partial<Record<keyof Function, unknown>>>, changes: Partial<Function>) => {
+    const conditions = Array.isArray(where) ? where : [where];
+    const id = conditions[0].id as string;
+    // A function a test read but never saved: its row as read, which its change's take writes first.
+    const row = rows.get(id) ?? (Array.isArray(where) ? ({ id, revisionId: conditions[0].revisionId } as Function) : undefined);
+    if (!row || !conditions.some((condition) => matches(row, condition))) return { affected: 0 };
+    Object.assign(row, changes);
+    rows.set(id, row);
+    if (changes.status !== undefined) savedStatuses.push(row.status);
+    return { affected: 1 };
+  };
   /** The names the account's other functions have; and those another request takes after an update checked its new name. */
   let namesInUse: Set<string>;
   let takenMeanwhile: Set<string>;
@@ -148,13 +177,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
     transaction.countBy.mockImplementation(async () => existingFunctions);
     transaction.save.mockImplementation(async (_target, entity) => functionsRepo.save(entity));
-    transaction.update.mockImplementation(async (_target, where: { id: string; status: FunctionStatus }, changes: Partial<Function>) => {
-      const row = rows.get(where.id);
-      if (!row || row.status !== where.status) return { affected: 0 };
-      Object.assign(row, changes);
-      savedStatuses.push(row.status);
-      return { affected: 1 };
-    });
+    transaction.update.mockImplementation(updateRows);
+    functionsRepo.update.mockImplementation(updateRows);
     transaction.findOneByOrFail.mockImplementation(async (_target, where: { id: string }) => ({ ...rows.get(where.id) }));
     namesInUse = new Set();
     takenMeanwhile = new Set();
@@ -163,6 +187,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     Object.assign(functionsRepo, {
       manager: {
         transaction: jest.fn(async (work) => work(transaction)),
+        update: jest.fn(updateRows),
         existsBy: jest.fn(async (_target, where: { name: string }) => named(where)),
         // No alias's URL that calls $LATEST, unless a test gives one.
         findOne: jest.fn(async () => null),
@@ -338,7 +363,11 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       const view = await started.rollOut(whenActive);
 
       expect(view).toMatchObject({ id: 'fn-1', status: FunctionStatus.ACTIVE, description: 'Orders' });
-      expect(transaction.update).toHaveBeenCalledWith(Function, { id: 'fn-1', status: FunctionStatus.CREATING }, { status: FunctionStatus.ACTIVE });
+      expect(transaction.update).toHaveBeenCalledWith(
+        Function,
+        { id: 'fn-1', updateStatus: UpdateStatus.IN_PROGRESS, updateStartedAt: expect.any(Date) },
+        { status: FunctionStatus.ACTIVE, error: null, updateStatus: UpdateStatus.SUCCESSFUL, updateReason: null, updateStartedAt: null },
+      );
       expect(whenActive).toHaveBeenCalledWith(transaction, expect.objectContaining({ id: 'fn-1', status: FunctionStatus.ACTIVE }));
       expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ACTIVE]);
     });
@@ -350,7 +379,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     it('leaves a function deleted while it was being created deleted: nothing saved, nothing scaled, its outcome refused', async () => {
       orchestrator.waitUntilReady.mockImplementation(async () => void rows.delete('fn-1'));
 
-      await expect(service.create('user-1', dto)).rejects.toThrow('The function hello was deleted or changed while it was being created: read it again');
+      await expect(service.create('user-1', dto)).rejects.toThrow('The function hello was deleted or changed while this change ran: read it again');
       expect(savedStatuses).toEqual([FunctionStatus.CREATING]);
 
       orchestrator.waitUntilReady.mockImplementation(async () => {
@@ -642,8 +671,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         TENANT,
       );
       expect(orchestrator.waitUntilReady).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 90_000);
-      // Its record as it is now, still running that package; and nothing saved, nothing audited: its version is the same.
-      expect(functionsRepo.findOne).toHaveBeenCalledWith({ where: { id: 'fn-1', accountId: 'user-1', status: FunctionStatus.ACTIVE, packageSha256: INLINE.codeSha256 } });
+      // Its record as it is now, still running that package, no change holding it; and nothing saved, nothing audited: its version is the same.
+      expect(functionsRepo.findOne).toHaveBeenCalledWith({
+        where: { id: 'fn-1', accountId: 'user-1', status: FunctionStatus.ACTIVE, packageSha256: INLINE.codeSha256, updateStatus: Not(UpdateStatus.IN_PROGRESS) },
+      });
       expect(functionsRepo.save).not.toHaveBeenCalled();
       expect(audit.record).not.toHaveBeenCalled();
     });
@@ -1084,7 +1115,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     functionsRepo.findOne.mockResolvedValue(activeFunction());
     const order: string[] = [];
     functionKeys.revoke.mockImplementation(async () => order.push('revoke'));
-    functionsRepo.remove.mockImplementation(async () => order.push('record'));
+    functionsRepo.remove.mockImplementation(async () => {
+      order.push('record');
+      rows.delete('fn-1');
+    });
 
     await service.remove('user-1', 'fn-1');
 
@@ -1095,6 +1129,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     orchestrator.remove.mockRejectedValue(new Error('the API server is down'));
     await expect(service.remove('user-1', 'fn-1')).rejects.toThrow(internal('Deleting the function'));
     expect(functionKeys.revoke).not.toHaveBeenCalled();
+    // Its delete ended Failed, saying why, so that the next change may take it.
+    expect(rows.get('fn-1')).toMatchObject({ updateStatus: UpdateStatus.FAILED, updateReason: expect.stringMatching(/^Deleting the function failed/), updateStartedAt: null });
   });
 
   describe('invoke', () => {
@@ -1340,7 +1376,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   });
 
   describe('a function being created', () => {
-    const creating = (createdAt: Date) => ({ ...activeFunction(), status: FunctionStatus.CREATING, createdAt });
+    /** A function whose create started then, as its row says. */
+    const creating = (startedAt: Date) => {
+      const function_ = { ...activeFunction(), status: FunctionStatus.CREATING, updateStatus: UpdateStatus.IN_PROGRESS, updateStartedAt: startedAt } as Function;
+      rows.set('fn-1', { ...function_ });
+      return function_;
+    };
 
     it('refuses its change, its secrets and its deletion while its rollout may still end, as Lambda refuses a Pending function\'s', async () => {
       functionsRepo.findOne.mockResolvedValue(creating(new Date()));
@@ -1353,13 +1394,123 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(orchestrator.remove).not.toHaveBeenCalled();
     });
 
-    it("takes a create past its rollout's bound and a minute for stopped, its function changed and deleted as one in ERROR", async () => {
-      // 90 s for an instance to be ready, a minute more for the outcome to be saved.
-      functionsRepo.findOne.mockResolvedValue(creating(new Date(Date.now() - 151_000)));
+    it("takes a create past a change's bound for stopped, its function changed and deleted as one in ERROR", async () => {
+      // 90 s for an instance to be ready, as many for an update's rollback, a minute more for the outcome to be saved.
+      functionsRepo.findOne.mockResolvedValue(creating(new Date(Date.now() - 241_000)));
 
       await service.remove('user-1', 'fn-1');
 
       expect(orchestrator.remove).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), []);
+    });
+  });
+
+  describe('one change of a function at a time', () => {
+    /** The function as read, at its revision, and its row: as read, unless a test changes it after. */
+    const read = (revisionId = 'rev-1') => {
+      const function_ = { ...activeFunction(), revisionId, updateStatus: UpdateStatus.SUCCESSFUL, updateReason: null, updateStartedAt: null } as Function;
+      rows.set('fn-1', { ...function_ });
+      // The first read is the request's; the next ones find the row as it is then.
+      functionsRepo.findOne.mockResolvedValueOnce(function_).mockImplementation(async () => ({ ...rows.get('fn-1') }));
+      return function_;
+    };
+    /** Another change of the function, which took it after this one read it, at its own time. */
+    const takenByAnother = (at = new Date()) => void Object.assign(rows.get('fn-1') as Function, { updateStatus: UpdateStatus.IN_PROGRESS, updateStartedAt: at });
+    /** Another change that ended, at a new revision. */
+    const changedByAnother = () => void Object.assign(rows.get('fn-1') as Function, { revisionId: 'rev-2' });
+    /** What another request does between this change's read and its take: while this one's code image is made. */
+    const meanwhile = (other: () => void) => packages.storeInline.mockImplementationOnce(async () => other());
+
+    it('answers an update before its rollout, the function as it will be, its new revision under way; the rollout ends it Successful', async () => {
+      read();
+
+      const started = await service.startUpdate('user-1', 'fn-1', { memory: 256 });
+
+      expect(started).toMatchObject({ rollsOut: true, function_: { memory: 256, updateStatus: UpdateStatus.IN_PROGRESS } });
+      expect(started.function_.revisionId).not.toBe('rev-1');
+      expect(rows.get('fn-1')).toMatchObject({ updateStatus: UpdateStatus.IN_PROGRESS, updateStartedAt: expect.any(Date) });
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      await expect(started.rollOut()).resolves.toMatchObject({ memory: 256, updateStatus: UpdateStatus.SUCCESSFUL });
+      // The record saved says the change ended, not what it read when the change began.
+      expect(rows.get('fn-1')).toMatchObject({ memory: 256, revisionId: started.function_.revisionId, updateStatus: UpdateStatus.SUCCESSFUL, updateReason: null, updateStartedAt: null });
+    });
+
+    it("refuses a change that another took since it was read, in that change's words, and rolls nothing out", async () => {
+      read();
+      meanwhile(takenByAnother);
+
+      await expect(service.update('user-1', 'fn-1', { memory: 256 })).rejects.toThrow(
+        new ConflictException('The function hello is being changed: change or delete it once that change is live, or rolled back'),
+      );
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('refuses with 412 an update whose RevisionId is not the one the function has, read before or moved since; 409 when none was sent', async () => {
+      read();
+      await expect(service.startUpdate('user-1', 'fn-1', { memory: 256 }, { revisionId: 'rev-0' })).rejects.toThrow(
+        new PreconditionFailedException("RevisionId rev-0 isn't the function hello's, rev-1: another change came since it was read. Read the function again, then change it"),
+      );
+
+      // Another change ended between this one's read and its take.
+      read();
+      meanwhile(changedByAnother);
+      await expect(service.startUpdate('user-1', 'fn-1', { memory: 256 }, { revisionId: 'rev-1' })).rejects.toThrow(
+        new PreconditionFailedException("RevisionId rev-1 isn't the function hello's, rev-2: another change came since it was read. Read the function again, then change it"),
+      );
+      read();
+      meanwhile(changedByAnother);
+      await expect(service.startUpdate('user-1', 'fn-1', { memory: 256 })).rejects.toThrow(
+        new ConflictException('The function hello was deleted or changed while this change ran: read it again'),
+      );
+      expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it('saves nothing at its end once another change took the function, past its bound', async () => {
+      read();
+      // Later than this change's start, as a take past its bound is.
+      orchestrator.waitUntilReady.mockImplementationOnce(async () => takenByAnother(new Date(Date.now() + 1_000)));
+
+      await expect(service.update('user-1', 'fn-1', { memory: 256 })).rejects.toThrow('The function hello was deleted or changed while this change ran: read it again');
+
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+      expect(rows.get('fn-1')).toMatchObject({ memory: 128, updateStatus: UpdateStatus.IN_PROGRESS });
+    });
+
+    it('keeps the scaling limits a change of them saved during the rollout: that change takes no function', async () => {
+      read();
+      orchestrator.waitUntilReady.mockImplementationOnce(async () => void Object.assign(rows.get('fn-1') as Function, { minInstances: 1, maxInstances: 7 }));
+
+      await expect(service.update('user-1', 'fn-1', { memory: 256 })).resolves.toMatchObject({ memory: 256, minInstances: 1, maxInstances: 7 });
+      expect(rows.get('fn-1')).toMatchObject({ memory: 256, minInstances: 1, maxInstances: 7, updateStatus: UpdateStatus.SUCCESSFUL });
+    });
+
+    it('marks a rolled-back update Failed with its reason, the function still Active, and lets the next change take it', async () => {
+      read();
+      orchestrator.waitUntilReady.mockRejectedValueOnce(new FunctionLoadError('Error', 'boom at init'));
+
+      await expect(service.update('user-1', 'fn-1', { memory: 256 })).rejects.toThrow(/rolled back: the previous version is still live/);
+      expect(rows.get('fn-1')).toMatchObject({
+        status: FunctionStatus.ACTIVE,
+        memory: 128,
+        updateStatus: UpdateStatus.FAILED,
+        updateReason: expect.stringMatching(/boom at init.*The update was rolled back: the previous version is still live\.$/),
+        updateStartedAt: null,
+      });
+
+      functionsRepo.findOne.mockImplementation(async () => ({ ...rows.get('fn-1') }));
+      await expect(service.update('user-1', 'fn-1', { memory: 256 })).resolves.toMatchObject({ memory: 256, updateStatus: UpdateStatus.SUCCESSFUL, updateReason: null });
+    });
+
+    it('ends a change of the record alone at once, Successful, in the same save', async () => {
+      read();
+
+      const started = await service.startUpdate('user-1', 'fn-1', { name: 'renamed' });
+
+      expect(started.rollsOut).toBe(false);
+      await expect(started.rollOut()).resolves.toMatchObject({ name: 'renamed', updateStatus: UpdateStatus.SUCCESSFUL });
+      expect(functionsRepo.save).toHaveBeenCalledWith(expect.objectContaining({ name: 'renamed', updateStatus: UpdateStatus.SUCCESSFUL, updateStartedAt: null }));
+      expect(orchestrator.update).not.toHaveBeenCalled();
     });
   });
 
@@ -1376,7 +1527,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       const config = await service.updateScalingConfig('user-1', 'fn-1', { maxInstances: 2 });
 
       expect(config).toEqual({ minInstances: 0, maxInstances: 2, scaleToZero: true });
-      expect(functionsRepo.save).toHaveBeenCalledWith(expect.objectContaining({ maxInstances: 2 }));
+      expect(functionsRepo.update).toHaveBeenCalledWith({ id: 'fn-1', accountId: 'user-1' }, { minInstances: 0, maxInstances: 2 });
+      expect(functionsRepo.save).not.toHaveBeenCalled();
       expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 2);
     });
 
@@ -1406,7 +1558,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await expect(service.updateScalingConfig('user-1', 'fn-1', { minInstances: 4 })).rejects.toThrow(
         "minInstances (4) can't be more than maxInstances (3)",
       );
-      expect(functionsRepo.save).not.toHaveBeenCalled();
+      expect(functionsRepo.update).not.toHaveBeenCalled();
     });
 
     it('only saves the limits of a function that is not ACTIVE: its next rollout applies them', async () => {
@@ -1414,7 +1566,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await service.updateScalingConfig('user-1', 'fn-1', { minInstances: 1 });
 
-      expect(functionsRepo.save).toHaveBeenCalled();
+      expect(functionsRepo.update).toHaveBeenCalledWith({ id: 'fn-1', accountId: 'user-1' }, { minInstances: 1, maxInstances: 3 });
       expect(orchestrator.desiredInstances).not.toHaveBeenCalled();
       expect(orchestrator.scale).not.toHaveBeenCalled();
     });
@@ -1424,7 +1576,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       orchestrator.desiredInstances.mockRejectedValue(new Error('api down'));
 
       await expect(service.updateScalingConfig('user-1', 'fn-1', { maxInstances: 2 })).resolves.toMatchObject({ maxInstances: 2 });
-      expect(functionsRepo.save).toHaveBeenCalled();
+      expect(functionsRepo.update).toHaveBeenCalled();
     });
   });
 
@@ -2194,7 +2346,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
 
     it('records a rename, which needs no rollout, and nothing for an update that changes nothing', async () => {
-      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      functionsRepo.findOne.mockImplementation(async () => activeFunction());
       await service.update('user-1', 'fn-1', { name: 'renamed' });
       await service.update('user-1', 'fn-1', { timeout: 5 });
 

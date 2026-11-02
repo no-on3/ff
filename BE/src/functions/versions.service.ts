@@ -51,10 +51,12 @@ export function sameRelease(version: Release, versionEnvironment: EnvironmentDoc
 
 /**
  * Why a function can't be published as it is, as Lambda refuses it: its code
- * not working, or not what the caller read. Undefined when it can.
+ * not working, a change of it `changing`, under way, or not what the caller
+ * read. Undefined when it can.
  */
-export function publishRefusal(function_: Pick<Function, 'status' | 'codeSha256' | 'revisionId'>, sent: PublishVersionDto): Error | undefined {
+export function publishRefusal(function_: Pick<Function, 'status' | 'codeSha256' | 'revisionId'>, sent: PublishVersionDto, changing = false): Error | undefined {
   if (function_.status === FunctionStatus.CREATING) return new ConflictException('The function is still being deployed: publish it once it is ACTIVE');
+  if (changing) return new ConflictException('The function is being changed: publish it once that change is live, or rolled back');
   if (function_.status !== FunctionStatus.ACTIVE) {
     return new ConflictException(`The function is ${function_.status}: it has no working code to publish. Fix it with PUT /functions/{id} first`);
   }
@@ -112,7 +114,7 @@ export class FunctionVersionsService {
    */
   async publishIn(manager: EntityManager, accountId: string, id: string, sent: PublishVersionDto): Promise<{ published: FunctionVersionView; made: boolean }> {
     const function_ = await lockedFunction(manager, accountId, id);
-    const refusal = publishRefusal(function_, sent);
+    const refusal = publishRefusal(function_, sent, this.functions.isChanging(function_));
     if (refusal) throw refusal;
     const environment = await this.environments.load(id, manager);
     const last = await manager

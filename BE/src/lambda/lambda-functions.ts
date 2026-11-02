@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { functionArn, qualifiedFunctionArn } from '../functions/arns';
 import { FunctionVersionView } from '../functions/dto/versions.dto';
-import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
+import { Function, FunctionStatus, Runtime, UpdateStatus } from '../functions/entities/function.entity';
 import { FunctionAliasesService } from '../functions/aliases.service';
 import { FunctionsService } from '../functions/functions.service';
 import { FunctionVersionsService } from '../functions/versions.service';
@@ -33,32 +33,26 @@ const CREATING = 'The function is being created.';
 /**
  * A function's state as Lambda's: a deploy under way is `Pending`, a working
  * function `Active`, one whose deploy failed `Failed` with FF's diagnosis as its
- * reason; its last change as `LastUpdateStatus`, the same way.
+ * reason. Its last change, its create's or an update's, is `LastUpdateStatus`:
+ * `InProgress`, with the reason Lambda gives it, the create's; then
+ * `Successful`, or `Failed` with its reason, the previous version still live
+ * while the function is `Active`.
  */
-export function statesOf(function_: Pick<Function, 'status' | 'error'>): States {
-  switch (function_.status) {
-    case FunctionStatus.CREATING:
-      return {
-        State: 'Pending',
-        StateReason: CREATING,
-        StateReasonCode: 'Creating',
-        LastUpdateStatus: 'InProgress',
-        LastUpdateStatusReason: CREATING,
-        LastUpdateStatusReasonCode: 'Creating',
-      };
-    case FunctionStatus.ACTIVE:
-      return { State: 'Active', LastUpdateStatus: 'Successful' };
-    default: {
-      const reason = function_.error ?? 'The function could not be deployed.';
-      return {
-        State: 'Failed',
-        StateReason: reason,
-        StateReasonCode: 'InvalidConfiguration',
-        LastUpdateStatus: 'Failed',
-        LastUpdateStatusReason: reason,
-        LastUpdateStatusReasonCode: 'InvalidConfiguration',
-      };
-    }
+export function statesOf(function_: Pick<Function, 'status' | 'error' | 'updateStatus' | 'updateReason'>): States {
+  const failure = function_.error ?? 'The function could not be deployed.';
+  const state: Omit<States, 'LastUpdateStatus'> =
+    function_.status === FunctionStatus.CREATING
+      ? { State: 'Pending', StateReason: CREATING, StateReasonCode: 'Creating' }
+      : function_.status === FunctionStatus.ACTIVE
+        ? { State: 'Active' }
+        : { State: 'Failed', StateReason: failure, StateReasonCode: 'InvalidConfiguration' };
+  switch (function_.updateStatus) {
+    case UpdateStatus.IN_PROGRESS:
+      return { ...state, LastUpdateStatus: 'InProgress', LastUpdateStatusReason: CREATING, LastUpdateStatusReasonCode: 'Creating' };
+    case UpdateStatus.FAILED:
+      return { ...state, LastUpdateStatus: 'Failed', LastUpdateStatusReason: function_.updateReason ?? failure, LastUpdateStatusReasonCode: 'InvalidConfiguration' };
+    default:
+      return { ...state, LastUpdateStatus: 'Successful' };
   }
 }
 
