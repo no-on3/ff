@@ -71,7 +71,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   /** Whether a write of the account's namespace runs inside PlansService.withTenant, under the account's lock. */
   let underLock: boolean;
   const plans = { forAccount: jest.fn(), withTenant: jest.fn() };
-  const transaction = { query: jest.fn(), countBy: jest.fn(), save: jest.fn(), existsBy: jest.fn() };
+  const transaction = { query: jest.fn(), countBy: jest.fn(), save: jest.fn(), existsBy: jest.fn(), update: jest.fn(), findOneByOrFail: jest.fn() };
+  /** Each function's row as the last save left it: a create's end changes it while it is still CREATING. */
+  let rows: Map<string, Function>;
   /** The names the account's other functions have; and those another request takes after an update checked its new name. */
   let namesInUse: Set<string>;
   let takenMeanwhile: Set<string>;
@@ -120,11 +122,13 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     savedStatuses = [];
+    rows = new Map();
     environments = memoryEnvironments();
     functionsRepo.create.mockImplementation((dto) => ({ ...dto }));
     functionsRepo.save.mockImplementation(async (entity) => {
       savedStatuses.push(entity.status);
       entity.id ??= 'fn-1';
+      rows.set(entity.id, entity);
       return entity;
     });
     accountPlan = plan();
@@ -144,6 +148,14 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
     transaction.countBy.mockImplementation(async () => existingFunctions);
     transaction.save.mockImplementation(async (_target, entity) => functionsRepo.save(entity));
+    transaction.update.mockImplementation(async (_target, where: { id: string; status: FunctionStatus }, changes: Partial<Function>) => {
+      const row = rows.get(where.id);
+      if (!row || row.status !== where.status) return { affected: 0 };
+      Object.assign(row, changes);
+      savedStatuses.push(row.status);
+      return { affected: 1 };
+    });
+    transaction.findOneByOrFail.mockImplementation(async (_target, where: { id: string }) => ({ ...rows.get(where.id) }));
     namesInUse = new Set();
     takenMeanwhile = new Set();
     const named = (where: { name: string }) => namesInUse.has(where.name);
@@ -314,6 +326,40 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(failure).toBeInstanceOf(BadRequestException);
       expect(failure.getResponse()).not.toHaveProperty('functionId');
       expect(functionsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it("saves the function CREATING, with Lambda's description and role, and rolls it out only when asked, ACTIVE then with what is done in the same transaction", async () => {
+      const started = await service.startCreate('user-42', dto, { description: 'Orders', role: 'arn:aws:iam::000000000001:role/orders' });
+
+      expect(started.function_).toMatchObject({ id: 'fn-1', status: FunctionStatus.CREATING, description: 'Orders', role: 'arn:aws:iam::000000000001:role/orders' });
+      expect(orchestrator.deploy).not.toHaveBeenCalled();
+
+      const whenActive = jest.fn(async () => undefined);
+      const view = await started.rollOut(whenActive);
+
+      expect(view).toMatchObject({ id: 'fn-1', status: FunctionStatus.ACTIVE, description: 'Orders' });
+      expect(transaction.update).toHaveBeenCalledWith(Function, { id: 'fn-1', status: FunctionStatus.CREATING }, { status: FunctionStatus.ACTIVE });
+      expect(whenActive).toHaveBeenCalledWith(transaction, expect.objectContaining({ id: 'fn-1', status: FunctionStatus.ACTIVE }));
+      expect(savedStatuses).toEqual([FunctionStatus.CREATING, FunctionStatus.ACTIVE]);
+    });
+
+    it('gives a function made through FF\'s API no description and no role', async () => {
+      expect(await service.create('user-42', dto)).toMatchObject({ description: '', role: null });
+    });
+
+    it('leaves a function deleted while it was being created deleted: nothing saved, nothing scaled, its outcome refused', async () => {
+      orchestrator.waitUntilReady.mockImplementation(async () => void rows.delete('fn-1'));
+
+      await expect(service.create('user-1', dto)).rejects.toThrow('The function hello was deleted or changed while it was being created: read it again');
+      expect(savedStatuses).toEqual([FunctionStatus.CREATING]);
+
+      orchestrator.waitUntilReady.mockImplementation(async () => {
+        rows.delete('fn-1');
+        throw new FunctionLoadError('Error', 'boom at init');
+      });
+
+      await expect(service.create('user-1', dto)).rejects.toThrow('The function failed to load: Error: boom at init');
+      expect(orchestrator.scale).not.toHaveBeenCalled();
     });
 
     it("keeps its code's hash and size, as AWS Lambda's CodeSha256 and CodeSize, and its handler, function.handler unless it names another", async () => {
@@ -1293,6 +1339,30 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
   });
 
+  describe('a function being created', () => {
+    const creating = (createdAt: Date) => ({ ...activeFunction(), status: FunctionStatus.CREATING, createdAt });
+
+    it('refuses its change, its secrets and its deletion while its rollout may still end, as Lambda refuses a Pending function\'s', async () => {
+      functionsRepo.findOne.mockResolvedValue(creating(new Date()));
+      const refusal = 'The function hello is being created: change or delete it once it is ACTIVE, or ERROR';
+
+      await expect(service.update('user-1', 'fn-1', { memory: 256 })).rejects.toThrow(new ConflictException(refusal));
+      await expect(service.updateSecrets('user-1', 'fn-1', { TOKEN: 'x' })).rejects.toThrow(refusal);
+      await expect(service.remove('user-1', 'fn-1')).rejects.toThrow(refusal);
+      expect(orchestrator.update).not.toHaveBeenCalled();
+      expect(orchestrator.remove).not.toHaveBeenCalled();
+    });
+
+    it("takes a create past its rollout's bound and a minute for stopped, its function changed and deleted as one in ERROR", async () => {
+      // 90 s for an instance to be ready, a minute more for the outcome to be saved.
+      functionsRepo.findOne.mockResolvedValue(creating(new Date(Date.now() - 151_000)));
+
+      await service.remove('user-1', 'fn-1');
+
+      expect(orchestrator.remove).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), []);
+    });
+  });
+
   describe('scaling configuration', () => {
     it('reports the limits, and that a function scales to zero exactly when minInstances is 0', () => {
       expect(service.scalingConfig(activeFunction())).toEqual({ minInstances: 0, maxInstances: 3, scaleToZero: true });
@@ -2014,7 +2084,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.create('user-1', { ...dto, awsEndpoints: [AwsEndpoint.SESV2, AwsEndpoint.SQS] });
 
       const every = [AwsEndpoint.S3, AwsEndpoint.SQS, AwsEndpoint.SESV2, AwsEndpoint.LAMBDA];
-      expect(functionsRepo.save.mock.calls.map(([fn]) => (fn as Function).awsEndpoints)).toEqual([every, every, [AwsEndpoint.SQS, AwsEndpoint.SESV2], [AwsEndpoint.SQS, AwsEndpoint.SESV2]]);
+      // Each create saves its record once; its end writes its status alone.
+      expect(functionsRepo.save.mock.calls.map(([fn]) => (fn as Function).awsEndpoints)).toEqual([every, [AwsEndpoint.SQS, AwsEndpoint.SESV2]]);
       expect(functionKeys.credentialsFor.mock.calls.map(([fn]) => fn.awsEndpoints)).toEqual([every, [AwsEndpoint.SQS, AwsEndpoint.SESV2]]);
     });
 

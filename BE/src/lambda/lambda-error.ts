@@ -35,6 +35,7 @@ export const invalidSignature = (
 ) => new LambdaError(403, 'InvalidSignatureException', message);
 export const accessDenied = (message: string) => new LambdaError(403, 'AccessDeniedException', message);
 export const resourceNotFound = (message: string) => new LambdaError(404, 'ResourceNotFoundException', message);
+export const resourceConflict = (message: string) => new LambdaError(409, 'ResourceConflictException', message);
 export const invalidParameterValue = (message: string) => new LambdaError(400, 'InvalidParameterValueException', message);
 export const invalidRequestContent = (message: string) => new LambdaError(400, 'InvalidRequestContentException', message);
 export const requestEntityTooLarge = (limit: number, operation: string) =>
@@ -59,14 +60,17 @@ const NAMES: Record<number, string> = {
 
 /**
  * A refusal of FF's services, which FF's API answers, as Lambda's: its status
- * and its message, under the name Lambda gives that status; a failure of the
- * platform's, 500 or 503, Lambda's ServiceException, which the SDKs try again.
+ * and its message, under the name Lambda gives that status, or the one of
+ * Lambda's that the refusal names (CodeStorageExceededException); a failure
+ * of the platform's, 500 or 503, Lambda's ServiceException, which the SDKs
+ * try again.
  */
 export function lambdaErrorOf(error: HttpException): LambdaError {
   const status = error.getStatus();
   const answer = error.getResponse();
-  const said = typeof answer === 'string' ? answer : (answer as { message?: unknown }).message;
+  const { message: said, error: named } = typeof answer === 'string' ? { message: answer, error: undefined } : (answer as { message?: unknown; error?: unknown });
   const message = Array.isArray(said) ? said.join('; ') : typeof said === 'string' ? said : error.message;
   if (status >= 500) return new LambdaError(status, 'ServiceException', message);
-  return new LambdaError(status, NAMES[status] ?? 'InvalidRequestContentException', message);
+  const lambdas = typeof named === 'string' && /^[A-Z][A-Za-z]+Exception$/.test(named) ? named : undefined;
+  return new LambdaError(status, lambdas ?? NAMES[status] ?? 'InvalidRequestContentException', message);
 }

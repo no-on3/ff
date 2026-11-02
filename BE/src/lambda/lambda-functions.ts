@@ -72,12 +72,15 @@ interface Settings {
   timeout: number;
   memory: number;
   description: string;
+  /** The role CreateFunction was given, none for a function made through FF's API. */
+  role?: string | null;
   variables?: Record<string, string>;
 }
 
 function settingsOf(settings: Settings): Record<string, unknown> {
   return {
     Runtime: LAMBDA_RUNTIMES[settings.runtime],
+    ...(settings.role ? { Role: settings.role } : {}),
     Handler: settings.handler,
     CodeSize: settings.codeSize,
     Description: settings.description,
@@ -101,7 +104,7 @@ export function latestConfiguration(function_: Function, region: string, variabl
   return {
     FunctionName: function_.name,
     FunctionArn: functionArn(region, function_.accountId, function_.name),
-    ...settingsOf({ ...function_, description: '', variables }),
+    ...settingsOf({ ...function_, variables }),
     LastModified: lambdaTime(function_.updatedAt),
     Version: '$LATEST',
     RevisionId: function_.revisionId,
@@ -109,12 +112,12 @@ export function latestConfiguration(function_: Function, region: string, variabl
   };
 }
 
-/** A version's configuration: what was published, which never changes, so always Active. */
-export function versionConfiguration(function_: Pick<Function, 'name'>, version: FunctionVersionView): Record<string, unknown> {
+/** A version's configuration: what was published, which never changes, so always Active; the role is its function's. */
+export function versionConfiguration(function_: Pick<Function, 'name' | 'role'>, version: FunctionVersionView): Record<string, unknown> {
   return {
     FunctionName: function_.name,
     FunctionArn: version.functionArn,
-    ...settingsOf({ ...version, name: function_.name, variables: version.environment }),
+    ...settingsOf({ ...version, name: function_.name, role: function_.role, variables: version.environment }),
     LastModified: lambdaTime(new Date(version.createdAt)),
     Version: version.version,
     RevisionId: version.revisionId,

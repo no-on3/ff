@@ -532,6 +532,74 @@ check "the audit log names each change, and the key that made it" \
 }
 section_def lambda_tags section_lambda_tags lambda_reads budget=15
 
+section_lambda_changes() {
+section "Lambda's CreateFunction and DeleteFunction with the AWS CLI: a zip sent or in a bucket, answered Pending, then Active or Failed; a version, then the function, deleted"
+as_ver POST /buckets '{"name": "e2e-lambda-code"}' >/dev/null
+maker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-maker", "functions": ["*"], "functionAccess": "write", "buckets": ["e2e-lambda-code"]}')"
+check "a key that may change every function of the account, and reach the bucket of its code" 201 "$(status)"
+# as_maker <aws arguments…>: the AWS CLI with that key, at Lambda's endpoint (aws_lambda) or at the buckets' (aws_ff).
+as_maker() { AWS_KEY="$(jq -r .id <<<"$maker")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$maker")" "$@"; }
+# zip_of <zip> <index.mjs's code>: a package of one module, as Lambda takes one; its CodeSha256 printed.
+zip_of() {
+  python3 - "$@" <<'PY'
+import base64, hashlib, sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w') as archive:
+    archive.writestr('index.mjs', sys.argv[2])
+print(base64.b64encode(hashlib.sha256(open(sys.argv[1], 'rb').read()).digest()).decode())
+PY
+}
+made_sha="$(zip_of "$work/made.zip" 'export const handler = async (event) => ({ made: "by the AWS CLI", stage: process.env.STAGE, event });')"
+role="arn:aws:iam::$ver:role/e2e-made"
+created="$(as_maker aws_lambda create-function --function-name e2e-made --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/made.zip" --description "Made by the AWS CLI" --environment 'Variables={STAGE=e2e}' --tags team=e2e --publish)"
+check "CreateFunction answers at once, Pending, with the zip's CodeSha256 and what it kept: the role, the description" \
+  "Pending Creating \$LATEST $made_sha $role Made by the AWS CLI" \
+  "$(jq -r '"\(.State) \(.StateReasonCode) \(.Version) \(.CodeSha256) \(.Role) \(.Description)"' <<<"$created")"
+check "  ... and the CLI's waiter function-active-v2 waits for it to be Active" accepted "$(outcome as_maker aws_lambda wait function-active-v2 --function-name e2e-made)"
+check "GetFunction reads it Active, its tags with it; its version 1 published with the function's description, as Terraform's provider asks" \
+  "Active Successful e2e {\"STAGE\":\"e2e\"} 1 Made by the AWS CLI" \
+  "$(as_reader get-function --function-name e2e-made | jq -r '"\(.Configuration.State) \(.Configuration.LastUpdateStatus) \(.Tags.team) \(.Configuration.Environment.Variables | tojson)"') \
+$(as_reader get-function-configuration --function-name e2e-made --qualifier 1 | jq -r '"\(.Version) \(.Description)"')"
+made_id="$(as_ver GET '/functions?name=e2e-made' | jq -r '.[0].id')"
+check "  ... and it runs its zip, through FF's API too" '201 "by the AWS CLI" "e2e"' \
+  "$(as_ver POST "/functions/$made_id/invoke" '{"input": {}}' >/dev/null; status) $(jq -c '.output.made, .output.stage' "$work/body" | paste -sd ' ')"
+check "the audit log names the create and the key that made it" "function.create access_key:$(jq -r .id <<<"$maker")" \
+  "$(as_ver GET /audit-log | jq -r --arg r "function:$made_id" '[.entries[] | select(.resource == $r and .action == "function.create")][0] | "\(.action) \(.actor)"')"
+
+as_maker aws_ff s3 cp "$work/made.zip" s3://e2e-lambda-code/builds/made.zip --only-show-errors
+as_maker aws_lambda create-function --function-name e2e-made-s3 --runtime nodejs24.x --role "$role" --handler index.handler \
+  --code S3Bucket=e2e-lambda-code,S3Key=builds/made.zip >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-made-s3 >/dev/null 2>&1 || true
+check "its code read from the account's bucket instead, the same zip; Lambda's defaults, 128 MB and 3 seconds" "Active $made_sha 128 3" \
+  "$(as_reader get-function-configuration --function-name e2e-made-s3 | jq -r '"\(.State) \(.CodeSha256) \(.MemorySize) \(.Timeout)"')"
+
+zip_of "$work/broken.zip" 'throw new Error("boom at import");' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-made-broken --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/broken.zip" >/dev/null
+check "a function whose code fails at its import: the waiter stops at Failed" refused "$(outcome as_maker aws_lambda wait function-active-v2 --function-name e2e-made-broken | xargs)"
+check "  ... GetFunction says why, FF's diagnosis as its reason" "Failed true" \
+  "$(as_reader get-function-configuration --function-name e2e-made-broken | jq -r '"\(.State) \(.StateReason | contains("boom at import"))"')"
+
+check "refused as Lambda refuses: a runtime FF lacks, a name taken, a key that may only read, a zip not in the bucket" \
+  "refused InvalidParameterValueException refused ResourceConflictException refused AccessDeniedException refused InvalidParameterValueException" \
+  "$(outcome as_maker aws_lambda create-function --function-name e2e-made-22 --runtime nodejs22.x --role "$role" --handler index.handler --zip-file "fileb://$work/made.zip") \
+$(outcome as_maker aws_lambda create-function --function-name e2e-made --runtime nodejs24.x --role "$role" --handler index.handler --zip-file "fileb://$work/made.zip") \
+$(outcome as_reader create-function --function-name e2e-made-r --runtime nodejs24.x --role "$role" --handler index.handler --zip-file "fileb://$work/made.zip") \
+$(outcome as_maker aws_lambda create-function --function-name e2e-made-none --runtime nodejs24.x --role "$role" --handler index.handler --code S3Bucket=e2e-lambda-code,S3Key=builds/none.zip)"
+
+as_maker aws_lambda delete-function --function-name e2e-made --qualifier 1 >/dev/null
+check "DeleteFunction with a version deletes that version alone" "refused ResourceNotFoundException Active" \
+  "$(outcome as_reader get-function --function-name e2e-made --qualifier 1) $(as_reader get-function --function-name e2e-made | jq -r .Configuration.State)"
+check "  ... never \$LATEST alone, which would be the function" "refused InvalidParameterValueException" \
+  "$(outcome as_maker aws_lambda delete-function --function-name e2e-made --qualifier '$LATEST')"
+for made in e2e-made e2e-made-s3 e2e-made-broken; do as_maker aws_lambda delete-function --function-name "$made" >/dev/null; done
+check "  ... and without one, the function, its record gone from FF's API too" "refused ResourceNotFoundException 404" \
+  "$(outcome as_reader get-function --function-name e2e-made) $(as_ver GET "/functions/$made_id" >/dev/null; status)"
+as_maker aws_ff s3 rm s3://e2e-lambda-code/builds/made.zip --only-show-errors
+as_ver DELETE /buckets/e2e-lambda-code >/dev/null
+}
+section_def lambda_changes section_lambda_changes lambda_reads budget=90
+
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"
 created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-scheduled", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"

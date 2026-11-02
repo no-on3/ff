@@ -36,8 +36,8 @@ function tagged(caller: LambdaCaller): string {
   return function_.id;
 }
 
-/** TagResource's Tags: an object of strings, each a tag's value by its key. */
-function tagsOf(sent: unknown): Record<string, string> {
+/** TagResource's Tags, and CreateFunction's: an object of strings, each a tag's value by its key. */
+export function tagsOf(sent: unknown): Record<string, string> {
   if (sent === undefined) throw invalidParameterValue('Tags is required: the tags to put on the function, each value by its key.');
   if (!sent || typeof sent !== 'object' || Array.isArray(sent) || Object.values(sent).some((value) => typeof value !== 'string')) {
     throw invalidParameterValue("Tags must be an object of strings, each tag's value by its key.");

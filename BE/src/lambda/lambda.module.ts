@@ -7,6 +7,7 @@ import { StorageModule } from '../storage/storage.module';
 import { TagsModule } from '../tags/tags.module';
 import { LambdaCodeLinks } from './lambda-code-links';
 import { LambdaFrontDoor } from './lambda-front-door';
+import { LambdaFunctionChanges } from './lambda-function-changes';
 import { LambdaFunctionReads } from './lambda-functions';
 import { LambdaOperations } from './lambda-operations';
 import { LambdaTags } from './lambda-tags';
@@ -20,12 +21,13 @@ import { LambdaTags } from './lambda-tags';
   providers: [
     LambdaCodeLinks,
     LambdaFunctionReads,
+    LambdaFunctionChanges,
     LambdaTags,
     // Each group of operations built so far; the others answer that FF doesn't offer them yet.
     {
       provide: LambdaOperations,
-      useFactory: (reads: LambdaFunctionReads, tags: LambdaTags) => new LambdaOperations(reads, tags),
-      inject: [LambdaFunctionReads, LambdaTags],
+      useFactory: (reads: LambdaFunctionReads, changes: LambdaFunctionChanges, tags: LambdaTags) => new LambdaOperations(reads, changes, tags),
+      inject: [LambdaFunctionReads, LambdaFunctionChanges, LambdaTags],
     },
     LambdaFrontDoor,
   ],

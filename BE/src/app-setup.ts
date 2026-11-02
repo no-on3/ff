@@ -6,6 +6,7 @@ import { RequestHandler, json } from 'express';
 import helmet from 'helmet';
 import { apiDocument } from './api-document';
 import { NoNulPipe } from './common/no-nul.pipe';
+import { DTO_VALIDATION } from './common/validation';
 import { requestContextMiddleware } from './common/request-context';
 import { corsOptions } from './cors';
 
@@ -70,7 +71,7 @@ export function configureApp(app: INestApplication, config: ConfigService): void
   const trusted = config.getOrThrow<string[]>('http.trustProxy');
   if (trusted.length > 0) (app as NestExpressApplication).set('trust proxy', trusted);
   // Then text with a NUL character, which PostgreSQL can't store: a 400 rather than the database's 500.
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }), new NoNulPipe());
+  app.useGlobalPipes(new ValidationPipe(DTO_VALIDATION), new NoNulPipe());
   // The OpenAPI document and its viewer, at /api: off in production unless FF_API_DOCS says otherwise.
   if (config.getOrThrow<boolean>('http.apiDocs')) SwaggerModule.setup('api', app, apiDocument(app));
 }

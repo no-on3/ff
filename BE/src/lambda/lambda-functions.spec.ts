@@ -19,7 +19,7 @@ import { DEVELOPMENT_KEY } from '../encryption/key-ring';
 import { awsEndpointsOf } from '../common/aws-endpoint';
 import { LambdaError } from './lambda-error';
 import { LambdaCodeLinks } from './lambda-code-links';
-import { LambdaFunctionReads, lambdaTime, latestConfiguration, statesOf } from './lambda-functions';
+import { LambdaFunctionReads, lambdaTime, latestConfiguration, statesOf, versionConfiguration } from './lambda-functions';
 import { LambdaCall, LambdaCaller, LambdaHandlers, LambdaOperations, operationOf } from './lambda-operations';
 
 const ACCOUNT = '000000000001';
@@ -41,6 +41,8 @@ const fn = (name: string, more: Partial<Function> = {}): Function =>
     timeout: 30,
     status: FunctionStatus.ACTIVE,
     error: null,
+    description: '',
+    role: null,
     revisionId: `rev-${name}`,
     updatedAt: UPDATED,
     ...more,
@@ -164,6 +166,15 @@ describe("Lambda's reads of functions (L1)", () => {
       expect(latestConfiguration(fn('billing', { runtime: Runtime.PYTHON }), REGION, {})).toMatchObject({ Runtime: 'python3.13' });
       expect(latestConfiguration(fn('billing'), REGION, {})).not.toHaveProperty('Environment');
       expect(lambdaTime(new Date('2026-01-02T03:04:05.000Z'))).toBe('2026-01-02T03:04:05.000+0000');
+    });
+
+    it("shows the description and the role that CreateFunction kept, a version its function's role", () => {
+      const role = `arn:aws:iam::${ACCOUNT}:role/orders`;
+      const made = fn('orders', { description: 'Takes orders', role });
+
+      expect(latestConfiguration(made, REGION)).toMatchObject({ Description: 'Takes orders', Role: role });
+      expect(versionConfiguration(made, version('orders', 1))).toMatchObject({ Description: 'version 1', Role: role });
+      expect(versionConfiguration(fn('orders'), version('orders', 1))).not.toHaveProperty('Role');
     });
 
     it('says a deploy under way is Pending, and one that failed Failed with its diagnosis, as the waiters read them', () => {

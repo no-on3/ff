@@ -93,6 +93,7 @@ const TRIGGER_QUALIFIERS = migrationNames.find((name) => name.startsWith('Trigge
 const ALARM_DIMENSIONS = migrationNames.find((name) => name.startsWith('AlarmDimensions')) as string;
 const FUNCTION_KEY_RENEWAL = migrationNames.find((name) => name.startsWith('FunctionKeyRenewal')) as string;
 const LAMBDA_ENDPOINT = migrationNames.find((name) => name.startsWith('LambdaEndpoint')) as string;
+const RESOURCE_TAGS = migrationNames.find((name) => name.startsWith('ResourceTags')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -1217,6 +1218,25 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await migrateDownTo(dataSource, LAMBDA_ENDPOINT);
       expect(await dataSource.query(`SELECT to_regclass('resource_tags') AS t`)).toEqual([{ t: null }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it('the function-descriptions migration gives every function there is an empty description and no role, and reverts with both set', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, RESOURCE_TAGS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('before', $1, 'nodejs', 'v1', 128, 5)`, [ACCOUNT]);
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await dataSource.query(`SELECT description, role FROM functions`)).toEqual([{ description: '', role: null }]);
+      await dataSource.query(`UPDATE functions SET description = $1, role = $2`, ['é'.repeat(256), `arn:aws:iam::${ACCOUNT}:role/orders`]);
+      await expect(dataSource.query(`UPDATE functions SET description = $1`, ['d'.repeat(257)])).rejects.toThrow(/value too long/);
+
+      await migrateDownTo(dataSource, RESOURCE_TAGS);
+      expect(await dataSource.query(`SELECT column_name FROM information_schema.columns WHERE table_name = 'functions' AND column_name IN ('description', 'role')`)).toEqual([]);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

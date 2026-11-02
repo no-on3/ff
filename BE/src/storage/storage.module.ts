@@ -45,6 +45,6 @@ import { WebsiteServer } from './website-server';
   imports: [TypeOrmModule.forFeature([Bucket, StorageKey, StorageRequestCount, KeyUse, Account, Function, Queue]), EncryptionModule, AuditModule, PlansModule, BillingModule, NotificationsModule],
   controllers: [BucketsController, StorageKeysController, DeployKeysController],
   providers: [StorageDirectory, StorageRequestCountsService, KeyUses, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys, BucketSamplesService, BucketEvents, BucketNotificationsService, BucketWebsitesService, SiteTransfer, WebsiteServer],
-  exports: [StorageDirectory, KeyUses, S3FrontDoor, BucketsService, StorageKeysService, FunctionKeys, BucketEvents, WebsiteServer],
+  exports: [StorageDirectory, KeyUses, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys, BucketEvents, WebsiteServer],
 })
 export class StorageModule {}

@@ -1105,6 +1105,13 @@ $(lambda_with "${lambda_b[@]}" invoke --function-name l5-a /dev/null)"
 check "  ... nor reads its tags, nor tags it, nor untags it, by its ARN" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" list-tags --resource "$arn_a") $(lambda_with "${lambda_b[@]}" tag-resource --resource "$arn_a" --tags owner=b) \
 $(lambda_with "${lambda_b[@]}" untag-resource --resource "$arn_a" --tag-keys owner)"
+# Neither is read: the name's account is checked first, and A's bucket is one B's key can't know of.
+made_by_b=(--runtime nodejs24.x --role "arn:aws:iam::$account_b:role/l5" --handler index.handler)
+check "  ... nor creates a function in A's account by an ARN of A's, nor with code from A's bucket, nothing made in either" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException 0 0" \
+  "$(lambda_with "${lambda_b[@]}" create-function --function-name "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-b-made" "${made_by_b[@]}" --code S3Bucket=l5-b-code,S3Key=code.zip) \
+$(lambda_with "${lambda_b[@]}" create-function --function-name l5-b-made "${made_by_b[@]}" --code S3Bucket=l5-photos-a,S3Key=code.zip) \
+$(as_a GET '/functions?name=l5-b-made' | jq length) $(as_b GET '/functions?name=l5-b-made' | jq length)"
 check "A's key finds it, by its name and by its ARN" "$arn_a $arn_a" \
   "$(lambda_with "${lambda_a[@]}" get-function --function-name l5-a --query Configuration.FunctionArn) $(lambda_with "${lambda_a[@]}" get-function --function-name "$arn_a" --query Configuration.FunctionArn)"
 # listed <key ID> <secret>: the functions the key's ListFunctions gives, by name, one a line.

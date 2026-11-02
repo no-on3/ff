@@ -111,6 +111,33 @@ export interface CodeImagesRestore {
 /** A function as the API answers it: its record and its variables. Its secrets' values are never part of it. */
 export type FunctionView = Function & { environment: Record<string, string> };
 
+/** What Lambda's CreateFunction gives a function beside FF's fields: its description, and the role it names, kept with no effect. */
+export interface LambdaCreateFields {
+  description?: string;
+  role?: string;
+}
+
+/** What is done with a function made ACTIVE, in the transaction that says so: Lambda's CreateFunction publishes its first version. */
+export type WhenActive = (manager: EntityManager, function_: Function) => Promise<unknown>;
+
+/** A create saved, its function CREATING, whose rollout is still to run. */
+export interface StartedCreate {
+  function_: Function;
+  environment: FunctionEnvironmentValues;
+  /**
+   * Deploys the function and waits for an instance: ACTIVE then, with what
+   * `whenActive` does; otherwise ERROR, its failure thrown as FF's API answers it.
+   */
+  rollOut(whenActive?: WhenActive): Promise<FunctionView>;
+}
+
+/**
+ * How long past its rollout's bound a create may still be saving its outcome:
+ * changes wait for it until then. A create older than that was stopped, by a
+ * restart of the backend, and its function may be changed, as one in ERROR.
+ */
+const CREATE_MARGIN_MS = 60_000;
+
 /** The answer for a function: a copy of its record, with its variables. */
 function viewOf(function_: Function, environment: FunctionEnvironmentValues): FunctionView {
   return { ...function_, environment: { ...environment.variables } };
@@ -356,7 +383,18 @@ export class FunctionsService {
     return this.configService.get<number>('orchestrator.readyTimeoutSeconds', 90) * 1000;
   }
 
+  /** Creates a function and rolls it out, answering once it is ACTIVE; ERROR answers its diagnosis, the function kept. */
   async create(accountId: string, createFunctionDto: CreateFunctionDto): Promise<FunctionView> {
+    return (await this.startCreate(accountId, createFunctionDto)).rollOut();
+  }
+
+  /**
+   * A create's first half: the function checked against the plan and the
+   * account's other functions, its code's image made, its record saved
+   * CREATING, with Lambda's fields when Lambda's CreateFunction made it. Its
+   * rollout is the second half, which that operation doesn't wait for.
+   */
+  async startCreate(accountId: string, createFunctionDto: CreateFunctionDto, lambda: LambdaCreateFields = {}): Promise<StartedCreate> {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, createFunctionDto);
     const { environment: variables, secrets, ...fields } = createFunctionDto;
@@ -374,33 +412,68 @@ export class FunctionsService {
       ...code,
       packageSha256,
       accountId,
+      description: lambda.description ?? '',
+      role: lambda.role ?? null,
       status: FunctionStatus.CREATING,
     });
+    const saved = await this.insertWithinPlan(plan, function_, environment);
+    return { function_: saved, environment, rollOut: (whenActive) => this.rollOutCreated(saved, environment, codeImage, whenActive) };
+  }
 
-    const savedFunction = await this.insertWithinPlan(plan, function_, environment);
+  /**
+   * A create's second half: the function deployed, then ACTIVE once an
+   * instance is ready; otherwise ERROR with the diagnosis, scaled to zero so a
+   * pod that can't start doesn't hold the quota, and the failure thrown, the
+   * function's ID in it, so the caller fixes it rather than create it again.
+   */
+  private async rollOutCreated(function_: Function, environment: FunctionEnvironmentValues, codeImage: string, whenActive?: WhenActive): Promise<FunctionView> {
     try {
       // A copy of inline code's text in object storage, beside the package its pods run; a package is there already.
-      if (savedFunction.packageType === PackageType.INLINE) await this.objectStore.uploadCode(this.codePath(savedFunction), savedFunction.code);
+      if (function_.packageType === PackageType.INLINE) await this.objectStore.uploadCode(this.codePath(function_), function_.code);
 
-      const workload = await this.workload(savedFunction, environment, codeImage);
-      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(workload, tenant));
+      const workload = await this.workload(function_, environment, codeImage);
+      await this.plans.withTenant(function_.accountId, (tenant) => this.orchestrator.deploy(workload, tenant));
       // ACTIVE only once an instance can actually serve; otherwise ERROR with the diagnostics.
-      await this.orchestrator.waitUntilReady(savedFunction, this.readyTimeoutMs());
+      await this.orchestrator.waitUntilReady(function_, this.readyTimeoutMs());
 
-      savedFunction.status = FunctionStatus.ACTIVE;
-      await this.functionsRepository.save(savedFunction);
-
-      return viewOf(savedFunction, environment);
+      const active = await this.endCreate(function_, { status: FunctionStatus.ACTIVE }, whenActive);
+      if (active) return viewOf(active, environment);
     } catch (error) {
       const failure = callersFailure(error) ?? platformFailure(this.logger, 'Deploying the function', error);
-      savedFunction.status = FunctionStatus.ERROR;
-      savedFunction.error = failure;
-      await this.functionsRepository.save(savedFunction);
       // Its objects and the diagnosis stay, so an update can repair it, and a delete removes everything.
-      await this.releaseInstances(savedFunction);
-      // The function exists all the same: its ID lets the caller open it to fix it, rather than create it again.
-      throw failureResponse(error, failure, { functionId: savedFunction.id });
+      if (await this.endCreate(function_, { status: FunctionStatus.ERROR, error: failure })) await this.releaseInstances(function_);
+      throw failureResponse(error, failure, { functionId: function_.id });
     }
+    // Deleted or changed meanwhile, the create having outlasted the time changes wait for it: what came since stands.
+    throw new ConflictException(`The function ${function_.name} was deleted or changed while it was being created: read it again`);
+  }
+
+  /**
+   * Saves a create's outcome, and does what `whenActive` does in the same
+   * transaction, unless the function is no longer CREATING: a delete or a
+   * change came since, which a save of the record would undo, or bring the
+   * function back. Null then, nothing done.
+   */
+  private endCreate(function_: Function, outcome: Pick<Function, 'status'> & Partial<Pick<Function, 'error'>>, whenActive?: WhenActive): Promise<Function | null> {
+    return this.functionsRepository.manager.transaction(async (manager) => {
+      const { affected } = await manager.update(Function, { id: function_.id, status: FunctionStatus.CREATING }, outcome);
+      if (!affected) return null;
+      const ended = await manager.findOneByOrFail(Function, { id: function_.id });
+      if (whenActive) await whenActive(manager, ended);
+      return ended;
+    });
+  }
+
+  /**
+   * Refuses to change or delete a function whose create is still rolling out,
+   * as Lambda refuses a Pending function's: the rollout would race the change
+   * on the cluster. Past the bound a create keeps to, it was stopped, and the
+   * function is changed as one in ERROR.
+   */
+  private refuseWhileCreating(function_: Function, now = new Date()): void {
+    if (function_.status !== FunctionStatus.CREATING) return;
+    if (now.getTime() - function_.createdAt.getTime() > this.readyTimeoutMs() + CREATE_MARGIN_MS) return;
+    throw new ConflictException(`The function ${function_.name} is being created: change or delete it once it is ACTIVE, or ERROR`);
   }
 
   /**
@@ -579,6 +652,7 @@ export class FunctionsService {
 
   async update(accountId: string, id: string, updateFunctionDto: UpdateFunctionDto): Promise<FunctionView> {
     const function_ = await this.findOne(accountId, id);
+    this.refuseWhileCreating(function_);
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
     const { environment: variables, ...changes } = updateFunctionDto;
@@ -666,6 +740,7 @@ export class FunctionsService {
    */
   async updateSecrets(accountId: string, id: string, changes: Record<string, string | null>): Promise<SecretsView> {
     const function_ = await this.findOne(accountId, id);
+    this.refuseWhileCreating(function_);
     const before = await this.environments.load(id);
     const { secrets, changed } = changedSecrets(before.secrets, changes, new Date());
     if (!changed) return secretsView(before);
@@ -951,6 +1026,7 @@ export class FunctionsService {
 
   async remove(accountId: string, id: string): Promise<void> {
     const function_ = await this.findOne(accountId, id);
+    this.refuseWhileCreating(function_);
 
     try {
       // Its versions' pods go with its own; their records go with its record.

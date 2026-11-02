@@ -133,6 +133,19 @@ export class Function {
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, unknown>;
 
+  /** What it is for, as Lambda's Description: up to 256 characters, empty for none. */
+  @Column({ type: 'varchar', length: 256, default: '' })
+  description: string;
+
+  /**
+   * The IAM role's ARN that Lambda's CreateFunction was given, kept and shown
+   * back as Lambda shows it, with no effect: FF has no IAM, and the function's
+   * own key to its account's services stands for its role. None for a
+   * function made through FF's API.
+   */
+  @Column({ type: 'varchar', length: 2048, nullable: true })
+  role: string | null;
+
   /** Why the function is in ERROR: the last failed deploy or update. Cleared once a rollout succeeds. */
   @Column({ type: 'varchar', nullable: true })
   error?: string | null;

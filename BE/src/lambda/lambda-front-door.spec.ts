@@ -277,6 +277,9 @@ describe("Lambda's endpoint (L1)", () => {
       expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([409, 'ResourceConflictException', 'A function named orders exists']);
       throwing(new NotFoundException('Function f-orders not found'));
       expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([404, 'ResourceNotFoundException', 'Function f-orders not found']);
+      // A refusal that names its error as Lambda's model does keeps that name.
+      throwing(new BadRequestException({ statusCode: 400, error: 'CodeStorageExceededException', message: 'The Beta plan keeps 75 MB of code an account' }));
+      expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([400, 'CodeStorageExceededException', 'The Beta plan keeps 75 MB of code an account']);
       throwing(new ServiceUnavailableException("The code registry can't be reached: nothing changed, try again in a moment"));
       const answer = await send('GET', '/2015-03-31/functions/orders');
       expect(refusal(answer)).toEqual([503, 'ServiceException', "The code registry can't be reached: nothing changed, try again in a moment"]);

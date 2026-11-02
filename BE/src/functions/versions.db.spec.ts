@@ -12,7 +12,7 @@
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
-import { BadRequestException, ConflictException, InternalServerErrorException, NotFoundException, PreconditionFailedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, InternalServerErrorException, Logger, NotFoundException, PreconditionFailedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
@@ -269,6 +269,52 @@ run("functions' versions and aliases (L2)", () => {
     expect(await numbers(fn.id)).toEqual([]);
     expect(callsFor(orchestrator.removeVersion, fn.id)).toEqual([[{ id: fn.id, accountId: ACCOUNT, version: 1 }], [{ id: fn.id, accountId: ACCOUNT, version: 1 }]]);
     expect((await deletions())[0].n).toBe(1);
+  });
+
+  describe("a create as Lambda's CreateFunction makes it, answered before its rollout", () => {
+    const role = `arn:aws:iam::${ACCOUNT}:role/orders`;
+
+    it('saves the function CREATING with its description and role, refuses its changes meanwhile, then makes it ACTIVE with version 1 in one transaction', async () => {
+      const started = await functions.startCreate(ACCOUNT, body('created'), { description: 'Takes orders', role });
+      const { id } = started.function_;
+
+      expect(await query('SELECT status, description, role FROM functions WHERE id = $1', [id])).toEqual([{ status: 'CREATING', description: 'Takes orders', role }]);
+      await expect(functions.update(ACCOUNT, id, { memory: 256 })).rejects.toThrow('The function created is being created: change or delete it once it is ACTIVE, or ERROR');
+      await expect(functions.remove(ACCOUNT, id)).rejects.toBeInstanceOf(ConflictException);
+
+      const view = await started.rollOut((manager) => versions.publishIn(manager, ACCOUNT, id, {}));
+
+      expect(view).toMatchObject({ id, status: 'ACTIVE', description: 'Takes orders', role, environment: { TABLE: 'orders' } });
+      // The package the pods run is the backend's to know: the answer doesn't give it.
+      expect(view.packageSha256).toBeUndefined();
+      // A version's description is its function's, unless its publish says another, as Lambda's.
+      expect(await versions.list(ACCOUNT, id)).toMatchObject([{ version: '1', description: 'Takes orders' }]);
+      expect(await functions.findOne(ACCOUNT, id)).toMatchObject({ description: 'Takes orders', role });
+    });
+
+    it('keeps the function from ACTIVE when what goes with it fails: the transaction undone, the function ERROR, no version', async () => {
+      const started = await functions.startCreate(ACCOUNT, body('unpublished'));
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      await expect(
+        started.rollOut(async () => {
+          throw new Error('the publish failed');
+        }),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+
+      expect(await query('SELECT status FROM functions WHERE id = $1', [started.function_.id])).toEqual([{ status: 'ERROR' }]);
+      expect(await query('SELECT count(*)::int AS n FROM function_versions WHERE function_id = $1', [started.function_.id])).toEqual([{ n: 0 }]);
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining('the publish failed'), expect.any(String));
+      logged.mockRestore();
+    });
+
+    it('leaves a function deleted during its rollout deleted, its outcome refused', async () => {
+      const started = await functions.startCreate(ACCOUNT, body('gone'));
+      await query('DELETE FROM functions WHERE id = $1', [started.function_.id]);
+
+      await expect(started.rollOut()).rejects.toBeInstanceOf(ConflictException);
+      expect(await query('SELECT count(*)::int AS n FROM functions WHERE id = $1', [started.function_.id])).toEqual([{ n: 0 }]);
+    });
   });
 
   describe('aliases', () => {
