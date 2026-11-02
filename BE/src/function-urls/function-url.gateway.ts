@@ -14,6 +14,7 @@ import { WRITERS } from '../auth/route-rules';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
+import { BodyRefusals, originForm, readBody, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { ALGORITHM, HeaderSignature, SignedService, checkAuthorization, readAuthorization, serviceWords } from '../common/signature-v4';
 import { withRequestContext } from '../common/request-context';
@@ -89,9 +90,6 @@ function jsonAnswer(status: number, message: string, headers: Array<[string, str
   return { status, headers: [['content-type', 'application/json'], ...headers], body: Buffer.from(JSON.stringify({ Message: message })) };
 }
 
-/** A header's value, the first when it came more than once. */
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
-
 /** A lookup's answer; 404 when the function or the alias was deleted meanwhile: its URL went with it. */
 async function notFoundAsRefusal<T>(lookup: Promise<T>): Promise<T> {
   try {
@@ -113,48 +111,14 @@ function plainAddress(address: string): string {
   return mapped && isIPv4(mapped[1]) ? mapped[1] : address;
 }
 
+/** A request over the limit is refused with 413, which closes the connection rather than read the rest. */
+const BODY_REFUSALS: BodyRefusals = {
+  tooLarge: () => new Refusal(HttpStatus.PAYLOAD_TOO_LARGE, 'Request Entity Too Large', [['connection', 'close']]),
+  incomplete: () => new Error('The caller closed the connection before sending its whole request'),
+};
+
 /** The request's path alone. */
 const pathOf = (target: string | undefined): string => originForm(target).split('?')[0];
-
-/** The request's path and query: an absolute target, as a proxy may send one, without its scheme and host; "*" is the root. */
-function originForm(target: string | undefined): string {
-  if (target?.startsWith('/')) return target;
-  try {
-    const url = new URL(target ?? '');
-    return `${url.pathname}${url.search}`;
-  } catch {
-    return '/';
-  }
-}
-
-/**
- * The request's body, whole; a refusal, 413, past the limit, which then closes
- * the connection rather than read the rest.
- */
-function readBody(request: IncomingMessage, limit: number): Promise<Buffer> {
-  const tooLarge = () => new Refusal(HttpStatus.PAYLOAD_TOO_LARGE, 'Request Entity Too Large', [['connection', 'close']]);
-  if (Number(request.headers['content-length']) > limit) return Promise.reject(tooLarge());
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const onData = (chunk: Buffer) => {
-      size += chunk.length;
-      if (size <= limit) {
-        chunks.push(chunk);
-        return;
-      }
-      request.off('data', onData);
-      request.resume();
-      reject(tooLarge());
-    };
-    request.on('data', onData);
-    request.on('end', () => resolve(Buffer.concat(chunks)));
-    request.on('error', reject);
-    request.on('close', () => {
-      if (!request.complete) reject(new Error('The caller closed the connection before sending its whole request'));
-    });
-  });
-}
 
 /**
  * The function URL gateway: a server of its own, on FF_FUNCTION_URL_PORT, that
@@ -303,7 +267,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     const { function_, target } = await this.runOf(url);
     await this.admit(url);
 
-    const body = caller?.body ?? (await readBody(request, URL_PAYLOAD_LIMIT));
+    const body = caller?.body ?? (await readBody(request, URL_PAYLOAD_LIMIT, BODY_REFUSALS));
     // On a customer's domain, the event names it, and its first label, as API Gateway names a custom domain's.
     const domainName = hostName(request.headers.host) as string;
     const event = urlEvent({
@@ -371,7 +335,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
    * read first, for its hash.
    */
   private async signedCaller(request: IncomingMessage, url: FunctionUrl, signature: HeaderSignature): Promise<UrlCaller> {
-    const body = await readBody(request, URL_PAYLOAD_LIMIT);
+    const body = await readBody(request, URL_PAYLOAD_LIMIT, BODY_REFUSALS);
     const key = await this.directory.key(signature.accessKeyId);
     if (key === EXPIRED) throw forbidden('The security token included in the request is expired.');
     if (!key) throw forbidden('The security token included in the request is invalid.');

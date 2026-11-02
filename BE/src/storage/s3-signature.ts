@@ -1,4 +1,5 @@
 import { IncomingHttpHeaders } from 'node:http';
+import { single } from '../common/http-request';
 import {
   ALGORITHM,
   HeaderSignature,
@@ -90,8 +91,6 @@ const S3_PRESIGNED: SignedService = {
   paths: 'once',
   refuse: s3Words(malformedQueryAuthorization, (detail) => malformedQueryAuthorization(`Error parsing the X-Amz-Credential parameter; ${detail}`)),
 };
-
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
 
 const QUERY_PARAMETERS = ['X-Amz-Algorithm', 'X-Amz-Credential', 'X-Amz-Signature', 'X-Amz-Date', 'X-Amz-SignedHeaders', 'X-Amz-Expires'];
 

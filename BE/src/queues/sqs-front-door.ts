@@ -9,10 +9,10 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
+import { BodyRefusals, originForm, readBody, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { PlansService } from '../plans/plans.service';
 import { countQueueRequest } from '../plans/rate-limits';
-import { originForm } from '../storage/front-door';
 import { KeyUses } from '../storage/key-uses.service';
 import { EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
 import { SqsError, accessDenied, expiredToken, internalError, invalidClientTokenId, invalidParameter, missingAuthenticationToken, requestThrottled } from './sqs-error';
@@ -25,33 +25,11 @@ const MAX_BODY_BYTES = 3 * 1024 * 1024;
 const CONTENT_TYPE = 'application/x-amz-json-1.0';
 const TARGET_PREFIX = 'AmazonSQS.';
 
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
-
-const tooLarge = (limit: number) => new SqsError(413, 'RequestEntityTooLarge', `The request is over ${limit} bytes.`);
-
-/**
- * The request's body, whole, `limit` bytes at most: past it, what is left
- * isn't read, and the answer closes the connection.
- */
-function bodyOf(request: IncomingMessage, limit: number): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    if (Number(single(request.headers['content-length']) ?? 0) > limit) return reject(tooLarge(limit));
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const onData = (chunk: Buffer) => {
-      size += chunk.length;
-      if (size <= limit) return void chunks.push(chunk);
-      request.off('data', onData);
-      request.pause();
-      reject(tooLarge(limit));
-    };
-    request.on('data', onData);
-    request.once('end', () => resolve(Buffer.concat(chunks)));
-    request.once('error', reject);
-    // A client gone before its request ended: no one to answer.
-    request.once('close', () => request.complete || reject(new SqsError(400, 'IncompleteRequest', 'The client went before its request ended.')));
-  });
-}
+const BODY_REFUSALS: BodyRefusals = {
+  tooLarge: (limit) => new SqsError(413, 'RequestEntityTooLarge', `The request is over ${limit} bytes.`),
+  // A client gone before its request ended: no one to answer.
+  incomplete: () => new SqsError(400, 'IncompleteRequest', 'The client went before its request ended.'),
+};
 
 /**
  * The SQS endpoint (ADR 0010): a server of its own, on FF_SQS_PORT, which
@@ -147,7 +125,7 @@ export class SqsFrontDoor implements OnModuleDestroy {
     if (request.method !== 'POST' || !target.startsWith(TARGET_PREFIX) || !contentType.startsWith(CONTENT_TYPE)) {
       throw new SqsError(400, 'UnsupportedOperation', "FF's SQS endpoint speaks SQS's JSON protocol: POST / with X-Amz-Target AmazonSQS.<operation>, as AWS's SDKs and CLI send it.", 'AWS.SimpleQueueService.UnsupportedOperation');
     }
-    const body = await bodyOf(request, MAX_BODY_BYTES);
+    const body = await readBody(request, MAX_BODY_BYTES, BODY_REFUSALS);
     const signature = readSqsSignature(request.headers);
     if (!signature) throw missingAuthenticationToken();
     const key = await this.directory.key(signature.accessKeyId);

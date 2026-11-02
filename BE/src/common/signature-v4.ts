@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { IncomingHttpHeaders } from 'node:http';
+import { single } from './http-request';
 
 /**
  * AWS Signature Version 4, read and checked once for every front door AWS's
@@ -179,8 +180,6 @@ export interface HeaderSignature {
   /** The request's time as signed, YYYYMMDDTHHMMSSZ. */
   amzDate: string;
 }
-
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
 
 /** A credential's parts: <access key ID>/<day>/<region>/<service>/aws4_request, scoped to the service. */
 export function readCredential(credential: string, service: SignedService): Pick<HeaderSignature, 'accessKeyId' | 'date' | 'region'> {

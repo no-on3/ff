@@ -11,6 +11,7 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
 import { AwsEndpoint } from '../common/aws-endpoint';
+import { originForm, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { SigningChain, decodeEscapes } from '../common/signature-v4';
 import { PlanView } from '../plans/plan-limits';
@@ -63,20 +64,7 @@ const DOCUMENT_BODIES = new Set(['DeleteObjects', 'CompleteMultipartUpload']);
 /** Operations whose object or part is limited to 5 GiB; PutObject's object, to the plan's maxObjectMb too. */
 const UPLOADS = new Set(['PutObject', 'UploadPart']);
 
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
-
 type Stage = NodeJS.ReadableStream | NodeJS.WritableStream | NodeJS.ReadWriteStream;
-
-/** The request's path and query: an absolute target, as a proxy may send one, without its scheme and host. */
-export function originForm(target: string | undefined): string {
-  if (target?.startsWith('/')) return target;
-  try {
-    const url = new URL(target ?? '');
-    return `${url.pathname}${url.search}`;
-  } catch {
-    return '/';
-  }
-}
 
 /** The query that goes to the store: without the signature's parameters, the checksum a presigned URL signs, nor the SDKs' x-id. */
 export function queryForStore(rawQuery: string): string {

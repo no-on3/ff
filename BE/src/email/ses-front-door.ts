@@ -5,8 +5,8 @@ import { AddressInfo } from 'node:net';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
+import { BodyRefusals, originForm, readBody } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
-import { originForm } from '../storage/front-door';
 import { reachesMail } from '../storage/key-reach';
 import { KeyUses } from '../storage/key-uses.service';
 import { EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
@@ -18,27 +18,7 @@ import { checkSesSignature, readSesSignature } from './ses-signature';
 /** The most a request's body holds: a raw message of 10 MB, SES's, in base64, and its JSON around it. */
 const MAX_BODY_BYTES = 14 * 1024 * 1024;
 
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
-
-/** The request's body, whole, `limit` bytes at most: past it, what is left isn't read, and the answer closes the connection. */
-function bodyOf(request: IncomingMessage, limit: number): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    if (Number(single(request.headers['content-length']) ?? 0) > limit) return reject(requestTooLarge(limit));
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const onData = (chunk: Buffer) => {
-      size += chunk.length;
-      if (size <= limit) return void chunks.push(chunk);
-      request.off('data', onData);
-      request.pause();
-      reject(requestTooLarge(limit));
-    };
-    request.on('data', onData);
-    request.once('end', () => resolve(Buffer.concat(chunks)));
-    request.once('error', reject);
-    request.once('close', () => request.complete || reject(badRequest('The client went before its request ended.')));
-  });
-}
+const BODY_REFUSALS: BodyRefusals = { tooLarge: requestTooLarge, incomplete: () => badRequest('The client went before its request ended.') };
 
 /** A page of the address's link: a sentence in French, then in English. */
 const page = (title: string, french: string, english: string): string =>
@@ -120,7 +100,7 @@ export class SesFrontDoor implements OnModuleDestroy {
 
   /** The operation's answer, once the request is signed by a key that reaches its account's mail. */
   private async answer(request: IncomingMessage, rawPath: string, rawQuery: string): Promise<unknown> {
-    const body = await bodyOf(request, MAX_BODY_BYTES);
+    const body = await readBody(request, MAX_BODY_BYTES, BODY_REFUSALS);
     const signature = readSesSignature(request.headers);
     if (!signature) throw missingAuthenticationToken();
     const key = await this.directory.key(signature.accessKeyId);
