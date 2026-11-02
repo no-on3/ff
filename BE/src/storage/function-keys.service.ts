@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, IsNull, QueryFailedError, Repository } from 'typeorm';
+import { EntityManager, IsNull, Not, QueryFailedError, Repository } from 'typeorm';
 import { AWS_ENDPOINTS, AwsEndpoint } from '../common/aws-endpoint';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
@@ -9,6 +9,23 @@ import { newAccessKeyId, newSecretAccessKey } from './storage-names';
 
 /** PostgreSQL's unique_violation: another deploy of the function made its key meanwhile. */
 const UNIQUE_VIOLATION = '23505';
+
+/** How long a function's key works, as a Lambda role's session lasts at most (ADR 0014, 5). */
+export const FUNCTION_KEY_LIFE_MS = 12 * 60 * 60 * 1000;
+
+/** When a function's key is renewed: at half its life, which leaves the other half to replace the pods holding it. */
+export function renewsAt(expiresAt: Date): Date {
+  return new Date(expiresAt.getTime() - FUNCTION_KEY_LIFE_MS / 2);
+}
+
+/** A function whose keys the renewal is for: its current key is due, or it has keys replaced that aren't revoked yet. */
+export interface KeysToRenew {
+  functionId: string;
+  /** Its current key is past half its life, or past its end. */
+  due: boolean;
+  /** It has keys replaced, not revoked yet, which pods may still hold. */
+  replaced: boolean;
+}
 
 /** The variable AWS's SDKs read each service's endpoint from. */
 const ENDPOINT_VARIABLES: Record<AwsEndpoint, string> = {
@@ -34,11 +51,15 @@ export interface FunctionCredentials {
  * (ADR 0010) and mail (ADR 0012): made the first time the function is
  * deployed, reaching every bucket and queue of the account, read-write, and
  * its mail, and checked as any key is; revoked when the function is deleted.
+ * It works 12 hours, as a role's credentials do (ADR 0014, 5): past half its
+ * life, the next workload made of the function has a new one, the old one
+ * replaced, working on until the renewal finds no pod holding it and revokes
+ * it. A key made before keys ended lasts until it is revoked.
  * It reaches the function's pods in their environment's Secret, with the
  * region and the endpoints' addresses inside the cluster, where AWS's SDKs look
  * for them, so that `new S3Client({})`, `new SQSClient({})`,
- * `new SESv2Client({})` and boto3's `s3`, `sqs` and `sesv2` work unchanged. Short-lived credentials, as a Lambda
- * role's are, wait for an STS of FF's. Never listed with the account's own
+ * `new SESv2Client({})` and boto3's `s3`, `sqs` and `sesv2` work unchanged, with no session token: the
+ * renewal rolls the pods onto the new key. Never listed with the account's own
  * keys, nor counted against their two. A function may leave an endpoint out
  * (its awsEndpoints), to reach that service at AWS while FF serves the others:
  * it still gets the key and the region, for those.
@@ -64,14 +85,15 @@ export class FunctionKeys {
 
   /**
    * The function's key and the endpoints it reaches of those it takes, the key
-   * made if it has none; undefined where FF gives functions no endpoint. A
-   * function deployed before an endpoint was given gets it at its next rollout.
+   * made if it has none, and renewed past half its life; undefined where FF
+   * gives functions no endpoint. A function deployed before an endpoint was
+   * given gets it at its next rollout.
    */
-  async credentialsFor(fn: { id: string; accountId: string; awsEndpoints: readonly AwsEndpoint[] }): Promise<FunctionCredentials | undefined> {
+  async credentialsFor(fn: { id: string; accountId: string; awsEndpoints: readonly AwsEndpoint[] }, now = new Date()): Promise<FunctionCredentials | undefined> {
     const offered = AWS_ENDPOINTS.filter((service) => this.endpoints[service]);
     if (offered.length === 0) return undefined;
     const given = offered.filter((service) => fn.awsEndpoints.includes(service));
-    const key = (await this.keyOf(fn.id)) ?? (await this.make(fn));
+    const key = await this.currentKey(fn, now);
     return {
       // The key's ID alone while the function takes every endpoint, as before one could be left out: no rollout for it.
       revision: given.length === offered.length ? key.id : `${key.id}:${given.join(',')}`,
@@ -85,28 +107,86 @@ export class FunctionKeys {
     };
   }
 
-  /** The function's key stops working at once: the front door refuses its next request. Nothing when it has none. */
+  /** Whether the function's key is due a renewal, past half its life or its end: a function at zero starts with a fresh one. */
+  async isDue(functionId: string, now = new Date()): Promise<boolean> {
+    const row = await this.keys.findOne({ where: { functionId, revokedAt: IsNull(), replacedAt: IsNull() }, select: { id: true, expiresAt: true } });
+    return row?.expiresAt != null && renewsAt(row.expiresAt) <= now;
+  }
+
+  /** The functions the renewal is for, each once: those whose current key is due, and those with keys replaced not revoked yet. */
+  async toRenew(now = new Date()): Promise<KeysToRenew[]> {
+    // Past half its life is ending within the other half.
+    const dueBefore = new Date(now.getTime() + FUNCTION_KEY_LIFE_MS / 2);
+    return this.keys.query(
+      `SELECT "function_id" AS "functionId",
+              bool_or("replaced_at" IS NULL AND "expires_at" <= $1) AS "due",
+              bool_or("replaced_at" IS NOT NULL) AS "replaced"
+         FROM "storage_keys"
+        WHERE "function_id" IS NOT NULL AND "revoked_at" IS NULL AND "expires_at" IS NOT NULL
+        GROUP BY "function_id"
+       HAVING bool_or("replaced_at" IS NULL AND "expires_at" <= $1) OR bool_or("replaced_at" IS NOT NULL)
+        ORDER BY "function_id"`,
+      [dueBefore],
+    );
+  }
+
+  /** The function's keys replaced stop working, once no pod holds them: how many. */
+  async revokeReplaced(functionId: string, now = new Date()): Promise<number> {
+    const { affected } = await this.keys.update({ functionId, replacedAt: Not(IsNull()), revokedAt: IsNull() }, { revokedAt: now });
+    return affected ?? 0;
+  }
+
+  /** The function's keys stop working at once, a current one and those replaced: the front door refuses their next request. Nothing when it has none. */
   async revoke(functionId: string, manager: EntityManager = this.keys.manager): Promise<void> {
     await manager.update(StorageKey, { functionId, revokedAt: IsNull() }, { revokedAt: new Date() });
   }
 
+  /** The function's key now: made when it has none, renewed past half its life. A lasting key, made before keys ended, stays. */
+  private async currentKey(fn: { id: string; accountId: string }, now: Date): Promise<{ id: string; secret: string }> {
+    const row = await this.currentRow(fn.id);
+    if (!row) return this.make(fn, now);
+    if (row.expiresAt !== null && renewsAt(row.expiresAt) <= now) return this.renew(fn, row.id, now);
+    return { id: row.id, secret: this.directory.secretOf(row) };
+  }
+
+  private currentRow(functionId: string): Promise<StorageKey | null> {
+    return this.keys.findOneBy({ functionId, revokedAt: IsNull(), replacedAt: IsNull() });
+  }
+
   private async keyOf(functionId: string): Promise<{ id: string; secret: string } | null> {
-    const row = await this.keys.findOneBy({ functionId, revokedAt: IsNull() });
+    const row = await this.currentRow(functionId);
     return row && { id: row.id, secret: this.directory.secretOf(row) };
   }
 
-  private async make(fn: { id: string; accountId: string }): Promise<{ id: string; secret: string }> {
-    const id = newAccessKeyId();
-    const secret = newSecretAccessKey();
+  private async make(fn: { id: string; accountId: string }, now: Date): Promise<{ id: string; secret: string }> {
     try {
-      await this.keys.insert({ id, accountId: fn.accountId, functionId: fn.id, secret: this.directory.sealSecret(id, secret), buckets: null, readOnly: false });
-      return { id, secret };
+      return await this.insert(fn, now, this.keys.manager);
     } catch (error) {
       if (!(error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION)) throw error;
-      // A function has one key that works, which its index keeps: the one the other deploy made.
+      // A function has one current key, which its index keeps: the one the other deploy made.
       const made = await this.keyOf(fn.id);
       if (!made) throw error;
       return made;
     }
+  }
+
+  /**
+   * A new key in the place of `current`, which is marked replaced in the same transaction, and works on. Two renewals
+   * at once make one: the second waits for the first's row, finds it replaced, and takes the key the first made.
+   */
+  private async renew(fn: { id: string; accountId: string }, current: string, now: Date): Promise<{ id: string; secret: string }> {
+    const made = await this.keys.manager.transaction(async (manager) => {
+      const { affected } = await manager.update(StorageKey, { id: current, replacedAt: IsNull(), revokedAt: IsNull() }, { replacedAt: now });
+      return affected ? this.insert(fn, now, manager) : null;
+    });
+    return made ?? (await this.keyOf(fn.id)) ?? this.make(fn, now);
+  }
+
+  private async insert(fn: { id: string; accountId: string }, now: Date, manager: EntityManager): Promise<{ id: string; secret: string }> {
+    const id = newAccessKeyId();
+    const secret = newSecretAccessKey();
+    const expiresAt = new Date(now.getTime() + FUNCTION_KEY_LIFE_MS);
+    await manager.insert(StorageKey, { id, accountId: fn.accountId, functionId: fn.id, secret: this.directory.sealSecret(id, secret), buckets: null, readOnly: false, expiresAt });
+    return { id, secret };
   }
 }

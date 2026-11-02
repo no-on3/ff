@@ -9,9 +9,9 @@ import { closeHttp, listenHttp } from '../common/http-server';
 import { originForm } from '../storage/front-door';
 import { reachesMail } from '../storage/key-reach';
 import { KeyUses } from '../storage/key-uses.service';
-import { StorageDirectory } from '../storage/storage-directory.service';
+import { EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
 import { EmailIdentitiesService } from './email-identities.service';
-import { SesError, accessDenied, badRequest, internalFailure, missingAuthenticationToken, requestTooLarge, unrecognizedClient } from './ses-error';
+import { SesError, accessDenied, badRequest, expiredToken, internalFailure, missingAuthenticationToken, requestTooLarge, unrecognizedClient } from './ses-error';
 import { SesOperations } from './ses-operations';
 import { checkSesSignature, readSesSignature } from './ses-signature';
 
@@ -124,6 +124,7 @@ export class SesFrontDoor implements OnModuleDestroy {
     const signature = readSesSignature(request.headers);
     if (!signature) throw missingAuthenticationToken();
     const key = await this.directory.key(signature.accessKeyId);
+    if (key === EXPIRED) throw expiredToken();
     if (!key) throw unrecognizedClient();
     const method = request.method ?? 'GET';
     checkSesSignature({ method, rawPath, rawQuery, rawHeaders: request.rawHeaders }, body, signature, key.secret, new Date());

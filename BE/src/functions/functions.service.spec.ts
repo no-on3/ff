@@ -90,7 +90,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   /** Each function's variables and secrets, as the service saved them. */
   let environments: ReturnType<typeof memoryEnvironments>;
   /** Functions' own keys to their account's buckets: none, unless a test gives them (FF without the front door's address for functions). */
-  const functionKeys = { credentialsFor: jest.fn(), revoke: jest.fn() };
+  // No key due a renewal, unless a test says so: isDue answers nothing.
+  const functionKeys = { credentialsFor: jest.fn(), revoke: jest.fn(), isDue: jest.fn() };
 
   const activeFunction = (): Function =>
     ({
@@ -179,6 +180,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       desiredInstances: jest.fn(),
       workloads: jest.fn(),
       codeImagesByFunction: jest.fn(),
+      renewEnvironment: jest.fn(),
       applyTenantLimits: jest.fn(),
       logs: jest.fn(),
       tailLogs: jest.fn(),
@@ -1105,7 +1107,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       expect(outcome.invocation).toMatchObject({ requestId: 'req-3', attempt: 2, source: InvocationSource.ASYNC, status: InvocationStatus.COMPLETED });
       expect(outcome.invocation.id).toMatch(UUID);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, 'req-3', undefined);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, 'req-3', expect.any(globalThis.Function));
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-3' }), ending);
     });
 
@@ -1125,7 +1127,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(inserted).toEqual([
         expect.objectContaining({ id: 'req-1', source: InvocationSource.URL, input: { version: '2.0', headers: { authorization: '***' } }, status: InvocationStatus.RUNNING }),
       ]);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, 'req-1', undefined);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, 'req-1', expect.any(globalThis.Function));
       expect(outcome).toMatchObject({ ok: true, output: { statusCode: 204 }, invocation: { id: 'req-1', status: InvocationStatus.COMPLETED } });
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-1' }), ending);
     });
@@ -1156,7 +1158,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1', { a: 1 });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, created().requestId, undefined);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, created().requestId, expect.any(globalThis.Function));
       expect(invocation).toMatchObject({
         status: InvocationStatus.COMPLETED,
         output: { hello: 'world' },
@@ -1195,7 +1197,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1');
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, created().requestId, undefined);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, created().requestId, expect.any(globalThis.Function));
       expect(invocation.duration).toBeGreaterThanOrEqual(0);
     });
 
@@ -1545,14 +1547,16 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       ]);
     });
 
-    it('runs $LATEST for an alias of $LATEST, or $LATEST named, nothing to make at a cold start; the alias kept', async () => {
+    it("runs $LATEST for an alias of $LATEST, or $LATEST named, nothing to make at a cold start while its key isn't due; the alias kept", async () => {
       await service.invoke('user-1', 'fn-1', {}, 'edge');
       await service.invoke('user-1', 'fn-1', {}, '$LATEST');
 
-      expect(orchestrator.invoke.mock.calls.map(([running, , , deploy]) => [running.version, deploy])).toEqual([
+      const starts = await Promise.all(orchestrator.invoke.mock.calls.map(async ([running, , , start]) => [running.version, await start?.()]));
+      expect(starts).toEqual([
         [undefined, undefined],
         [undefined, undefined],
       ]);
+      expect(functionKeys.isDue).toHaveBeenCalledWith('fn-1');
       expect(usage.record.mock.calls.map(([made]) => [made.version, made.alias, made.memoryMb])).toEqual([
         [null, 'edge', 128],
         [null, null, 128],
@@ -1590,7 +1594,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.invoke('user-1', 'fn-1', { name: 'x' });
 
       // $LATEST's pods are there: nothing to make at a cold start.
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, created().requestId, undefined);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, created().requestId, expect.any(globalThis.Function));
       expect(usage.record).toHaveBeenCalledWith(
         {
           requestId: created().requestId,

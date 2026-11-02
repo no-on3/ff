@@ -328,6 +328,12 @@ describe('configuration', () => {
     expect(problems({ ...production, FF_ALARM_INTERVAL_SECONDS: '0' })).toEqual([expect.stringContaining('FF_ALARM_INTERVAL_SECONDS')]);
   });
 
+  it("looks for functions' keys to renew every minute, unless told otherwise", () => {
+    expect(configuration(production).keyRenewal).toEqual({ intervalSeconds: 60 });
+    expect(configuration({ ...production, FF_KEY_RENEWAL_INTERVAL_SECONDS: '5' }).keyRenewal).toEqual({ intervalSeconds: 5 });
+    expect(problems({ ...production, FF_KEY_RENEWAL_INTERVAL_SECONDS: '0' })).toEqual([expect.stringContaining('FF_KEY_RENEWAL_INTERVAL_SECONDS')]);
+  });
+
   it("sends notifications every 10 s, never to a private address, unless told otherwise", () => {
     expect(configuration(production).notifications).toEqual({ intervalSeconds: 10, allowPrivate: false });
     expect(configuration({ ...production, NODE_ENV: 'development', FF_NOTIFY_INTERVAL_SECONDS: '1', FF_WEBHOOK_ALLOW_PRIVATE: 'true' }).notifications).toEqual({ intervalSeconds: 1, allowPrivate: true });

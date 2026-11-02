@@ -23,7 +23,7 @@ export class DeployKeysController {
   @ApiOperation({
     summary: "A key to the bucket alone, for a deploy's uploads",
     description:
-      "An access key for AWS's SDKs and CLI that reaches this bucket alone, read-write, for an hour, then stops as a revoked key does: its secret in this answer only. " +
+      "An access key for AWS's SDKs and CLI that reaches this bucket alone, read-write, for an hour, then is refused as expired, in S3's words (ExpiredToken): its secret in this answer only. " +
       '`ff sites deploy` gets one, signs its uploads and deletions with it at the S3 endpoint, and revokes it when it is done.',
   })
   @ApiResponse({ status: 201, type: CreatedDeployKey })

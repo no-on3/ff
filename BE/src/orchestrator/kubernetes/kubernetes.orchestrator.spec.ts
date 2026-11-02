@@ -377,6 +377,84 @@ describe('KubernetesOrchestrator', () => {
     });
   });
 
+  describe("renewEnvironment: a function's new key, rolled out in two writes (ADR 0014, 5)", () => {
+    const secretPath = (slot: number) => `/api/v1/namespaces/${ns}/secrets/${name}-env-${slot}`;
+    const withKey = (key: string, overrides = {}) => workload({ environment: { revision: `r1.${key}`, values: { AWS_ACCESS_KEY_ID: key } }, ...overrides });
+    const versionPath = `/apis/apps/v1/namespaces/${ns}/deployments/${name}-v2`;
+    /** The API server keeps what is applied, a Deployment as rolled out at once. */
+    const keepApplied = () => {
+      const apply = api.apply.bind(api);
+      api.apply = async <T>(path: string, manifest: any): Promise<T> => {
+        api.objects.set(path, manifest.kind === 'Deployment' ? { ...manifest, ...rolledOut(manifest.spec.replicas), spec: manifest.spec } : manifest);
+        return apply<T>(path, manifest);
+      };
+    };
+
+    it("writes $LATEST's new environment where its pods don't read it, then its template, its instances as they are, and nothing else", async () => {
+      keepApplied();
+      await orchestrator.deploy(withKey('AKFFOLD'), tenant());
+      await orchestrator.scale(withKey('AKFFOLD'), 3);
+      api.objects.set(deploymentPath, { ...api.applied.at(-1)!.manifest, ...rolledOut(3), spec: { ...api.applied.at(-1)!.manifest.spec, replicas: 3 } });
+      api.applied = [];
+
+      expect(await orchestrator.renewEnvironment(withKey('AKFFNEW'))).toBe(true);
+
+      expect(api.applied.map((a) => a.path)).toEqual([secretPath(1), deploymentPath]);
+      const deployment = api.applied[1].manifest;
+      expect(deployment.spec.replicas).toBe(3);
+      expect(deployment.spec.strategy).toEqual({ type: 'RollingUpdate', rollingUpdate: { maxUnavailable: 0, maxSurge: 1 } });
+      expect(deployment.spec.template.metadata.annotations[ANNOTATIONS.environmentRevision]).toBe('r1.AKFFNEW');
+      expect(deployment.spec.template.spec.containers[0].envFrom).toEqual([{ secretRef: { name: `${name}-env-1` } }]);
+      expect(Buffer.from(api.applied[0].manifest.data.AWS_ACCESS_KEY_ID, 'base64').toString()).toBe('AKFFNEW');
+    });
+
+    it("writes a version's own Secret again, which its pods read as they start, then its Deployment, its instances as they are", async () => {
+      const version = withKey('AKFFNEW', { version: 2, lastVersion: 2 });
+      api.objects.set(versionPath, { ...rolledOut(2), spec: { replicas: 2 } });
+
+      expect(await orchestrator.renewEnvironment(version)).toBe(true);
+
+      expect(api.applied.map((a) => a.path)).toEqual([`/api/v1/namespaces/${ns}/secrets/${name}-v2-env`, versionPath]);
+      expect(api.applied[1].manifest.spec.replicas).toBe(2);
+    });
+
+    it('does nothing, and says so, for a workload with no Deployment', async () => {
+      expect(await orchestrator.renewEnvironment(withKey('AKFFNEW', { version: 2 }))).toBe(false);
+      expect(api.applied).toEqual([]);
+    });
+
+    it("leaves $LATEST's two Secrets when a version's rollout is waited for: its Secret is its own", async () => {
+      api.objects.set(versionPath, rolledOut(1));
+
+      await orchestrator.waitUntilReady(withKey('AKFFNEW', { version: 2, lastVersion: 2 }), 100);
+
+      expect(api.deleted).toEqual([]);
+    });
+
+    it('starts $LATEST from zero with the fresh key its call gives, its template written with one instance, where a scale would keep the old key', async () => {
+      keepApplied();
+      await orchestrator.deploy(withKey('AKFFOLD'), tenant());
+      api.objects.set(deploymentPath, { ...api.applied.at(-1)!.manifest, spec: { ...api.applied.at(-1)!.manifest.spec, replicas: 0 }, status: { readyReplicas: 0 } });
+      api.applied = [];
+
+      await orchestrator.invoke(withKey('AKFFOLD'), {}, undefined, async () => withKey('AKFFNEW'));
+
+      expect(api.scaled).toEqual([]);
+      expect(api.applied.map((a) => a.path)).toEqual([secretPath(1), deploymentPath]);
+      expect(api.applied[1].manifest.spec.replicas).toBe(1);
+      expect(api.requests).toHaveLength(1);
+    });
+
+    it('scales $LATEST from zero as it is when its call has no fresh key to give', async () => {
+      api.objects.set(deploymentPath, { ...rolledOut(0), status: { readyReplicas: 0 } });
+
+      await orchestrator.invoke(withKey('AKFFOLD'), {}, undefined, async () => undefined);
+
+      expect(api.scaled).toEqual([1]);
+      expect(api.applied).toEqual([]);
+    });
+  });
+
   it('remove deletes the Deployment, the Service, every code ConfigMap, and both environment Secrets by name', async () => {
     await orchestrator.remove(fn);
 
@@ -1262,6 +1340,27 @@ describe('KubernetesOrchestrator', () => {
         ['f-zero', 0],
       ]);
       expect(api.listed).toEqual([{ path: '/apis/apps/v1/deployments', selector: 'app.kubernetes.io/managed-by=ff-controller' }]);
+    });
+
+    it("says what each one's template runs, for the renewal of keys: its environment's revision and its code image", async () => {
+      api.lists.set('/apis/apps/v1/deployments', [
+        {
+          ...deployment('ff-t-aaaaaaaaaaaa', ff('f-env'), 1),
+          spec: {
+            replicas: 1,
+            template: {
+              metadata: { annotations: { [ANNOTATIONS.environmentRevision]: 'r1.AKFFKEY' } },
+              spec: { volumes: [{ name: 'code', image: { reference: 'registry.local/code@sha256:abc' } }] },
+            },
+          },
+        },
+        deployment('ff-t-aaaaaaaaaaaa', ff('f-bare'), 1),
+      ]);
+
+      expect((await orchestrator.workloads()).map(({ functionId, revision, codeImage }) => [functionId, revision, codeImage])).toEqual([
+        ['f-env', 'r1.AKFFKEY', 'registry.local/code@sha256:abc'],
+        ['f-bare', undefined, undefined],
+      ]);
     });
 
     it("leaves out a Deployment outside FF's tenant namespaces, or without a function ID, whatever its labels say", async () => {

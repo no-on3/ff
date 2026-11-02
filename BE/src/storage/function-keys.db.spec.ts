@@ -10,8 +10,8 @@ import { EncryptionService } from '../encryption/encryption.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { AwsEndpoint, awsEndpointsOf } from '../common/aws-endpoint';
 import { Bucket } from './bucket.entity';
-import { FunctionCredentials, FunctionKeys } from './function-keys.service';
-import { StorageDirectory } from './storage-directory.service';
+import { FUNCTION_KEY_LIFE_MS, FunctionCredentials, FunctionKeys } from './function-keys.service';
+import { EXPIRED, StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { StorageKeysService } from './storage-keys.service';
 
@@ -104,7 +104,87 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
     expect((await rowsOf(function_.id)).map((row) => row.revokedAt === null)).toEqual([false, true]);
   });
 
-  it("is never one of the account's own keys: not listed with them, nor counted against the plan's two", async () => {
+  describe('its life: 12 hours, renewed at half of it, the old key working on until the renewal revokes it', () => {
+    const HALF = FUNCTION_KEY_LIFE_MS / 2;
+    const at = (start: Date, ms: number) => new Date(start.getTime() + ms);
+    const toRenewOf = async (functionId: string, now: Date) => (await keys.toRenew(now)).filter((pending) => pending.functionId === functionId);
+
+    it('ends 12 hours after it is made; is due at half its life, when the next workload gets a new key, the old one replaced and still working', async () => {
+      const function_ = fn();
+      const made = new Date();
+      const first = await keys.credentialsFor(function_, made);
+
+      expect((await rowsOf(function_.id))[0].expiresAt).toEqual(at(made, FUNCTION_KEY_LIFE_MS));
+      expect([await keys.isDue(function_.id, at(made, HALF - 1000)), await keys.isDue(function_.id, at(made, HALF))]).toEqual([false, true]);
+      expect(keyOf(await keys.credentialsFor(function_, at(made, HALF - 1000)))).toBe(keyOf(first));
+      expect(await toRenewOf(function_.id, at(made, HALF - 1000))).toEqual([]);
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, due: true, replaced: false }]);
+
+      const renewed = await keys.credentialsFor(function_, at(made, HALF));
+
+      expect(keyOf(renewed)).not.toBe(keyOf(first));
+      expect(renewed!.revision).toBe(keyOf(renewed));
+      expect(await rowsOf(function_.id)).toEqual([
+        expect.objectContaining({ id: keyOf(first), replacedAt: at(made, HALF), revokedAt: null }),
+        expect.objectContaining({ id: keyOf(renewed), replacedAt: null, revokedAt: null, expiresAt: at(made, HALF + FUNCTION_KEY_LIFE_MS) }),
+      ]);
+      // The pods that hold the old one go on reaching the account's buckets until the renewal finds none holding it.
+      expect(await directory.key(keyOf(first))).toMatchObject({ functionId: function_.id });
+      expect(keyOf(await keys.credentialsFor(function_, at(made, HALF)))).toBe(keyOf(renewed));
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, due: false, replaced: true }]);
+
+      expect(await keys.revokeReplaced(function_.id)).toBe(1);
+
+      expect(await directory.key(keyOf(first))).toBeNull();
+      expect(await directory.key(keyOf(renewed))).toMatchObject({ functionId: function_.id });
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([]);
+      expect(await keys.revokeReplaced(function_.id)).toBe(0);
+    });
+
+    it('makes one new key when two workloads renew it at once: the second finds it replaced, and takes the one the first made', async () => {
+      const function_ = fn();
+      const made = new Date();
+      await keys.credentialsFor(function_, made);
+
+      const answers = await Promise.all([1, 2, 3].map(() => keys.credentialsFor(function_, at(made, HALF))));
+
+      expect(new Set(answers.map(keyOf)).size).toBe(1);
+      expect((await rowsOf(function_.id)).map((row) => row.replacedAt === null)).toEqual([false, true]);
+    });
+
+    it('says a key past its end expired, and renews it at the next workload, as a function at zero starts', async () => {
+      const function_ = fn();
+      const made = new Date(Date.now() - FUNCTION_KEY_LIFE_MS - 1000);
+      const old = await keys.credentialsFor(function_, made);
+
+      expect(await directory.key(keyOf(old))).toBe(EXPIRED);
+      expect(await keys.isDue(function_.id)).toBe(true);
+      expect(keyOf(await keys.credentialsFor(function_))).not.toBe(keyOf(old));
+    });
+
+    it("never renews a lasting key, made before keys ended, nor lists it: it is revoked with its function", async () => {
+      const function_ = fn();
+      const id = 'AKFFLASTINGLASTINGLA';
+      await db.dataSource.getRepository(StorageKey).insert({ id, accountId: ACCOUNT, functionId: function_.id, secret: directory.sealSecret(id, 's'.repeat(40)) });
+
+      expect(keyOf(await keys.credentialsFor(function_, at(new Date(), 10 * FUNCTION_KEY_LIFE_MS)))).toBe(id);
+      expect(await keys.isDue(function_.id)).toBe(false);
+      expect(await toRenewOf(function_.id, at(new Date(), 10 * FUNCTION_KEY_LIFE_MS))).toEqual([]);
+    });
+
+    it('revokes the current key and those replaced when the function goes', async () => {
+      const function_ = fn();
+      const made = new Date();
+      const first = await keys.credentialsFor(function_, made);
+      const renewed = await keys.credentialsFor(function_, at(made, HALF));
+
+      await keys.revoke(function_.id);
+
+      expect([await directory.key(keyOf(first)), await directory.key(keyOf(renewed))]).toEqual([null, null]);
+    });
+  });
+
+  it("is never one of the account's own keys: not listed with them, nor counted against the plan's access keys", async () => {
     const audit = new AuditService(db.dataSource.getRepository(AuditEntry));
     const own = new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, audit, onePlan(plan({ accessKeys: 2 })), config());
     const function_ = fn();

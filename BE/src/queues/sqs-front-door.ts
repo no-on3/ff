@@ -14,8 +14,8 @@ import { PlansService } from '../plans/plans.service';
 import { countQueueRequest } from '../plans/rate-limits';
 import { originForm } from '../storage/front-door';
 import { KeyUses } from '../storage/key-uses.service';
-import { StorageDirectory } from '../storage/storage-directory.service';
-import { SqsError, accessDenied, internalError, invalidClientTokenId, invalidParameter, missingAuthenticationToken, requestThrottled } from './sqs-error';
+import { EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
+import { SqsError, accessDenied, expiredToken, internalError, invalidClientTokenId, invalidParameter, missingAuthenticationToken, requestThrottled } from './sqs-error';
 import { Caller, SENDING_OPERATIONS, SqsOperations } from './sqs-operations';
 import { checkSqsSignature, readSqsSignature } from './sqs-signature';
 
@@ -151,6 +151,7 @@ export class SqsFrontDoor implements OnModuleDestroy {
     const signature = readSqsSignature(request.headers);
     if (!signature) throw missingAuthenticationToken();
     const key = await this.directory.key(signature.accessKeyId);
+    if (key === EXPIRED) throw expiredToken();
     if (!key) throw invalidClientTokenId();
     const url = originForm(request.url);
     const at = url.indexOf('?');

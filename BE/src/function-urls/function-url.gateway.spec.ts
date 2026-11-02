@@ -25,7 +25,7 @@ import { FunctionRuntimeError, FunctionThrottledError } from '../orchestrator/or
 import { countInvocation } from '../plans/rate-limits';
 import { plan } from '../plans/test-fixtures';
 import { CallTarget } from '../functions/functions.service';
-import { ActiveKey } from '../storage/storage-directory.service';
+import { ActiveKey, EXPIRED } from '../storage/storage-directory.service';
 import { FunctionUrlGateway, URL_PAYLOAD_LIMIT } from './function-url.gateway';
 import { FunctionUrlEvent } from './url-event';
 
@@ -174,7 +174,8 @@ describe('the function URL gateway (L1)', () => {
     accounts.findOne.mockImplementation(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE, planId: 'beta' }));
     apiKeys.authenticate.mockImplementation(async () => KEY);
     accessKeys = [ACCESS];
-    directory.key.mockImplementation(async (id: string) => accessKeys.find((key) => key.id === id) ?? null);
+    // A function's key past its end, AKFFFFFF…, the directory says so of.
+    directory.key.mockImplementation(async (id: string) => (id === 'AKFFFFFFFFFFFFFFFFFF' ? EXPIRED : (accessKeys.find((key) => key.id === id) ?? null)));
     directory.account.mockImplementation(async (id: string) => ({ id, status: AccountStatus.ACTIVE, planId: 'beta' }));
     throttler = new ThrottlerStorageService();
     gateway = new FunctionUrlGateway(
@@ -378,6 +379,7 @@ describe('the function URL gateway (L1)', () => {
 
     it.each<[string, () => Promise<Record<string, string>>, string | jest.AsymmetricMatcher]>([
       ['a key FF never made', () => signedHeaders(PRIVATE, '/', { key: { ...ACCESS, id: 'AKFFZZZZZZZZZZZZZZZZ' } }), 'Forbidden: The security token included in the request is invalid.'],
+      ['a key past its end', () => signedHeaders(PRIVATE, '/', { key: { ...ACCESS, id: 'AKFFFFFFFFFFFFFFFFFF' } }), 'Forbidden: The security token included in the request is expired.'],
       [
         'a signature by another secret',
         () => signedHeaders(PRIVATE, '/', { secret: 'b'.repeat(40) }),

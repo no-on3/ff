@@ -17,7 +17,7 @@ import { ScratchDatabase, createScratchDatabase } from '../database/scratch-data
 import { EncryptionService } from '../encryption/encryption.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { Bucket } from './bucket.entity';
-import { StorageDirectory } from './storage-directory.service';
+import { EXPIRED, StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { DEPLOY_KEY_MS, StorageKeysService } from './storage-keys.service';
 
@@ -79,7 +79,8 @@ run("deploys' own keys to a bucket, in FF's database (L2)", () => {
 
     expect(made.expiresAt).toEqual(new Date(now.getTime() + DEPLOY_KEY_MS));
     expect(await directory.key(made.accessKeyId, new Date(now.getTime() + DEPLOY_KEY_MS - 1000))).not.toBeNull();
-    expect(await directory.key(made.accessKeyId, new Date(now.getTime() + DEPLOY_KEY_MS))).toBeNull();
+    // Past its end, it says so, as AWS says a token expired.
+    expect(await directory.key(made.accessKeyId, new Date(now.getTime() + DEPLOY_KEY_MS))).toBe(EXPIRED);
   });
 
   it("is never one of the account's own keys: not listed with them, nor counted against the plan's two, nor revoked as one", async () => {

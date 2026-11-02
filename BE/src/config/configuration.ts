@@ -422,6 +422,8 @@ const appShape = {
   // How often alarms are evaluated, and how long a period has been over before it is judged; tests shorten both.
   FF_ALARM_INTERVAL_SECONDS: integer(60, 1, 3600),
   FF_ALARM_SETTLE_SECONDS: integer(60, 0, 3600),
+  // How often the backend looks for functions' keys past half their life, which it renews; tests shorten it.
+  FF_KEY_RENEWAL_INTERVAL_SECONDS: integer(60, 1, 3600),
   // How often the scheduler takes the schedules due (0: never, a backend that runs none); and FF's region, which
   // events name, as AWS's do theirs.
   FF_SCHEDULER_INTERVAL_SECONDS: integer(5, 0, 60),
@@ -1014,6 +1016,10 @@ export default function configuration(env: Env = process.env) {
     alarms: {
       intervalSeconds: parsed.FF_ALARM_INTERVAL_SECONDS,
       settleSeconds: parsed.FF_ALARM_SETTLE_SECONDS,
+    },
+    // Functions' keys: how often the ones past half their life are looked for, and renewed.
+    keyRenewal: {
+      intervalSeconds: parsed.FF_KEY_RENEWAL_INTERVAL_SECONDS,
     },
     // Schedules: how often the due ones are taken, and the region their events name.
     schedules: {

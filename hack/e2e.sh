@@ -219,8 +219,9 @@ function_secret() {
 aws_ff() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
   AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" --endpoint-url "$s3_endpoint" "$@"; }
 
-# outcome <command…>: accepted, or refused with the S3 error's code in its message, as the CLI prints it.
-outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|InvalidArgument)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
+# outcome <command…>: accepted, or refused with the error's code, as AWS's CLI prints any service's: S3's, SQS's query
+# code (AWS.SimpleQueueService.NonExistentQueue), SES's name (NotFoundException).
+outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/aws.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"; }
 
 # written_within <seconds> <table> <id> <since>: true when the backend wrote the table's first row for the id within
 # that many seconds of <since> (seconds since the epoch), else how long after, as its log says: in development, each
@@ -309,8 +310,12 @@ e2e_migrate "${be_env[@]}"
 # The backend's own startup check, below, then proves that none is left pending.
 check "the migrations run from the build" true \
   "$(grep -q 'executed successfully' "$work/migrations.log" && echo true || echo false)"
+# The suite's account makes more changes in a minute than the beta plan's 60, its sections one after another: the rate
+# limit is checked on a plan of its own, the small one's five.
+sql "UPDATE plans SET limits = limits || '{\"writesPerMinute\": 10000}' WHERE id = 'beta'"
 # Alarms evaluated every 5 s, each minute as soon as it is over, and notifications sent every second, to this machine too.
-alarm_env=(FF_ALARM_INTERVAL_SECONDS=5 FF_ALARM_SETTLE_SECONDS=0 FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
+alarm_env=(FF_ALARM_INTERVAL_SECONDS=5 FF_ALARM_SETTLE_SECONDS=0 FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true
+  FF_KEY_RENEWAL_INTERVAL_SECONDS=5)
 # The cold start the running backend allows a function (K8S_READY_TIMEOUT_SECONDS), which its hourly rating's wait for
 # an hour to settle follows: the default here.
 be_ready_timeout=90
@@ -1404,13 +1409,11 @@ check "  ... sends a message with an attribute, receives it back, and deletes it
   "$(jq -r '.Messages[0] | "\(.Body) \(.MessageAttributes.source.StringValue)"' "$work/received.json") \
 $(aws_sqs delete-message --queue-url "$cli_url" --receipt-handle "$(jq -r '.Messages[0].ReceiptHandle' "$work/received.json")" >/dev/null; \
 aws_sqs get-queue-attributes --queue-url "$cli_url" --attribute-names ApproximateNumberOfMessages --query Attributes.ApproximateNumberOfMessages --output text)"
-# outcome_sqs <command…>: accepted, or refused with the error's query code, as the CLI prints it.
-outcome_sqs() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((AWS\.SimpleQueueService\.[A-Za-z]+|SignatureDoesNotMatch|InvalidClientTokenId|AccessDenied|OverLimit|RequestThrottled)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
-check "  ... a queue that isn't there, by its query code" "refused AWS.SimpleQueueService.NonExistentQueue" "$(outcome_sqs aws_sqs get-queue-url --queue-name nowhere)"
+check "  ... a queue that isn't there, by its query code" "refused AWS.SimpleQueueService.NonExistentQueue" "$(outcome aws_sqs get-queue-url --queue-name nowhere)"
 other_url="$(as_other_sqs aws_sqs create-queue --queue-name e2e-cli-orders --query QueueUrl --output text)"
 check "another account's queue of the same name is its own: its URL under its account, which this account's key doesn't find" \
   "$sqs_endpoint/$other/e2e-cli-orders refused AWS.SimpleQueueService.NonExistentQueue" \
-  "$other_url $(outcome_sqs aws_sqs send-message --queue-url "$other_url" --message-body 'not mine')"
+  "$other_url $(outcome aws_sqs send-message --queue-url "$other_url" --message-body 'not mine')"
 check "  ... nor lists" "$cli_url" "$(aws_sqs list-queues --query 'QueueUrls' --output text)"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0010 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
@@ -1493,11 +1496,11 @@ check "  ... refuses a name the account has" '409 The account has a queue named 
 named_key="$(http POST /storage-keys '{"queues": ["e2e-api-orders"]}')"
 named_sqs() { AWS_KEY="$(jq -r .id <<<"$named_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$named_key")" "$@"; }
 check "a key that names a queue lists it alone, and is refused another, AccessDenied" "201 e2e-api-orders $api_url refused AccessDenied" \
-  "$(status) $(jq -r '.queues | join(",")' <<<"$named_key") $(named_sqs aws_sqs list-queues --query 'QueueUrls' --output text) $(named_sqs outcome_sqs aws_sqs get-queue-url --queue-name e2e-fn-records)"
+  "$(status) $(jq -r '.queues | join(",")' <<<"$named_key") $(named_sqs aws_sqs list-queues --query 'QueueUrls' --output text) $(named_sqs outcome aws_sqs get-queue-url --queue-name e2e-fn-records)"
 http DELETE "/storage-keys/$(jq -r .id <<<"$named_key")" >/dev/null
 http POST /queues/e2e-api-orders/purge >/dev/null
 check "FF's API purges a queue, and deletes it, which the CLI then doesn't find" "204 0 204 refused AWS.SimpleQueueService.NonExistentQueue" \
-  "$(status) $(http GET /queues/e2e-api-orders | jq -r .sizeBytes) $(http DELETE /queues/e2e-api-orders >/dev/null; status) $(outcome_sqs aws_sqs get-queue-url --queue-name e2e-api-orders)"
+  "$(status) $(http GET /queues/e2e-api-orders | jq -r .sizeBytes) $(http DELETE /queues/e2e-api-orders >/dev/null; status) $(outcome aws_sqs get-queue-url --queue-name e2e-api-orders)"
 check "the audit log names each change of a queue, whichever way it came: the CLI's under its access key, the API's as its caller" \
   "queue.create access_key:$queue_key_id|queue.create dev|queue.purge dev|queue.delete dev" \
   "$(env_q "SELECT string_agg(action || ' ' || actor, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource IN ('queue:e2e-cli-orders', 'queue:e2e-api-orders') AND (resource = 'queue:e2e-api-orders' OR action = 'queue.create')")"
@@ -1695,8 +1698,6 @@ mail_key_secret="$(jq -r .secretAccessKey <<<"$mail_key")"
 aws_ses() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$mail_key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$mail_key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 \
   AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_SESV2="$ses_endpoint" "${aws_cli[@]}" sesv2 "$@" --output json; }
 as_other_ses() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
-# outcome_ses <command…>: accepted, or refused with the error's name, as the CLI prints it.
-outcome_ses() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE 'An error occurred \([A-Za-z]+\)' "$work/aws.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"; }
 check "the AWS CLI makes a domain an identity, with a DKIM key of FF's, as SES's own DKIM brought in: pending, its one token the selector" \
   "DOMAIN false PENDING EXTERNAL 1" \
   "$(aws_ses create-email-identity --email-identity Shop.E2E-Customer.tn | jq -r '"\(.IdentityType) \(.VerifiedForSendingStatus) \(.DkimAttributes.Status) \(.DkimAttributes.SigningAttributesOrigin) \(.DkimAttributes.Tokens | length)"')"
@@ -1717,7 +1718,7 @@ check "once its records are published, a check proves it, its return path too" "
   "$(jq -r '"\(.status) \(.sendingEnabled) \(.mailFromVerified)"' "$work/body")"
 check "  ... as the AWS CLI reads it back" "true SUCCESS SUCCESS" \
   "$(aws_ses get-email-identity --email-identity shop.e2e-customer.tn | jq -r '"\(.VerifiedForSendingStatus) \(.DkimAttributes.Status) \(.MailFromAttributes.MailFromDomainStatus)"')"
-check "  ... the same domain again, refused as SES does" "refused AlreadyExistsException" "$(outcome_ses aws_ses create-email-identity --email-identity shop.e2e-customer.tn)"
+check "  ... the same domain again, refused as SES does" "refused AlreadyExistsException" "$(outcome aws_ses create-email-identity --email-identity shop.e2e-customer.tn)"
 check "an address is made an identity, pending until its link is followed" "EMAIL_ADDRESS false" \
   "$(aws_ses create-email-identity --email-identity Orders@E2E-Customer.tn | jq -r '"\(.IdentityType) \(.VerifiedForSendingStatus)"')"
 # No SMTP server here: FF's own mail is written to the backend's log, the link with it.
@@ -1732,14 +1733,14 @@ $(curl -s -o /dev/null -w '%{http_code}' "$ses_endpoint/verify?token=$token")"
 check "  ... and the CLI lists both, proved" "orders@e2e-customer.tn:true shop.e2e-customer.tn:true" \
   "$(aws_ses list-email-identities | jq -r '[.EmailIdentities[] | "\(.IdentityName):\(.SendingEnabled)"] | join(" ")')"
 check "another account's key finds none of them" "refused NotFoundException 0" \
-  "$(outcome_ses as_other_ses aws_ses get-email-identity --email-identity shop.e2e-customer.tn) $(as_other_ses aws_ses list-email-identities | jq '.EmailIdentities | length')"
+  "$(outcome as_other_ses aws_ses get-email-identity --email-identity shop.e2e-customer.tn) $(as_other_ses aws_ses list-email-identities | jq '.EmailIdentities | length')"
 check "the account's sending as GetAccount says it: the plan's quotas, SES's doubles as the AWS CLI prints them, in the sandbox" "200.0 1.0 false true" \
   "$(aws_ses get-account | jq -r '"\(.SendQuota.Max24HourSend) \(.SendQuota.MaxSendRate) \(.ProductionAccessEnabled) \(.SendingEnabled)"')"
 aws_ses put-suppressed-destination --email-address Gone@E2E-Customer.tn --reason BOUNCE >/dev/null
 check "an address put on the suppression list, read back by the CLI and FF's API" "gone@e2e-customer.tn BOUNCE gone@e2e-customer.tn" \
   "$(aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn | jq -r '"\(.SuppressedDestination.EmailAddress) \(.SuppressedDestination.Reason)"') $(http GET /email/suppressions | jq -r '.suppressions[0].address')"
 aws_ses delete-suppressed-destination --email-address gone@e2e-customer.tn >/dev/null
-check "  ... and taken off" "refused NotFoundException" "$(outcome_ses aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn)"
+check "  ... and taken off" "refused NotFoundException" "$(outcome aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn)"
 check "the audit log names each change to the domain, the CLI's under its key" "email.identity.create access_key:$mail_key_id email.identity.verify" \
   "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'email-identity:shop.e2e-customer.tn'")"
 }
@@ -1784,9 +1785,9 @@ check "a raw message, its sender and recipient from its header as the AWS CLI se
   "$(received_envelope 2 | jq -r '.to | join(",")') $(grep -q '^Message-ID: <raw-e2e@shop.e2e-customer.tn>' "$work/received-2.eml" && echo true || echo false) $(dkim_of "$work/received-2.eml")"
 sleep 1
 check "a message from an address the account hasn't proved is refused, as SES refuses it" "refused MessageRejected" \
-  "$(outcome_ses aws_ses send-email --from-email-address someone@unproved.tn --destination ToAddresses=orders@e2e-customer.tn --content "$simple_content")"
+  "$(outcome aws_ses send-email --from-email-address someone@unproved.tn --destination ToAddresses=orders@e2e-customer.tn --content "$simple_content")"
 check "  ... and in the sandbox, one to an address it hasn't proved" "refused MessageRejected" \
-  "$(outcome_ses aws_ses send-email --from-email-address news@shop.e2e-customer.tn --destination ToAddresses=stranger@example.org --content "$simple_content")"
+  "$(outcome aws_ses send-email --from-email-address news@shop.e2e-customer.tn --destination ToAddresses=stranger@example.org --content "$simple_content")"
 check "GetAccount counts what the account sent in the last day, each recipient once, the one kept off too" 4.0 \
   "$(aws_ses get-account | jq -r .SendQuota.SentLast24Hours)"
 check "GET /email/metrics counts its recipients as CloudWatch names SES's metrics: sent, taken, bounced or kept off, complained of" "4 2 2 0" \
@@ -1802,6 +1803,66 @@ check "  ... the domain's mail stays in GET /usage, said deleted, as billed" "tr
 http DELETE "/storage-keys/$mail_key_id" >/dev/null
 }
 section_def mail_sent section_mail_sent mail budget=20
+
+section_key_life() {
+section "keys that end (ADR 0014, 5): a function's, copied out of it, refused past its end in each service's words; a fresh one from zero, and at half its life"
+# A function's key lasts 12 hours, which this suite doesn't wait: its times move in SQL, as the hours would move them.
+key_code='export async function handler() { return { key: process.env.AWS_ACCESS_KEY_ID }; }'
+created="$(http POST /functions "$(jq -n --arg code "$key_code" '{name: "e2e-key-life", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
+key_fn="$(jq -r .id <<<"$created")"
+made="$(http POST "/functions/$key_fn/url" '{"authType": "AWS_IAM"}')"
+local url_host
+url_host="$(jq -r .functionUrl <<<"$made" | sed -E 's#^http://([^:/]+).*#\1#')"
+# key_life <key ID>: the hours between a key's making and its end.
+key_life() { env_q "SELECT round(extract(epoch FROM expires_at - created_at) / 3600) FROM storage_keys WHERE id = '$1'"; }
+# called_key: the key the function's pod runs with, as it answers a call.
+called_key() { http POST "/functions/$key_fn/invoke" '{"input": {}}' | jq -r .output.key; }
+first_key="$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)"
+copied="$(jq -n --arg id "$first_key" --arg secret "$(function_secret "$key_fn" AWS_SECRET_ACCESS_KEY)" '{id: $id, secretAccessKey: $secret}')"
+as_copied() { AWS_KEY="$first_key" AWS_SECRET="$(jq -r .secretAccessKey <<<"$copied")" "$@"; }
+check "a function's key lasts 12 hours, and its pod runs with it" "12 $first_key" "$(key_life "$first_key") $(called_key)"
+check "  ... copied out of it, it opens S3, SQS and SES, and the function's URL" "accepted accepted accepted 200" \
+  "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities) $(signed_url "$copied" GET / >/dev/null; url_status)"
+# At zero, as the idle sweep leaves a function, no pod holds its key, which the renewal leaves to its next start.
+kubectl -n "$tenant_ns" scale deployment "fn-$key_fn" --replicas=0 >/dev/null
+for _ in $(seq 60); do [ -z "$(kubectl -n "$tenant_ns" get deployment "fn-$key_fn" -o jsonpath='{.status.readyReplicas}')" ] && break; sleep 1; done
+sql "UPDATE storage_keys SET created_at = now() - interval '12 hours 1 second', expires_at = now() - interval '1 second' WHERE id = '$first_key'"
+check "past its end, each front door refuses it at once, in its service's words: S3's ExpiredToken, SQS's, SES's ExpiredTokenException" \
+  "refused ExpiredToken refused ExpiredToken refused ExpiredTokenException" \
+  "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities)"
+check "  ... and the URL, Forbidden, saying so" "403 Forbidden: The security token included in the request is expired." \
+  "$(signed_url "$copied" GET / >/dev/null; url_status) $(jq -r .Message "$work/url-body")"
+fresh_key="$(called_key)"
+check "a call starts the function from zero on a fresh key, of 12 hours" "true $fresh_key 12" \
+  "$([[ $fresh_key =~ ^AKFF && $fresh_key != "$first_key" ]] && echo true || echo false) $(function_secret "$key_fn" AWS_ACCESS_KEY_ID) $(key_life "$fresh_key")"
+for _ in $(seq 60); do [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$first_key'")" = t ] && break; sleep 1; done
+check "  ... the old one revoked by the renewal's next turn, which finds its pod on the new one" "t t" \
+  "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$first_key'" | tr '|' ' ')"
+
+# Six hours and a minute on: past half its life, which the renewal, every 5 s here, finds.
+sql "UPDATE storage_keys SET created_at = created_at - interval '6 hours 1 minute', expires_at = expires_at - interval '6 hours 1 minute' WHERE id = '$fresh_key'"
+# Called each second until the old key is revoked, a turn after its pod was replaced: every call answered.
+calls=0 failed=0
+for _ in $(seq 120); do
+  answer="$(http POST "/functions/$key_fn/invoke" '{"input": {}}')"
+  calls=$((calls + 1))
+  [ "$(status) $(jq -r .status <<<"$answer")" = "201 COMPLETED" ] || failed=$((failed + 1))
+  [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$fresh_key'")" = t ] && break
+  sleep 1
+done
+renewed_key="$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)"
+check "past half its life, a running function gets a new key, of 12 hours, which its new pod runs with" "true 12 $renewed_key" \
+  "$([[ $renewed_key =~ ^AKFF && $renewed_key != "$fresh_key" ]] && echo true || echo false) $(key_life "$renewed_key") $(called_key)"
+check "  ... the old one revoked once no pod holds it, and the function's only key left" "t t 1" \
+  "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$fresh_key'" | tr '|' ' ') $(env_q "SELECT count(*) FROM storage_keys WHERE function_id = '$key_fn' AND revoked_at IS NULL")"
+check "  ... every call answered while its pod was replaced" "0 true" "$failed $([ "$calls" -gt 3 ] && echo true || echo false)"
+check "the renewal is in the backend's log" true \
+  "$(grep "Deployment(s) rolled onto a new key" "$work/backend.log" >/dev/null && echo true || echo false)"
+http DELETE "/functions/$key_fn" >/dev/null
+check "the function deleted, its key with it" "200 0" \
+  "$(status) $(env_q "SELECT count(*) FROM storage_keys WHERE function_id = '$key_fn' AND revoked_at IS NULL")"
+}
+section_def key_life section_key_life queues mail budget=40
 
 section_plans() {
 section "plans and rate limits (P-15)"

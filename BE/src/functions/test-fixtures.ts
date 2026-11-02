@@ -147,9 +147,9 @@ const noUpload = () => {
 /** What a test's packages service has of uploads: none to name, and none of the account's code counted against its plan. */
 const NO_UPLOADS = { name: noUpload, namedBytes: async () => 0 };
 
-/** FF without functions' keys to buckets, as where the front door has no address for functions: none made, none to revoke. */
+/** FF without functions' keys to buckets, as where the front door has no address for functions: none made, none to revoke nor renew. */
 export function noFunctionKeys(): FunctionKeys {
-  return { credentialsFor: async () => undefined, revoke: async () => undefined } as unknown as FunctionKeys;
+  return { credentialsFor: async () => undefined, revoke: async () => undefined, isDue: async () => false } as unknown as FunctionKeys;
 }
 
 /**

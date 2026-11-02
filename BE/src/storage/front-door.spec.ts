@@ -36,7 +36,7 @@ import { Bucket, BucketStatus } from './bucket.entity';
 import { S3FrontDoor } from './front-door';
 import { CountedRequest } from './request-tally';
 import { RequestSignature, checkSignature, readSignature, signedForStore } from './s3-signature';
-import { ActiveKey, StorageDirectory } from './storage-directory.service';
+import { ActiveKey, EXPIRED, StorageDirectory } from './storage-directory.service';
 import { notedUses, useLine } from './test-fixtures';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { WebsiteConfiguration } from './website';
@@ -49,6 +49,8 @@ const OTHERS: ActiveKey = { ...KEY, id: 'AKFFCCCCCCCCCCCCCCCC', accountId: '0000
 const NARROW: ActiveKey = { ...KEY, id: 'AKFFDDDDDDDDDDDDDDDD', buckets: ['photos'] };
 /** A key that names queues alone: it reaches no bucket. */
 const QUEUES_ONLY: ActiveKey = { ...KEY, id: 'AKFFEEEEEEEEEEEEEEEE', queues: ['orders'] };
+/** A function's key past its end, which the directory says so of. */
+const ENDED = 'AKFFFFFFFFFFFFFFFFFF';
 const bucket = (name: string, accountId: string, storeName: string): Bucket =>
   Object.assign(new Bucket(), { id: `id-${name}`, accountId, name, storeName, status: BucketStatus.ACTIVE, createdAt: new Date('2026-10-23T06:00:00Z') });
 const BUCKETS = [bucket('photos', KEY.accountId, 'ff-000000000000000000000001'), bucket('exports', KEY.accountId, 'ff-000000000000000000000002'), bucket('theirs', OTHERS.accountId, 'ff-000000000000000000000003')];
@@ -140,7 +142,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   const counted: CountedRequest[] = [];
   const keys = new Map([KEY, READ_ONLY, OTHERS, NARROW, QUEUES_ONLY].map((key) => [key.id, key]));
   const directory = {
-    key: async (id: string) => keys.get(id) ?? null,
+    key: async (id: string) => (id === ENDED ? EXPIRED : (keys.get(id) ?? null)),
     bucket: async (name: string) => BUCKETS.find((b) => b.name === name) ?? null,
     bucketsOf: async (accountId: string) => BUCKETS.filter((b) => b.accountId === accountId),
     touch: () => undefined,
@@ -324,11 +326,12 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     expect(seen).toEqual([]);
   });
 
-  it("refuses, in S3's words, before the store hears of it: a wrong secret, an unknown key, another account's bucket, a bucket the key doesn't reach, a write with a read-only key, none at all", async () => {
+  it("refuses, in S3's words, before the store hears of it: a wrong secret, an unknown key, one past its end, another account's bucket, a bucket the key doesn't reach, a write with a read-only key, none at all", async () => {
     const get = new GetObjectCommand({ Bucket: 'photos', Key: 'range.txt' });
 
     expect(await refused(client(KEY, 'b'.repeat(40)).send(get))).toBe('403 SignatureDoesNotMatch');
     expect(await refused(client({ ...KEY, id: 'AKFFZZZZZZZZZZZZZZZZ' }).send(get))).toBe('403 InvalidAccessKeyId');
+    expect(await refused(client({ ...KEY, id: ENDED }).send(get))).toBe('400 ExpiredToken');
     expect(await refused(client().send(new GetObjectCommand({ Bucket: 'theirs', Key: 'x' })))).toBe('403 AccessDenied');
     expect(await refused(client(NARROW).send(new ListObjectsV2Command({ Bucket: 'exports' })))).toBe('403 AccessDenied');
     expect(await refused(client(QUEUES_ONLY).send(new ListObjectsV2Command({ Bucket: 'photos' })))).toBe('403 AccessDenied');

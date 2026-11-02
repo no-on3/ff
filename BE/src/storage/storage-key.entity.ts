@@ -16,13 +16,14 @@ export const ALL_FUNCTIONS = '*';
  * Naming nothing, it reaches all the account's buckets, queues and mail and
  * no function; naming some buckets, queues or functions, those alone,
  * read-write or read-only, and its functions at their level. A function's own
- * key names its function, which has one that works at most. A deploy's own key
- * reaches one bucket for an hour. A revoked or expired key keeps its row, so
- * that its ID is never another's.
+ * key names its function, which has one current key at most, for 12 hours: a
+ * key renewed is replaced, and works on until no pod holds it. A deploy's own
+ * key reaches one bucket for an hour. A revoked or expired key keeps its row,
+ * so that its ID is never another's.
  */
 @Entity('storage_keys')
 @Index(['accountId'])
-@Index('UQ_storage_keys_function', ['functionId'], { unique: true, where: '"function_id" IS NOT NULL AND "revoked_at" IS NULL' })
+@Index('UQ_storage_keys_function', ['functionId'], { unique: true, where: '"function_id" IS NOT NULL AND "revoked_at" IS NULL AND "replaced_at" IS NULL' })
 @Index('UQ_storage_keys_name', ['accountId', 'name'], { unique: true, where: '"name" IS NOT NULL AND "revoked_at" IS NULL' })
 @Check(`"function_access" IN ('read', 'invoke', 'write')`)
 @Check(`("functions" IS NULL) = ("function_access" IS NULL)`)
@@ -75,7 +76,11 @@ export class StorageKey {
   @Column({ type: 'timestamptz', nullable: true })
   revokedAt: Date | null;
 
-  /** When a deploy's key stops working; null for a key that works until revoked. */
+  /** When a deploy's or a function's key stops working; null for a key that works until revoked. */
   @Column({ type: 'timestamptz', nullable: true })
   expiresAt: Date | null;
+
+  /** When a function's key was renewed: it works on, until its end or until no pod holds it; null for a current key. */
+  @Column({ type: 'timestamptz', nullable: true })
+  replacedAt: Date | null;
 }

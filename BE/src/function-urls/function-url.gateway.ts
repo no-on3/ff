@@ -24,7 +24,7 @@ import { CallTarget, FunctionsService } from '../functions/functions.service';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { S3FrontDoor } from '../storage/front-door';
 import { functionAccessOf, mayInvoke } from '../storage/key-reach';
-import { StorageDirectory } from '../storage/storage-directory.service';
+import { EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
 import { WebsiteServer } from '../storage/website-server';
 import { refusals, statusClass, urlResponses } from '../monitoring/operator-metrics';
 import { FunctionThrottledError } from '../orchestrator/orchestrator.errors';
@@ -373,6 +373,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
   private async signedCaller(request: IncomingMessage, url: FunctionUrl, signature: HeaderSignature): Promise<UrlCaller> {
     const body = await readBody(request, URL_PAYLOAD_LIMIT);
     const key = await this.directory.key(signature.accessKeyId);
+    if (key === EXPIRED) throw forbidden('The security token included in the request is expired.');
     if (!key) throw forbidden('The security token included in the request is invalid.');
     const target = originForm(request.url);
     const at = target.indexOf('?');

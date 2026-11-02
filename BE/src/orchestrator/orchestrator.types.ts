@@ -52,6 +52,10 @@ export interface WorkloadInstances {
   version?: number;
   desired: number;
   ready: number;
+  /** The revision of the environment its template names, its key's with it; none without one. */
+  revision?: string;
+  /** The code image its template mounts. */
+  codeImage?: string;
 }
 
 /** What a function's process gets besides FF's own variables: its variables and its secrets' values. */
@@ -168,13 +172,22 @@ export interface Orchestrator {
    */
   waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void>;
   /**
+   * Write the workload's environment where its pods don't read it, and roll its Deployment, $LATEST's or the version
+   * `fn.version` names, onto it, its code and its instances as they are: each pod replaced by one of the new
+   * environment, one at a time, a new one ready before an old one goes; none started for a Deployment at zero, whose
+   * next start finds it written. Two writes, where an update makes seven: for a function's renewed key (ADR 0014, 5).
+   * False, and nothing done, for a workload with no Deployment.
+   */
+  renewEnvironment(fn: FunctionWorkload): Promise<boolean>;
+  /**
    * Calls the function, or the version `fn.version` names. `requestId` goes to the runtime (X-FF-Request-Id), so the
    * invocation, its usage record and its log lines share one ID. An error after a cold start carries its
-   * duration: initMsOf(). `deploy` gives a version's workload whole, its code image and environment, which the call
-   * asks for only when the version has nothing to run on: its first call, or its first since it went idle; the cold
-   * start's duration counts its making.
+   * duration: initMsOf(). `start` gives what a cold start starts from, which the call asks for only then: a version's
+   * workload whole, its code image and environment, when the version has nothing to run on (its first call, or its
+   * first since it went idle); $LATEST's at zero with a fresh key when its key is due a renewal, else nothing, its
+   * Deployment then scaled up as it is. The cold start's duration counts its making.
    */
-  invoke(fn: FunctionWorkload, payload: unknown, requestId?: string, deploy?: () => Promise<FunctionWorkload>): Promise<InvokeResult>;
+  invoke(fn: FunctionWorkload, payload: unknown, requestId?: string, start?: () => Promise<FunctionWorkload | undefined>): Promise<InvokeResult>;
   scale(fn: FunctionWorkload, replicas: number): Promise<void>;
   /** Instances that can serve now, of the version `fn.version` names, or $LATEST's. */
   readyInstances(fn: FunctionWorkload): Promise<number>;

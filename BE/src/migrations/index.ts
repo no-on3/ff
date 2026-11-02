@@ -69,6 +69,7 @@ import { UrlAliases1793580000000 } from './1793580000000-UrlAliases';
 import { TriggerQualifiers1793590000000 } from './1793590000000-TriggerQualifiers';
 import { AlarmDimensions1793600000000 } from './1793600000000-AlarmDimensions';
 import { AccessKeyFunctions1793610000000 } from './1793610000000-AccessKeyFunctions';
+import { FunctionKeyRenewal1793620000000 } from './1793620000000-FunctionKeyRenewal';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -147,4 +148,5 @@ export const MIGRATIONS: Array<new () => object> = [
   TriggerQualifiers1793590000000,
   AlarmDimensions1793600000000,
   AccessKeyFunctions1793610000000,
+  FunctionKeyRenewal1793620000000,
 ];

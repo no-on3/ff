@@ -30,6 +30,7 @@ import { FunctionAliasesController } from './aliases.controller';
 import { FunctionAliasesService } from './aliases.service';
 import { FunctionVersionsController } from './versions.controller';
 import { FunctionVersionsService } from './versions.service';
+import { FunctionKeyRenewal } from './key-renewal.service';
 
 @Module({
   imports: [
@@ -50,7 +51,7 @@ import { FunctionVersionsService } from './versions.service';
     QueuesModule,
   ],
   controllers: [FunctionsController, EventInvokeConfigController, FunctionVersionsController, FunctionAliasesController],
-  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService],
+  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionKeyRenewal],
   exports: [FunctionsService],
 })
 export class FunctionsModule {}

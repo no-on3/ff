@@ -30,6 +30,9 @@ export interface ActiveKey {
   secret: string;
 }
 
+/** A key past its end, which a front door refuses saying so, in its service's words, as AWS refuses an expired token. */
+export const EXPIRED = 'expired';
+
 /** How often a key's last use is written down: at most once a minute. */
 const TOUCH_INTERVAL_MS = 60_000;
 
@@ -55,10 +58,11 @@ export class StorageDirectory {
     return this.encryption.openJson<string>(key.secret, sealedFor(key.id));
   }
 
-  /** The key of that ID, unless it is revoked or past its time; null for any other. */
-  async key(accessKeyId: string, now = new Date()): Promise<ActiveKey | null> {
+  /** The key of that ID, unless it is revoked; EXPIRED past its end, a function's or a deploy's; null for any other. */
+  async key(accessKeyId: string, now = new Date()): Promise<ActiveKey | typeof EXPIRED | null> {
     const key = await this.keys.findOneBy({ id: accessKeyId, revokedAt: IsNull() });
-    if (!key || (key.expiresAt !== null && key.expiresAt <= now)) return null;
+    if (!key) return null;
+    if (key.expiresAt !== null && key.expiresAt <= now) return EXPIRED;
     return {
       id: key.id,
       accountId: key.accountId,

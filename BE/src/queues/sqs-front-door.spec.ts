@@ -9,7 +9,7 @@ import { AuditService } from '../audit/audit.service';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { onePlan, plan } from '../plans/test-fixtures';
-import { ActiveKey, StorageDirectory } from '../storage/storage-directory.service';
+import { ActiveKey, EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
 import { notedUses, useLine } from '../storage/test-fixtures';
 import { CustomerQueues } from './customer-queues';
 import { QueueEvents } from './queue-events';
@@ -54,7 +54,8 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
   const events = { wait: jest.fn((_queueId: string, _ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve()))) };
 
   const directory = {
-    key: async (id: string) => [KEY, OTHERS].find((key) => key.id === id) ?? null,
+    // A function's key past its end, AKFFFFFF…, the directory says so of.
+    key: async (id: string) => (id === 'AKFFFFFFFFFFFFFFFFFF' ? EXPIRED : ([KEY, OTHERS].find((key) => key.id === id) ?? null)),
     account: async (id: string) => accounts.get(id) ?? null,
     touch: (id: string) => void touched.push(id),
   } as unknown as StorageDirectory;
@@ -165,11 +166,16 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
     }
   });
 
-  it("refuses an unknown key, and another secret, as SQS names them", async () => {
+  it("refuses an unknown key, one past its end, and another secret, as SQS names them", async () => {
     expect(await failure(client({ id: 'AKFFZZZZZZZZZZZZZZZZ', secret: KEY.secret }).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).toMatchObject({
       name: 'InvalidClientTokenId',
       status: 403,
       message: 'The security token included in the request is invalid.',
+    });
+    expect(await failure(client({ id: 'AKFFFFFFFFFFFFFFFFFF', secret: KEY.secret }).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).toMatchObject({
+      name: 'ExpiredToken',
+      status: 403,
+      message: 'The security token included in the request is expired',
     });
     expect(await failure(client({ id: KEY.id, secret: 'b'.repeat(40) }).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).toMatchObject({ name: 'SignatureDoesNotMatch', status: 403 });
   });

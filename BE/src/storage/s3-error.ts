@@ -19,6 +19,8 @@ export const accessDenied = (message = 'Access Denied') => new S3Error(403, 'Acc
 
 export const invalidAccessKeyId = () => new S3Error(403, 'InvalidAccessKeyId', 'The AWS Access Key Id you provided does not exist in our records.');
 
+export const expiredToken = () => new S3Error(400, 'ExpiredToken', 'The provided token has expired.');
+
 export const signatureMismatch = () =>
   new S3Error(403, 'SignatureDoesNotMatch', 'The request signature we calculated does not match the signature you provided. Check your key and signing method.');
 

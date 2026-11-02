@@ -65,6 +65,7 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
   const photosOnly = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const functionsOnly = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const suspended = { id: newAccessKeyId(), secret: newSecretAccessKey() };
+  const ended = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   /** The DNS, as the stand-in answers it: the records published so far. */
   const zone = { txt: new Map<string, string[]>(), mx: new Map<string, string[]>() };
   const resolver: MailResolver = { txt: async (name) => zone.txt.get(name) ?? [], mx: async (name) => zone.mx.get(name) ?? [] };
@@ -141,6 +142,7 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
       { id: photosOnly.id, accountId: ACCOUNT, buckets: ['photos'], secret: directory.sealSecret(photosOnly.id, photosOnly.secret) },
       { id: functionsOnly.id, accountId: ACCOUNT, functions: ['*'], functionAccess: 'write', secret: directory.sealSecret(functionsOnly.id, functionsOnly.secret) },
       { id: suspended.id, accountId: SUSPENDED, secret: directory.sealSecret(suspended.id, suspended.secret) },
+      { id: ended.id, accountId: ACCOUNT, secret: directory.sealSecret(ended.id, ended.secret), expiresAt: new Date(Date.now() - 1000) },
     ]);
     const plans = onePlan(plan({ emailIdentities: 2, emailsPerDay: 200, emailsPerSecond: 1 }));
     const audit = new AuditService(db.dataSource.getRepository(AuditEntry));
@@ -294,9 +296,10 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
       expect(await ses('GET', '/v2/email/account', { as: suspended })).toMatchObject({ status: 403, error: 'AccessDeniedException', body: { message: 'The account is suspended: its mail answers no key.' } });
     });
 
-    it("refuses a request that isn't signed and a key FF doesn't know; without a mail server, sends nothing; and answers NotImplemented for what it doesn't do", async () => {
+    it("refuses a request that isn't signed, a key FF doesn't know and one past its end; without a mail server, sends nothing; and answers NotImplemented for what it doesn't do", async () => {
       expect(await send('GET', '/v2/email/account', { host: `127.0.0.1:${port}` })).toMatchObject({ status: 403, error: 'MissingAuthenticationTokenException' });
       expect((await ses('GET', '/v2/email/account', { as: { id: newAccessKeyId(), secret: newSecretAccessKey() } })).error).toBe('UnrecognizedClientException');
+      expect(await ses('GET', '/v2/email/account', { as: ended })).toMatchObject({ status: 403, error: 'ExpiredTokenException' });
       expect(await ses('POST', '/v2/email/outbound-emails', { input: {} })).toMatchObject({ status: 400, error: 'BadRequestException', body: { message: 'Content is required: Simple or Raw' } });
       const message = { FromEmailAddress: 'orders@shop.example.tn', Destination: { ToAddresses: ['orders@shop.example.tn'] }, Content: { Simple: { Subject: { Data: 'Hi' }, Body: { Text: { Data: 'Hello' } } } } };
       expect(await ses('POST', '/v2/email/outbound-emails', { input: message })).toMatchObject({ status: 400, error: 'SendingPausedException' });

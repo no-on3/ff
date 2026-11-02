@@ -50,17 +50,20 @@ import {
   workloadResourceName,
 } from './naming';
 
+/** A Deployment's template, of what FF reads of it. */
+interface PodTemplate {
+  metadata?: Pick<K8sObject['metadata'], 'labels' | 'annotations'>;
+  spec?: {
+    containers?: Array<{ envFrom?: Array<{ secretRef?: { name?: string } }> }>;
+    volumes?: Array<{ name: string; configMap?: { name?: string }; image?: { reference?: string } }>;
+  };
+}
+
 interface Deployment extends K8sObject {
   metadata: K8sObject['metadata'] & { generation?: number };
   spec?: {
     replicas?: number;
-    template?: {
-      metadata?: Pick<K8sObject['metadata'], 'labels' | 'annotations'>;
-      spec?: {
-        containers?: Array<{ envFrom?: Array<{ secretRef?: { name?: string } }> }>;
-        volumes?: Array<{ name: string; configMap?: { name?: string }; image?: { reference?: string } }>;
-      };
-    };
+    template?: PodTemplate;
   };
   status?: {
     observedGeneration?: number;
@@ -132,6 +135,11 @@ function environmentInUse(fn: FunctionWorkload, deployment: Deployment | null): 
   const slot = name === undefined ? undefined : environmentSlotOf(fn.id, name);
   if (name === undefined || slot === undefined) return undefined;
   return { name, slot, revision: template?.metadata?.annotations?.[ANNOTATIONS.environmentRevision] };
+}
+
+/** The code image a Deployment's template mounts; none for one mounting its code from elsewhere, as a code ConfigMap from before. */
+function codeImageOf(template: PodTemplate | undefined): string | undefined {
+  return template?.spec?.volumes?.find((volume) => volume.name === 'code')?.image?.reference;
 }
 
 /** The rollout is finished: every replica runs the new template and is available (as `kubectl rollout status`). */
@@ -235,9 +243,31 @@ export class KubernetesOrchestrator implements Orchestrator {
     const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
     const replicas = Math.max(existing?.spec?.replicas ?? 0, fn.minInstances, 1);
     if (!Number.isFinite(replicas)) throw new OrchestratorError(`Invalid minInstances ${fn.minInstances} for function ${fn.id}`);
-    const environmentSecret = await this.applyEnvironment(fn, ns, existing);
-    await this.api.apply(paths.apps(ns, 'deployments', name), deploymentManifest(fn, ns, hash, this.settings, replicas, environmentSecret));
+    await this.applyTemplate(fn, ns, hash, existing, replicas);
     await this.collectOldConfigMaps(fn, ns, existing);
+  }
+
+  /**
+   * The workload's environment Secret, then its Deployment with `replicas`: $LATEST's in the Secret its running
+   * version doesn't read, a version's in its own, which its pods read as they start.
+   */
+  private async applyTemplate(fn: FunctionWorkload, ns: string, hash: string, existing: Deployment | null, replicas: number): Promise<void> {
+    const secret = fn.version === undefined ? await this.applyEnvironment(fn, ns, existing) : await this.applyVersionEnvironment(fn, ns);
+    await this.api.apply(paths.apps(ns, 'deployments', workloadResourceName(fn)), deploymentManifest(fn, ns, hash, this.settings, replicas, secret));
+  }
+
+  async renewEnvironment(fn: FunctionWorkload): Promise<boolean> {
+    return this.rollEnvironment(fn);
+  }
+
+  /** renewEnvironment, its Deployment given `replicas`, or keeping its own: false without one. */
+  private async rollEnvironment(fn: FunctionWorkload, replicas?: number): Promise<boolean> {
+    if (!fn.codeImage) throw new OrchestratorError(`Function ${fn.id} has no code image: its code reaches its pods as one (ADR 0003)`);
+    const ns = this.namespaceOf(fn);
+    const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', workloadResourceName(fn)));
+    if (!existing) return false;
+    await this.applyTemplate(fn, ns, codeHash(fn.runtime, fn.codeImage), existing, replicas ?? existing.spec?.replicas ?? 0);
+    return true;
   }
 
   /**
@@ -313,16 +343,20 @@ export class KubernetesOrchestrator implements Orchestrator {
     const ns = this.namespaceOf(fn);
     const name = versionResourceName(fn.id, version);
     await this.moveLatestOntoItsLabel(fn, ns);
-    let secret: string | undefined;
-    if (hasEnvironment(fn)) {
-      secret = versionEnvironmentSecretName(fn.id, version);
-      await this.api.apply(paths.core(ns, 'secrets', secret), environmentSecretManifest(fn, ns, secret));
-    }
+    const secret = await this.applyVersionEnvironment(fn, ns);
     await this.api.apply(paths.core(ns, 'services', name), serviceManifest(fn, ns));
     // Two first calls at once both deploy: the second keeps what the scaler may have given the first since.
     const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
     const replicas = Math.max(existing?.spec?.replicas ?? 0, 1);
     await this.api.apply(paths.apps(ns, 'deployments', name), deploymentManifest(fn, ns, codeHash(fn.runtime, fn.codeImage), this.settings, replicas, secret));
+  }
+
+  /** A version's environment, written to its own Secret, whose name the Deployment takes; nothing without one. */
+  private async applyVersionEnvironment(fn: FunctionWorkload, ns: string): Promise<string | undefined> {
+    if (!hasEnvironment(fn) || fn.version === undefined) return undefined;
+    const secret = versionEnvironmentSecretName(fn.id, fn.version);
+    await this.api.apply(paths.core(ns, 'secrets', secret), environmentSecretManifest(fn, ns, secret));
+    return secret;
   }
 
   /** A version's Deployment, Service and Secret, by name; nothing to do for one that has none. */
@@ -418,7 +452,8 @@ export class KubernetesOrchestrator implements Orchestrator {
 
   async waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void> {
     const deployment = await this.waitFor(fn, timeoutMs, isRolledOut);
-    await this.collectEnvironments(fn, this.namespaceOf(fn), deployment);
+    // $LATEST's two Secrets are its own: a version's rollout leaves them, and its Secret is the one it reads.
+    if (fn.version === undefined) await this.collectEnvironments(fn, this.namespaceOf(fn), deployment);
   }
 
   /** For a cold start: one ready instance is enough to serve the call. */
@@ -596,7 +631,15 @@ export class KubernetesOrchestrator implements Orchestrator {
       if (!functionId || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
       const version = isVersionLabelled(labels) ? Number(labels?.[LABELS.version]) : undefined;
       if (version !== undefined && !(Number.isInteger(version) && version > 0)) continue; // no version FF names
-      workloads.push({ functionId, version, desired: deployment.spec?.replicas ?? 0, ready: deployment.status?.readyReplicas ?? 0 });
+      const template = deployment.spec?.template;
+      workloads.push({
+        functionId,
+        version,
+        desired: deployment.spec?.replicas ?? 0,
+        ready: deployment.status?.readyReplicas ?? 0,
+        revision: template?.metadata?.annotations?.[ANNOTATIONS.environmentRevision],
+        codeImage: codeImageOf(template),
+      });
     }
     return workloads;
   }
@@ -610,13 +653,13 @@ export class KubernetesOrchestrator implements Orchestrator {
       if (!functionId || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
       // $LATEST's alone: a version's Deployment is made of the registry's image at each first call, and goes when idle.
       if (isVersionLabelled(deployment.metadata.labels)) continue;
-      const reference = deployment.spec?.template?.spec?.volumes?.find((volume) => volume.name === 'code')?.image?.reference;
+      const reference = codeImageOf(deployment.spec?.template);
       if (reference) images.set(functionId, reference);
     }
     return images;
   }
 
-  async invoke(fn: FunctionWorkload, payload: unknown, requestId?: string, deploy?: () => Promise<FunctionWorkload>): Promise<InvokeResult> {
+  async invoke(fn: FunctionWorkload, payload: unknown, requestId?: string, start?: () => Promise<FunctionWorkload | undefined>): Promise<InvokeResult> {
     let initMs: number | undefined;
     try {
       const { desired, ready, exists } = await this.instances(fn);
@@ -626,14 +669,21 @@ export class KubernetesOrchestrator implements Orchestrator {
         try {
           if (!exists && fn.version !== undefined) {
             // A version's first call, or its first since it went idle: its objects made, with one instance.
-            if (!deploy) throw new OrchestratorError(`Version ${fn.version} of function ${fn.id} has no Deployment, and the call gave no way to make one`);
+            const workload = await start?.();
+            if (!workload) throw new OrchestratorError(`Version ${fn.version} of function ${fn.id} has no Deployment, and the call gave no way to make one`);
             this.logger.log(`Cold start: deploying version ${fn.version} of ${fn.id}`);
-            await this.deployVersion(await deploy());
+            await this.deployVersion(workload);
           } else if (desired === 0) {
             // Only raise from zero: an instance may already be starting, perhaps asked for by the
             // scaler for a burst of calls, and setting 1 here would take the others away again.
-            this.logger.log(`Cold start: scaling ${fn.id} from zero`);
-            await this.scale(fn, 1);
+            // A key due a renewal is renewed now, while no pod holds it (ADR 0014, 5).
+            const fresh = await start?.();
+            if (fresh && (await this.rollEnvironment(fresh, 1))) {
+              this.logger.log(`Cold start: starting ${fn.id} from zero with a fresh key`);
+            } else {
+              this.logger.log(`Cold start: scaling ${fn.id} from zero`);
+              await this.scale(fn, 1);
+            }
           }
           await this.waitForAnInstance(fn, this.settings.readyTimeoutSeconds * 1000);
         } finally {

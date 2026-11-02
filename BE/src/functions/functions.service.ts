@@ -28,7 +28,7 @@ import {
   LogStoreUnavailableError,
   initMsOf,
 } from '../orchestrator/orchestrator.errors';
-import { FunctionWorkload, ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { FunctionWorkload, ORCHESTRATOR, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
@@ -128,6 +128,24 @@ export function workloadOf(function_: Function, environment: FunctionEnvironment
   const values = { ...processEnvironment(environment), ...credentials?.variables };
   const revision = [environment.revision, credentials?.revision].filter(Boolean).join('.');
   return { ...function_, environment: Object.keys(values).length > 0 ? { revision, values } : undefined, codeImage };
+}
+
+/**
+ * What of a workload's revision is its environment's, without its key's: workloadOf joins the two with a dot, an
+ * environment's being hexadecimal and a key's starting with its ID, AKFF.
+ */
+function environmentPart(revision: string | undefined): string {
+  const [first = ''] = (revision ?? '').split('.');
+  return first.startsWith('AKFF') ? '' : first;
+}
+
+/**
+ * Whether a Deployment's template runs the workload but for its key: the same code image and the same environment,
+ * which a renewal may roll onto the new key. Another is an update's under way, or one that failed, whose own rollout
+ * gives the pods the current key.
+ */
+export function differsByKeyAlone(template: Pick<WorkloadInstances, 'revision' | 'codeImage'>, workload: FunctionWorkload): boolean {
+  return template.codeImage === workload.codeImage && environmentPart(template.revision) === environmentPart(workload.environment?.revision);
 }
 
 /** A function's code, as its record keeps it. */
@@ -1024,9 +1042,10 @@ export class FunctionsService {
     const startTime = Date.now();
     try {
       // The runtime logs the request's ID, and the usage record is keyed by it and the attempt's start (D6).
-      // A version's first call, or its first since it went idle, makes its pods of its workload whole.
-      const deploy = version ? () => this.versionWorkload(running, version.version) : undefined;
-      const result = await this.orchestrator.invoke(running, payload, invocation.requestId, deploy);
+      // A version's first call, or its first since it went idle, makes its pods of its workload whole; $LATEST at
+      // zero starts with a fresh key when its key is due a renewal.
+      const start = version ? () => this.versionWorkload(running, version.version) : () => this.withFreshKey(function_.id);
+      const result = await this.orchestrator.invoke(running, payload, invocation.requestId, start);
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
@@ -1119,14 +1138,46 @@ export class FunctionsService {
       number = named.version;
     }
     if (number === undefined) return { alias };
-    const version = await manager
-      .createQueryBuilder(FunctionVersion, 'v')
-      .addSelect('v.packageSha256')
-      .where('v.functionId = :id AND v.version = :number', { id: function_.id, number })
-      .getOne();
+    const version = await this.publishedVersion(function_.id, number);
     // An alias's versions are there: none is deleted while an alias names it.
     if (!version) throw noSuchVersion(function_, number);
     return { version, alias };
+  }
+
+  /** The function's version of that number, with its package; null for one it hasn't. */
+  private publishedVersion(functionId: string, number: number): Promise<FunctionVersion | null> {
+    return this.functionsRepository.manager
+      .createQueryBuilder(FunctionVersion, 'v')
+      .addSelect('v.packageSha256')
+      .where('v.functionId = :id AND v.version = :number', { id: functionId, number })
+      .getOne();
+  }
+
+  /**
+   * What a renewal of the function's key rolls out to its Deployment, $LATEST's or the version `version` names: the
+   * code image and the environment its record has, as its pods run them, with its current key, renewed if due (ADR
+   * 0014, 5). Null for a function that isn't ACTIVE, whose change under way, or failed, holds its pods; one that has
+   * no package, deployed before code came as images; and a version deleted.
+   */
+  async runningWorkload(functionId: string, version?: number): Promise<FunctionWorkload | null> {
+    const function_ = await this.functionsRepository
+      .createQueryBuilder('f')
+      .addSelect(['f.packageSha256', 'f.lastVersion'])
+      .where('f.id = :functionId AND f.status = :status', { functionId, status: FunctionStatus.ACTIVE })
+      .getOne();
+    if (!function_?.packageSha256) return null;
+    if (version === undefined) {
+      const image = await this.codeImages.imageFor(function_.accountId, function_.packageSha256);
+      return this.workload(function_, await this.environments.load(function_.id), image);
+    }
+    const published = await this.publishedVersion(function_.id, version);
+    return published && this.versionWorkload(versionRun(function_, published), version);
+  }
+
+  /** $LATEST's workload with a fresh key, when its key is due a renewal as it starts from zero; nothing otherwise. */
+  private async withFreshKey(functionId: string): Promise<FunctionWorkload | undefined> {
+    if (!(await this.functionKeys.isDue(functionId))) return undefined;
+    return (await this.runningWorkload(functionId)) ?? undefined;
   }
 
   /** A version's workload whole, as its first call makes its pods: its environment as published, its package's image, its function's key. */
