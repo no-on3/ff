@@ -169,6 +169,38 @@ export interface AccountQueue {
 export const QUEUE_FIELDS = ['name', 'messages', 'sizeBytes', 'deadLetterQueue', 'createdAt'] as const;
 export const QUEUE_MESSAGES_FIELDS = ['available', 'inFlight', 'delayed'] as const;
 
+/** One of the account's access keys, as its owners see it: never its secret. */
+export interface AccountAccessKey {
+  id: string;
+  /** Its name, as an IAM user's; its ID for a key made before keys had names. */
+  name: string;
+  /** The buckets and the queues it names; null for none. Naming nothing at all, it reaches every one, and the mail. */
+  buckets: string[] | null;
+  queues: string[] | null;
+  readOnly: boolean;
+  /** The functions it names, or "*" for all of them, at a level; null for none. */
+  functions: string[] | null;
+  functionAccess: 'read' | 'invoke' | 'write' | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** The fields the API gives for each of them. */
+export const ACCESS_KEY_FIELDS = ['id', 'name', 'buckets', 'queues', 'readOnly', 'functions', 'functionAccess', 'createdAt', 'lastUsedAt'] as const;
+
+/**
+ * What a key reaches, in the console's words: every bucket and queue of the
+ * account, and its mail, when it names nothing; else those it names, its
+ * read-only theirs, and its functions at their level.
+ */
+export function keyReach(key: Pick<AccountAccessKey, 'buckets' | 'queues' | 'readOnly' | 'functions' | 'functionAccess'>): string {
+  const storage = [key.buckets && `buckets ${key.buckets.join(', ')}`, key.queues && `queues ${key.queues.join(', ')}`].filter(Boolean).join('; ');
+  const functions = key.functions && `${key.functions.includes('*') ? 'every function' : `functions ${key.functions.join(', ')}`}, to ${key.functionAccess}`;
+  if (!storage && !functions) return key.readOnly ? 'Every bucket and queue, and the mail, read-only' : 'Every bucket and queue, and the mail';
+  const reach = [storage && (key.readOnly ? `${storage}, read-only` : storage), functions].filter(Boolean).join('; ');
+  return reach.charAt(0).toUpperCase() + reach.slice(1);
+}
+
 /** What some of the account's things hold together, as its plan counts them, against the plan's room for them. */
 export interface StorageUsed {
   bytes: number;
@@ -249,6 +281,8 @@ export interface AccountView {
   buckets: AccountBucket[];
   /** Its queues, by name. */
   queues: AccountQueue[];
+  /** Its access keys, oldest first: neither a function's own key nor a site deploy's. */
+  accessKeys: AccountAccessKey[];
   /** Its queues' messages with its functions' calls that don't wait. */
   queueStorage: StorageUsed;
   /** The packages its functions and their versions name. */

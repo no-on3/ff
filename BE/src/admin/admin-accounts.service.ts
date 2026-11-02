@@ -12,6 +12,7 @@ import { describeError } from '../common/describe-error';
 import { CachesService } from '../caches/caches.service';
 import { DatabasesService } from '../databases/databases.service';
 import { BucketsService } from '../storage/buckets.service';
+import { StorageKeysService } from '../storage/storage-keys.service';
 import { CustomerQueues } from '../queues/customer-queues';
 import { QueueStore } from '../queues/queue-store';
 import { parseQueueArn } from '../queues/sqs-attributes';
@@ -219,6 +220,7 @@ export class AdminAccountsService {
     private readonly queueStore: QueueStore,
     private readonly caches: CachesService,
     private readonly packages: PackagesService,
+    private readonly storageKeys: StorageKeysService,
   ) {}
 
   /** GET /admin/accounts: newest first, a page at a time, each with its owners. */
@@ -308,6 +310,7 @@ export class AdminAccountsService {
       })),
       buckets: await this.buckets.measured(id),
       queues: await this.queuesOf(id),
+      accessKeys: await this.storageKeys.list(id),
       queueStorage: { bytes: await this.queueStore.accountBytes(id), limitMb: limits.queueStorageMb },
       codeStorage: { bytes: await this.packages.namedBytes(id), limitMb: limits.codeStorageMb },
       usage: { month, totals },

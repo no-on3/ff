@@ -17,6 +17,7 @@ import invoiceEntitySource from '../../BE/src/billing/invoices/invoice.entity.ts
 import adminAccountsDtoSource from '../../BE/src/admin/admin-accounts.dto.ts?raw';
 import adminEmailDtoSource from '../../BE/src/admin/admin-email.dto.ts?raw';
 import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
+import storageDtoSource from '../../BE/src/storage/dto/storage.dto.ts?raw';
 import adminCreditsDtoSource from '../../BE/src/admin/admin-credits.dto.ts?raw';
 import adminSupportDtoSource from '../../BE/src/admin/admin-support.dto.ts?raw';
 import adminStatsDtoSource from '../../BE/src/admin/admin-stats.dto.ts?raw';
@@ -25,7 +26,7 @@ import ledgerTransactionSource from '../../BE/src/billing/ledger/ledger-transact
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
-import { ACCOUNT_STATUSES, BUCKET_FIELDS, CACHE_FIELDS, DATABASE_FIELDS, QUEUE_FIELDS, QUEUE_MESSAGES_FIELDS, STATUS_CHANGES, STORAGE_FIELDS } from './lib/accounts';
+import { ACCESS_KEY_FIELDS, ACCOUNT_STATUSES, BUCKET_FIELDS, CACHE_FIELDS, DATABASE_FIELDS, QUEUE_FIELDS, QUEUE_MESSAGES_FIELDS, STATUS_CHANGES, STORAGE_FIELDS } from './lib/accounts';
 import { FF_ACTIONS, OPERATOR_ACTIONS } from './lib/audit';
 import { ALIAS_FIELDS, CALL_FIELDS, CALL_HIT_FIELDS, DOMAIN_FIELDS, FUNCTION_HIT_FIELDS, FUNCTION_PAGE_FIELDS, FUNCTION_URL_FIELDS, SCHEDULE_FIELDS, VERSION_FIELDS } from './lib/support';
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
@@ -262,6 +263,11 @@ describe('credit grants and the account page\'s credit (P-74)', () => {
     expect(fieldsOf(adminAccountsDtoSource, 'export class AdminStorageView {')).toEqual([...STORAGE_FIELDS]);
     expect(adminAccountsDtoSource).toContain("@ApiProperty({ type: [AdminQueueView], description: 'Its queues, by name' }) queues: AdminQueueView[];");
     expect(adminAccountsDtoSource).toContain('queueStorage: AdminStorageView;');
+  });
+
+  it("have the API's fields of the account's access keys, as its owners see them", () => {
+    expect(fieldsOf(storageDtoSource, 'export class StorageKeyView {')).toEqual([...ACCESS_KEY_FIELDS]);
+    expect(adminAccountsDtoSource).toContain('accessKeys: StorageKeyView[];');
   });
 
   it("have what the packages its functions and their versions name hold, against the plan's code storage", () => {

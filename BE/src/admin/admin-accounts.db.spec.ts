@@ -41,6 +41,8 @@ import { PlatformSettingsService } from './platform-settings.service';
 import { BucketsService } from '../storage/buckets.service';
 import { Bucket } from '../storage/bucket.entity';
 import { StoreBuckets } from '../storage/store-buckets';
+import { StorageKey } from '../storage/storage-key.entity';
+import { StorageKeysService } from '../storage/storage-keys.service';
 import { CustomerQueues } from '../queues/customer-queues';
 import { Queue } from '../queues/queue.entity';
 import { QueueStore } from '../queues/queue-store';
@@ -173,6 +175,8 @@ run('accounts, for operators (L2, P-71)', () => {
       } as never,
       // Only counts what its functions' and versions' packages hold: nothing here is uploaded or stored.
       new PackagesService(ds.getRepository(Package), {} as never, audit, {} as never),
+      // Only lists the account's keys: nothing here makes, seals or revokes one.
+      new StorageKeysService(ds.getRepository(StorageKey), {} as never, audit, plans, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' } })),
     );
   });
 
@@ -602,6 +606,30 @@ run('accounts, for operators (L2, P-71)', () => {
     );
 
     expect((await service.detail(id)).codeStorage).toEqual({ bytes: 3_500, limitMb: BETA_LIMITS.codeStorageMb });
+  });
+
+  it("lists its access keys on its page, oldest first, as its owners see them: never a secret, a revoked key, a function's own nor a site deploy's", async () => {
+    const id = await account({ status: AccountStatus.ACTIVE });
+    await fn(id, { name: 'worker' });
+    const [{ id: worker }] = await query<Array<{ id: string }>>(`SELECT id FROM functions WHERE account_id = $1 AND name = 'worker'`, [id]);
+    const key = (keyId: string, columns: Record<string, unknown>) => {
+      const row = { id: keyId, account_id: id, secret: {}, ...columns };
+      const names = Object.keys(row);
+      return query(`INSERT INTO storage_keys (${names.join(', ')}) VALUES (${names.map((_, i) => `$${i + 1}`).join(', ')})`, Object.values(row));
+    };
+    await key('AKFFBBBBBBBBBBBBBBBB', { name: 'ci-invoker', functions: ['*'], function_access: 'invoke', created_at: '2026-10-21T10:00:00Z', last_used_at: '2026-10-22T08:00:00Z' });
+    await key('AKFFAAAAAAAAAAAAAAAA', { buckets: ['photos'], read_only: true, created_at: '2026-10-20T10:00:00Z' });
+    await key('AKFFCCCCCCCCCCCCCCCC', { name: 'old', created_at: '2026-10-19T10:00:00Z', revoked_at: '2026-10-19T11:00:00Z' });
+    await key('AKFFDDDDDDDDDDDDDDDD', { function_id: worker, created_at: '2026-10-19T10:00:00Z' });
+    await key('AKFFEEEEEEEEEEEEEEEE', { buckets: ['site'], created_at: '2026-10-19T10:00:00Z', expires_at: '2099-01-01T00:00:00Z' });
+
+    const { accessKeys } = await service.detail(id);
+
+    expect(accessKeys).toEqual([
+      // A key made before keys had names is named by its ID.
+      { id: 'AKFFAAAAAAAAAAAAAAAA', name: 'AKFFAAAAAAAAAAAAAAAA', buckets: ['photos'], queues: null, readOnly: true, functions: null, functionAccess: null, createdAt: new Date('2026-10-20T10:00:00Z'), lastUsedAt: null },
+      { id: 'AKFFBBBBBBBBBBBBBBBB', name: 'ci-invoker', buckets: null, queues: null, readOnly: false, functions: ['*'], functionAccess: 'invoke', createdAt: new Date('2026-10-21T10:00:00Z'), lastUsedAt: new Date('2026-10-22T08:00:00Z') },
+    ]);
   });
 
   it('changes nothing when the cluster refuses the NetworkPolicy; the value the account has writes nothing, but applies it again', async () => {

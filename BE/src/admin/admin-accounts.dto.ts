@@ -4,6 +4,7 @@ import { CacheStatus } from '../caches/cache.entity';
 import { DatabaseStatus } from '../databases/database.entity';
 import { BucketStatus } from '../storage/bucket.entity';
 import { QueueMessagesView } from '../queues/dto/queue.dto';
+import { StorageKeyView } from '../storage/dto/storage.dto';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import type { Role } from '../auth/principal';
@@ -232,6 +233,8 @@ export class AdminAccountView {
   @ApiProperty({ type: [AdminCacheView], description: 'Its caches, by name' }) caches: AdminCacheView[];
   @ApiProperty({ type: [AdminBucketView], description: 'Its buckets, by name' }) buckets: AdminBucketView[];
   @ApiProperty({ type: [AdminQueueView], description: 'Its queues, by name' }) queues: AdminQueueView[];
+  @ApiProperty({ type: [StorageKeyView], description: "Its access keys, oldest first, as its owners see them: never a secret; neither a function's own key nor a site deploy's" })
+  accessKeys: StorageKeyView[];
   @ApiProperty({ type: AdminStorageView, description: "Its queues' messages and its functions' calls that don't wait, against the plan's queueStorageMb" })
   queueStorage: AdminStorageView;
   @ApiProperty({ type: AdminStorageView, description: "The packages its functions and their versions name, each once, against the plan's codeStorageMb" })
