@@ -4,6 +4,7 @@ import { DataSource, EntityManager, IsNull } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { hourOf } from '../billing/rating-hours';
 import { describeError } from '../common/describe-error';
+import { withJobLock } from '../database/job-lock';
 import { BYTES_PER_MB, StorageShare } from '../databases/storage-notice';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PlanView } from '../plans/plan-limits';
@@ -14,7 +15,7 @@ import { StoreBuckets } from './store-buckets';
 
 const MINUTE_MS = 60_000;
 /** One backend measures at a time: the others skip their turn. */
-const SAMPLE_LOCK = `hashtext('ff_bucket_samples')`;
+const SAMPLE_LOCK = 'ff_bucket_samples';
 
 /** An account to measure, as its row was read: what it was last told of its buckets' storage. */
 interface DueAccount {
@@ -64,45 +65,36 @@ export class BucketSamplesService implements OnModuleInit, OnModuleDestroy {
    */
   async sampleDue(now = new Date()): Promise<number> {
     const hour = hourOf(now);
-    const runner = this.dataSource.createQueryRunner();
-    await runner.connect();
-    try {
-      const [{ locked }] = (await runner.query(`SELECT pg_try_advisory_lock(${SAMPLE_LOCK}) AS "locked"`)) as Array<{ locked: boolean }>;
-      if (!locked) return 0;
-      try {
-        // A bucket not measured in the hour; or the account full; or told of its storage, with no bucket left to hold any.
-        const due = await this.dataSource.query<Array<{ id: string; notice: number | null }>>(
-          `SELECT a."id", a."bucket_storage_notice" AS "notice" FROM "accounts" a
-            WHERE a."status" <> 'closed'
-              AND (a."bucket_storage_notice" = 100
-                   OR EXISTS (SELECT 1 FROM "buckets" b WHERE b."account_id" = a."id" AND b."status" = $2
-                                AND NOT EXISTS (SELECT 1 FROM "bucket_samples" s WHERE s."bucket_id" = b."id" AND s."hour" = $1))
-                   OR (a."bucket_storage_notice" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "buckets" b WHERE b."account_id" = a."id" AND b."status" = $2)))
-            ORDER BY a."id"`,
-          [hour, BucketStatus.ACTIVE],
-        );
-        if (due.length === 0) return 0;
-        const plans = await this.plans.forAccounts(due.map((account) => account.id));
-        let written = 0;
-        for (const account of due) {
-          const plan = plans.get(account.id);
-          if (!plan) {
-            this.logger.warn(`The buckets of account ${account.id} weren't measured: its account has no plan`);
-            continue;
-          }
-          try {
-            written += await this.measureAccount({ id: account.id, notice: account.notice as StorageShare | null }, plan, hour, now);
-          } catch (error) {
-            this.logger.error(`The buckets of account ${account.id} weren't measured: ${describeError(error)}`);
-          }
+    const written = await withJobLock(this.dataSource, SAMPLE_LOCK, async () => {
+      // A bucket not measured in the hour; or the account full; or told of its storage, with no bucket left to hold any.
+      const due = await this.dataSource.query<Array<{ id: string; notice: number | null }>>(
+        `SELECT a."id", a."bucket_storage_notice" AS "notice" FROM "accounts" a
+          WHERE a."status" <> 'closed'
+            AND (a."bucket_storage_notice" = 100
+                 OR EXISTS (SELECT 1 FROM "buckets" b WHERE b."account_id" = a."id" AND b."status" = $2
+                              AND NOT EXISTS (SELECT 1 FROM "bucket_samples" s WHERE s."bucket_id" = b."id" AND s."hour" = $1))
+                 OR (a."bucket_storage_notice" IS NOT NULL AND NOT EXISTS (SELECT 1 FROM "buckets" b WHERE b."account_id" = a."id" AND b."status" = $2)))
+          ORDER BY a."id"`,
+        [hour, BucketStatus.ACTIVE],
+      );
+      if (due.length === 0) return 0;
+      const plans = await this.plans.forAccounts(due.map((account) => account.id));
+      let written = 0;
+      for (const account of due) {
+        const plan = plans.get(account.id);
+        if (!plan) {
+          this.logger.warn(`The buckets of account ${account.id} weren't measured: its account has no plan`);
+          continue;
         }
-        return written;
-      } finally {
-        await runner.query(`SELECT pg_advisory_unlock(${SAMPLE_LOCK})`);
+        try {
+          written += await this.measureAccount({ id: account.id, notice: account.notice as StorageShare | null }, plan, hour, now);
+        } catch (error) {
+          this.logger.error(`The buckets of account ${account.id} weren't measured: ${describeError(error)}`);
+        }
       }
-    } finally {
-      await runner.release();
-    }
+      return written;
+    });
+    return written ?? 0;
   }
 
   /**

@@ -19,6 +19,7 @@ import { MetricsService } from '../metrics/metrics.service';
 import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import { jsonBytes } from '../common/byte-limits';
 import { describeError } from '../common/describe-error';
+import { withJobLock } from '../database/job-lock';
 import {
   FunctionRuntimeError,
   FunctionThrottledError,
@@ -88,7 +89,7 @@ const sendsOther = (value: unknown, current: unknown): boolean =>
   value !== undefined && (Array.isArray(value) && Array.isArray(current) ? value.join() !== current.join() : value !== current);
 
 /** The advisory lock the restore of lost code images holds: one backend runs it at a time. */
-const RESTORE_LOCK = `hashtext('ff_code_images_restore')`;
+const RESTORE_LOCK = 'ff_code_images_restore';
 
 /** A package, by its account and SHA-256, as a key. */
 const packageRef = (accountId: string, codeSha256: string): string => `${accountId}/${codeSha256}`;
@@ -826,19 +827,10 @@ export class FunctionsService {
   async restoreCodeImages(): Promise<CodeImagesRestore> {
     const report: CodeImagesRestore = { packages: 0, imagesMade: 0, zipsMade: 0, rolledOut: 0, failures: 0 };
     if (!this.codeImages.available) return report;
-    const runner = this.functionsRepository.manager.connection.createQueryRunner();
-    await runner.connect();
-    try {
-      const [{ locked }] = (await runner.query(`SELECT pg_try_advisory_lock(${RESTORE_LOCK}) AS "locked"`)) as Array<{ locked: boolean }>;
-      if (!locked) return report;
-      try {
-        await this.rollOutLostImages(await this.restorePackageImages(report), report);
-      } finally {
-        await runner.query(`SELECT pg_advisory_unlock(${RESTORE_LOCK})`);
-      }
-    } finally {
-      await runner.release();
-    }
+    // Another backend's turn leaves the report as it is: nothing done, nothing to log.
+    await withJobLock(this.functionsRepository.manager.connection, RESTORE_LOCK, async () =>
+      this.rollOutLostImages(await this.restorePackageImages(report), report),
+    );
     if (report.imagesMade || report.zipsMade || report.rolledOut || report.failures) {
       this.logger.log(
         `Lost code images restored: of ${report.packages} package(s) in use, ${report.imagesMade} image(s) made again, ${report.zipsMade} zip(s) made again of inline code; ` +

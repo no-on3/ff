@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { DataSource, EntityManager } from 'typeorm';
 import { PlatformSettingsService } from '../admin/platform-settings.service';
 import { describeError } from '../common/describe-error';
+import { withJobLock } from '../database/job-lock';
 import { LedgerAccountType } from './ledger/ledger-account.entity';
 import { LedgerTransactionKind } from './ledger/ledger-transaction.entity';
 import { LedgerService } from './ledger/ledger.service';
@@ -18,7 +19,7 @@ import { BILLED_CALL, EMAIL_RESOURCE_ID, RESOURCE_SUMS, ResourceRow, SAMPLE_SUMS
 
 const MINUTE_MS = 60_000;
 /** One backend rates at a time: the others skip their turn (parent §4.3). */
-const RATING_LOCK = `hashtext('ff_hourly_rating')`;
+const RATING_LOCK = 'ff_hourly_rating';
 
 interface HourlyRow {
   functionId: string;
@@ -78,21 +79,12 @@ export class HourlyRatingService implements OnModuleInit, OnModuleDestroy {
    * another backend, does nothing: one holds PostgreSQL's advisory lock.
    */
   async rateDueHours(now = new Date()): Promise<number> {
-    const runner = this.dataSource.createQueryRunner();
-    await runner.connect();
-    try {
-      const [{ locked }] = (await runner.query(`SELECT pg_try_advisory_lock(${RATING_LOCK}) AS "locked"`)) as Array<{ locked: boolean }>;
-      if (!locked) return 0;
-      try {
-        const hours = await this.dueHours(now);
-        for (const hour of hours) await this.rateHour(hour);
-        return hours.length;
-      } finally {
-        await runner.query(`SELECT pg_advisory_unlock(${RATING_LOCK})`);
-      }
-    } finally {
-      await runner.release();
-    }
+    const rated = await withJobLock(this.dataSource, RATING_LOCK, async () => {
+      const hours = await this.dueHours(now);
+      for (const hour of hours) await this.rateHour(hour);
+      return hours.length;
+    });
+    return rated ?? 0;
   }
 
   /** The hours that have settled by `now` and aren't rated: after the latest rated, or from the first book's start. */
