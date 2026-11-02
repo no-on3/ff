@@ -14,6 +14,7 @@ import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { HOUR_MS } from '../billing/rating-hours';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthOf, monthPartitions } from '../usage/usage.service';
 import { CacheSamplesService } from './cache-samples.service';
 import { CacheServer, CacheUse } from './cache-server';
 
@@ -67,7 +68,7 @@ run("customers' caches measured every hour (L2, ADR 0013)", () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const month of [t0, at(24 * 31)]) await query(`SELECT ff_ensure_month_partition('cache_samples', $1::date)`, [month]);
+    await monthPartitions(db.dataSource, [monthOf(t0), monthOf(at(24 * 31))]);
     await db.dataSource.getRepository(Account).save([
       { id: A, name: 'Cached', planId: 'beta', status: AccountStatus.ACTIVE },
       { id: CLOSED, name: 'Closed', planId: 'beta', status: AccountStatus.CLOSED, dataDeletionDueAt: new Date(Date.now() + 30 * 86_400_000) },

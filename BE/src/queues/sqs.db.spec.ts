@@ -42,6 +42,8 @@ import { EncryptionService } from '../encryption/encryption.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { Bucket } from '../storage/bucket.entity';
 import { StorageDirectory } from '../storage/storage-directory.service';
+import { KeyUse } from '../storage/key-use.entity';
+import { KeyUses } from '../storage/key-uses.service';
 import { StorageKey } from '../storage/storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey } from '../storage/storage-names';
 import { CustomerQueues } from './customer-queues';
@@ -68,6 +70,7 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
   let events: QueueEvents;
   let store: QueueStore;
   let counts: QueueRequestCounts;
+  let keyUses: KeyUses;
   let frontDoor: SqsFrontDoor;
   let endpoint: string;
   const key = { id: newAccessKeyId(), secret: newSecretAccessKey() };
@@ -129,6 +132,7 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
     store = new QueueStore(db.dataSource, { count: () => undefined } as never);
     const customerQueues = new CustomerQueues(db.dataSource, db.dataSource.getRepository(Queue));
     counts = new QueueRequestCounts(db.dataSource.getRepository(QueueRequestCount));
+    keyUses = new KeyUses(db.dataSource.getRepository(KeyUse));
     const operations = new SqsOperations(customerQueues, store, events, new AuditService(db.dataSource.getRepository(AuditEntry)), counts, BASE, REGION);
     // Every account on that plan, with credit, and as many requests a second as it sends: the checks of each have their own tests.
     frontDoor = new SqsFrontDoor(
@@ -138,6 +142,7 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
       onePlan(PLAN),
       { admit: async () => undefined } as unknown as CreditService,
       { increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 }) },
+      keyUses,
     );
     // FF's API over the same operations, as the module makes it.
     api = new QueuesService(
@@ -405,6 +410,19 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
 
   describe("FF's API, beside the endpoint", () => {
     const owner: Principal = { accountId: ACCOUNT, accountStatus: AccountStatus.ACTIVE, planId: 'beta', role: 'owner', userId: 'u-1' };
+
+    it("writes what the key used at the endpoint, for the export's roles, by SQS's names: nothing of FF's API, which no key signs", async () => {
+      const QueueUrl = await newQueue();
+      await sqs.send(new SendMessageCommand({ QueueUrl, MessageBody: 'through the endpoint' }));
+      await api.send(owner, `queue-${n}`, { body: 'through the API' });
+      await api.receive(owner, `queue-${n}`, { maxMessages: 1 });
+      await keyUses.flush();
+
+      expect(await db.dataSource.query(`SELECT holder, operation FROM key_uses WHERE service = 'sqs' AND resource = $1 ORDER BY operation`, [`queue-${n}`])).toEqual([
+        { holder: key.id, operation: 'CreateQueue' },
+        { holder: key.id, operation: 'SendMessage' },
+      ]);
+    });
 
     it("counts each request that names a queue, the endpoint's and the API's, as SQS bills them, written once a minute", async () => {
       const QueueUrl = await newQueue();

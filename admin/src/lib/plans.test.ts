@@ -6,6 +6,7 @@ const BETA: PlanLimits = {
   memoryMb: 1024,
   timeoutSeconds: 300,
   instancesPerFunction: 10,
+  codeStorageMb: 5120,
   quota: { pods: 20, cpu: '8', memory: '8Gi' },
   writesPerMinute: 60,
   invokesPerSecond: 100,
@@ -32,6 +33,7 @@ const BETA: PlanLimits = {
   emailIdentities: 2,
   emailsPerDay: 200,
   emailsPerSecond: 1,
+  accessKeys: 10,
 };
 
 describe("a plan's limits, in a form (P-73)", () => {

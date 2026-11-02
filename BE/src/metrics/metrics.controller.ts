@@ -4,7 +4,8 @@ import { Principal } from '../auth/principal';
 import { RequireScope } from '../auth/route-rules';
 import { CustomerMetricsService } from './customer-metrics.service';
 import { CACHE_PERIOD, DATABASE_PERIOD, EMAIL_PERIOD, MetricsWindow, metricsWindow } from './customer-metrics';
-import { BucketMetricsView, CacheMetricsView, DatabaseMetricsView, EmailMetricsView, MetricsQuery, MetricsView, QueueMetricsView, SiteMetricsView } from './dto/metrics-query.dto';
+import { BucketMetricsView, CacheMetricsView, DatabaseMetricsView, EmailMetricsView, FunctionMetricsQuery, MetricsQuery, MetricsView, QueueMetricsView, SiteMetricsView } from './dto/metrics-query.dto';
+import { isFiltered } from '../functions/qualifier';
 
 /** A window the request names, or 400 saying why it can't be. */
 function windowOf(query: MetricsQuery): MetricsWindow {
@@ -29,9 +30,15 @@ export class MetricsController {
 
   @Get('functions/:id/metrics')
   @RequireScope('metrics:read')
-  @ApiOperation({ summary: "A function's Invocations, Errors, Throttles, Duration, ColdStarts and Instances, a point per period" })
+  @ApiOperation({
+    summary: "A function's Invocations, Errors, Throttles, Duration, ColdStarts and Instances, a point per period",
+    description:
+      'resource and executedVersion give the calls that named a version or an alias, and those a version ran, as CloudWatch\'s dimensions of ' +
+      "Lambda's: their Invocations, Errors, Throttles, ColdStarts and Duration alone, which each call's record measures.",
+  })
   @ApiResponse({ status: 200, type: MetricsView })
-  forFunction(@Param('id', ParseUUIDPipe) id: string, @Query() query: MetricsQuery, @Principal() principal: Principal) {
+  forFunction(@Param('id', ParseUUIDPipe) id: string, @Query() query: FunctionMetricsQuery, @Principal() principal: Principal) {
+    if (isFiltered(query)) return this.metrics.forCalls(principal.accountId, id, windowOf(query), query);
     return this.metrics.forFunction(principal.accountId, id, windowOf(query));
   }
 

@@ -47,7 +47,15 @@ export class UsageRecord {
   @Column({ type: 'text' })
   runtime: string;
 
-  /** The function's memory when it was invoked. */
+  /** The version that ran the call: null for $LATEST, as for every call before versions. */
+  @Column({ type: 'integer', nullable: true })
+  version: number | null;
+
+  /** The alias the call named: null for none. */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  alias: string | null;
+
+  /** The memory of what ran, the function's or its version's, when it was invoked. */
   @Column({ type: 'int' })
   memoryMb: number;
 

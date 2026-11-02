@@ -68,7 +68,7 @@ export const FUNCTION_URL_FIELDS = ['functionUrl', 'authType', 'cors', 'createdA
 /** A function's URL: its address, who may call it, and the customer's own domains for it. */
 export interface FunctionUrl {
   functionUrl: string;
-  /** NONE: anyone; AWS_IAM: an API key of the account. */
+  /** NONE: anyone; AWS_IAM: the account's keys, an access key's signature or an API key. */
   authType: 'NONE' | 'AWS_IAM';
   /** Whether it has a CORS configuration. */
   cors: boolean;
@@ -76,18 +76,48 @@ export interface FunctionUrl {
   domains: Domain[];
 }
 
-export const SCHEDULE_FIELDS = ['name', 'expression', 'enabled', 'nextRunAt', 'lastRunAt', 'lastOutcome'] as const;
-/** A function's schedule: when it runs, and how its last run went; never its input. */
+export const SCHEDULE_FIELDS = ['name', 'expression', 'qualifier', 'enabled', 'nextRunAt', 'lastRunAt', 'lastOutcome'] as const;
+/** A function's schedule: when it runs, what it runs, and how its last run went; never its input. */
 export interface Schedule {
   name: string;
   expression: string;
+  /** $LATEST, an alias or a version. */
+  qualifier: string;
   enabled: boolean;
   nextRunAt: string | null;
   lastRunAt: string | null;
   lastOutcome: string | null;
 }
 
-export const FUNCTION_PAGE_FIELDS = ['function', 'url', 'variables', 'secrets', 'schedules', 'account', 'recentCalls', 'recentErrors'] as const;
+export const VERSION_FIELDS = ['version', 'description', 'runtime', 'memory', 'timeout', 'codeSha256', 'codeSize', 'createdAt'] as const;
+/** A function's version: what it froze when it was published, never its variables. */
+export interface Version {
+  version: string;
+  description: string;
+  runtime: string;
+  memory: number;
+  timeout: number;
+  /** Its code's SHA-256, in base64. */
+  codeSha256: string;
+  /** Bytes. */
+  codeSize: number;
+  createdAt: string;
+}
+
+export const ALIAS_FIELDS = ['name', 'functionVersion', 'additionalVersion', 'additionalWeight', 'description', 'url'] as const;
+/** A function's alias: where its calls go, and its own URL. */
+export interface Alias {
+  name: string;
+  /** $LATEST or a version's number. */
+  functionVersion: string;
+  /** Another version with a share of its calls, from 0 to 1. */
+  additionalVersion: string | null;
+  additionalWeight: number | null;
+  description: string;
+  url: FunctionUrl | null;
+}
+
+export const FUNCTION_PAGE_FIELDS = ['function', 'url', 'versions', 'aliases', 'variables', 'secrets', 'schedules', 'account', 'recentCalls', 'recentErrors'] as const;
 export interface FunctionPage {
   function: {
     id: string;
@@ -105,6 +135,10 @@ export interface FunctionPage {
     updatedAt: string;
   };
   url: FunctionUrl | null;
+  /** Newest first. */
+  versions: Version[];
+  /** By name. */
+  aliases: Alias[];
   /** Its variables' and secrets' names: never their values. */
   variables: string[];
   secrets: string[];
@@ -183,10 +217,22 @@ export function urlText(url: FunctionUrl): string {
 export const domainsText = (domains: Domain[]): string =>
   domains.length ? domains.map(({ domain, status }) => `${domain} (${status})`).join(', ') : 'none';
 
-/** A schedule, to read: its expression, and its next run or why there is none. */
+/** What a qualifier names, to read: "$LATEST", "version 3", "alias live". */
+export const qualifierText = (qualifier: string): string => (qualifier === '$LATEST' ? qualifier : /^\d+$/.test(qualifier) ? `version ${qualifier}` : `alias ${qualifier}`);
+
+/** A schedule, to read: its expression, what it runs when not $LATEST, and its next run or why there is none. */
 export function scheduleText(schedule: Schedule, when: (iso: string) => string): string {
+  const runs = schedule.qualifier === '$LATEST' ? '' : `, runs ${qualifierText(schedule.qualifier)}`;
   const next = !schedule.enabled ? 'disabled' : schedule.nextRunAt ? `next ${when(schedule.nextRunAt)}` : 'no run left';
-  return `${schedule.name}: ${schedule.expression}, ${next}${schedule.lastOutcome ? `; last: ${schedule.lastOutcome}` : ''}`;
+  return `${schedule.name}: ${schedule.expression}${runs}, ${next}${schedule.lastOutcome ? `; last: ${schedule.lastOutcome}` : ''}`;
+}
+
+/** Where an alias's calls go, to read: "version 3", "$LATEST", "version 3; 10% to version 2". */
+export function aliasText(alias: Pick<Alias, 'functionVersion' | 'additionalVersion' | 'additionalWeight'>): string {
+  const own = qualifierText(alias.functionVersion);
+  if (alias.additionalVersion === null || alias.additionalWeight === null) return own;
+  const share = `${(alias.additionalWeight * 100).toLocaleString('en-US', { maximumFractionDigits: 2 })}%`;
+  return `${own}; ${share} to version ${alias.additionalVersion}`;
 }
 
 /** Names, to read: "A, B", or "none". */

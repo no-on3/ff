@@ -58,7 +58,7 @@ fn enable_makes_a_url_who_may_call_it_said_and_needed() {
         .assert()
         .success()
         .stdout(
-            "hello has a URL: https://abc.fn.ff.tn/\ncallers need an API key of the account with functions:invoke\n",
+            "hello has a URL: https://abc.fn.ff.tn/\ncallers need an access key of the account that may invoke it, signing for lambda, or an API key of it with functions:invoke\n",
         );
     assert_eq!(
         body(&api.requests()[2]),
@@ -116,6 +116,35 @@ fn show_says_the_address_its_callers_and_domains_or_that_there_is_none() {
         .assert()
         .code(3)
         .stderr("error: hello has no URL: `ff url enable hello --auth none|key` gives it one\n");
+}
+
+#[test]
+fn alias_names_an_aliass_own_url_on_every_route() {
+    let api = Server::start(vec![
+        Reply::json(200, listed()),
+        Reply::json(200, url("https://live.fn.ff.tn/", "NONE")),
+        Reply::json(200, json!([])),
+        Reply::json(200, listed()),
+        not_found(),
+    ]);
+    let dir = with_key(&api.url);
+
+    ff(&dir).args(["url", "show", "hello", "--alias", "live"]).assert().success();
+    ff(&dir)
+        .args(["url", "show", "hello", "--alias", "live"])
+        .assert()
+        .code(3)
+        .stderr("error: hello:live has no URL: `ff url enable hello --alias live --auth none|key` gives it one\n");
+    let paths: Vec<String> = api.requests().iter().map(|request| request.path.clone()).collect();
+    assert_eq!(
+        paths[1..],
+        [
+            "/functions/f1/url?qualifier=live",
+            "/functions/f1/url/domains?qualifier=live",
+            "/functions?name=hello",
+            "/functions/f1/url?qualifier=live"
+        ]
+    );
 }
 
 #[test]

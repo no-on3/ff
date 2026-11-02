@@ -12,7 +12,7 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { RequestWithPrincipal } from '../auth/principal';
 import { PlanView } from './plan-limits';
 import { PlansService } from './plans.service';
-import { Invocation, RateLimitGuard, countInvocation, rateLimitOf, rateLimitOptions } from './rate-limits';
+import { Invocation, RateLimitGuard, countInvocation, countWrite, rateLimitOf, rateLimitOptions } from './rate-limits';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { refusals } from '../monitoring/operator-metrics';
 import { valueOf } from '../monitoring/test-fixtures';
@@ -161,6 +161,18 @@ describe('rate limits per account (L1, P-15)', () => {
     expect(await countInvocation(storage, 'a3', 2)).toBe(1); // over: a second to wait
     expect((await invoke()).status).toBe(429); // and the API's invokes wait with it
     expect(await countInvocation(storage, 'a4', 2)).toBeUndefined(); // another account counts apart
+  });
+
+  it("counts changes made another way, at Lambda's endpoint, with the API's changes: one count for the account", async () => {
+    const storage = app.get<ThrottlerStorage>(getStorageToken());
+    const change = () => call('POST', '/probe', 'a5', 'tight');
+
+    expect(await statuses([change])).toEqual([201]);
+    expect(await countWrite(storage, 'a5', 3)).toBeUndefined();
+    expect(await countWrite(storage, 'a5', 3)).toBeUndefined(); // the third this minute, of 3
+    expect(await countWrite(storage, 'a5', 3)).toBeGreaterThan(55); // over: the rest of the minute to wait
+    expect((await change()).status).toBe(429); // and the API's changes wait with it
+    expect(await countWrite(storage, 'a6', 3)).toBeUndefined(); // another account counts apart
   });
 
   it("gives each account its own count, though they call from the same address", async () => {

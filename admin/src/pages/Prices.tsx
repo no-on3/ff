@@ -5,6 +5,9 @@ import { EmptyState, ErrorState, Loading } from '../components/States';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
 import {
   DraftForm,
+  ESTIMATE_LABELS,
+  ESTIMATE_SKUS,
+  EstimateForm,
   PriceBook,
   PriceBookPreview,
   PriceDocument,
@@ -14,8 +17,10 @@ import {
   draftDocument,
   earliestStart,
   formFrom,
+  gbTierLabel,
   pricesCaches,
   pricesEmail,
+  pricesEstimate,
   pricesQueues,
   pricesStorage,
   queueTierLabel,
@@ -109,6 +114,7 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
   const book = books.find((candidate) => candidate.id === shown);
   const draft = form && latest ? draftDocument(form, latest.document, new Date()) : null;
   const setStorage = (change: Partial<StorageForm>) => setForm((current) => (current ? { ...current, storage: { ...current.storage, ...change } } : current));
+  const setEstimate = (change: Partial<EstimateForm>) => setForm((current) => (current ? { ...current, estimate: { ...current.estimate, ...change } } : current));
   const set = (change: Partial<DraftForm>) => {
     setForm((current) => (current ? { ...current, ...change } : current));
     setPreview(null);
@@ -394,6 +400,34 @@ const Prices: React.FC<{ email: string | undefined }> = ({ email }) => {
                         <Field id="emailAttachmentsGb" label={`E-mail attachments, per GB, ${currency}`} value={given.emailAttachmentsGb} onChange={change('emailAttachmentsGb')} />
                       </>
                     );
+                  })()}
+                </div>
+              </fieldset>
+            )}
+            {form.mode === 'aws' && pricesEstimate(latest.document) && (
+              <fieldset className="space-y-3">
+                <legend className="text-sm font-medium text-gray-700">What AWS bills that FF doesn't, for the estimate at AWS's prices: US$ alone, as FF bills none of it</legend>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {(() => {
+                    const usd = latest.document.source.usdPrices;
+                    const given = form.estimate;
+                    const tiered = { dataOutGb: 'dataOutTiers', logsIngestedGb: 'logsIngestedTiers', cloudFrontDataOutGb: 'cloudFrontDataOutTiers' } as const;
+                    return ESTIMATE_SKUS.map((sku) => {
+                      if (sku === 'dataOutGb' || sku === 'logsIngestedGb' || sku === 'cloudFrontDataOutGb') {
+                        const field = tiered[sku];
+                        const tiers = usd?.[sku] ?? [];
+                        return tiers.map((_tier, index) => (
+                          <Field
+                            key={`${sku}-${index}`}
+                            id={`estimate-${sku}-${index}`}
+                            label={`${ESTIMATE_LABELS[sku]}, ${gbTierLabel(tiers, index)}, per GB, US$`}
+                            value={given[field][index] ?? ''}
+                            onChange={(value) => setEstimate({ [field]: given[field].map((text, at) => (at === index ? value : text)) })}
+                          />
+                        ));
+                      }
+                      return <Field key={sku} id={`estimate-${sku}`} label={`${ESTIMATE_LABELS[sku]}, US$`} value={given[sku]} onChange={(value) => setEstimate({ [sku]: value })} />;
+                    });
                   })()}
                 </div>
               </fieldset>

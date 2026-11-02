@@ -18,7 +18,7 @@ const overview: OverviewView = {
   today: { day: '2026-11-20', invocations: 7, errors: 4, throttles: 7 },
   month: '2026-11',
   money: [{ currency: 'TND', consumption: { charged: '2.200', debited: '1.500', shadow: '0.700' }, topUps: { payments: 1, credit: '100.000' }, balances: { owedByFF: '167.500', owedToFF: '4.200', walletsInDebt: 1 } }],
-  invoices: { issued: 1, creditNotes: 0, toIssue: { month: '2026-10', drafts: 1, issuable: true } },
+  invoices: { month: '2026-10', issued: 1, creditNotes: 0, toIssue: { month: '2026-10', drafts: 1, issuable: true } },
   capacity: [{ day: '2026-11-20', reservedGbS: 75, provisionedGbS: 75, billedGbS: 1.28, requests: 5 }],
 };
 

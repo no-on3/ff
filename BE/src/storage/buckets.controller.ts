@@ -1,7 +1,8 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
+import { booleanQuery } from '../common/boolean-query';
 import { BucketNotificationsService } from './bucket-notifications.service';
 import { BucketWebsitesService } from './bucket-websites.service';
 import { BucketsService } from './buckets.service';
@@ -134,7 +135,6 @@ export class BucketsController {
   @ApiResponse({ status: 204 })
   @ApiResponse({ status: 409, description: "It isn't empty, and force wasn't asked" })
   async remove(@Param('name') name: string, @Query('force') force: string | undefined, @Principal() principal: Principal): Promise<void> {
-    if (force !== undefined && force !== 'true' && force !== 'false') throw new BadRequestException('force must be true or false');
-    await this.buckets.remove(principal.accountId, name, force === 'true');
+    await this.buckets.remove(principal.accountId, name, booleanQuery('force', force));
   }
 }

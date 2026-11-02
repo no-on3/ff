@@ -1,0 +1,8 @@
+# gitleaks' own rules (hack/ci.sh, the static stage), and the one file whose "secrets" AWS published as examples.
+# Findings that aren't secrets in a commit of before go in .gitleaksignore, one line each.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "AWS's Signature Version 4 test suite: its example key, secret and session tokens, as AWS publishes them"
+paths = ['''(^|/)BE/src/common/signature-v4-suite/cases\.json$''']

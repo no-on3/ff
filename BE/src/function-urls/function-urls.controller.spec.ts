@@ -10,7 +10,7 @@ import { Principal } from '../auth/principal';
 import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
 import { INVOCATION } from '../plans/rate-limits';
 import { CustomDomainsController } from './custom-domains.controller';
-import { FunctionUrlsController } from './function-urls.controller';
+import { FunctionUrlListController, FunctionUrlsController } from './function-urls.controller';
 import { FunctionUrlsService } from './function-urls.service';
 
 const reflector = new Reflector();
@@ -35,6 +35,16 @@ describe('FunctionUrlsController route rules (L1)', () => {
 
   it('lets every member read it, viewers included, and a key with functions:read', () => {
     expect(rules('get')).toEqual({ roles: 'anyone', activeAccount: false, scope: 'functions:read', invocation: false });
+  });
+
+  it("lets every member list the function's URLs, and a key with functions:read", () => {
+    const method = FunctionUrlListController.prototype.list;
+
+    expect([reflector.get<string[] | undefined>(ROLES, method) ?? 'anyone', reflector.get<boolean | undefined>(ACTIVE_ACCOUNT, method) ?? false, reflector.get<string>(SCOPE, method)]).toEqual([
+      'anyone',
+      false,
+      'functions:read',
+    ]);
   });
 });
 
@@ -85,8 +95,8 @@ describe('POST and PUT /functions/:id/url, validated (L1)', () => {
 
   afterAll(() => app.close());
 
-  const send = async (method: string, body: unknown) => {
-    const res = await fetch(`${baseUrl}/functions/${ID}/url`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const send = async (method: string, body: unknown, query = '') => {
+    const res = await fetch(`${baseUrl}/functions/${ID}/url${query}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     return { status: res.status, message: ((await res.json()) as { message?: string | string[] }).message };
   };
 
@@ -101,9 +111,23 @@ describe('POST and PUT /functions/:id/url, validated (L1)', () => {
     };
 
     expect((await send('POST', { authType: 'AWS_IAM', cors, invokeMode: 'BUFFERED' })).status).toBe(201);
-    expect(urls.create).toHaveBeenLastCalledWith('123456789012', ID, expect.objectContaining({ authType: 'AWS_IAM', cors: expect.objectContaining(cors) }));
+    expect(urls.create).toHaveBeenLastCalledWith('123456789012', ID, expect.objectContaining({ authType: 'AWS_IAM', cors: expect.objectContaining(cors) }), undefined);
     expect((await send('PUT', { cors: null })).status).toBe(200);
-    expect(urls.update).toHaveBeenLastCalledWith('123456789012', ID, { cors: null });
+    expect(urls.update).toHaveBeenLastCalledWith('123456789012', ID, { cors: null }, undefined);
+  });
+
+  it("names an alias's URL by qualifier, and refuses a version or $LATEST there, as Lambda's", async () => {
+    expect((await send('POST', { authType: 'NONE' }, '?qualifier=live')).status).toBe(201);
+    expect(urls.create).toHaveBeenLastCalledWith('123456789012', ID, { authType: 'NONE' }, 'live');
+
+    for (const qualifier of ['1', '$LATEST', 'a'.repeat(129)]) {
+      const answer = await send('PUT', {}, `?qualifier=${encodeURIComponent(qualifier)}`);
+
+      expect([answer.status, answer.message]).toEqual([
+        400,
+        ["qualifier is an alias's name, as Lambda's for a URL: leave it out for $LATEST's URL, and name a version through an alias"],
+      ]);
+    }
   });
 
   it.each([

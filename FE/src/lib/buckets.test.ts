@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { BucketMetrics, CreatedStorageKey } from '../services/api';
+import type { BucketMetrics } from '../services/api';
 import { BETA_PLAN } from '../test-fixtures';
-import { addresses, awsVariables, bucketNameProblem, exportLines, keyReach, listCommand, measuredHours, storageNotice, total } from './buckets';
+import { addresses, bucketNameProblem, listCommand, measuredHours, storageNotice, total } from './buckets';
 
 describe("a bucket's name, as the API takes it", () => {
   it.each(['photos', 'abc', 'my-app-2026', '123'])('takes %s', (name) => {
@@ -18,38 +18,6 @@ describe("a bucket's name, as the API takes it", () => {
       'AWS keeps names like this one for itself: a bucket on FF must be able to move to S3',
       'Give the bucket a name',
     ]);
-  });
-});
-
-describe('an access key', () => {
-  const key: CreatedStorageKey = {
-    id: 'AKFF7Q2MLKX4RTZB3W5N',
-    buckets: ['photos'],
-    queues: null,
-    readOnly: true,
-    createdAt: '2026-10-23T06:36:00.000Z',
-    lastUsedAt: null,
-    secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
-    endpoint: 'https://s3.ffunc.cloud',
-    sqsEndpoint: 'https://sqs.ffunc.cloud',
-    sesEndpoint: 'https://email.ffunc.cloud',
-    region: 'tn-tunis-1',
-  };
-
-  it('says what it reaches: every bucket and queue when it names neither, else those it names', () => {
-    expect([
-      keyReach(key),
-      keyReach({ buckets: null, queues: null, readOnly: false }),
-      keyReach({ buckets: null, queues: ['orders'], readOnly: false }),
-      keyReach({ buckets: ['photos'], queues: ['orders', 'invoices'], readOnly: true }),
-    ]).toEqual(['Buckets photos, read-only', 'Every bucket and queue', 'Queues orders', 'Buckets photos; queues orders, invoices, read-only']);
-  });
-
-  it("gives the six variables AWS's SDKs and CLI read, the S3, SQS and SES endpoints among them, as shell lines too", () => {
-    expect(awsVariables(key).map(([name]) => name)).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL_SQS', 'AWS_ENDPOINT_URL_SESV2']);
-    expect(exportLines(key)).toBe(
-      'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.cloud\nexport AWS_ENDPOINT_URL_SQS=https://sqs.ffunc.cloud\nexport AWS_ENDPOINT_URL_SESV2=https://email.ffunc.cloud',
-    );
   });
 });
 

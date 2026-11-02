@@ -5,8 +5,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FindOperator } from 'typeorm';
+import { awsEndpointsOf } from '../common/aws-endpoint';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
-import { FunctionEnvironmentValues, NO_ENVIRONMENT, isEmpty } from './environment';
+import { EnvironmentDocument, FunctionEnvironmentValues, NO_ENVIRONMENT, isEmpty } from './environment';
 import type { EnvironmentStore } from './environment.store';
 import { InlinePackage, inlinePackage } from './inline-package';
 import { codeRepository, pushCodeImage } from '../packages/code-images.service';
@@ -24,6 +25,7 @@ export const FUNCTION_DEFAULTS: Partial<Function> = {
   eventFormat: EventFormat.LAMBDA,
   packageType: PackageType.INLINE,
   handler: 'function.handler',
+  awsEndpoints: awsEndpointsOf(),
 };
 
 
@@ -58,7 +60,7 @@ export class MemoryRepository<T extends { id?: string }> {
     this.rows.set(entity.id, { ...entity });
   }
 
-  /** The first row whose fields equal every value of `where`, as the account-scoped queries need (P-10). */
+  /** The first row whose fields equal every value of `where`, as the account-scoped queries need. */
   async findOne(options: { where: Partial<T> }): Promise<T | null> {
     const [row] = await this.find(options);
     return row ?? null;
@@ -80,21 +82,21 @@ export class MemoryRepository<T extends { id?: string }> {
   }
 
   /**
-   * Enough of TypeORM's EntityManager for FunctionsService's transactions, the
-   * create and the end of an invocation (P-20): one process, so locks are ignored.
+   * Enough of TypeORM's EntityManager for FunctionsService: its lookups, and its transactions, the create and the
+   * end of an invocation, which get the same manager: one process, so locks are ignored. Another table's
+   * rows, such as a function's versions, are none: this repository holds the functions alone.
    */
   get manager() {
-    return {
+    const manager = {
+      query: async () => [],
+      find: async () => [],
+      countBy: async (_target: unknown, where: Partial<T>) => (await this.find({ where })).length,
       existsBy: (target: unknown, where: Partial<T>) => this.existsBy(target, where),
-      transaction: async <R>(work: (manager: unknown) => Promise<R>): Promise<R> =>
-        work({
-          query: async () => [],
-          countBy: async (_target: unknown, where: Partial<T>) => (await this.find({ where })).length,
-          existsBy: (target: unknown, where: Partial<T>) => this.existsBy(target, where),
-          findOne: async (_target: unknown, options: { where: Partial<T> }) => this.findOne(options),
-          save: async (_target: unknown, entity: T) => this.save(entity),
-        }),
+      findOne: async (_target: unknown, options: { where: Partial<T> }) => this.findOne(options),
+      save: async (_target: unknown, entity: T) => this.save(entity),
+      transaction: async <R>(work: (manager: unknown) => Promise<R>): Promise<R> => work(manager),
     };
+    return manager;
   }
 
   async remove(entity: T): Promise<T> {
@@ -130,6 +132,9 @@ export function memoryEnvironments(): EnvironmentStore & { saved: Map<string, Fu
       if (isEmpty(environment)) saved.delete(fn.id);
       else saved.set(fn.id, environment);
     },
+    // A version's environment, which a test keeps as the document itself, unsealed.
+    openVersion: (_functionId: string, version: number, sealed: EnvironmentDocument | null | undefined): FunctionEnvironmentValues =>
+      sealed ? { revision: `v${version}`, variables: sealed.variables ?? {}, secrets: sealed.secrets ?? {} } : NO_ENVIRONMENT,
   };
   return store as unknown as EnvironmentStore & { saved: Map<string, FunctionEnvironmentValues> };
 }
@@ -137,24 +142,26 @@ export function memoryEnvironments(): EnvironmentStore & { saved: Map<string, Fu
 const noUpload = () => {
   throw new Error('this test uploads no package');
 };
+/** What a test's packages service has of uploads: none to name, and none of the account's code counted against its plan. */
+const NO_UPLOADS = { name: noUpload, namedBytes: async () => 0 };
+
+/** FF without functions' keys to buckets, as where the front door has no address for functions: none made, none to revoke nor renew. */
+export function noFunctionKeys(): FunctionKeys {
+  return { credentialsFor: async () => undefined, revoke: async () => undefined, isDue: async () => false } as unknown as FunctionKeys;
+}
 
 /**
  * The packages and code images of a FunctionsService whose orchestrator is a
  * fake, which never pulls an image: inline code's image is a name, made up of
  * its package's SHA-256, and no function names an uploaded package.
  */
-/** FF without functions' keys to buckets, as where the front door has no address for functions: none made, none to revoke. */
-export function noFunctionKeys(): FunctionKeys {
-  return { credentialsFor: async () => undefined, revoke: async () => undefined } as unknown as FunctionKeys;
-}
-
 export function noPackages(): [PackagesService, CodeImagesService] {
   const images = {
     assertAvailable: () => undefined,
     imageFor: async (accountId: string, codeSha256: string) =>
       `registry.test/${codeRepository(accountId)}@sha256:${Buffer.from(codeSha256, 'base64').toString('hex')}`,
   };
-  return [{ name: noUpload, storeInline: async () => undefined } as unknown as PackagesService, images as unknown as CodeImagesService];
+  return [{ ...NO_UPLOADS, storeInline: async () => undefined } as unknown as PackagesService, images as unknown as CodeImagesService];
 }
 
 /** The development registry, which hack/k8s/registry-up.sh runs, as the backend pushes to it and the cluster's node pulls from it. */
@@ -187,7 +194,7 @@ export function inlineCodeImage(code: string, runtime: Runtime, accountId: strin
 export function clusterImages(): [PackagesService, CodeImagesService] {
   const zips = new Map<string, Buffer>();
   const packages = {
-    name: noUpload,
+    ...NO_UPLOADS,
     storeInline: async (_accountId: string, built: InlinePackage) => void zips.set(built.codeSha256, built.zip),
   };
   const images = {

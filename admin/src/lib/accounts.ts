@@ -169,13 +169,45 @@ export interface AccountQueue {
 export const QUEUE_FIELDS = ['name', 'messages', 'sizeBytes', 'deadLetterQueue', 'createdAt'] as const;
 export const QUEUE_MESSAGES_FIELDS = ['available', 'inFlight', 'delayed'] as const;
 
-/** What the account's queues hold together with its functions' calls that don't wait, against the plan's room for them. */
-export interface QueueStorage {
+/** One of the account's access keys, as its owners see it: never its secret. */
+export interface AccountAccessKey {
+  id: string;
+  /** Its name, as an IAM user's; its ID for a key made before keys had names. */
+  name: string;
+  /** The buckets and the queues it names; null for none. Naming nothing at all, it reaches every one, and the mail. */
+  buckets: string[] | null;
+  queues: string[] | null;
+  readOnly: boolean;
+  /** The functions it names, or "*" for all of them, at a level; null for none. */
+  functions: string[] | null;
+  functionAccess: 'read' | 'invoke' | 'write' | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+/** The fields the API gives for each of them. */
+export const ACCESS_KEY_FIELDS = ['id', 'name', 'buckets', 'queues', 'readOnly', 'functions', 'functionAccess', 'createdAt', 'lastUsedAt'] as const;
+
+/**
+ * What a key reaches, in the console's words: every bucket and queue of the
+ * account, and its mail, when it names nothing; else those it names, its
+ * read-only theirs, and its functions at their level.
+ */
+export function keyReach(key: Pick<AccountAccessKey, 'buckets' | 'queues' | 'readOnly' | 'functions' | 'functionAccess'>): string {
+  const storage = [key.buckets && `buckets ${key.buckets.join(', ')}`, key.queues && `queues ${key.queues.join(', ')}`].filter(Boolean).join('; ');
+  const functions = key.functions && `${key.functions.includes('*') ? 'every function' : `functions ${key.functions.join(', ')}`}, to ${key.functionAccess}`;
+  if (!storage && !functions) return key.readOnly ? 'Every bucket and queue, and the mail, read-only' : 'Every bucket and queue, and the mail';
+  const reach = [storage && (key.readOnly ? `${storage}, read-only` : storage), functions].filter(Boolean).join('; ');
+  return reach.charAt(0).toUpperCase() + reach.slice(1);
+}
+
+/** What some of the account's things hold together, as its plan counts them, against the plan's room for them. */
+export interface StorageUsed {
   bytes: number;
   limitMb: number;
 }
 
-export const QUEUE_STORAGE_FIELDS = ['bytes', 'limitMb'] as const;
+export const STORAGE_FIELDS = ['bytes', 'limitMb'] as const;
 
 /** A queue's messages, in a few words: those in flight and delayed when there are some. */
 export function queueMessagesLabel(messages: AccountQueue['messages']): string {
@@ -186,8 +218,13 @@ export function queueMessagesLabel(messages: AccountQueue['messages']): string {
 }
 
 /** What the page says of the queues' room: what they hold with the calls that don't wait, of the plan's. */
-export function queueStorageLabel(storage: QueueStorage): string {
+export function queueStorageLabel(storage: StorageUsed): string {
   return `${formatBytes(storage.bytes)} of the plan's ${storage.limitMb.toLocaleString('en-US')} MB, its functions' calls that don't wait among them; past it, sends and those calls are refused`;
+}
+
+/** What the page says of its functions' code: the packages they and their versions name, of the plan's. */
+export function codeStorageLabel(storage: StorageUsed): string {
+  return `${formatBytes(storage.bytes)} of the plan's ${storage.limitMb.toLocaleString('en-US')} MB, the packages its functions and their versions name, each once; past it, new code is refused`;
 }
 
 /** What the page says of the account's buckets together against its plan's storage. */
@@ -244,7 +281,12 @@ export interface AccountView {
   buckets: AccountBucket[];
   /** Its queues, by name. */
   queues: AccountQueue[];
-  queueStorage: QueueStorage;
+  /** Its access keys, oldest first: neither a function's own key nor a site deploy's. */
+  accessKeys: AccountAccessKey[];
+  /** Its queues' messages with its functions' calls that don't wait. */
+  queueStorage: StorageUsed;
+  /** The packages its functions and their versions name. */
+  codeStorage: StorageUsed;
   usage: { month: string; totals: UsageTotals };
   /** Each wallet's balance (P-31), with its currency's decimals; none before the account's first credit or debit. */
   balances: Array<{ currency: string; balance: string }>;

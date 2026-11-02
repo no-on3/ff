@@ -26,6 +26,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml_edit = "0.25"
 ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
+# A SAM template's YAML, read from its parser's events as CloudFormation reads it (ADR 0016): a template is UTF-8 text,
+# so without the decoder of other encodings.
+yaml-rust2 = { version = "0.13", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2"

@@ -9,6 +9,7 @@ describe('planLimitRows', () => {
       ['Memory per function', 'up to 1024 MB'],
       ['Timeout per function', 'up to 300 s'],
       ['Instances per function', 'up to 10'],
+      ['Code of the functions', "5 GB together, their versions' included"],
       ['All functions together', '20 instances, 8 CPU, 8Gi of memory'],
       ['Changes', '60 per minute'],
       ['Invocations', '100 per second'],
@@ -34,6 +35,7 @@ describe('planLimitRows', () => {
       ['Memory of a cache', '64 MB; past it, the least recently used keys go'],
       ['Domains to send mail from', '2'],
       ['E-mails', '200 a day, 1 a second; each recipient one'],
+      ["Access keys for AWS's SDKs and CLI", '10'],
     ]);
   });
 

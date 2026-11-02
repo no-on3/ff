@@ -13,13 +13,16 @@ use crate::table::{table, time};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Schedule {
+pub(super) struct Schedule {
     id: String,
-    name: String,
-    description: Option<String>,
-    expression: String,
-    input: Value,
-    enabled: bool,
+    /// The version or the alias it runs; none: $LATEST. Kept by `ff schedule set` unless `--qualifier` names another.
+    #[serde(default)]
+    pub(super) qualifier: Option<String>,
+    pub(super) name: String,
+    pub(super) description: Option<String>,
+    pub(super) expression: String,
+    pub(super) input: Value,
+    pub(super) enabled: bool,
     next_run_at: Option<String>,
     last_run_at: Option<String>,
     last_request_id: Option<String>,
@@ -29,6 +32,8 @@ struct Schedule {
 /// What a schedule set sends: the expression always, the rest when asked.
 pub struct ScheduleChanges {
     pub expression: String,
+    /// The version or the alias it runs, `$LATEST` for the function as it is; None keeps what it runs.
+    pub qualifier: Option<String>,
     pub input: Option<Value>,
     pub no_input: bool,
     pub description: Option<String>,
@@ -68,6 +73,7 @@ pub fn list(function: &str, context: &Context) -> Result<(), Error> {
             .map(|schedule| {
                 vec![
                     schedule.name.clone(),
+                    super::versions::runs_text(schedule.qualifier.as_deref()),
                     schedule.expression.clone(),
                     if schedule.enabled { "yes" } else { "no" }.to_owned(),
                     schedule.next_run_at.as_deref().map(time).unwrap_or_else(|| "-".to_owned()),
@@ -75,7 +81,7 @@ pub fn list(function: &str, context: &Context) -> Result<(), Error> {
                 ]
             })
             .collect();
-        table(&["NAME", "EXPRESSION", "ENABLED", "NEXT RUN (UTC)", "LAST RUN (UTC)"], &rows)
+        table(&["NAME", "RUNS", "EXPRESSION", "ENABLED", "NEXT RUN (UTC)", "LAST RUN (UTC)"], &rows)
     })
 }
 
@@ -90,7 +96,7 @@ fn next_runs(client: &Client, expression: &str) -> Result<Vec<String>, Error> {
 
 pub fn set(function: &str, name: &str, changes: ScheduleChanges, context: &Context) -> Result<(), Error> {
     if changes.input.is_some() && changes.no_input {
-        return Err(Error::new(Kind::Usage, "--input and --no-input say opposite things: one or the other"));
+        return Err(Error::usage("--input and --no-input say opposite things: one or the other"));
     }
     let client = Client::new(&context.settings()?)?;
     let found = function_named(&client, function)?;
@@ -98,6 +104,9 @@ pub fn set(function: &str, name: &str, changes: ScheduleChanges, context: &Conte
     let existing = schedules(&client, &found.id)?.into_iter().find(|schedule| schedule.name == name);
     let mut body = Map::new();
     body.insert("expression".into(), changes.expression.trim().into());
+    if let Some(qualifier) = &changes.qualifier {
+        body.insert("qualifier".into(), super::versions::qualifier_named(qualifier).into());
+    }
     if let Some(input) = changes.input {
         body.insert("input".into(), input);
     } else if changes.no_input {
@@ -128,7 +137,11 @@ pub fn set(function: &str, name: &str, changes: ScheduleChanges, context: &Conte
         } else {
             "disabled: it doesn't run".to_owned()
         };
-        format!("{function}'s schedule {} {action}: {}, with {event}\n{next}", schedule.name, schedule.expression)
+        let runs = match &schedule.qualifier {
+            Some(qualifier) => format!(", running {}", super::versions::runs_text(Some(qualifier))),
+            None => String::new(),
+        };
+        format!("{function}'s schedule {} {action}: {}{runs}, with {event}\n{next}", schedule.name, schedule.expression)
     })
 }
 
@@ -172,6 +185,7 @@ mod tests {
     fn schedule(outcome: Option<&str>) -> Schedule {
         Schedule {
             id: "s1".into(),
+            qualifier: None,
             name: "nightly".into(),
             description: None,
             expression: "cron(0 2 * * ? *)".into(),

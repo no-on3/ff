@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { EventInvokeConfig, Metrics } from '../services/api';
-import { asyncCallsText, asyncSettingsBody, asyncSettingsForm, asyncSettingsText, destinationText, keptText, nameOfArn } from './async-settings';
+import { asyncCallsText, asyncSettingsBody, asyncSettingsForm, asyncSettingsText, destinationName, destinationText, keptText } from './async-settings';
 
 const ARN = 'arn:aws:lambda:tn-tunis-1:000000000001:function:failed-orders';
 const QUEUE_ARN = 'arn:aws:sqs:tn-tunis-1:000000000001:failed-orders';
@@ -49,8 +49,19 @@ describe("a function's settings for its calls that don't wait", () => {
 
   it('say times and names as people read them', () => {
     expect([keptText(60), keptText(120), keptText(3600), keptText(21600), keptText(5400)]).toEqual(['1 minute', '2 minutes', '1 hour', '6 hours', '90 minutes']);
-    expect([nameOfArn(ARN), nameOfArn(`${ARN}:$LATEST`), nameOfArn(undefined)]).toEqual(['failed-orders', 'failed-orders', '']);
-    expect([destinationText(ARN), destinationText('failed-orders'), destinationText(QUEUE_ARN)]).toEqual(['failed-orders', 'failed-orders', 'the queue failed-orders']);
+    expect([destinationName(ARN), destinationName(`${ARN}:$LATEST`), destinationName(`${ARN}:live`), destinationName(QUEUE_ARN), destinationName(undefined)]).toEqual([
+      'failed-orders',
+      'failed-orders',
+      'failed-orders:live',
+      QUEUE_ARN,
+      '',
+    ]);
+    expect([destinationText(ARN), destinationText('failed-orders'), destinationText(`${ARN}:live`), destinationText(QUEUE_ARN)]).toEqual([
+      'failed-orders',
+      'failed-orders',
+      'failed-orders:live',
+      'the queue failed-orders',
+    ]);
   });
 
   it('say a queue as a destination, and keep it in the form by its ARN, as the API gave it', () => {
@@ -59,6 +70,13 @@ describe("a function's settings for its calls that don't wait", () => {
     const form = asyncSettingsForm(queued);
     expect(form.onFailure).toBe(QUEUE_ARN);
     expect(asyncSettingsBody(form)).toEqual({ body: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 21600, destinationConfig: { onFailure: { destination: QUEUE_ARN } } } });
+  });
+
+  it("keep an alias of a function in the form, and send it back so, which the API takes as its qualified ARN: a change of retries keeps it", () => {
+    const aliased = config({ destinationConfig: { onSuccess: { destination: `${ARN}:live` }, onFailure: {} } });
+    expect(asyncSettingsText(aliased)).toBe('A call that fails is retried twice, and kept 6 hours at most; a call that succeeds goes on to failed-orders:live.');
+    const form = { ...asyncSettingsForm(aliased), retries: 0 };
+    expect(asyncSettingsBody(form)).toEqual({ body: { maximumRetryAttempts: 0, maximumEventAgeInSeconds: 21600, destinationConfig: { onSuccess: { destination: 'failed-orders:live' } } } });
   });
 });
 

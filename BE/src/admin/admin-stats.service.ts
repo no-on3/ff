@@ -4,6 +4,7 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { InvoicesService } from '../billing/invoices/invoices.service';
 import { formatMinor } from '../billing/money';
 import { monthBounds } from '../billing/pricing.service';
+import { tunisDay } from '../billing/tunisia';
 import { FunctionStatus } from '../functions/entities/function.entity';
 import { capacityReport, reportWindow } from '../usage/capacity-report';
 import { OverviewView } from './admin-stats.dto';
@@ -31,9 +32,10 @@ export class AdminStatsService {
     private readonly invoices: InvoicesService,
   ) {}
 
-  /** GET /admin/stats/overview: the last one worked out, if less than a minute old; else a new one. */
+  /** GET /admin/stats/overview: the last one worked out, in the minute after it was; else a new one. */
   overview(now = new Date()): Promise<OverviewView> {
-    if (this.cached && now.getTime() - this.cached.at < OVERVIEW_TTL_MS) return this.cached.view;
+    const cached = this.cached;
+    if (cached && now.getTime() >= cached.at && now.getTime() - cached.at < OVERVIEW_TTL_MS) return cached.view;
     const view = this.compute(now);
     this.cached = { at: now.getTime(), view };
     // A failure isn't kept: the next request tries again.
@@ -51,7 +53,7 @@ export class AdminStatsService {
       this.functions(),
       this.today(day),
       this.money(month),
-      this.invoiceCounts(month, now),
+      this.invoiceCounts(tunisDay(now).slice(0, 7), now),
       this.capacity(now),
     ]);
     return { computedAt: now.toISOString(), accounts, functions, today, month, money, invoices, capacity };
@@ -157,7 +159,7 @@ export class AdminStatsService {
     });
   }
 
-  /** The invoices and credit notes issued this month, and last month's still to issue. */
+  /** The invoices and credit notes issued in `month`, this one in Tunisia, where they are dated; and last month's still to issue. */
   private async invoiceCounts(month: string, now: Date): Promise<OverviewView['invoices']> {
     const { to } = monthBounds(month);
     const [[issued], drafts] = await Promise.all([
@@ -168,7 +170,7 @@ export class AdminStatsService {
       ),
       this.invoices.drafts(InvoicesService.lastMonth(now), now),
     ]);
-    return { issued: issued.invoices, creditNotes: issued.credit_notes, toIssue: { month: drafts.month, drafts: drafts.drafts.length, issuable: drafts.issuable } };
+    return { month, issued: issued.invoices, creditNotes: issued.credit_notes, toIssue: { month: drafts.month, drafts: drafts.drafts.length, issuable: drafts.issuable } };
   }
 
   /** The last days' capacity FF held against what it billed, all accounts together: what FF pays for and nobody else does. */

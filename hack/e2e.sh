@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # L4 end-to-end test of the whole stack, driven through the public REST API:
-#   PostgreSQL + S3 (compose project "ff-e2e", ports 55432 / 59003), customers' database server (10.199.1.10)
+#   PostgreSQL + S3 (compose project "ff-e2e", ports 25432 / 29003), customers' database server (10.199.1.10)
 #   + the k3d dev cluster + the backend (built, started on a free port).
 # The backend first refuses the new database, then the migrations run from the
 # build, as a deploy step would. Scenario: create → invoke → history → update →
@@ -68,8 +68,9 @@
 # invocation, with the runtime
 # given the invocation's ID, and a call lost when the backend is killed during
 # it, which the restarted backend marks LOST without billing it, read after an
-# alarm: a function's error fires it, a quiet minute recovers it, and each
-# change reaches a local webhook receiver, signed. Then capacity
+# alarm: a function's error, through its alias, fires it and the alarm on the
+# alias's calls alone, not the one on $LATEST's; a quiet minute recovers it, and
+# each change reaches a local webhook receiver, signed. Then capacity
 # samples (P-21): the warm function sampled each minute, and the capacity report.
 # Then GET /usage (P-22) against the raw records, as JSON and as CSV, the deleted
 # database's, bucket's and queue's months in both, priced with the first price book (P-30). Then the hourly rating (P-32): every hour settled
@@ -98,8 +99,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-e2e
 E2E_NAME=e2e
-export FF_PG_PORT="${FF_E2E_PG_PORT:-55432}"
-export FF_S3_PORT="${FF_E2E_S3_PORT:-59003}"
+export FF_PG_PORT="${FF_E2E_PG_PORT:-25432}"
+export FF_S3_PORT="${FF_E2E_S3_PORT:-29003}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 sections_options "$@"
@@ -117,6 +118,14 @@ code_facts() { printf '%s' "$1" | python3 -c 'import base64, hashlib, sys; code 
 code_image_of() { kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.spec.template.spec.volumes[?(@.name=="code")].image.reference}'; }
 in_registry() { [[ "$1" == "$FF_REGISTRY_NAME:5000/ff-code/$tenant@sha256:"* ]] && echo true || echo false; }
 code_configmaps() { kubectl -n "$tenant_ns" get configmaps -l "ff.dev/function-id=$1" -o name | wc -l; }
+# as_ver <method> <path> [body] [curl option...]: a call as the versions' account (versions).
+as_ver() {
+  local method=$1 path=$2 body=${3:-}
+  shift $(($# < 3 ? $# : 3))
+  http_at "$api" "$method" "$path" "$body" -H "X-FF-Dev-Account: $ver" "$@"
+}
+# replicas_in_ver <deployment>: the instances it asks for, in the versions' account.
+replicas_in_ver() { kubectl -n "$ver_ns" get deployment "$1" -o jsonpath='{.spec.replicas}'; }
 
 # What more than one section uses: a function's code, and helpers.
 v1='export async function handler(event: { name?: string }) {
@@ -157,7 +166,7 @@ q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -
 # aws_cli: the AWS CLI, this machine's or its image's; each caller gives the key, the region and the endpoint.
 if command -v aws >/dev/null; then aws_cli=(aws); else
   aws_cli=(docker run --rm --network host -v "$work:$work" -w "$work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION
-    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS -e AWS_ENDPOINT_URL_SESV2 amazon/aws-cli:2.34.32)
+    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS -e AWS_ENDPOINT_URL_SESV2 -e AWS_ENDPOINT_URL_LAMBDA amazon/aws-cli:2.34.32)
 fi
 
 # other: a second account, the one development mode's X-FF-Dev-Account header names: neither reaches what the other owns.
@@ -210,8 +219,9 @@ function_secret() {
 aws_ff() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
   AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" --endpoint-url "$s3_endpoint" "$@"; }
 
-# outcome <command…>: accepted, or refused with the S3 error's code in its message, as the CLI prints it.
-outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|InvalidArgument)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
+# outcome <command…>: accepted, or refused with the error's code, as AWS's CLI prints any service's: S3's, SQS's query
+# code (AWS.SimpleQueueService.NonExistentQueue), SES's name (NotFoundException).
+outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/aws.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"; }
 
 # written_within <seconds> <table> <id> <since>: true when the backend wrote the table's first row for the id within
 # that many seconds of <since> (seconds since the epoch), else how long after, as its log says: in development, each
@@ -237,6 +247,7 @@ PY
 
 section_stack() {
 section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
+e2e_within_one_month 15
 e2e_dependencies
 e2e_cluster
 # This machine as the cluster's pods see it, the gateway of the cluster's Docker network: functions reach the S3 front
@@ -271,6 +282,8 @@ sqs_port="$(free_port)"
 website_port="$(free_port)"
 # Customers' mail's SES endpoint on a fifth, at http://localhost:<port>; functions reach it at the cluster's gateway.
 ses_port="$(free_port)"
+# Lambda's API on a sixth, at http://localhost:<port>; functions reach it at the cluster's gateway.
+lambda_port="$(free_port)"
 # Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
 dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
@@ -283,6 +296,8 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port"
   FF_SES_PORT="$ses_port" FF_SES_BASE="http://localhost:$ses_port"
   FF_SES_FUNCTION_ENDPOINT="http://$cluster_gateway:$ses_port" FF_SES_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_LAMBDA_PORT="$lambda_port" FF_LAMBDA_BASE="http://localhost:$lambda_port"
+  FF_LAMBDA_FUNCTION_ENDPOINT="http://$cluster_gateway:$lambda_port" FF_LAMBDA_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
@@ -299,8 +314,12 @@ e2e_migrate "${be_env[@]}"
 # The backend's own startup check, below, then proves that none is left pending.
 check "the migrations run from the build" true \
   "$(grep -q 'executed successfully' "$work/migrations.log" && echo true || echo false)"
+# The suite's account makes more changes in a minute than the beta plan's 60, its sections one after another: the rate
+# limit is checked on a plan of its own, the small one's five.
+sql "UPDATE plans SET limits = limits || '{\"writesPerMinute\": 10000}' WHERE id = 'beta'"
 # Alarms evaluated every 5 s, each minute as soon as it is over, and notifications sent every second, to this machine too.
-alarm_env=(FF_ALARM_INTERVAL_SECONDS=5 FF_ALARM_SETTLE_SECONDS=0 FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true)
+alarm_env=(FF_ALARM_INTERVAL_SECONDS=5 FF_ALARM_SETTLE_SECONDS=0 FF_NOTIFY_INTERVAL_SECONDS=1 FF_WEBHOOK_ALLOW_PRIVATE=true
+  FF_KEY_RENEWAL_INTERVAL_SECONDS=5)
 # The cold start the running backend allows a function (K8S_READY_TIMEOUT_SECONDS), which its hourly rating's wait for
 # an hour to settle follows: the default here.
 be_ready_timeout=90
@@ -399,6 +418,62 @@ check "the function record is gone" 404 "$(status)"
 }
 section_def scenario section_scenario backend budget=20
 
+section_versions() {
+section "a version's pods, scaled on its own calls; their removal once idle read a few sections on"
+# An account of its own, on a plan whose idle window is cut to a second once its calls are over: no other account's
+# functions idle with it.
+ver="$(random_account)"
+ver_ns="$(tenant_namespace "$ver")"
+e2e_namespaces+=("$ver_ns")
+as_ver GET /functions >/dev/null
+sql "INSERT INTO plans (id, name, limits) SELECT 'e2e-versions', 'E2E versions', limits FROM plans WHERE id = 'beta'"
+sql "UPDATE accounts SET plan_id = 'e2e-versions' WHERE id = '$ver'"
+sleeper='export async function handler(event: { sleepMs?: number }) {
+  if (event.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.sleepMs));
+  return { ran: process.env.FUNCTION_VERSION };
+}'
+created="$(as_ver POST /functions "$(jq -n --arg code "$sleeper" '{name: "e2e-versioned", runtime: "nodejs", code: $code, memory: 128, timeout: 10}')")"
+check "a function to publish is created" "201 ACTIVE" "$(status) $(jq -r .status <<<"$created")"
+versioned_id="$(jq -r .id <<<"$created")"
+as_ver POST "/functions/$versioned_id/versions" '{}' >/dev/null
+check "its version 1 is published" "201 1" "$(status) $(jq -r .version "$work/body")"
+as_ver POST "/functions/$versioned_id/aliases" '{"name": "live", "functionVersion": "1"}' >/dev/null
+check "and its alias live names it" 201 "$(status)"
+as_ver PUT "/functions/$versioned_id" '{"memory": 256}' >/dev/null
+check "\$LATEST given more memory since, as the version keeps its own" 200 "$(status)"
+called="$(as_ver POST "/functions/$versioned_id/invoke" '{"qualifier": "live", "input": {}}')"
+check "the alias's first call makes the version's pods, which know their version" "201 1 live 1" \
+  "$(status) $(jq -r '"\(.version) \(.alias) \(.output.ran)"' <<<"$called")"
+check "  ... a Deployment of its own with one instance, beside \$LATEST's" "1 1" \
+  "$(replicas_in_ver "fn-$versioned_id-v1") $(replicas_in_ver "fn-$versioned_id")"
+# Four calls at once, each longer than the others take to arrive: every instance busy, so the version scales up.
+burst=()
+for n in 1 2 3 4; do
+  curl -sS -o /dev/null -w '%{http_code}\n' -X POST -H 'content-type: application/json' -H "X-FF-Dev-Account: $ver" \
+    --data '{"qualifier": "live", "input": {"sleepMs": 3000}}' "$api/functions/$versioned_id/invoke" >"$work/burst-$n" &
+  burst+=($!)
+done
+for pid in "${burst[@]}"; do wait "$pid" || true; done
+check "four calls at once through the alias scale the version up, on its own calls; \$LATEST keeps its one instance" \
+  "201 201 201 201 true 1" \
+  "$(cat "$work"/burst-{1,2,3,4} | paste -sd ' ') $([ "$(replicas_in_ver "fn-$versioned_id-v1")" -ge 2 ] && echo true || echo false) $(replicas_in_ver "fn-$versioned_id")"
+as_ver POST "/functions/$versioned_id/invoke" '{"qualifier": "live", "invocationType": "Event", "input": {}}' >/dev/null
+check "a call that doesn't wait through the alias is kept, as Lambda's Event, to run as the version" 202 "$(status)"
+event_request="$(jq -r .requestId "$work/body")"
+live_url="$(as_ver POST "/functions/$versioned_id/url?qualifier=live" '{"authType": "NONE"}')"
+check "the alias gets a URL of its own, as Lambda's, \$LATEST none" "201 live 404" \
+  "$(status) $(jq -r .alias <<<"$live_url") $(as_ver GET "/functions/$versioned_id/url" >/dev/null; status)"
+live_host="$(jq -r .functionUrl <<<"$live_url")"
+live_host="${live_host#http://}"
+live_host="${live_host%%:*}"
+check "  ... and a request to it runs the version the alias names" '200 {"ran":"1"}' \
+  "$(curl -sS -o "$work/live-url" -w '%{http_code}' --resolve "$live_host:$url_port:127.0.0.1" "http://$live_host:$url_port/") $(jq -c . "$work/live-url")"
+# Idle a minute on, in the background while the sections between run: the version's pods sampled first, at a minute's
+# fifth second, then removed by the scaler's run of the minute after the window (versions_idle).
+(sleep 65 && sql "UPDATE plans SET limits = limits || '{\"idleSeconds\": 1}' WHERE id = 'e2e-versions'") >/dev/null 2>&1 &
+}
+section_def versions section_versions backend budget=35
+
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"
 created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-scheduled", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
@@ -411,9 +486,14 @@ made_at="$(date -u +%s)"
 every="$(http POST "/functions/$sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}')"
 check "a schedule is made, its first run a minute after" "201 true" \
   "$(status) $(jq --argjson t "$made_at" '(.nextRunAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $t | (. >= 55 and . <= 65)' <<<"$every")"
-http POST "/functions/$sched_fn/schedules" '{"name": "with-input", "expression": "rate(1 minute)", "input": {"report": "daily"}}' >/dev/null
+# One runs through an alias, as an EventBridge rule's qualified target; naming $LATEST, it runs no other pods.
+http POST "/functions/$sched_fn/schedules" '{"name": "gone", "expression": "rate(1 minute)", "qualifier": "nightly"}' >/dev/null
+check "a schedule naming an alias the function hasn't is refused, saying which" "400 qualifier: the function has no alias nightly" "$(status) $(jq -r .message "$work/body")"
+http POST "/functions/$sched_fn/aliases" '{"name": "nightly", "functionVersion": "$LATEST"}' >/dev/null
+check "and one with an input of its own, through the alias" "201 nightly" \
+  "$(http POST "/functions/$sched_fn/schedules" '{"name": "with-input", "expression": "rate(1 minute)", "input": {"report": "daily"}, "qualifier": "nightly"}' >/dev/null; status) $(jq -r .qualifier "$work/body")"
 http POST "/functions/$sched_fn/schedules" '{"name": "off", "expression": "rate(1 minute)", "enabled": false}' >/dev/null
-check "and one with an input of its own, and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
+check "and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
 http PUT "/functions/$sched_fn" '{"eventFormat": "wrapped"}' >/dev/null
 check "a function with schedules keeps AWS Lambda's event" 400 "$(status)"
 # A function whose runs fail: each run is an asynchronous call, retried.
@@ -430,8 +510,8 @@ py='def handler(event, context):
 created="$(http POST /functions "$(jq -n --arg code "$py" '{name: "e2e-python", runtime: "python", code: $code, memory: 128, timeout: 5}')")"
 check "create returns 201" 201 "$(status)"
 check "function is ACTIVE once ready" ACTIVE "$(jq -r .status <<<"$created")"
-id="$(jq -r .id <<<"$created")"
-invoked="$(http POST "/functions/$id/invoke" '{"input":{"name":"Python"}}')"
+python_id="$(jq -r .id <<<"$created")"
+invoked="$(http POST "/functions/$python_id/invoke" '{"input":{"name":"Python"}}')"
 check "invocation is COMPLETED" COMPLETED "$(jq -r .status <<<"$invoked")"
 check "handler output is returned, with the Lambda context" "Hello Python 128" \
   "$(jq -r '"\(.output.message) \(.output.memory)"' <<<"$invoked")"
@@ -439,16 +519,16 @@ check "handler output is returned, with the Lambda context" "Hello Python 128" \
 py_aws='def lambda_handler(event, context):
     return {"message": "Hello from lambda_handler"}
 '
-http PUT "/functions/$id" "$(jq -n --arg code "$py_aws" '{code: $code, handler: "function.lambda_handler"}')" >/dev/null
+http PUT "/functions/$python_id" "$(jq -n --arg code "$py_aws" '{code: $code, handler: "function.lambda_handler"}')" >/dev/null
 check "a handler named by an update rolls out, and the runtime calls it" "200 function.lambda_handler Hello from lambda_handler" \
-  "$(status) $(http GET "/functions/$id" | jq -r .handler) $(http POST "/functions/$id/invoke" '{"input":{}}' | jq -r .output.message)"
+  "$(status) $(http GET "/functions/$python_id" | jq -r .handler) $(http POST "/functions/$python_id/invoke" '{"input":{}}' | jq -r .output.message)"
 check "its pods are told it" function.lambda_handler \
-  "$(kubectl -n "$tenant_ns" get deployment "fn-$id" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FF_HANDLER")].value}')"
-http PUT "/functions/$id" '{"handler": "lambda_function.lambda_handler"}' >/dev/null
+  "$(kubectl -n "$tenant_ns" get deployment "fn-$python_id" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FF_HANDLER")].value}')"
+http PUT "/functions/$python_id" '{"handler": "lambda_function.lambda_handler"}' >/dev/null
 check "a handler in another file than inline code's is refused, naming its file, and the function keeps its own" \
   "400 handler must be function.<name> for inline code, which is the file function.py: function.handler, for example function.lambda_handler" \
-  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$id" | jq -r .handler)"
-http DELETE "/functions/$id" >/dev/null
+  "$(status) $(jq -r '.message | join("; ")' "$work/body") $(http GET "/functions/$python_id" | jq -r .handler)"
+http DELETE "/functions/$python_id" >/dev/null
 check "delete returns 200" 200 "$(status)"
 }
 section_def python section_python backend budget=15
@@ -598,7 +678,7 @@ section_def from_package section_from_package package budget=30
 
 section_environment() {
 section "environment variables"
-# A variable of its own for the function: the sections below still read $id, the Python function's.
+# A variable of its own for the function, as each section's: the usage section reads $python_id, the Python function's.
 reader='export async function handler() { return { table: process.env.TABLE ?? null, tz: process.env.TZ }; }'
 created="$(http POST /functions "$(jq -n --arg code "$reader" '{name: "e2e-environment", runtime: "nodejs", code: $code, memory: 128, timeout: 5, environment: {TABLE: "orders"}}')")"
 check "a function created with a variable answers with it" "201 ACTIVE orders" "$(status) $(jq -r '"\(.status) \(.environment.TABLE)"' <<<"$created")"
@@ -707,6 +787,7 @@ url_code='export async function handler(event: any) {
       method: event.requestContext.http.method, path: event.rawPath, query: event.queryStringParameters ?? null,
       cookies: event.cookies ?? [], body: event.body ?? null, base64: event.isBase64Encoded, auth: event.headers.authorization ?? null,
       account: event.requestContext.accountId, requestId: event.requestContext.requestId, domain: event.requestContext.domainName,
+      caller: event.requestContext.authorizer?.iam ?? null,
     }),
   };
 }'
@@ -811,6 +892,31 @@ check "with CORS set, the URL answers a browser's preflight itself" "200 204 htt
 http PUT "/functions/$url_fn/url" '{"authType": "AWS_IAM"}' >/dev/null
 check "a URL that takes the account's credentials refuses a caller without them" '403 403' \
   "$(at_url GET / >/dev/null; url_status) $(at_url GET / -H 'authorization: Bearer ffk_0123456789ab_not-a-real-secret' >/dev/null; url_status)"
+# signed_url <key JSON> <method> <path> [curl option...]: a request to the URL signed for lambda with the key, as AWS's tools sign one.
+signed_url() {
+  local key=$1 method=$2 path=$3
+  shift 3
+  at_url "$method" "$path" --aws-sigv4 "aws:amz:tn-tunis-1:lambda" --user "$(jq -r '"\(.id):\(.secretAccessKey)"' <<<"$key")" "$@"
+}
+url_invoker="$(http POST /storage-keys '{"name": "e2e-url-invoker", "functions": ["e2e-url"], "functionAccess": "invoke"}')"
+url_reader="$(http POST /storage-keys '{"name": "e2e-url-reader", "functions": ["*"], "functionAccess": "read"}')"
+url_elsewhere="$(http POST /storage-keys '{"name": "e2e-url-elsewhere", "functions": ["e2e-orders"], "functionAccess": "write"}')"
+signed="$(signed_url "$url_invoker" POST /orders -H 'content-type: application/json' --data '{"order":8}')"
+check "a request signed for lambda by an access key that may invoke the function: called with its body, the key its caller, the signature never the function's" \
+  '200 {"body":"{\"order\":8}","auth":null,"caller":"e2e-url-invoker"} true' \
+  "$(url_status) $(jq -c '{body, auth, caller: .caller.userId}' <<<"$signed") $(jq -r --arg id "$(jq -r .id <<<"$url_invoker")" '.caller.accessKey == $id' <<<"$signed")"
+check "a key that may only read the function is refused, saying so" \
+  "403 Forbidden: the access key e2e-url-reader ($(jq -r .id <<<"$url_reader")) may read this URL's function, not invoke it" \
+  "$(signed_url "$url_reader" GET / >/dev/null; url_status) $(jq -r .Message "$work/url-body")"
+check "  ... and one that names other functions" \
+  "403 Forbidden: the access key e2e-url-elsewhere ($(jq -r .id <<<"$url_elsewhere")) doesn't reach this URL's function" \
+  "$(signed_url "$url_elsewhere" GET / >/dev/null; url_status) $(jq -r .Message "$work/url-body")"
+check "  ... and a signature by another secret" "403 true" \
+  "$(signed_url "$(jq '.secretAccessKey = "not-the-secret"' <<<"$url_invoker")" GET / >/dev/null; url_status) \
+$(jq -r '.Message | startswith("Forbidden: The request signature we calculated does not match")' "$work/url-body")"
+check "the invoker's last use is written down, as at every front door" true \
+  "$(http GET /storage-keys | jq -r '.[] | select(.name == "e2e-url-invoker") | .lastUsedAt != null')"
+for url_key in "$url_invoker" "$url_reader" "$url_elsewhere"; do http DELETE "/storage-keys/$(jq -r .id <<<"$url_key")" >/dev/null; done
 http PUT "/functions/$url_fn" '{"eventFormat": "wrapped"}' >/dev/null
 check "a function with a URL keeps AWS Lambda's event" 400 "$(status)"
 http DELETE "/functions/$url_fn/url" >/dev/null
@@ -881,13 +987,15 @@ gone_soon "$aged"
 check "an Event past its maximum age is dropped at its next claim, without another attempt" "0 1" "$(kept_events "$aged") $(attempts_of "$aged" | jq length)"
 records_fn="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-async-records", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
 records_arn="arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async-records"
+# An alias of the destination, naming $LATEST: a record sent through it runs no other pods.
+http POST "/functions/$records_fn/aliases" '{"name": "records", "functionVersion": "$LATEST"}' >/dev/null
 http GET "/functions/$async_fn/event-invoke-config" >/dev/null
 check "a function without settings for its asynchronous calls follows Lambda's defaults, which the 404 says" \
   "404 The function arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async has no event invoke configuration: its asynchronous calls are retried twice and kept 6 hours, AWS Lambda's defaults" \
   "$(status) $(jq -r .message "$work/body")"
-set_config="$(http PUT "/functions/$async_fn/event-invoke-config" "$(jq -cn --arg arn "$records_arn" '{maximumRetryAttempts: 0, destinationConfig: {onSuccess: {destination: $arn}, onFailure: {destination: $arn}}}')")"
-check "its own settings, as Lambda's EventInvokeConfig: no retry, and another function as the destination of each call's record" \
-  "200 arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async:\$LATEST 0 null $records_arn $records_arn" \
+set_config="$(http PUT "/functions/$async_fn/event-invoke-config" "$(jq -cn --arg arn "$records_arn" '{maximumRetryAttempts: 0, destinationConfig: {onSuccess: {destination: "\($arn):records"}, onFailure: {destination: $arn}}}')")"
+check "its own settings, as Lambda's EventInvokeConfig: no retry, and another function as the destination of each call's record, an alias of it for a success" \
+  "200 arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async:\$LATEST 0 null $records_arn:records $records_arn" \
   "$(status) $(jq -r '"\(.functionArn) \(.maximumRetryAttempts) \(.maximumEventAgeInSeconds) \(.destinationConfig.onSuccess.destination) \(.destinationConfig.onFailure.destination)"' <<<"$set_config")"
 # The records come to the destination as asynchronous calls of its own, their event Lambda's record.
 record_of() {
@@ -906,6 +1014,9 @@ check "one that fails, with no retry, hands it at once its record: RetriesExhaus
   "RetriesExhausted 1 Unhandled Error asked to fail" \
   "$(record_of "$failed" | jq -r '"\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.responseContext.functionError) \(.responsePayload.errorType) \(.responsePayload.errorMessage)"')"
 check "  ... after its one attempt" 1 "$(attempts_of "$failed" | jq length)"
+check "the success's record ran through the alias its destination names, the failure's as \$LATEST" "records null" \
+  "$(http GET "/functions/$records_fn/invocations?limit=20" | jq -r --arg s "$succeeded" --arg f "$failed" \
+    '[.invocations[] | select(.status == "COMPLETED")] | "\(map(select(.input.requestContext.requestId == $s))[0].alias) \(map(select(.input.requestContext.requestId == $f))[0].alias)"')"
 http DELETE "/functions/$async_fn/event-invoke-config" >/dev/null
 check "its settings deleted, it follows Lambda's defaults again" "204 404" "$(status) $(http GET "/functions/$async_fn/event-invoke-config" >/dev/null; status)"
 }
@@ -1044,7 +1155,8 @@ check "each schedule ran within a minute and a few seconds, as calls of its sche
 check "with EventBridge's Scheduled Event: its source, its account, FF's region, the rule's ARN" \
   "Scheduled Event aws.events $tenant tn-tunis-1 arn:aws:events:tn-tunis-1:$tenant:rule/e2e-scheduled-every-minute true" \
   "$(jq -r '"\(.["detail-type"]) \(.source) \(.account) \(.region) \(.resources[0]) \(.time | test("^[0-9-]{10}T[0-9:]{8}Z$"))"' <<<"$event")"
-check "or the schedule's own input" '{"report":"daily"}' "$(jq -c '[.[] | select(.input.report != null)][0].input' <<<"$first_calls")"
+check "or the schedule's own input, through the alias it names" '{"report":"daily"} nightly' \
+  "$(jq -r '[.[] | select(.input.report != null)][0] | "\(.input | tojson) \(.alias)"' <<<"$first_calls")"
 check "each schedule says how its run went, and which call it was; the disabled one never ran" \
   "every-minute success true off null with-input success" \
   "$(jq -r --argjson h "$history" '[.[] | "\(.name) \(.lastOutcome // "null")\(if .name == "every-minute" then " \(.lastRequestId as $id | [$h.invocations[].id] | index($id) != null)" else "" end)"] | join(" ")' <<<"$schedules")"
@@ -1130,9 +1242,18 @@ key_secret="$(jq -r .secretAccessKey <<<"$key")"
 read_only="$(http POST /storage-keys '{"readOnly": true, "buckets": ["e2e-photos"]}')"
 ro_id="$(jq -r .id <<<"$read_only")"
 ro_secret="$(jq -r .secretAccessKey <<<"$read_only")"
+invoker="$(http POST /storage-keys '{"name": "e2e-invoker", "functions": ["*"], "functionAccess": "invoke"}')"
+check "a key named, to every function at one level, reaching neither bucket nor queue" "201 e2e-invoker * invoke null null" \
+  "$(status) $(jq -r '"\(.name) \(.functions | join(",")) \(.functionAccess) \(.buckets) \(.queues)"' <<<"$invoker")"
+http POST /storage-keys '{"name": "e2e-invoker"}' >/dev/null
+check "a name once among the account's working keys; functions with a level, and a level with functions" "409 400 400" \
+  "$(status) $(http POST /storage-keys '{"functions": ["orders"]}' >/dev/null; status) $(http POST /storage-keys '{"functionAccess": "write"}' >/dev/null; status)"
+extra_keys=("$(jq -r .id <<<"$invoker")")
+for _ in 4 5 6 7 8 9 10; do extra_keys+=("$(http POST /storage-keys '{}' | jq -r .id)"); done
 http POST /storage-keys '{}' >/dev/null
-check "two keys at most, as IAM gives a user; listed without their secrets" "409 2 false" \
-  "$(status) $(http GET /storage-keys | jq -r 'length, (map(has("secretAccessKey")) | any)' | xargs)"
+check "as many keys as the beta plan allows, ten; listed without their secrets" "400 The Beta plan allows 10 access keys, and the account has 10: revoke one first 10 false" \
+  "$(status) $(jq -r .message "$work/body") $(http GET /storage-keys | jq -r 'length, (map(has("secretAccessKey")) | any)' | xargs)"
+for extra_key in "${extra_keys[@]}"; do http DELETE "/storage-keys/$extra_key" >/dev/null; done
 check "the secret is sealed in FF's database, never in clear" "0" \
   "$(env_q "SELECT count(*) FROM storage_keys WHERE secret::text LIKE '%' || '$key_secret' || '%'")"
 
@@ -1239,13 +1360,16 @@ check "a suspended account's keys, and those of an account whose storage FF turn
 for _ in $(seq 75); do [ "$(env_q "SELECT count(*) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")" = 1 ] && break; sleep 1; done
 check "its hourly measure, within a minute: once in the hour, by its name" "1|e2e-photos" \
   "$(env_q "SELECT count(*), max(name) FROM bucket_samples WHERE bucket_id = '$photos_id' AND hour = date_trunc('hour', now())")"
-# Each minute, the front door writes the minutes that are over: these within two.
+# Each minute, the front door writes the minutes that are over: these within two. All of them, the minute of the 300 MB
+# among them, not only the first three classes, which an earlier minute may hold.
+photos_requests() {
+  env_q "SELECT count(DISTINCT class) || ' ' || (sum(bytes_in) > 314572800) || ' ' || (sum(bytes_out) > 314572800) || ' ' || (sum(errors4xx) > 0) FROM storage_request_counts WHERE name = 'e2e-photos'" | tr -d '\r'
+}
 for _ in $(seq 150); do
-  [ "$(env_q "SELECT count(DISTINCT class) FROM storage_request_counts WHERE name = 'e2e-photos'")" = 3 ] && break
+  [ "$(photos_requests)" = "3 true true true" ] && break
   sleep 1
 done
-check "the requests counted by the minute, in AWS's three classes, with their bytes, the 300 MB up and down among them" "3 true true true" \
-  "$(env_q "SELECT count(DISTINCT class) || ' ' || (sum(bytes_in) > 314572800) || ' ' || (sum(bytes_out) > 314572800) || ' ' || (sum(errors4xx) > 0) FROM storage_request_counts WHERE name = 'e2e-photos'" | tr -d '\r')"
+check "the requests counted by the minute, in AWS's three classes, with their bytes, the 300 MB up and down among them" "3 true true true" "$(photos_requests)"
 # Its metrics, as CloudWatch names S3's: this hour and the one before, a point an hour. The minute of its last requests
 # may be written between the two reads: both read again until they agree, which a minute's writing settles.
 since="$(date -u -d '-1 hour' +%Y-%m-%dT%H:00:00Z)"
@@ -1289,13 +1413,11 @@ check "  ... sends a message with an attribute, receives it back, and deletes it
   "$(jq -r '.Messages[0] | "\(.Body) \(.MessageAttributes.source.StringValue)"' "$work/received.json") \
 $(aws_sqs delete-message --queue-url "$cli_url" --receipt-handle "$(jq -r '.Messages[0].ReceiptHandle' "$work/received.json")" >/dev/null; \
 aws_sqs get-queue-attributes --queue-url "$cli_url" --attribute-names ApproximateNumberOfMessages --query Attributes.ApproximateNumberOfMessages --output text)"
-# outcome_sqs <command…>: accepted, or refused with the error's query code, as the CLI prints it.
-outcome_sqs() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE '\((AWS\.SimpleQueueService\.[A-Za-z]+|SignatureDoesNotMatch|InvalidClientTokenId|AccessDenied|OverLimit|RequestThrottled)\)' "$work/aws.err" | head -1 | tr -d '()')"; }
-check "  ... a queue that isn't there, by its query code" "refused AWS.SimpleQueueService.NonExistentQueue" "$(outcome_sqs aws_sqs get-queue-url --queue-name nowhere)"
+check "  ... a queue that isn't there, by its query code" "refused AWS.SimpleQueueService.NonExistentQueue" "$(outcome aws_sqs get-queue-url --queue-name nowhere)"
 other_url="$(as_other_sqs aws_sqs create-queue --queue-name e2e-cli-orders --query QueueUrl --output text)"
 check "another account's queue of the same name is its own: its URL under its account, which this account's key doesn't find" \
   "$sqs_endpoint/$other/e2e-cli-orders refused AWS.SimpleQueueService.NonExistentQueue" \
-  "$other_url $(outcome_sqs aws_sqs send-message --queue-url "$other_url" --message-body 'not mine')"
+  "$other_url $(outcome aws_sqs send-message --queue-url "$other_url" --message-body 'not mine')"
 check "  ... nor lists" "$cli_url" "$(aws_sqs list-queues --query 'QueueUrls' --output text)"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0010 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
@@ -1337,6 +1459,7 @@ check "their pods get the SQS endpoint inside the cluster with their own key, th
   "http://$cluster_gateway:$sqs_port $(function_secret "$node_sqs" AWS_ACCESS_KEY_ID)" \
   "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SQS) $(env_q "SELECT id FROM storage_keys WHERE function_id = '$node_sqs' AND revoked_at IS NULL")"
 check "  ... and the SES endpoint for the account's mail, as AWS_ENDPOINT_URL_SESV2" "http://$cluster_gateway:$ses_port" "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SESV2)"
+check "  ... and Lambda's endpoint for the account's functions, as AWS_ENDPOINT_URL_LAMBDA" "http://$cluster_gateway:$lambda_port" "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_LAMBDA)"
 http PUT "/functions/$python_sqs" '{"environment": {"AWS_ENDPOINT_URL_SQS": "https://sqs.us-east-1.amazonaws.com"}}' >/dev/null
 check "a function can't point it elsewhere: AWS_ENDPOINT_URL_SQS is FF's" "400 AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues" \
   "$(status) $(jq -r '.message | join("; ")' "$work/body")"
@@ -1378,11 +1501,11 @@ check "  ... refuses a name the account has" '409 The account has a queue named 
 named_key="$(http POST /storage-keys '{"queues": ["e2e-api-orders"]}')"
 named_sqs() { AWS_KEY="$(jq -r .id <<<"$named_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$named_key")" "$@"; }
 check "a key that names a queue lists it alone, and is refused another, AccessDenied" "201 e2e-api-orders $api_url refused AccessDenied" \
-  "$(status) $(jq -r '.queues | join(",")' <<<"$named_key") $(named_sqs aws_sqs list-queues --query 'QueueUrls' --output text) $(named_sqs outcome_sqs aws_sqs get-queue-url --queue-name e2e-fn-records)"
+  "$(status) $(jq -r '.queues | join(",")' <<<"$named_key") $(named_sqs aws_sqs list-queues --query 'QueueUrls' --output text) $(named_sqs outcome aws_sqs get-queue-url --queue-name e2e-fn-records)"
 http DELETE "/storage-keys/$(jq -r .id <<<"$named_key")" >/dev/null
 http POST /queues/e2e-api-orders/purge >/dev/null
 check "FF's API purges a queue, and deletes it, which the CLI then doesn't find" "204 0 204 refused AWS.SimpleQueueService.NonExistentQueue" \
-  "$(status) $(http GET /queues/e2e-api-orders | jq -r .sizeBytes) $(http DELETE /queues/e2e-api-orders >/dev/null; status) $(outcome_sqs aws_sqs get-queue-url --queue-name e2e-api-orders)"
+  "$(status) $(http GET /queues/e2e-api-orders | jq -r .sizeBytes) $(http DELETE /queues/e2e-api-orders >/dev/null; status) $(outcome aws_sqs get-queue-url --queue-name e2e-api-orders)"
 check "the audit log names each change of a queue, whichever way it came: the CLI's under its access key, the API's as its caller" \
   "queue.create access_key:$queue_key_id|queue.create dev|queue.purge dev|queue.delete dev" \
   "$(env_q "SELECT string_agg(action || ' ' || actor, '|' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource IN ('queue:e2e-cli-orders', 'queue:e2e-api-orders') AND (resource = 'queue:e2e-api-orders' OR action = 'queue.create')")"
@@ -1411,13 +1534,17 @@ batch_code='export const handler = async (event) => ({ batchItemFailures: event.
 batch_fn="$(http POST /functions "$(jq -n --arg code "$batch_code" '{name: "e2e-batch-reader", runtime: "nodejs", code: $code, memory: 128, timeout: 3}')" | jq -r .id)"
 # Warm, so that its first batch isn't held past the queue's visibility timeout by a cold start.
 http POST "/functions/$batch_fn/invoke" '{"input": {"Records": []}}' >/dev/null
-mapping="$(http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn, maximumBatchingWindowInSeconds: 2, functionResponseTypes: ["ReportBatchItemFailures"]}')")"
-check "a function made to read a queue, as Lambda's CreateEventSourceMapping: 10 a batch, a window of 2 s, partial batch responses" \
-  "201 Enabled 10 2 ReportBatchItemFailures $batch_arn" \
-  "$(status) $(jq -r '"\(.state) \(.batchSize) \(.maximumBatchingWindowInSeconds) \(.functionResponseTypes[0]) \(.eventSourceArn)"' <<<"$mapping")"
+# It reads through an alias, as Lambda's mapping of a qualified function; naming $LATEST, it runs the pods just warmed.
+http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn, qualifier: "batch"}')" >/dev/null
+check "a mapping naming an alias the function hasn't is refused, saying which" "400 qualifier: the function has no alias batch" "$(status) $(jq -r .message "$work/body")"
+http POST "/functions/$batch_fn/aliases" '{"name": "batch", "functionVersion": "$LATEST"}' >/dev/null
+mapping="$(http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn, maximumBatchingWindowInSeconds: 2, functionResponseTypes: ["ReportBatchItemFailures"], qualifier: "batch"}')")"
+check "a function made to read a queue, as Lambda's CreateEventSourceMapping: 10 a batch, a window of 2 s, partial batch responses, through its alias" \
+  "201 Enabled 10 2 ReportBatchItemFailures $batch_arn arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-batch-reader:batch" \
+  "$(status) $(jq -r '"\(.state) \(.batchSize) \(.maximumBatchingWindowInSeconds) \(.functionResponseTypes[0]) \(.eventSourceArn) \(.functionArn)"' <<<"$mapping")"
 mapping_id="$(jq -r .uuid <<<"$mapping")"
 http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn}')" >/dev/null
-check "  ... once: another for the same queue names the first, in Lambda's words" "409 Please update or delete the existing mapping with UUID $mapping_id" \
+check "  ... once, whatever it runs: another for the same queue names the first, in Lambda's words" "409 Please update or delete the existing mapping with UUID $mapping_id" \
   "$(status) $(jq -r .message "$work/body" | grep -oE 'Please update or delete the existing mapping with UUID [0-9a-f-]+$')"
 check "  ... which the function's list and the queue's show" "$mapping_id $mapping_id" \
   "$(http GET "/functions/$batch_fn/event-sources" | jq -r '.[0].uuid') $(http GET "/event-sources?eventSourceArn=$(jq -rn --arg arn "$batch_arn" '$arn | @uri')" | jq -r '.[0].uuid')"
@@ -1434,8 +1561,8 @@ check "the AWS CLI's five messages in one call of the function, SQS's event; the
   "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | last | .input.Records | "\(length) \(.[0].eventSource) \(.[0].eventSourceARN) \([.[].body | fromjson | select(.fail | not) | .order] | map(tostring) | join(","))"') \
 $(aws_sqs receive-message --queue-url "$sqs_endpoint/$tenant/e2e-batch-dlq" --max-number-of-messages 10 | jq -r '[.Messages[].Body | fromjson | .order] | sort | map(tostring) | join(",")') \
 $(http GET /queues/e2e-batch | jq '.messages.available + .messages.inFlight') $(http GET /queues/e2e-batch-dlq | jq '.messages.available + .messages.inFlight')"
-check "  ... each call in the function's history as the queue's: the batch, then the two again" "2 sqs" \
-  "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | "\(length) \(.[0].source)"')"
+check "  ... each call in the function's history as the queue's, through the alias: the batch, then the two again" "2 sqs batch" \
+  "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | "\(length) \(.[0].source) \(.[0].alias)"')"
 http PATCH "/event-sources/$mapping_id" '{"enabled": false}' >/dev/null
 check "a mapping disabled, as Lambda's UpdateEventSourceMapping: nothing read" "200 Disabled" "$(status) $(jq -r .state "$work/body")"
 aws_sqs send-message --queue-url "$sqs_endpoint/$tenant/e2e-batch" --message-body '{"order": 6}' >/dev/null
@@ -1458,10 +1585,12 @@ http POST /buckets '{"name": "e2e-notify"}' >/dev/null
 # As a function written for Lambda reads S3's event: each key form-decoded, a "+" a space.
 upload_code='export const handler = async (event) => ({ keys: event.Records.map((record) => decodeURIComponent(record.s3.object.key.replace(/\+/g, " "))), name: event.Records[0].eventName });'
 upload_fn="$(http POST /functions "$(jq -n --arg code "$upload_code" '{name: "e2e-on-upload", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+# The rule names an alias of it, as S3 calls a qualified ARN; naming $LATEST, it runs no other pods.
+http POST "/functions/$upload_fn/aliases" '{"name": "uploads", "functionVersion": "$LATEST"}' >/dev/null
 aws_sqs create-queue --queue-name e2e-removals >/dev/null
 removals_url="$sqs_endpoint/$tenant/e2e-removals"
 s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn \
-  --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-on-upload" --arg queue "arn:aws:sqs:tn-tunis-1:$tenant:e2e-removals" \
+  --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-on-upload:uploads" --arg queue "arn:aws:sqs:tn-tunis-1:$tenant:e2e-removals" \
   '{LambdaFunctionConfigurations: [{Id: "uploads", LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"], Filter: {Key: {FilterRules: [{Name: "prefix", Value: "uploads/"}]}}}],
     QueueConfigurations: [{Id: "removals", QueueArn: $queue, Events: ["s3:ObjectRemoved:*"]}]}')"
 check "the AWS CLI sets a bucket's notifications, as S3's, and reads them back; FF's API reads the same" "uploads removals uploads removals" \
@@ -1478,15 +1607,17 @@ for _ in $(seq 1 30); do
   [ "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq '[.invocations[] | select(.source == "async" and .status == "COMPLETED")] | length')" -ge 1 ] && break
   sleep 1
 done
-check "an upload its rule names runs the function without waiting, S3's event its input, the key decoded as Lambda's functions decode it; another, nothing" \
-  '1 ["uploads/red cat.jpg"] ObjectCreated:Put 9 e2e-notify' \
-  "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq -r '[.invocations[] | select(.source == "async")] | "\(length) \(.[0].output.keys | tojson) \(.[0].output.name) \(.[0].input.Records[0].s3.object.size) \(.[0].input.Records[0].s3.bucket.name)"')"
+check "an upload its rule names runs the function without waiting, through the alias the rule names, S3's event its input, the key decoded as Lambda's functions decode it; another, nothing" \
+  '1 uploads ["uploads/red cat.jpg"] ObjectCreated:Put 9 e2e-notify' \
+  "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq -r '[.invocations[] | select(.source == "async")] | "\(length) \(.[0].alias) \(.[0].output.keys | tojson) \(.[0].output.name) \(.[0].input.Records[0].s3.object.size) \(.[0].input.Records[0].s3.bucket.name)"')"
 s3n s3 rm "s3://e2e-notify/uploads/red cat.jpg" --only-show-errors
 aws_sqs receive-message --queue-url "$removals_url" --wait-time-seconds 10 --attribute-names SenderId >"$work/s3-removed.json"
 check "a deletion puts S3's event in the queue, as S3 sends it to SQS, from the bucket" "ObjectRemoved:Delete uploads%2Fred+cat.jpg removals arn:aws:s3:::e2e-notify" \
   "$(jq -r '.Messages[0].Body | fromjson | .Records[0] | "\(.eventName) \(.s3.object.key) \(.s3.configurationId)"' "$work/s3-removed.json") $(jq -r '.Messages[0].Attributes.SenderId' "$work/s3-removed.json")"
-check "  ... a destination the account doesn't have refused, as S3 refuses one it can't validate" "refused InvalidArgument" \
-  "$(outcome s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:nowhere" '{LambdaFunctionConfigurations: [{LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"]}]}')")"
+for missing in nowhere e2e-on-upload:gone; do
+  check "  ... a destination the account doesn't have refused, as S3 refuses one it can't validate: $missing" "refused InvalidArgument" \
+    "$(outcome s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:$missing" '{LambdaFunctionConfigurations: [{LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"]}]}')")"
+done
 check "the audit log names the change, under the CLI's key" "bucket.notifications access_key:$queue_key_id" \
   "$(env_q "SELECT action || ' ' || actor FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-notify' AND action = 'bucket.notifications' ORDER BY at DESC LIMIT 1")"
 http DELETE "/functions/$upload_fn" >/dev/null
@@ -1565,6 +1696,7 @@ section "customers' mail (ADR 0012): identities and the suppression list, with A
 ses_endpoint="http://localhost:$ses_port"
 mail_key="$(http POST /storage-keys '{}')"
 check "a new key's answer names the SES endpoint, AWS_ENDPOINT_URL_SESV2" "$ses_endpoint" "$(jq -r .sesEndpoint <<<"$mail_key")"
+check "  ... and Lambda's, AWS_ENDPOINT_URL_LAMBDA, for the account's functions" "http://localhost:$lambda_port" "$(jq -r .lambdaEndpoint <<<"$mail_key")"
 mail_key_id="$(jq -r .id <<<"$mail_key")"
 mail_key_secret="$(jq -r .secretAccessKey <<<"$mail_key")"
 # The AWS CLI, its endpoint from AWS_ENDPOINT_URL_SESV2 alone, as a function's environment gives it, and no setting of
@@ -1572,8 +1704,6 @@ mail_key_secret="$(jq -r .secretAccessKey <<<"$mail_key")"
 aws_ses() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$mail_key_id}" AWS_SECRET_ACCESS_KEY="${AWS_SECRET:-$mail_key_secret}" AWS_DEFAULT_REGION=tn-tunis-1 \
   AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_SESV2="$ses_endpoint" "${aws_cli[@]}" sesv2 "$@" --output json; }
 as_other_ses() { AWS_KEY="$(jq -r .id <<<"$other_key")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$other_key")" "$@"; }
-# outcome_ses <command…>: accepted, or refused with the error's name, as the CLI prints it.
-outcome_ses() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE 'An error occurred \([A-Za-z]+\)' "$work/aws.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"; }
 check "the AWS CLI makes a domain an identity, with a DKIM key of FF's, as SES's own DKIM brought in: pending, its one token the selector" \
   "DOMAIN false PENDING EXTERNAL 1" \
   "$(aws_ses create-email-identity --email-identity Shop.E2E-Customer.tn | jq -r '"\(.IdentityType) \(.VerifiedForSendingStatus) \(.DkimAttributes.Status) \(.DkimAttributes.SigningAttributesOrigin) \(.DkimAttributes.Tokens | length)"')"
@@ -1594,7 +1724,7 @@ check "once its records are published, a check proves it, its return path too" "
   "$(jq -r '"\(.status) \(.sendingEnabled) \(.mailFromVerified)"' "$work/body")"
 check "  ... as the AWS CLI reads it back" "true SUCCESS SUCCESS" \
   "$(aws_ses get-email-identity --email-identity shop.e2e-customer.tn | jq -r '"\(.VerifiedForSendingStatus) \(.DkimAttributes.Status) \(.MailFromAttributes.MailFromDomainStatus)"')"
-check "  ... the same domain again, refused as SES does" "refused AlreadyExistsException" "$(outcome_ses aws_ses create-email-identity --email-identity shop.e2e-customer.tn)"
+check "  ... the same domain again, refused as SES does" "refused AlreadyExistsException" "$(outcome aws_ses create-email-identity --email-identity shop.e2e-customer.tn)"
 check "an address is made an identity, pending until its link is followed" "EMAIL_ADDRESS false" \
   "$(aws_ses create-email-identity --email-identity Orders@E2E-Customer.tn | jq -r '"\(.IdentityType) \(.VerifiedForSendingStatus)"')"
 # No SMTP server here: FF's own mail is written to the backend's log, the link with it.
@@ -1609,14 +1739,14 @@ $(curl -s -o /dev/null -w '%{http_code}' "$ses_endpoint/verify?token=$token")"
 check "  ... and the CLI lists both, proved" "orders@e2e-customer.tn:true shop.e2e-customer.tn:true" \
   "$(aws_ses list-email-identities | jq -r '[.EmailIdentities[] | "\(.IdentityName):\(.SendingEnabled)"] | join(" ")')"
 check "another account's key finds none of them" "refused NotFoundException 0" \
-  "$(outcome_ses as_other_ses aws_ses get-email-identity --email-identity shop.e2e-customer.tn) $(as_other_ses aws_ses list-email-identities | jq '.EmailIdentities | length')"
+  "$(outcome as_other_ses aws_ses get-email-identity --email-identity shop.e2e-customer.tn) $(as_other_ses aws_ses list-email-identities | jq '.EmailIdentities | length')"
 check "the account's sending as GetAccount says it: the plan's quotas, SES's doubles as the AWS CLI prints them, in the sandbox" "200.0 1.0 false true" \
   "$(aws_ses get-account | jq -r '"\(.SendQuota.Max24HourSend) \(.SendQuota.MaxSendRate) \(.ProductionAccessEnabled) \(.SendingEnabled)"')"
 aws_ses put-suppressed-destination --email-address Gone@E2E-Customer.tn --reason BOUNCE >/dev/null
 check "an address put on the suppression list, read back by the CLI and FF's API" "gone@e2e-customer.tn BOUNCE gone@e2e-customer.tn" \
   "$(aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn | jq -r '"\(.SuppressedDestination.EmailAddress) \(.SuppressedDestination.Reason)"') $(http GET /email/suppressions | jq -r '.suppressions[0].address')"
 aws_ses delete-suppressed-destination --email-address gone@e2e-customer.tn >/dev/null
-check "  ... and taken off" "refused NotFoundException" "$(outcome_ses aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn)"
+check "  ... and taken off" "refused NotFoundException" "$(outcome aws_ses get-suppressed-destination --email-address gone@e2e-customer.tn)"
 check "the audit log names each change to the domain, the CLI's under its key" "email.identity.create access_key:$mail_key_id email.identity.verify" \
   "$(env_q "SELECT string_agg(action || CASE WHEN actor LIKE 'access_key:%' THEN ' ' || actor ELSE '' END, ' ' ORDER BY at) FROM audit_log WHERE account_id = '$tenant' AND resource = 'email-identity:shop.e2e-customer.tn'")"
 }
@@ -1661,9 +1791,9 @@ check "a raw message, its sender and recipient from its header as the AWS CLI se
   "$(received_envelope 2 | jq -r '.to | join(",")') $(grep -q '^Message-ID: <raw-e2e@shop.e2e-customer.tn>' "$work/received-2.eml" && echo true || echo false) $(dkim_of "$work/received-2.eml")"
 sleep 1
 check "a message from an address the account hasn't proved is refused, as SES refuses it" "refused MessageRejected" \
-  "$(outcome_ses aws_ses send-email --from-email-address someone@unproved.tn --destination ToAddresses=orders@e2e-customer.tn --content "$simple_content")"
+  "$(outcome aws_ses send-email --from-email-address someone@unproved.tn --destination ToAddresses=orders@e2e-customer.tn --content "$simple_content")"
 check "  ... and in the sandbox, one to an address it hasn't proved" "refused MessageRejected" \
-  "$(outcome_ses aws_ses send-email --from-email-address news@shop.e2e-customer.tn --destination ToAddresses=stranger@example.org --content "$simple_content")"
+  "$(outcome aws_ses send-email --from-email-address news@shop.e2e-customer.tn --destination ToAddresses=stranger@example.org --content "$simple_content")"
 check "GetAccount counts what the account sent in the last day, each recipient once, the one kept off too" 4.0 \
   "$(aws_ses get-account | jq -r .SendQuota.SentLast24Hours)"
 check "GET /email/metrics counts its recipients as CloudWatch names SES's metrics: sent, taken, bounced or kept off, complained of" "4 2 2 0" \
@@ -1679,6 +1809,106 @@ check "  ... the domain's mail stays in GET /usage, said deleted, as billed" "tr
 http DELETE "/storage-keys/$mail_key_id" >/dev/null
 }
 section_def mail_sent section_mail_sent mail budget=20
+
+section_key_life() {
+section "keys that end (ADR 0014, 5): a function's, copied out of it, refused past its end in each service's words; a fresh one from zero, at half its life, and for one from before keys ended"
+# A function's key lasts 12 hours, which this suite doesn't wait: its times move in SQL, as the hours would move them.
+# Asked for Lambda's endpoint, it calls it unsigned from its pod, and answers with the status and the error's name.
+key_code='export async function handler(event) {
+  if (!event.lambda) return { key: process.env.AWS_ACCESS_KEY_ID };
+  const answer = await fetch(`${process.env.AWS_ENDPOINT_URL_LAMBDA}/2015-03-31/functions/`);
+  return { lambda: `${answer.status} ${answer.headers.get("x-amzn-errortype")}` };
+}'
+# key_function <name>: a function that answers with the key its pod runs with.
+key_function() { http POST /functions "$(jq -n --arg name "$1" --arg code "$key_code" '{name: $name, runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id; }
+key_fn="$(key_function e2e-key-life)"
+# The key from before keys ended is another function's, at zero until its key is replaced.
+ended_fn="$(key_function e2e-key-ended)"
+made="$(http POST "/functions/$key_fn/url" '{"authType": "AWS_IAM"}')"
+local url_host
+url_host="$(jq -r .functionUrl <<<"$made" | sed -E 's#^http://([^:/]+).*#\1#')"
+# at_zero <function>: scaled to zero, as the idle sweep leaves a function, no pod holding its key. Before any call: the
+# backend's autoscaler steps a function called in the last minute back up from zero, its pod on the key it had.
+at_zero() {
+  kubectl -n "$tenant_ns" scale deployment "fn-$1" --replicas=0 >/dev/null
+  for _ in $(seq 60); do [ -z "$(kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.status.readyReplicas}')" ] && break; sleep 1; done
+}
+at_zero "$key_fn"
+at_zero "$ended_fn"
+# key_life <key ID>: the hours between a key's making and its end.
+key_life() { env_q "SELECT round(extract(epoch FROM expires_at - created_at) / 3600) FROM storage_keys WHERE id = '$1'"; }
+# called_key <function>: the key the function's pod runs with, as it answers a call.
+called_key() { http POST "/functions/$1/invoke" '{"input": {}}' | jq -r .output.key; }
+# copied_key: the function's key and its secret, as code that reads its environment would copy them out.
+copied_key() { jq -n --arg id "$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)" --arg secret "$(function_secret "$key_fn" AWS_SECRET_ACCESS_KEY)" '{id: $id, secretAccessKey: $secret}'; }
+copied="$(copied_key)"
+first_key="$(jq -r .id <<<"$copied")"
+as_copied() { AWS_KEY="$first_key" AWS_SECRET="$(jq -r .secretAccessKey <<<"$copied")" "$@"; }
+# aws_lambda <arguments…>: the AWS CLI at Lambda's endpoint, from AWS_ENDPOINT_URL_LAMBDA alone, with AWS_KEY's key.
+aws_lambda() { AWS_ACCESS_KEY_ID="$AWS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
+  AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_LAMBDA="http://localhost:$lambda_port" "${aws_cli[@]}" lambda "$@" --output json; }
+check "a function's key lasts 12 hours" "12" "$(key_life "$first_key")"
+check "  ... copied out of it, it opens S3, SQS and SES" "accepted accepted accepted" \
+  "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities)"
+check "  ... and at Lambda's endpoint it invokes its account's functions, as a role allowed to invoke them, Invoke not offered there yet; and does nothing else" \
+  "refused UnknownOperationException refused AccessDeniedException" \
+  "$(as_copied outcome aws_lambda invoke --function-name e2e-key-life /dev/null) $(as_copied outcome aws_lambda get-function --function-name e2e-key-life)"
+sql "UPDATE storage_keys SET created_at = now() - interval '12 hours 1 second', expires_at = now() - interval '1 second' WHERE id = '$first_key'"
+check "past its end, each front door refuses it at once, in its service's words: S3's ExpiredToken, SQS's, SES's and Lambda's ExpiredTokenException" \
+  "refused ExpiredToken refused ExpiredToken refused ExpiredTokenException refused ExpiredTokenException" \
+  "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities) $(as_copied outcome aws_lambda invoke --function-name e2e-key-life /dev/null)"
+check "  ... and the URL, Forbidden, saying so" "403 Forbidden: The security token included in the request is expired." \
+  "$(signed_url "$copied" GET / >/dev/null; url_status) $(jq -r .Message "$work/url-body")"
+fresh_key="$(called_key "$key_fn")"
+check "a call starts the function from zero on a fresh key, of 12 hours, which its pod runs with" "true $fresh_key 12" \
+  "$([[ $fresh_key =~ ^AKFF && $fresh_key != "$first_key" ]] && echo true || echo false) $(function_secret "$key_fn" AWS_ACCESS_KEY_ID) $(key_life "$fresh_key")"
+for _ in $(seq 60); do [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$first_key'")" = t ] && break; sleep 1; done
+check "  ... the old one revoked by the renewal's next turn, which finds its pod on the new one" "t t" \
+  "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$first_key'" | tr '|' ' ')"
+check "  ... copied out of it, the fresh one opens the function's URL" 200 "$(signed_url "$(copied_key)" GET / >/dev/null; url_status)"
+check "  ... and its pod reaches Lambda's endpoint, AWS_ENDPOINT_URL_LAMBDA, which refuses a call unsigned" "403 MissingAuthenticationTokenException" \
+  "$(http POST "/functions/$key_fn/invoke" '{"input": {"lambda": true}}' | jq -r .output.lambda)"
+
+# Six hours and a minute on: past half its life, which the renewal, every 5 s here, finds.
+sql "UPDATE storage_keys SET created_at = created_at - interval '6 hours 1 minute', expires_at = expires_at - interval '6 hours 1 minute' WHERE id = '$fresh_key'"
+# Called each second until the old key is revoked, once no pod holds it: every call answered. A call lost is named
+# with its times and its answer.
+calls=0 failed=0 lost=""
+for _ in $(seq 120); do
+  sent="$(date +%T)"
+  answer="$(http POST "/functions/$key_fn/invoke" '{"input": {}}')"
+  calls=$((calls + 1))
+  if [ "$(status) $(jq -r .status <<<"$answer")" != "201 COMPLETED" ]; then
+    failed=$((failed + 1))
+    lost+=", sent at $sent and answered at $(date +%T): $(status) $(jq -c . <<<"$answer" 2>/dev/null || printf %s "$answer")"
+  fi
+  [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$fresh_key'")" = t ] && break
+  sleep 1
+done
+renewed_key="$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)"
+check "past half its life, a running function gets a new key, of 12 hours, which its new pod runs with" "true 12 $renewed_key" \
+  "$([[ $renewed_key =~ ^AKFF && $renewed_key != "$fresh_key" ]] && echo true || echo false) $(key_life "$renewed_key") $(called_key "$key_fn")"
+check "  ... the old one revoked once no pod holds it, and the function's only key left" "t t 1" \
+  "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$fresh_key'" | tr '|' ' ') $(env_q "SELECT count(*) FROM storage_keys WHERE function_id = '$key_fn' AND revoked_at IS NULL")"
+check "  ... every call answered while its pod was replaced" "0 true" "$failed $([ "$calls" -gt 3 ] && echo true || echo false)$lost"
+check "the renewal is in the backend's log" true \
+  "$(grep "Deployment(s) rolled onto a new key" "$work/backend.log" >/dev/null && echo true || echo false)"
+
+# A key made before keys ended has none, and would never end on its own: the renewal's next turn replaces it, a function
+# at zero too, its template written with no pod started, and the turn after revokes it.
+lasting_key="$(function_secret "$ended_fn" AWS_ACCESS_KEY_ID)"
+sql "UPDATE storage_keys SET expires_at = NULL WHERE id = '$lasting_key'"
+for _ in $(seq 60); do [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$lasting_key'")" = t ] && break; sleep 1; done
+ended_key="$(function_secret "$ended_fn" AWS_ACCESS_KEY_ID)"
+check "a key from before keys ended is replaced even at zero, no pod started, and revoked the turn after" "t t 0 true 12" \
+  "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$lasting_key'" | tr '|' ' ') \
+$(kubectl -n "$tenant_ns" get deployment "fn-$ended_fn" -o jsonpath='{.spec.replicas}') $([[ $ended_key =~ ^AKFF && $ended_key != "$lasting_key" ]] && echo true || echo false) $(key_life "$ended_key")"
+check "  ... the function's next call starts it on the new one" "$ended_key" "$(called_key "$ended_fn")"
+deleted="$(http DELETE "/functions/$key_fn" >/dev/null; status) $(http DELETE "/functions/$ended_fn" >/dev/null; status)"
+check "the functions deleted, their keys with them" "200 200 0" \
+  "$deleted $(env_q "SELECT count(*) FROM storage_keys WHERE function_id IN ('$key_fn', '$ended_fn') AND revoked_at IS NULL")"
+}
+section_def key_life section_key_life queues mail budget=80
 
 section_plans() {
 section "plans and rate limits (P-15)"
@@ -1820,6 +2050,33 @@ http DELETE "/storage-keys/$queue_key_id" >/dev/null
 }
 section_def sites_counted section_sites_counted sites budget=45
 
+section_versions_idle() {
+section "a version idle past its plan's window: its pods removed, as \$LATEST's are scaled to zero"
+# At the scaler's run of the minute after the window was cut, a minute after versions: the sections since have mostly
+# waited both out.
+left="" latest=""
+for _ in $(seq 1 180); do
+  left="$(kubectl -n "$ver_ns" get "deployment/fn-$versioned_id-v1" "service/fn-$versioned_id-v1" "secret/fn-$versioned_id-v1-env" \
+    --ignore-not-found -o name 2>/dev/null)"
+  latest="$(replicas_in_ver "fn-$versioned_id")"
+  [ -z "$left" ] && [ "$latest" = 0 ] && break
+  sleep 1
+done
+check "the version's Deployment, Service and Secret are removed" "" "$left"
+aliased="$(as_ver GET "/functions/$versioned_id/aliases/live")"
+check "\$LATEST scaled to zero; the version and its alias kept, for the next call to start again" "0 200 1" \
+  "$latest $(status) $(jq -r .functionVersion <<<"$aliased")"
+as_ver GET "/functions/$versioned_id/invocations?resource=live" >/dev/null
+check "the alias's call that didn't wait ran version 1, an attempt of the queue's worker, its history through live" "200 async 1 live COMPLETED" \
+  "$(status) $(jq -r --arg r "$event_request" '.invocations[] | select(.requestId == $r) | "\(.source) \(.version) \(.alias) \(.status)"' "$work/body")"
+check "  ... and its URL's request too, its history through live" "url 1 live COMPLETED" \
+  "$(jq -r '.invocations[] | select(.source == "url") | "\(.source) \(.version) \(.alias) \(.status)"' "$work/body")"
+check "the version's pods were sampled apart while they ran, at the memory it was published with, none warm; \$LATEST's at its own" \
+  "128 0 256" \
+  "$(q "SELECT memory_mb, min_instances FROM capacity_samples WHERE function_id = '$versioned_id' AND version = 1 LIMIT 1") $(q "SELECT memory_mb FROM capacity_samples WHERE function_id = '$versioned_id' AND version = 0 ORDER BY minute DESC LIMIT 1")"
+}
+section_def versions_idle section_versions_idle versions budget=5
+
 section_usage_records() {
 section "usage records (P-20)"
 meter='export async function handler(event: { sleepMs?: number; fail?: boolean }, context: { awsRequestId: string }) {
@@ -1890,7 +2147,7 @@ restarted_pid="${e2e_pids[${#e2e_pids[@]}-1]}" # the processes started after it 
 section_def usage_records section_usage_records backend budget=70
 
 section_alarms() {
-section "alarms: an error fires an alarm, a quiet minute recovers it, each change told to a webhook"
+section "alarms: an error fires an alarm, and the alarm on its alias's calls, a quiet minute recovers it, each change told to a webhook"
 receiver_port="$(free_port)"
 cat >"$work/receiver.py" <<'PY'
 import json, sys
@@ -1915,26 +2172,42 @@ failing='export async function handler(event: { fail?: boolean }) {
 }'
 alarmed_id="$(http POST /functions "$(jq -n --arg code "$failing" '{name: "e2e-alarmed", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
 check "a function to watch" 201 "$(status)"
+# Its alias names $LATEST, whose instance is up: a version's first call starts pods of its own, and the backend here,
+# restarted in a section before, allows a cold start of 1 s, which a slower machine misses.
+http POST "/functions/$alarmed_id/aliases" '{"name": "live", "functionVersion": "$LATEST"}' >/dev/null
+check "  ... its alias live naming \$LATEST" 201 "$(status)"
 alarm_id="$(http POST /alarms "$(jq -cn --arg fn "$alarmed_id" --arg url "http://127.0.0.1:$receiver_port/ff" \
   '{name: "e2e errors", functionId: $fn, metric: "Errors", statistic: "Sum", period: 60, comparison: "GreaterThanThreshold", threshold: 0,
     evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: [$url]}}')" | jq -r .id)"
 check "an alarm on its errors, each minute, telling the receiver" "201 INSUFFICIENT_DATA" "$(status) $(jq -r .state "$work/body")"
-# alarm_state_after <state> <seconds>: waits for the alarm to reach the state, then prints it.
+# An alarm on some of its calls, by what they named, as CloudWatch's Resource dimension: an alias's, or $LATEST's.
+alarm_on_calls() {
+  http POST /alarms "$(jq -cn --arg fn "$alarmed_id" --arg resource "$1" \
+    '{name: "e2e errors \($resource)", functionId: $fn, resource: $resource, metric: "Errors", statistic: "Sum", period: 60,
+      comparison: "GreaterThanThreshold", threshold: 0, evaluationPeriods: 1, datapointsToAlarm: 1, actions: {email: false, webhookUrls: []}}')" | jq -r .id
+}
+live_alarm="$(alarm_on_calls live)"
+latest_alarm="$(alarm_on_calls '$LATEST')"
+check "  ... one on the calls through its alias live alone, another on those naming no alias or version" "201 live \$LATEST" \
+  "$(status) $(http GET "/alarms/$live_alarm" | jq -r .resource) $(http GET "/alarms/$latest_alarm" | jq -r .resource)"
+# alarm_state_after <state> <seconds> [alarm ID]: waits for the alarm, the errors' by default, to reach the state, then prints it.
 alarm_state_after() {
   local state=""
   for _ in $(seq 1 "$2"); do
-    state="$(http GET "/alarms/$alarm_id" | jq -r .state)"
+    state="$(http GET "/alarms/${3:-$alarm_id}" | jq -r .state)"
     [ "$state" = "$1" ] && break
     sleep 1
   done
   echo "$state"
 }
 check "its first evaluation judges a quiet minute: OK, and tells nobody" "OK 0" "$(alarm_state_after OK 30) $(wc -l <"$work/webhooks.jsonl" | tr -d ' ')"
-http POST "/functions/$alarmed_id/invoke" '{"input": {"fail": true}}' >/dev/null
-check "the function fails" "400 Error: asked to fail" "$(status) $(jq -r .message "$work/body")"
+http POST "/functions/$alarmed_id/invoke" '{"qualifier": "live", "input": {"fail": true}}' >/dev/null
+check "the function fails, called through its alias live" "400 Error: asked to fail" "$(status) $(jq -r .message "$work/body")"
 check "once that minute is over, the alarm fires" "ALARM" "$(alarm_state_after ALARM 90)"
+check "  ... the one on live's calls with it; the one on \$LATEST's, none of which failed, stays OK" "ALARM OK" \
+  "$(alarm_state_after ALARM 30 "$live_alarm") $(http GET "/alarms/$latest_alarm" | jq -r .state)"
 check "saying why" "1 of the last 1 period(s) of 60 s breaching Errors Sum > 0 (1 needed); latest 1" "$(http GET "/alarms/$alarm_id" | jq -r .stateReason)"
-check "the next minute, quiet, recovers it" "OK" "$(alarm_state_after OK 90)"
+check "the next minute, quiet, recovers it, and the one on live's calls" "OK OK" "$(alarm_state_after OK 90) $(alarm_state_after OK 30 "$live_alarm")"
 for _ in $(seq 1 20); do [ "$(wc -l <"$work/webhooks.jsonl" | tr -d ' ')" -ge 2 ] && break; sleep 0.5; done
 secret="$(http GET /notifications/webhook-secret | jq -r .secret)"
 told="$(python3 - "$secret" "$work/webhooks.jsonl" <<'PY'
@@ -2009,7 +2282,7 @@ check "the account's totals are its records' own sums" \
   "$(jq -r '.totals | "\(.requests) \(.billedMs) \(.gbSeconds)"' <<<"$usage")"
 # Its two calls: handler's, then lambda_handler's.
 check "the Python function, deleted earlier, keeps its usage, marked deleted" "true 2" \
-  "$(jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
+  "$(jq -r --arg id "$python_id" '.functions[] | select(.functionId == $id) | "\(.deleted) \(.requests)"' <<<"$usage")"
 check "the database, deleted earlier, keeps its month: its hours sampled and GB-months, at nothing before the book that prices databases" "true e2e-orders true true 0.000" \
   "$(jq -r --arg id "$db_id" '.databases[] | select(.databaseId == $id) | "\(.deleted) \(.name) \(.hours >= 1) \((.gbMonths | tonumber) > 0) \(.cost)"' <<<"$usage")"
 photos_requests="$(env_q "SELECT coalesce(sum(requests) FILTER (WHERE class = 'tier1'), 0) || ' ' || coalesce(sum(requests) FILTER (WHERE class = 'tier2'), 0)
@@ -2128,7 +2401,8 @@ check "the call that failed, and the API's answers by class" "true true true" \
   "$([ "$(metric 'ff_invocations_total{outcome="error"}')" -ge 1 ] && echo true || echo false) \
 $([ "$(metric 'ff_http_responses_total{class="2xx"}')" -gt 0 ] && echo true || echo false) \
 $([ "$(metric 'ff_http_responses_total{class="4xx"}')" -gt 0 ] && echo true || echo false)"
-check "the alarm into ALARM once and into OK twice; the two webhooks delivered; none pending" "1 2 2 0" \
+# The errors' alarm and the one on live's calls each into OK and ALARM, then OK again; the one on $LATEST's into OK.
+check "the alarms into ALARM twice and into OK five times; the two webhooks delivered; none pending" "2 5 2 0" \
   "$(metric 'ff_alarm_state_changes_total{state="ALARM"}') $(metric 'ff_alarm_state_changes_total{state="OK"}') \
 $(metric 'ff_notification_attempts_total{channel="webhook",result="delivered"}') $(metric ff_notification_deliveries_pending)"
 check "the rating's lag, the process's memory and its event loop" "3" \
@@ -2146,7 +2420,8 @@ print(bool(lines) and all({'time', 'level', 'message'} <= line.keys() for line i
 PY
 )"
 }
-section_def monitoring section_monitoring backend budget=5
+# It counts what those sections did: the call marked lost, the one refused for credit, the alarms' changes.
+section_def monitoring section_monitoring usage_lost balance alarms budget=5
 
 section_lost_images() {
 section "code images the registry lost, made again (CLI plan, C-29)"
@@ -2162,6 +2437,10 @@ on_node() { docker exec "$node" crictl inspecti "$1" >/dev/null 2>&1 && echo tru
 meter_image="$(code_image_of "$meter_id")"
 meter_layer="$(curl -s -H 'accept: application/vnd.oci.image.manifest.v1+json' "$registry/v2/$(repository_of "$meter_image")/manifests/${meter_image##*@}" | jq -r '.layers[0].digest')"
 small_image="$(code_image_in "$small_ns" "$small_id")"
+# Stopped, to be restarted below as the runbook says after losing the registry: until then no autoscaler's minute
+# steps a function called in the last one, as the balance section's calls are, back up from zero.
+kill "$restarted_pid"
+e2e_gone "$restarted_pid"
 # Neither function has a pod, nor the node a copy of their images, as a node that never pulled them.
 kubectl -n "$tenant_ns" scale deployment "fn-$meter_id" --replicas=0 >/dev/null
 kubectl -n "$small_ns" scale deployment "fn-$small_id" --replicas=0 >/dev/null
@@ -2178,8 +2457,6 @@ check "the registry lost a layer of the meter function's image; the node has nei
   "404 false false $lost_image" \
   "$(layer_status "$meter_image" "$meter_layer") $(on_node "$meter_image") $(on_node "$small_image") $(code_image_in "$small_ns" "$small_id")"
 # Restarted, as the runbook says after losing the registry: the retention job runs at the backend's start.
-kill "$restarted_pid"
-e2e_gone "$restarted_pid"
 be_ready_timeout=90
 e2e_start_backend "$work/backend-restored.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 restored=""

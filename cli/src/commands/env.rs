@@ -57,12 +57,13 @@ pub const RESERVED: [&str; 27] = [
     "PATH",
 ];
 
-/// The names FF sets with a function's own key to its account's buckets, queues and mail, and why, which the API refuses
-/// too. A test holds this list to the API's.
-pub const ENDPOINTS_RESERVED: [(&str, &str); 3] = [
+/// The names FF sets with a function's own key to its account's buckets, queues, mail and functions, and why, which the
+/// API refuses too. A test holds this list to the API's.
+pub const ENDPOINTS_RESERVED: [(&str, &str); 4] = [
     ("AWS_ENDPOINT_URL_S3", "FF sets it, with the function's own key to its account's buckets"),
     ("AWS_ENDPOINT_URL_SQS", "FF sets it, with the function's own key to its account's queues"),
     ("AWS_ENDPOINT_URL_SESV2", "FF sets it, with the function's own key to its account's mail"),
+    ("AWS_ENDPOINT_URL_LAMBDA", "FF sets it, with the function's own key to its account's functions"),
 ];
 
 /// Why a name can't be a variable's, in the API's words, or none.
@@ -78,15 +79,11 @@ pub fn reserved(name: &str) -> Option<String> {
     }
 }
 
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
-
 fn named(name: &str) -> Result<String, Error> {
     if is_variable_name(name) {
         Ok(name.to_owned())
     } else {
-        Err(usage(format!(
+        Err(Error::usage(format!(
             "\"{name}\" can't be a variable's name: a letter, then letters, digits or underscores, two characters at least"
         )))
     }
@@ -108,7 +105,7 @@ pub fn variables(assignments: &[String]) -> Result<Variables, Error> {
             (name, Some(value)) => {
                 variables.insert(name, value);
             }
-            (name, None) => return Err(usage(format!("--env {name} has no value: --env {name}=<value>"))),
+            (name, None) => return Err(Error::usage(format!("--env {name} has no value: --env {name}=<value>"))),
         }
     }
     Ok(variables)
@@ -238,6 +235,7 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend_source::listed;
 
     #[test]
     fn a_name_follows_lambdas_rule() {
@@ -261,16 +259,7 @@ mod tests {
     #[test]
     fn the_reserved_names_are_the_apis() {
         let source = include_str!("../../../BE/src/functions/environment.ts");
-        let list = |constant: &str| -> Vec<String> {
-            let start = source.find(&format!("const {constant} = [")).expect("the API's list") + constant.len() + 10;
-            let end = start + source[start..].find(']').expect("its end");
-            source[start..end]
-                .split(',')
-                .map(|item| item.trim().trim_matches('\'').to_owned())
-                .filter(|item| !item.is_empty())
-                .collect()
-        };
-        let api: Vec<String> = [list("LAMBDA_RESERVED"), list("FF_RESERVED")].concat();
+        let api: Vec<String> = [listed(source, "LAMBDA_RESERVED"), listed(source, "FF_RESERVED")].concat();
 
         assert_eq!(api, RESERVED.map(str::to_owned));
         // The API's endpoints, a map of each name to why: ['NAME', "why"] pairs.
@@ -295,6 +284,10 @@ mod tests {
         assert_eq!(
             reserved("AWS_ENDPOINT_URL_SESV2").unwrap(),
             "AWS_ENDPOINT_URL_SESV2 is reserved: FF sets it, with the function's own key to its account's mail"
+        );
+        assert_eq!(
+            reserved("AWS_ENDPOINT_URL_LAMBDA").unwrap(),
+            "AWS_ENDPOINT_URL_LAMBDA is reserved: FF sets it, with the function's own key to its account's functions"
         );
         assert_eq!(reserved("FF_DEBUG").unwrap(), "FF_DEBUG is reserved: names starting with FF_ are FF's own");
         assert_eq!(reserved("TZ"), None);

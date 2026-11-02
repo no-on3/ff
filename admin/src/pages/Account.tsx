@@ -16,9 +16,11 @@ import {
   changesFor,
   dataDeletion,
   bucketStorageLabel,
+  codeStorageLabel,
   formatBytes,
   formatMegabytes,
   isAccountId,
+  keyReach,
   ownersSee,
   queueMessagesLabel,
   queueStorageLabel,
@@ -453,6 +455,7 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Functions</h2>
+        <p className="text-sm text-slate-600">Their code: {codeStorageLabel(view.codeStorage)}.</p>
         {view.functions.length === 0 ? (
           <EmptyState>No function.</EmptyState>
         ) : (
@@ -536,6 +539,25 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
           <Table
             head={['Name', 'Messages', 'Holding', 'Dead letters to', 'Created']}
             rows={view.queues.map((q) => [q.name, queueMessagesLabel(q.messages), formatBytes(q.sizeBytes), q.deadLetterQueue ?? '–', whenUtc(q.createdAt)])}
+          />
+        )}
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Access keys</h2>
+        <p className="text-sm text-slate-600">For AWS's SDKs and CLI, which its owners make and revoke in the console; never a secret here.</p>
+        {view.accessKeys.length === 0 ? (
+          <EmptyState>No access key.</EmptyState>
+        ) : (
+          <Table
+            head={['Name', 'ID', 'It reaches', 'Last used', 'Created']}
+            rows={view.accessKeys.map((k) => [
+              k.name === k.id ? '–' : k.name,
+              <span className="font-mono text-xs">{k.id}</span>,
+              keyReach(k),
+              k.lastUsedAt ? whenUtc(k.lastUsedAt) : 'never',
+              whenUtc(k.createdAt),
+            ])}
           />
         )}
       </section>

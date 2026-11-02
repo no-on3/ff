@@ -36,6 +36,7 @@ export const invalidAttributeValue = (message: string) => new SqsError(400, 'Inv
 export const receiptHandleIsInvalid = (handle: string) => new SqsError(400, 'ReceiptHandleIsInvalid', `The input receipt handle "${handle}" is not a valid receipt handle.`);
 export const accessDenied = (message = 'Access to the resource is denied.') => new SqsError(403, 'AccessDenied', message, 'AccessDenied');
 export const invalidClientTokenId = () => new SqsError(403, 'InvalidClientTokenId', 'The security token included in the request is invalid.');
+export const expiredToken = () => new SqsError(403, 'ExpiredTokenException', 'The security token included in the request is expired', 'ExpiredToken');
 export const signatureDoesNotMatch = (message = 'The request signature we calculated does not match the signature you provided.') =>
   new SqsError(403, 'SignatureDoesNotMatch', message);
 export const missingAuthenticationToken = () => new SqsError(403, 'MissingAuthenticationToken', 'Request is missing Authentication Token');

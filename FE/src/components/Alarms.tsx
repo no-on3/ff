@@ -19,16 +19,33 @@ import {
   emptyForm,
   formFromAlarm,
   formProblem,
-  metricsFor,
+  metricsOf,
   scopeOf,
   toBody,
+  withCalls,
   withMetric,
   withScope,
 } from '../lib/alarms';
 import { apiErrorMessage } from '../lib/functions';
 import { can } from '../lib/session';
-import { Alarm, AlarmState, Bucket, Cache, Database, Function, Queue, alarmsApi, bucketsApi, cachesApi, databasesApi, functionsApi, queuesApi } from '../services/api';
+import { callsChoices, callsText, pickValue } from '../lib/versions';
+import {
+  Alarm,
+  AlarmState,
+  Bucket,
+  Cache,
+  Database,
+  Function,
+  Queue,
+  alarmsApi,
+  bucketsApi,
+  cachesApi,
+  databasesApi,
+  functionsApi,
+  queuesApi,
+} from '../services/api';
 import StatusPill from './StatusPill';
+import { hasRoutes, useFunctionRoutes } from './useFunctionRoutes';
 import { useSession } from '../session/session';
 
 const TONE = { ok: 'ok', alarm: 'failed', unknown: 'idle' } as const;
@@ -74,6 +91,10 @@ const AlarmEditor: React.FC<{
         ? "Mail's metrics have a point an hour"
         : null;
   const set = (change: Partial<AlarmForm>) => setForm({ ...form, ...change });
+  // The function's versions and aliases, whose calls the alarm may watch alone.
+  const routes = useFunctionRoutes(form.functionId || undefined);
+  const pick = { resource: form.resource, executedVersion: form.executedVersion };
+  const picksCalls = !!form.functionId && (hasRoutes(routes) || !!callsText(pick));
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -128,9 +149,20 @@ const AlarmEditor: React.FC<{
             ))}
           </select>
         </Field>
+        {picksCalls && (
+          <Field id="alarm-calls" label="Its calls" hint="By what they named, or the version that ran them, as CloudWatch's Resource and ExecutedVersion">
+            <select id="alarm-calls" className="input" value={pickValue(pick)} onChange={(e) => setForm(withCalls(form, e.target.value))}>
+              {callsChoices(routes?.versions ?? [], routes?.aliases ?? [], pick).map((choice) => (
+                <option key={choice.value} value={choice.value}>
+                  {choice.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field id="alarm-metric" label="Metric">
           <select id="alarm-metric" className="input" value={form.metric} onChange={(e) => setForm(withMetric(form, e.target.value as Metric))}>
-            {metricsFor(form.functionId, form.databaseId, form.bucketName, form.queueName, form.cacheName).map((metric) => (
+            {metricsOf(form).map((metric) => (
               <option key={metric} value={metric}>
                 {metric}
               </option>
@@ -349,6 +381,7 @@ const Alarms: React.FC = () => {
       <ul className="space-y-3" aria-label="Alarms">
         {alarms?.map((alarm) => {
           const on = nameOf(alarm.functionId);
+          const calls = callsText({ resource: alarm.resource ?? '', executedVersion: alarm.executedVersion ?? '' });
           const onDatabase = databaseNameOf(alarm.databaseId);
           return (
             <li key={alarm.id} data-alarm={alarm.id} className="card">
@@ -358,6 +391,7 @@ const Alarms: React.FC = () => {
                   {on ? (
                     <>
                       on <Link to={`/functions/${alarm.functionId}`}>{on}</Link>
+                      {calls && <>, its {calls}</>}
                     </>
                   ) : onDatabase ? (
                     <>

@@ -93,6 +93,8 @@ run('functions reading queues, as Lambda\'s event source mappings (L2)', () => {
         if (!fn) throw new NotFoundException(`Function with ID ${id} not found`);
         return fn;
       },
+      // The mappings here run $LATEST: none names a version or an alias.
+      callTarget: async () => ({}),
       call: async (_fn: Function, event: (typeof calls)[number]) => {
         calls.push(event);
         return { ok: true, output: answer(event), invocation: {} };
@@ -214,6 +216,40 @@ run('functions reading queues, as Lambda\'s event source mappings (L2)', () => {
       await service.remove(ACCOUNT, made.uuid);
       await expect(service.get(ACCOUNT, made.uuid)).rejects.toEqual(new NotFoundException(`The account has no event source mapping ${made.uuid}`));
       expect((await entries('event_source.delete')).slice(-1)).toEqual([{ function: fn.name, queue: queue.name }]);
+    });
+
+    it("reads through a version or an alias the function has, the queue hiding a message for the longest timeout of its versions; its ARN qualified, the audit log naming it", async () => {
+      const fn = await newFunction();
+      const queue = await newQueue();
+      // Version 1 as published with a timeout of 60 s, version 2 with 5 s; live names $LATEST, canary version 2 and a tenth of its calls version 1's.
+      for (const [version, timeout] of [
+        [1, 60],
+        [2, 5],
+      ]) {
+        await db.dataSource.query(
+          `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+           VALUES ($1, $5, $2, 'nodejs', 'function.handler', 'inline', $3, $4, 37, $4, 128, $6, 'lambda', '{}')`,
+          [fn.id, ACCOUNT, fn.code, 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=', version, timeout],
+        );
+      }
+      await db.dataSource.query(`INSERT INTO function_aliases (function_id, name, account_id) VALUES ($1, 'live', $2)`, [fn.id, ACCOUNT]);
+      await db.dataSource.query(`INSERT INTO function_aliases (function_id, name, account_id, version, additional_version, additional_weight) VALUES ($1, 'canary', $2, 2, 1, 0.1)`, [
+        fn.id,
+        ACCOUNT,
+      ]);
+
+      await expect(service.create(ACCOUNT, fn.id, { eventSourceArn: arnOf(queue.name), qualifier: 'gone' })).rejects.toEqual(new BadRequestException('qualifier: the function has no alias gone'));
+      await expect(service.create(ACCOUNT, fn.id, { eventSourceArn: arnOf(queue.name), qualifier: 'canary' })).rejects.toEqual(
+        new BadRequestException('Invalid parameter: Queue visibility timeout: 30 seconds is less than Function timeout: 60 seconds'),
+      );
+      const made = await service.create(ACCOUNT, fn.id, { eventSourceArn: arnOf(queue.name), qualifier: 'live', enabled: false });
+
+      expect(made.functionArn).toBe(`arn:aws:lambda:${REGION}:${ACCOUNT}:function:${fn.name}:live`);
+      expect(await db.dataSource.getRepository(EventSourceMapping).findOneBy({ id: made.uuid })).toMatchObject({ qualifier: 'live' });
+      expect((await entries('event_source.create')).slice(-1)).toEqual([expect.objectContaining({ function: fn.name, qualifier: 'live' })]);
+      // Back to $LATEST, kept as none.
+      expect((await service.update(ACCOUNT, made.uuid, { qualifier: '$LATEST' })).functionArn).toBe(`arn:aws:lambda:${REGION}:${ACCOUNT}:function:${fn.name}`);
+      expect((await entries('event_source.update')).slice(-1)).toEqual([{ changes: { qualifier: { from: 'live', to: null } } }]);
     });
 
     it("goes with its queue, and with its function; and isn't made for a queue that hides a message for less than the function's timeout", async () => {

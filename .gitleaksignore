@@ -1,4 +1,4 @@
-# gitleaks findings that are not secrets (hack/ci.sh, the security stage). Each line is one finding:
+# gitleaks findings that are not secrets (hack/ci.sh, the static stage). Each line is one finding:
 # commit:file:rule:line. Anything else in these files is still reported.
 
 # An old doc's curl examples: "Authorization: Bearer YOUR_TOKEN", a placeholder.
@@ -28,6 +28,7 @@ ba4fdf5f123f7fc2c9801cb8b0407ee598e43017:BE/src/api-keys/api-key-format.spec.ts:
 5f7a6e01127915d497a42834b1b63fd16d2d119a:docs/how-it-works.html:generic-api-key:1225
 5f7a6e01127915d497a42834b1b63fd16d2d119a:docs/how-it-works.html:generic-api-key:1238
 a032412e1c92022e5e09cb3dd4bad325aaaad595:cli/src/commands/buckets.rs:aws-access-token:284
+e698ad817789250184a23444a17e1062c61c8890:cli/src/commands/keys.rs:aws-access-token:382
 6565961b813d57b2ba4a25ff42f0a70bd0d58186:BE/src/functions/functions.service.spec.ts:generic-api-key:1681
 de6622df8698677ecb303e6db2e73d3612e4582c:docs/how-it-works.html:generic-api-key:1590
 de6622df8698677ecb303e6db2e73d3612e4582c:docs/how-it-works.html:generic-api-key:1617

@@ -7,13 +7,15 @@ import { AddressInfo } from 'node:net';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
+import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
+import { BodyRefusals, readBody, requestTarget, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { PlansService } from '../plans/plans.service';
 import { countQueueRequest } from '../plans/rate-limits';
-import { originForm } from '../storage/front-door';
-import { StorageDirectory } from '../storage/storage-directory.service';
-import { SqsError, accessDenied, internalError, invalidClientTokenId, invalidParameter, missingAuthenticationToken, requestThrottled } from './sqs-error';
+import { KeyUses } from '../storage/key-uses.service';
+import { EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
+import { SqsError, accessDenied, expiredToken, internalError, invalidClientTokenId, invalidParameter, missingAuthenticationToken, requestThrottled } from './sqs-error';
 import { Caller, SENDING_OPERATIONS, SqsOperations } from './sqs-operations';
 import { checkSqsSignature, readSqsSignature } from './sqs-signature';
 
@@ -23,33 +25,11 @@ const MAX_BODY_BYTES = 3 * 1024 * 1024;
 const CONTENT_TYPE = 'application/x-amz-json-1.0';
 const TARGET_PREFIX = 'AmazonSQS.';
 
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
-
-const tooLarge = (limit: number) => new SqsError(413, 'RequestEntityTooLarge', `The request is over ${limit} bytes.`);
-
-/**
- * The request's body, whole, `limit` bytes at most: past it, what is left
- * isn't read, and the answer closes the connection.
- */
-function bodyOf(request: IncomingMessage, limit: number): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    if (Number(single(request.headers['content-length']) ?? 0) > limit) return reject(tooLarge(limit));
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const onData = (chunk: Buffer) => {
-      size += chunk.length;
-      if (size <= limit) return void chunks.push(chunk);
-      request.off('data', onData);
-      request.pause();
-      reject(tooLarge(limit));
-    };
-    request.on('data', onData);
-    request.once('end', () => resolve(Buffer.concat(chunks)));
-    request.once('error', reject);
-    // A client gone before its request ended: no one to answer.
-    request.once('close', () => request.complete || reject(new SqsError(400, 'IncompleteRequest', 'The client went before its request ended.')));
-  });
-}
+const BODY_REFUSALS: BodyRefusals = {
+  tooLarge: (limit) => new SqsError(413, 'RequestEntityTooLarge', `The request is over ${limit} bytes.`),
+  // A client gone before its request ended: no one to answer.
+  incomplete: () => new SqsError(400, 'IncompleteRequest', 'The client went before its request ended.'),
+};
 
 /**
  * The SQS endpoint (ADR 0010): a server of its own, on FF_SQS_PORT, which
@@ -83,6 +63,7 @@ export class SqsFrontDoor implements OnModuleDestroy {
     private readonly plans: PlansService,
     private readonly credit: CreditService,
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
+    private readonly keyUses: KeyUses,
   ) {
     const sqs = config.getOrThrow<{ base: string; functionEndpoint?: string }>('sqs');
     this.base = sqs.base;
@@ -144,15 +125,14 @@ export class SqsFrontDoor implements OnModuleDestroy {
     if (request.method !== 'POST' || !target.startsWith(TARGET_PREFIX) || !contentType.startsWith(CONTENT_TYPE)) {
       throw new SqsError(400, 'UnsupportedOperation', "FF's SQS endpoint speaks SQS's JSON protocol: POST / with X-Amz-Target AmazonSQS.<operation>, as AWS's SDKs and CLI send it.", 'AWS.SimpleQueueService.UnsupportedOperation');
     }
-    const body = await bodyOf(request, MAX_BODY_BYTES);
+    const body = await readBody(request, MAX_BODY_BYTES, BODY_REFUSALS);
     const signature = readSqsSignature(request.headers);
     if (!signature) throw missingAuthenticationToken();
     const key = await this.directory.key(signature.accessKeyId);
+    if (key === EXPIRED) throw expiredToken();
     if (!key) throw invalidClientTokenId();
-    const url = originForm(request.url);
-    const at = url.indexOf('?');
     checkSqsSignature(
-      { method: 'POST', rawPath: at < 0 ? url : url.slice(0, at), rawQuery: at < 0 ? '' : url.slice(at + 1), rawHeaders: request.rawHeaders },
+      { method: 'POST', ...requestTarget(request.url), rawHeaders: request.rawHeaders },
       body,
       signature,
       key.secret,
@@ -171,10 +151,11 @@ export class SqsFrontDoor implements OnModuleDestroy {
     return this.operations.run(operation, input, {
       ...caller,
       endpoint: this.endpointOf(request),
-      reach: { buckets: key.buckets, queues: key.queues },
+      reach: { buckets: key.buckets, queues: key.queues, functions: key.functions },
       // Changes are the key's in the audit log, which a request here doesn't name otherwise.
       actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` },
       ip: request.socket.remoteAddress,
+      used: (sqsOperation, queue) => this.keyUses.note({ key, service: AwsEndpoint.SQS, resource: queue, operation: sqsOperation }),
     });
   }
 

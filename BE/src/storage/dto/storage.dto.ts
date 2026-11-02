@@ -1,6 +1,24 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ArrayMaxSize, ArrayNotEmpty, ArrayUnique, IsArray, IsBoolean, IsOptional, IsString, Matches, MaxLength, Validate, ValidatorConstraint, ValidatorConstraintInterface } from 'class-validator';
+import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  ArrayUnique,
+  IsArray,
+  IsBoolean,
+  IsDefined,
+  IsIn,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  Validate,
+  ValidateIf,
+  ValidatorConstraint,
+  ValidatorConstraintInterface,
+} from 'class-validator';
+import { FUNCTION_NAME } from '../../functions/dto/create-function.dto';
 import { BucketStatus } from '../bucket.entity';
+import { ALL_FUNCTIONS, FUNCTION_ACCESS, FunctionAccess } from '../storage-key.entity';
 import { bucketNameProblem } from '../storage-names';
 
 @ValidatorConstraint({ name: 'bucketName' })
@@ -16,6 +34,23 @@ class BucketNameRule implements ValidatorConstraintInterface {
     return typeof wrong === 'string' ? (bucketNameProblem(wrong) as string) : 'a bucket name must be text';
   }
 }
+
+/** An access key's name, as an IAM user's: 1 to 64 letters, digits and +=,.@_-. */
+export const KEY_NAME = /^[\w+=,.@-]{1,64}$/;
+
+@ValidatorConstraint({ name: 'functionNames' })
+class FunctionNamesRule implements ValidatorConstraintInterface {
+  validate(value: unknown): boolean {
+    return Array.isArray(value) && value.every((name) => typeof name === 'string' && (name === ALL_FUNCTIONS || FUNCTION_NAME.test(name))) && (value.length === 1 || !value.includes(ALL_FUNCTIONS));
+  }
+
+  defaultMessage(): string {
+    return `functions must be functions' names, 1 to 64 letters, digits, hyphens or underscores, or "${ALL_FUNCTIONS}" alone for all the account's`;
+  }
+}
+
+/** Whether a key's request names functions or a level for them: then both are needed. */
+const namesFunctions = (dto: CreateStorageKeyDto): boolean => dto.functions !== undefined || dto.functionAccess !== undefined;
 
 /** POST /buckets. */
 export class CreateBucketDto {
@@ -59,8 +94,17 @@ export class BucketView {
   createdAt: Date;
 }
 
-/** POST /storage-keys: what the key reaches. */
+/** POST /storage-keys: the key's name, and what it reaches. */
 export class CreateStorageKeyDto {
+  @ApiPropertyOptional({
+    example: 'shop-uploads',
+    description: "Its name, as an IAM user's: 1 to 64 letters, digits and +=,.@_-, the account's working keys' once; its ID when none is given",
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(KEY_NAME, { message: "name must be 1 to 64 letters, digits and +=,.@_-, as an IAM user's" })
+  name?: string;
+
   @ApiPropertyOptional({
     type: [String],
     example: ['photos'],
@@ -83,16 +127,42 @@ export class CreateStorageKeyDto {
   @Matches(/^[A-Za-z0-9_-]{1,80}$/, { each: true, message: "each of queues must be a queue's name: 1 to 80 letters, digits, hyphens or underscores" })
   queues?: string[];
 
-  @ApiPropertyOptional({ default: false, description: 'Reads and lists only: no write, copy or delete' })
+  @ApiPropertyOptional({ default: false, description: 'Its buckets, queues and mail read and listed only: no write, copy or delete' })
   @IsOptional()
   @IsBoolean()
   readOnly?: boolean;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['orders'],
+    description: `The functions it reaches, by name, or ["${ALL_FUNCTIONS}"] for all the account's, at its functionAccess; none when not given, as a key made before. Naming functions alone, it reaches no bucket, queue or mail`,
+  })
+  @ValidateIf(namesFunctions)
+  @IsDefined({ message: `functions goes with functionAccess: the functions' names, or ["${ALL_FUNCTIONS}"]` })
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayUnique()
+  @ArrayMaxSize(100)
+  @Validate(FunctionNamesRule)
+  functions?: string[];
+
+  @ApiPropertyOptional({
+    enum: FUNCTION_ACCESS,
+    description:
+      "What it may do with its functions, as IAM groups Lambda's actions: read (Lambda's List and Read actions), invoke (those, and InvokeFunction, so an AWS_IAM function URL too), write (every operation). It goes with functions",
+  })
+  @ValidateIf(namesFunctions)
+  @IsIn(FUNCTION_ACCESS, { message: 'functionAccess goes with functions, and is read, invoke or write' })
+  functionAccess?: FunctionAccess;
 }
 
-/** An access key to the account's buckets and queues, as its owners see it: never its secret. */
+/** An access key to the account's buckets, queues, mail and functions, as its owners see it: never its secret. */
 export class StorageKeyView {
   @ApiProperty({ example: 'AKFF7Q2MLKX4RTZB3W5N', description: 'The access key ID, AWS_ACCESS_KEY_ID: safe to show and to log' })
   id: string;
+
+  @ApiProperty({ example: 'shop-uploads', description: 'Its name, as an IAM user\'s; a key made before keys had names has its ID' })
+  name: string;
 
   @ApiProperty({ type: [String], nullable: true, example: ['photos'], description: "The buckets it names; null for none named. A key that names neither buckets nor queues reaches all the account's" })
   buckets: string[] | null;
@@ -102,6 +172,12 @@ export class StorageKeyView {
 
   @ApiProperty()
   readOnly: boolean;
+
+  @ApiProperty({ type: [String], nullable: true, example: ['orders'], description: `The functions it names, or ["${ALL_FUNCTIONS}"] for all; null for none` })
+  functions: string[] | null;
+
+  @ApiProperty({ enum: FUNCTION_ACCESS, nullable: true, description: 'What it may do with them: read, invoke or write; null while it names none' })
+  functionAccess: FunctionAccess | null;
 
   @ApiProperty()
   createdAt: Date;
@@ -142,8 +218,11 @@ export class CreatedStorageKey extends StorageKeyView {
   @ApiProperty({ example: 'https://sqs.ffunc.cloud', description: "The SQS endpoint to give them, AWS_ENDPOINT_URL_SQS, for the account's queues" })
   sqsEndpoint: string;
 
-  @ApiProperty({ example: 'https://email.ffunc.cloud', description: "The SES endpoint to give them, AWS_ENDPOINT_URL_SESV2, for the account's mail: a key that names buckets or queues doesn't reach it" })
+  @ApiProperty({ example: 'https://email.ffunc.cloud', description: "The SES endpoint to give them, AWS_ENDPOINT_URL_SESV2, for the account's mail: a key that names buckets, queues or functions doesn't reach it" })
   sesEndpoint: string;
+
+  @ApiProperty({ example: 'https://lambda.ffunc.cloud', description: "Lambda's endpoint to give them, AWS_ENDPOINT_URL_LAMBDA, for the account's functions: a key that reaches no function is refused there" })
+  lambdaEndpoint: string;
 
   @ApiProperty({ example: 'tn-tunis-1' })
   region: string;

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ArrayMaxSize, IsArray, IsBoolean, IsEnum, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateNested } from 'class-validator';
+import { ALIAS_NAME } from '../../functions/dto/aliases.dto';
 import { UrlAuthType, UrlCors, UrlInvokeMode } from '../../functions/entities/function-url.entity';
 import { TOKEN } from '../url-response';
 
@@ -59,8 +60,9 @@ export class CorsDto implements UrlCors {
 }
 
 const AUTH_TYPE_DESCRIPTION =
-  'NONE: anyone may call the URL. AWS_IAM: only a caller with an API key of the account with functions:invoke, sent as ' +
-  '"Authorization: Bearer ffk_…", which the function never sees; AWS signs these calls with SigV4 instead.';
+  'NONE: anyone may call the URL. AWS_IAM: only a request signed for lambda (SigV4), as AWS\'s tools sign one, by an access ' +
+  'key of the account that may invoke the function (a function\'s own key may), or one with an API key of the account with ' +
+  'functions:invoke, sent as "Authorization: Bearer ffk_…"; the function sees neither.';
 const CORS_DESCRIPTION =
   'With it, the URL answers browsers\' preflights itself and adds its CORS headers to every answer, in place of any the ' +
   'function sends; without it, the function answers them.';
@@ -102,6 +104,15 @@ export class UpdateFunctionUrlDto {
   invokeMode?: UrlInvokeMode;
 }
 
+/** Which of a function's URLs a request means, as Lambda's Qualifier names it: an alias's, or $LATEST's without one. */
+export class UrlQualifierQuery {
+  @ApiPropertyOptional({ example: 'live', description: "The alias whose URL it is, as Lambda's Qualifier; $LATEST's URL when missing. A version has none: an alias names it" })
+  @IsOptional()
+  @IsString()
+  @Matches(ALIAS_NAME, { message: "qualifier is an alias's name, as Lambda's for a URL: leave it out for $LATEST's URL, and name a version through an alias" })
+  qualifier?: string;
+}
+
 /** A function's URL, as the API answers it. */
 export class FunctionUrlView {
   @ApiProperty({ example: 'https://0123456789abcdefghijklmnopqrstuv.fn.example.tn/', description: 'Its address, fixed for its life' })
@@ -109,6 +120,9 @@ export class FunctionUrlView {
 
   @ApiProperty()
   functionId: string;
+
+  @ApiProperty({ type: String, nullable: true, example: 'live', description: "The alias whose calls it makes, as Lambda's Qualifier; null for $LATEST's URL" })
+  alias: string | null;
 
   @ApiProperty({ enum: UrlAuthType })
   authType: UrlAuthType;

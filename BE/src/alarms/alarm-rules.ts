@@ -1,4 +1,15 @@
-import type { BucketMetricsView, BucketRequestMetric, CacheMetricsView, DatabaseMetricsView, EmailMetricsView, MetricsView, QueueMetricsView, SiteMetricsView } from '../metrics/customer-metrics';
+import type {
+  BucketMetricsView,
+  BucketRequestMetric,
+  CacheMetricsView,
+  CallMetricsView,
+  DatabaseMetricsView,
+  EmailMetricsView,
+  MetricsView,
+  QueueMetricsView,
+  SiteMetricsView,
+} from '../metrics/customer-metrics';
+import { LATEST, callsKept } from '../functions/qualifier';
 import { CACHE_PERIOD, DATABASE_PERIOD, EMAIL_PERIOD } from '../metrics/customer-metrics';
 
 /**
@@ -104,6 +115,15 @@ export const QUEUE_METRICS: readonly Metric[] = [
   'SentMessageSize',
 ];
 
+/**
+ * A function's metrics that some of its calls have, as CloudWatch keeps
+ * Lambda's by their Resource and ExecutedVersion dimensions: an alarm naming
+ * an alias, a version or what ran the calls takes these; the instances by what
+ * ran them alone, as a version's pods run the calls of every alias that names
+ * it. The calls that don't wait are counted by function alone.
+ */
+export const CALL_METRICS: readonly Metric[] = ['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration', 'Instances'];
+
 /** A cache's: the alarm names it, and judges hours. */
 export const CACHE_METRICS: readonly Metric[] = ['BytesUsedForCache', 'CurrConnections', 'CacheHits', 'CacheMisses', 'Evictions'];
 
@@ -136,6 +156,10 @@ export interface AlarmRule {
   queueId: string | null;
   /** The cache it names, if any. */
   cacheId: string | null;
+  /** The calls it watches by what they named, as CloudWatch's Resource dimension: an alias, a version, or $LATEST for those naming neither; null for all of them. */
+  resource: string | null;
+  /** The calls it watches by what ran them, as CloudWatch's ExecutedVersion dimension: a version, or $LATEST; null for all of them. */
+  executedVersion: string | null;
   metric: Metric;
   statistic: Statistic;
   period: number;
@@ -151,6 +175,8 @@ export function alarmProblem(rule: AlarmRule): string | null {
   const statistics = STATISTICS[rule.metric] as readonly string[];
   if (!statistics.includes(rule.statistic)) return `${rule.metric} has the statistic${statistics.length > 1 ? 's' : ''} ${statistics.join(', ')}, not ${rule.statistic}`;
   if (rule.datapointsToAlarm > rule.evaluationPeriods) return `datapointsToAlarm (${rule.datapointsToAlarm}) can't be more than evaluationPeriods (${rule.evaluationPeriods})`;
+  const calls = callsProblem(rule);
+  if (calls) return calls;
   if (DATABASE_METRICS.includes(rule.metric)) {
     if (!rule.databaseId || rule.functionId) return `${rule.metric} is a database's: the alarm names a databaseId, and no function`;
     if (rule.period !== DATABASE_PERIOD) return `A database's metrics have a point an hour: period must be ${DATABASE_PERIOD}`;
@@ -188,6 +214,21 @@ export function alarmProblem(rule: AlarmRule): string | null {
   }
   if (rule.period * rule.evaluationPeriods > MAX_LOOKBACK_SECONDS) {
     return `${rule.evaluationPeriods} periods of ${rule.period} s look back more than a day: take fewer periods, or shorter ones`;
+  }
+  return null;
+}
+
+/** Why an alarm can't watch the calls it names, or null: a function's, a metric they have, and calls that can be. */
+function callsProblem(rule: AlarmRule): string | null {
+  const { resource, executedVersion } = rule;
+  if (resource === null && executedVersion === null) return null;
+  const named = resource !== null ? 'A resource' : 'An executedVersion';
+  if (!rule.functionId) return `${named} picks some of a function's calls: the alarm names its functionId`;
+  if (!CALL_METRICS.includes(rule.metric)) return `${named} goes with a function's ${CALL_METRICS.join(', ')}: ${rule.metric} is counted by function alone`;
+  if (rule.metric === 'Instances' && resource !== null) return "Instances goes with an executedVersion alone: a version's instances run the calls of every alias that names it";
+  if (!callsKept({ resource: resource ?? undefined, executedVersion: executedVersion ?? undefined })) {
+    const runs = resource === LATEST ? 'a call naming no alias or version runs $LATEST' : `a call naming version ${resource} runs it`;
+    return `No call names ${resource} and is run by ${executedVersion}: ${runs}`;
   }
   return null;
 }
@@ -334,8 +375,13 @@ export function databaseDatapointsOf(view: DatabaseMetricsView, metric: Metric, 
 }
 
 /** A metric's datapoints in a metrics answer, oldest first: a count's every period, a duration's and an event's age null where nothing was measured. */
-export function datapointsOf(view: MetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
-  const m = view.metrics;
+export function datapointsOf(view: MetricsView | CallMetricsView, metric: Metric, statistic: Statistic): Array<number | null> {
+  const m: Partial<MetricsView['metrics']> = view.metrics;
+  // A view of some calls lacks what they don't have (CALL_METRICS), which the alarm's rule keeps it from asking for.
+  const series = <T>(found: T | undefined): T => {
+    if (found === undefined) throw new Error(`${metric} isn't in a view of some calls`);
+    return found;
+  };
   switch (metric) {
     case 'Invocations':
     case 'Errors':
@@ -344,13 +390,13 @@ export function datapointsOf(view: MetricsView, metric: Metric, statistic: Stati
     case 'AsyncEventsReceived':
     case 'AsyncEventsDropped':
     case 'DestinationDeliveryFailures':
-      return m[metric];
+      return series(m[metric]);
     case 'AsyncEventAge':
-      return m.AsyncEventAge[statistic as 'Average' | 'Maximum'];
+      return series(m.AsyncEventAge)[statistic as 'Average' | 'Maximum'];
     case 'Duration':
-      return m.Duration[statistic as keyof MetricsView['metrics']['Duration']];
+      return series(m.Duration)[statistic as keyof MetricsView['metrics']['Duration']];
     case 'Instances':
-      return m.Instances[statistic as keyof MetricsView['metrics']['Instances']];
+      return series(m.Instances)[statistic as keyof MetricsView['metrics']['Instances']];
     default:
       throw new Error(`${metric} isn't in the metrics API`);
   }

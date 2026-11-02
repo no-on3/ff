@@ -9,7 +9,8 @@ import { AuditService } from '../audit/audit.service';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { onePlan, plan } from '../plans/test-fixtures';
-import { ActiveKey, StorageDirectory } from '../storage/storage-directory.service';
+import { ActiveKey, EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
+import { notedUses, useLine } from '../storage/test-fixtures';
 import { CustomerQueues } from './customer-queues';
 import { QueueEvents } from './queue-events';
 import { QueueRequestCounts } from './queue-request-counts.service';
@@ -20,7 +21,7 @@ import { SqsFrontDoor } from './sqs-front-door';
 import { SqsOperations } from './sqs-operations';
 
 const BASE = 'http://localhost:3003';
-const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, queues: null, readOnly: false, secret: 'a'.repeat(40) };
+const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', name: null, functionId: null, buckets: null, queues: null, functions: null, functionAccess: null, readOnly: false, secret: 'a'.repeat(40) };
 const OTHERS: ActiveKey = { ...KEY, id: 'AKFFCCCCCCCCCCCCCCCC', accountId: '000000000002' };
 const URL_ = `${BASE}/${KEY.accountId}/orders`;
 const ORDERS: Queue = Object.assign(new Queue(), {
@@ -42,6 +43,8 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
   let throttled: boolean;
   let creditless: boolean;
   const touched: string[] = [];
+  /** What each key used, as the endpoint noted it. */
+  const keyUses = notedUses();
   const queues = {
     find: jest.fn(async (accountId: string, name: string) => (accountId === KEY.accountId && name === 'orders' ? ORDERS : null)),
     send: jest.fn(async () => undefined),
@@ -51,7 +54,8 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
   const events = { wait: jest.fn((_queueId: string, _ms: number, signal?: AbortSignal) => new Promise<void>((resolve) => signal?.addEventListener('abort', () => resolve()))) };
 
   const directory = {
-    key: async (id: string) => [KEY, OTHERS].find((key) => key.id === id) ?? null,
+    // A function's key past its end, AKFFFFFF…, the directory says so of.
+    key: async (id: string) => (id === 'AKFFFFFFFFFFFFFFFFFF' ? EXPIRED : ([KEY, OTHERS].find((key) => key.id === id) ?? null)),
     account: async (id: string) => accounts.get(id) ?? null,
     touch: (id: string) => void touched.push(id),
   } as unknown as StorageDirectory;
@@ -85,6 +89,7 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
       onePlan(),
       credit,
       throttler,
+      keyUses,
     );
 
   beforeAll(async () => {
@@ -130,11 +135,12 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
     });
   }
 
-  it("answers a request signed with the account's key, with its request ID, and writes the key's use down", async () => {
+  it("answers a request signed with the account's key, with its request ID, and writes the key's use down, and what it used", async () => {
     const answer = await client().send(new GetQueueUrlCommand({ QueueName: 'orders' }));
     expect(answer.QueueUrl).toBe(URL_);
     expect(answer.$metadata.requestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(touched).toContain(KEY.id);
+    expect(keyUses.seen.map(useLine)).toContain(`${KEY.id} sqs orders GetQueueUrl`);
   });
 
   it("answers a queue's URL under functions' own endpoint for a request to its host, inside the cluster, and under FF_SQS_BASE for any other", async () => {
@@ -160,11 +166,16 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
     }
   });
 
-  it("refuses an unknown key, and another secret, as SQS names them", async () => {
+  it("refuses an unknown key, one past its end, and another secret, as SQS names them", async () => {
     expect(await failure(client({ id: 'AKFFZZZZZZZZZZZZZZZZ', secret: KEY.secret }).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).toMatchObject({
       name: 'InvalidClientTokenId',
       status: 403,
       message: 'The security token included in the request is invalid.',
+    });
+    expect(await failure(client({ id: 'AKFFFFFFFFFFFFFFFFFF', secret: KEY.secret }).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).toMatchObject({
+      name: 'ExpiredToken',
+      status: 403,
+      message: 'The security token included in the request is expired',
     });
     expect(await failure(client({ id: KEY.id, secret: 'b'.repeat(40) }).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).toMatchObject({ name: 'SignatureDoesNotMatch', status: 403 });
   });

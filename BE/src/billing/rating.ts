@@ -1,5 +1,5 @@
 import { Decimal } from './decimal';
-import { BookPrices } from './price-book';
+import { BookPrices, PriceTier } from './price-book';
 
 /** MB-ms per GB-second: 1,024 MB × 1,000 ms (D7). */
 const MB_MS_PER_GB_SECOND = 1_024_000n;
@@ -112,14 +112,14 @@ export interface MonthEstimate {
 const gbSeconds = (mbMs: bigint) => Decimal.ratio(mbMs, MB_MS_PER_GB_SECOND);
 
 /** How much of [start, end) falls in [low, high), high null for no end. */
-function overlap(start: Decimal, end: Decimal, low: Decimal, high: Decimal | null): Decimal {
+export function overlap(start: Decimal, end: Decimal, low: Decimal, high: Decimal | null): Decimal {
   const from = start.max(low);
   const to = high === null ? end : end.min(high);
   return to.compare(from) > 0 ? to.minus(from) : Decimal.ZERO;
 }
 
 /** What lies in [low, high) of `tiers` between `from` and `to` of the month's quantity, priced above the first tier, the free part left out. */
-function aboveFirstTier(from: Decimal, to: Decimal, tiers: Array<{ upTo: Decimal | null; price: Decimal }>, free: Decimal): Decimal {
+function aboveFirstTier(from: Decimal, to: Decimal, tiers: PriceTier[], free: Decimal): Decimal {
   let extra = Decimal.ZERO;
   let low = Decimal.ZERO;
   const first = tiers[0].price;

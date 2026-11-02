@@ -157,6 +157,36 @@ pub enum Command {
         yes: bool,
     },
 
+    /// Publish a version of a function: its code, settings and variables as they are now, which never change, as AWS
+    /// Lambda's PublishVersion
+    Publish {
+        /// The function's name
+        name: String,
+
+        /// What the version is
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// List a function's versions, newest first, with the aliases whose calls reach each; or delete one
+    Versions {
+        /// The function's name
+        name: String,
+
+        /// Delete this version, which no alias may name: its number is never given again
+        #[arg(long, value_name = "VERSION", value_parser = clap::value_parser!(u32).range(1..))]
+        delete: Option<u32>,
+
+        /// With --delete, don't ask first: a script must say it
+        #[arg(long, short, requires = "delete")]
+        yes: bool,
+    },
+
+    /// A function's aliases, as AWS Lambda's: names for a version, or $LATEST, which calls (ff invoke orders:live),
+    /// URLs, schedules and queue readers name
+    #[command(subcommand)]
+    Alias(AliasCommand),
+
     /// Run a function on this machine, in Docker, as production runs it
     #[command(subcommand)]
     Local(LocalCommand),
@@ -197,22 +227,36 @@ pub enum Command {
     #[command(subcommand)]
     Email(EmailCommand),
 
-    /// The account's buckets, as AWS S3 gives them, and its access keys to them and to its queues
+    /// The account's buckets, as AWS S3 gives them
     #[command(subcommand)]
     Buckets(BucketsCommand),
+
+    /// The account's access keys, as an IAM user's, for AWS's SDKs and CLI: each with its name and what it reaches,
+    /// buckets, queues, the mail and functions
+    #[command(subcommand)]
+    Keys(KeysCommand),
 
     /// The account's sites: a bucket's files, public at its own address, as S3's website hosting serves them
     #[command(subcommand)]
     Sites(SitesCommand),
 
     /// The account's queues, as Amazon SQS's standard queues, which AWS's SDKs and CLI reach with a key of
-    /// `ff buckets keys create`
+    /// `ff keys create`
     #[command(subcommand)]
     Queues(QueuesCommand),
 
     /// Functions reading queues of the account in batches, as AWS Lambda's event source mappings for SQS
     #[command(subcommand)]
     EventSources(EventSourcesCommand),
+
+    /// Check a function's folder, or a file, for what works on FF and not on AWS Lambda: FF's API keys, variables and
+    /// hosts, its original event, files written outside /tmp, a TypeScript handler, a package over Lambda's size, its
+    /// template; with --deployed, what in the account still points at FF
+    Doctor(DoctorArgs),
+
+    /// Write what a move to AWS needs in a new folder: a SAM template of the account's functions, queues and
+    /// buckets, each function's code as Lambda runs it, a page for each kind of resource, and MIGRATION.md
+    Export(ExportArgs),
 
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
@@ -223,15 +267,28 @@ pub enum Command {
     /// Show the current account: its status, the role in it, its plan's limits, its internet access
     Account,
 
-    /// Show a month's usage per function, with its estimated cost
+    /// Show a month's usage per function, with its estimated cost; with --aws, the last months at AWS's prices
     Usage {
         /// The month, YYYY-MM, by the UTC calendar [default: this month]
-        #[arg(long)]
+        #[arg(long, conflicts_with = "aws")]
         month: Option<String>,
 
         /// The API's CSV, for a spreadsheet
-        #[arg(long)]
+        #[arg(long, conflicts_with = "aws")]
         csv: bool,
+
+        /// The last months as FF counted them at AWS's prices, an estimate, beside FF's: what they would cost on AWS
+        #[arg(long)]
+        aws: bool,
+
+        /// With --aws, how many months, this one so far last [default: 3]
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=12))]
+        months: Option<u32>,
+
+        /// With --aws, lines of what AWS bills that FF doesn't to leave out of the totals: coldStarts,
+        /// databaseInstances, cacheNodes, dataOut, logs, cloudFront, natGateway
+        #[arg(long, value_delimiter = ',', value_name = "LINE,...")]
+        without: Vec<String>,
     },
 
     /// Show the account's balance, this month's charges, and whether calls go on
@@ -304,6 +361,15 @@ pub struct DeployArgs {
     /// Its environment variables, KEY=value, repeated: all of them, as on Lambda, those not named removed
     #[arg(long = "env", value_name = "KEY=value")]
     pub env: Vec<String>,
+
+    /// Publish a version once it is deployed, as SAM's AutoPublishAlias does: the function as it is then, which never
+    /// changes
+    #[arg(long)]
+    pub publish: bool,
+
+    /// With --publish, point this alias at the new version, making it if the function hasn't it
+    #[arg(long, requires = "publish", value_name = "NAME")]
+    pub alias: Option<String>,
 }
 
 /// How a folder's libraries go into its package.
@@ -316,6 +382,36 @@ pub struct BuildArgs {
     /// Install nothing: the folder as it is, its node_modules included
     #[arg(long)]
     pub no_build: bool,
+}
+
+#[derive(Args)]
+pub struct ExportArgs {
+    /// The folder to write, new or empty
+    pub folder: PathBuf,
+
+    /// The functions to export, with the queues and buckets that call them or that they send to [default: every one]
+    #[arg(long, value_delimiter = ',', value_name = "NAME,...")]
+    pub functions: Vec<String>,
+
+    /// Write the functions' variables with their values in the template, where they are parameters otherwise; secrets
+    /// stay parameters, FF never showing their values back
+    #[arg(long)]
+    pub with_values: bool,
+}
+
+#[derive(Args)]
+pub struct DoctorArgs {
+    /// The function's folder, or one file of code
+    #[arg(default_value = ".")]
+    pub path: PathBuf,
+
+    /// Fail on warnings too, not on errors alone
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Check what is deployed in the account instead, as `ff export` reads it: what in it still points at FF
+    #[arg(long, conflicts_with = "path")]
+    pub deployed: bool,
 }
 
 #[derive(Args)]
@@ -344,6 +440,52 @@ pub struct PackageArgs {
     pub compile: bool,
 }
 
+#[derive(Subcommand)]
+pub enum AliasCommand {
+    /// Point an alias at a version, or $LATEST, making it if the function hasn't it; with --also, a share of its calls
+    /// to a second version. A rollback is a set to the version before
+    Set {
+        /// The function's name
+        function: String,
+
+        /// The alias's name: letters, digits, - and _, not digits alone
+        alias: String,
+
+        /// The version its calls go to: its number, or $LATEST (latest), the function as it is. Its own name, as clap
+        /// keeps `version` for --version
+        #[arg(id = "to", value_name = "VERSION")]
+        version: String,
+
+        /// A second version and its share of the calls, 10% or 0.1, as Lambda's weighted aliases; without it, every call
+        /// goes to the first
+        #[arg(long, num_args = 2, value_names = ["VERSION", "SHARE"])]
+        also: Option<Vec<String>>,
+
+        /// What it is for
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// List a function's aliases: where each one's calls go, and its URL
+    List {
+        /// The function's name
+        function: String,
+    },
+
+    /// Remove an alias: its URL goes with it, and the versions it named stay
+    Remove {
+        /// The function's name
+        function: String,
+
+        /// The alias's name
+        alias: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
 pub enum Runtime {
     Nodejs,
@@ -361,7 +503,7 @@ impl Runtime {
 
 #[derive(Args)]
 pub struct InvokeArgs {
-    /// The function's name
+    /// The function's name, with a version or an alias after a colon to call it (orders:live, orders:3)
     pub name: String,
 
     /// The event: JSON, @file for a file's, or - for stdin's [default: {}]
@@ -403,7 +545,7 @@ pub struct AsyncConfigArgs {
     #[arg(long)]
     pub max_age: Option<String>,
 
-    /// Another function of the account, by name or ARN, or a queue of it, by ARN, which gets the record of each call that succeeds
+    /// Another function of the account, by name or ARN, an alias or a version of it after a colon (failed-orders:live), or a queue of it, by ARN, which gets the record of each call that succeeds
     #[arg(long, conflicts_with = "no_on_success")]
     pub on_success: Option<String>,
 
@@ -411,7 +553,7 @@ pub struct AsyncConfigArgs {
     #[arg(long)]
     pub no_on_success: bool,
 
-    /// Another function of the account, by name or ARN, or a queue of it, by ARN, which gets the record of each call that fails for good
+    /// Another function of the account, by name or ARN, an alias or a version of it after a colon (failed-orders:live), or a queue of it, by ARN, which gets the record of each call that fails for good
     #[arg(long, conflicts_with = "no_on_failure")]
     pub on_failure: Option<String>,
 
@@ -764,9 +906,9 @@ pub enum BucketsCommand {
         yes: bool,
     },
 
-    /// The account's access keys to its buckets and queues, for AWS's SDKs and CLI
+    /// The account's access keys, for AWS's SDKs and CLI: another name for `ff keys`
     #[command(subcommand)]
-    Keys(BucketKeysCommand),
+    Keys(KeysCommand),
 
     /// Send a bucket's events to a function of the account, called without waiting with S3's event, or to a queue,
     /// as S3's notifications
@@ -774,7 +916,7 @@ pub enum BucketsCommand {
         /// The bucket's name
         bucket: String,
 
-        /// The function its events run, by name
+        /// The function its events run, by name, an alias or a version of it after a colon (thumbnails:live)
         #[arg(required_unless_present = "queue", conflicts_with = "queue")]
         function: Option<String>,
 
@@ -928,35 +1070,70 @@ pub enum SiteDomainsCommand {
 }
 
 #[derive(Subcommand)]
-pub enum BucketKeysCommand {
-    /// List the account's access keys: what each reaches, when it was last used; never a secret
+pub enum KeysCommand {
+    /// List the account's access keys: each one's name, what it reaches, when it was last used; never a secret
     List,
 
-    /// Make an access key: its secret printed this once, as the variables AWS's tools read
-    Create {
-        /// A bucket it reaches, by name; again for each. Naming neither buckets nor queues, it reaches all the
-        /// account's; naming some, those alone
-        #[arg(long = "bucket", value_name = "NAME")]
-        buckets: Vec<String>,
-
-        /// A queue it reaches, by name; again for each
-        #[arg(long = "queue", value_name = "NAME")]
-        queues: Vec<String>,
-
-        /// Reads and lists only: no upload, copy or delete, no message sent, received or deleted
-        #[arg(long)]
-        read_only: bool,
-    },
+    /// Make an access key: its secret printed this once, as the variables AWS's tools read. Naming nothing, it
+    /// reaches every bucket and queue of the account, and its mail; naming buckets, queues or functions, those alone.
+    /// A key stays as it was made: another reach is another key
+    Create(NewKeyArgs),
 
     /// Revoke an access key: whatever uses it is refused at once
     Revoke {
-        /// The access key ID, AKFF and 16 characters
-        id: String,
+        /// The access key ID, AKFF and 16 characters, or its name
+        key: String,
 
         /// Don't ask first: a script must say it
         #[arg(long, short)]
         yes: bool,
     },
+}
+
+#[derive(Args)]
+pub struct NewKeyArgs {
+    /// Its name, as an IAM user's: 1 to 64 letters, digits and +=,.@_-, once among the account's keys. Without it,
+    /// the key is named by its ID
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// A bucket it reaches, by name; again for each
+    #[arg(long = "bucket", value_name = "NAME")]
+    pub buckets: Vec<String>,
+
+    /// A queue it reaches, by name; again for each
+    #[arg(long = "queue", value_name = "NAME")]
+    pub queues: Vec<String>,
+
+    /// Its buckets and queues read and listed only: no upload, copy or delete, no message sent, received or deleted
+    #[arg(long)]
+    pub read_only: bool,
+
+    /// A function it reaches, by name, or '*' alone for all the account's; again for each
+    #[arg(long = "function", value_name = "NAME")]
+    pub functions: Vec<String>,
+
+    /// What it may do with its functions, as IAM groups Lambda's actions: read lists and reads them; invoke reads
+    /// and calls them; write does every operation, deploys and deletes among them [default: invoke]
+    #[arg(long, value_enum, requires = "functions")]
+    pub function_access: Option<FunctionAccess>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+pub enum FunctionAccess {
+    Read,
+    Invoke,
+    Write,
+}
+
+impl FunctionAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FunctionAccess::Read => "read",
+            FunctionAccess::Invoke => "invoke",
+            FunctionAccess::Write => "write",
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -1084,8 +1261,12 @@ pub enum EventSourcesCommand {
         /// The queue's name
         queue: String,
 
-        /// The function's name
+        /// The function's name, with a version or an alias after a colon to have it read the queue (orders-worker:live)
         function: String,
+
+        /// What reads the queue: a version's number, an alias's name, or $LATEST (latest), the function as it is
+        #[arg(long)]
+        qualifier: Option<String>,
 
         #[command(flatten)]
         batches: BatchArgs,
@@ -1121,6 +1302,10 @@ pub enum EventSourcesCommand {
     Update {
         /// The mapping's UUID
         uuid: String,
+
+        /// What reads the queue: a version's number, an alias's name, or $LATEST (latest), the function as it is
+        #[arg(long)]
+        qualifier: Option<String>,
 
         #[command(flatten)]
         batches: BatchArgs,
@@ -1265,6 +1450,10 @@ pub enum UrlCommand {
     Show {
         /// The function's name
         name: String,
+
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
     },
 
     /// Give it a URL, or change who may call it and its CORS
@@ -1272,7 +1461,12 @@ pub enum UrlCommand {
         /// The function's name
         name: String,
 
-        /// Who may call it: none, anyone; key, the account's API keys with functions:invoke. Needed for a new URL
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
+
+        /// Who may call it: none, anyone; key, the account's access keys that may invoke it, signing for lambda, and its API
+        /// keys with functions:invoke. Needed for a new URL
         #[arg(long, value_enum)]
         auth: Option<UrlAuth>,
 
@@ -1294,6 +1488,10 @@ pub enum UrlCommand {
         /// The function's name
         name: String,
 
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
+
         /// Don't ask first: a script must say it
         #[arg(long, short)]
         yes: bool,
@@ -1312,12 +1510,20 @@ pub enum DomainsCommand {
     List {
         /// The function's name
         name: String,
+
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
     },
 
     /// Add a domain of the account's, and show the DNS records that prove it
     Add {
         /// The function's name
         name: String,
+
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
 
         /// The domain, such as shop.example.tn
         domain: String,
@@ -1328,6 +1534,10 @@ pub enum DomainsCommand {
         /// The function's name
         name: String,
 
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
+
         /// The domain
         domain: String,
     },
@@ -1336,6 +1546,10 @@ pub enum DomainsCommand {
     Remove {
         /// The function's name
         name: String,
+
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
 
         /// The domain
         domain: String,
@@ -1365,6 +1579,11 @@ pub enum ScheduleCommand {
         /// The schedule's name, unique within the function
         #[arg(long = "name", default_value = "schedule")]
         schedule: String,
+
+        /// What it runs: a version's number, an alias's name, or $LATEST (latest), the function as it is [default: what it
+        /// runs already; $LATEST for a new schedule]
+        #[arg(long)]
+        qualifier: Option<String>,
 
         /// The function's event: JSON, @file or - for stdin [default: EventBridge's Scheduled Event]
         #[arg(long)]
@@ -1453,5 +1672,17 @@ impl ConfigKey {
             ConfigKey::AllowHttp => "allow_http",
             ConfigKey::Token => "token",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    /// Clap's own check of every command's definition, those no other test runs among them: a mistake fails here,
+    /// not when someone runs the command.
+    #[test]
+    fn every_command_is_defined_as_clap_takes_it() {
+        super::Cli::command().debug_assert();
     }
 }

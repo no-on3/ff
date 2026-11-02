@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, HttpException, HttpStatus, Inte
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { Not } from 'typeorm';
+import { FindOperator, In, IsNull, Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import {
@@ -25,13 +25,19 @@ import { withInitMs } from '../orchestrator/orchestrator.errors';
 import { BETA_LIMITS, plan } from '../plans/test-fixtures';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { FunctionUrl } from './entities/function-url.entity';
+import { FunctionVersion } from './entities/function-version.entity';
+import { FunctionAlias } from './entities/function-alias.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { inlineCodeFacts } from './code-package';
 import { inlinePackage } from './inline-package';
+import { lambdaJavaScript } from './lambda-javascript';
+import { AwsEndpoint, awsEndpointsOf } from '../common/aws-endpoint';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { CodeImagesService } from '../packages/code-images.service';
+import { packageKey } from '../packages/package.entity';
 import { PackagesService } from '../packages/packages.service';
+import { filesOf, zipOf } from '../packages/test-fixtures';
 import { RegistryError } from '../packages/registry';
 import { FunctionKeys } from '../storage/function-keys.service';
 import { FunctionsService, workloadOf } from './functions.service';
@@ -57,7 +63,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     remove: jest.fn(),
   };
   const invocationsRepo = { create: jest.fn(), save: jest.fn(), insert: jest.fn(), findAndCount: jest.fn() };
-  const storage = { uploadCode: jest.fn(), deleteCode: jest.fn() };
+  const storage = { uploadCode: jest.fn(), deleteCode: jest.fn(), getDocument: jest.fn() };
   const metrics = { recordMetric: jest.fn(), invocationStarted: jest.fn(), invocationFinished: jest.fn() };
   /** The account's plan, and how many functions it has: the transaction that saves a new one counts them. */
   let accountPlan: PlanView;
@@ -75,7 +81,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   /** D9's balance check (P-33): every account may invoke unless a test says otherwise. */
   const credit = { admit: jest.fn(async (_accountId: string) => undefined) };
   /** The account's packages, and the registry their images go to. */
-  const packages = { name: jest.fn(), storeInline: jest.fn(), named: jest.fn(), restoreInlineZip: jest.fn() };
+  const packages = { name: jest.fn(), storeInline: jest.fn(), named: jest.fn(), restoreInlineZip: jest.fn(), namedBytes: jest.fn() };
   const codeImages = { available: true, assertAvailable: jest.fn(), imageFor: jest.fn(), ensureImage: jest.fn(), hasMounted: jest.fn() };
   /** The image the registry gives a package, by its SHA-256. */
   const imageOf = (codeSha256: string) => `ff-dev-registry:5000/ff-code/user-1@sha256:${Buffer.from(codeSha256, 'base64').toString('hex')}`;
@@ -84,7 +90,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
   /** Each function's variables and secrets, as the service saved them. */
   let environments: ReturnType<typeof memoryEnvironments>;
   /** Functions' own keys to their account's buckets: none, unless a test gives them (FF without the front door's address for functions). */
-  const functionKeys = { credentialsFor: jest.fn(), revoke: jest.fn() };
+  // No key due a renewal, unless a test says so: isDue answers nothing.
+  const functionKeys = { credentialsFor: jest.fn(), revoke: jest.fn(), isDue: jest.fn() };
 
   const activeFunction = (): Function =>
     ({
@@ -101,6 +108,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       minInstances: 0,
       maxInstances: 3,
       scaleToZero: true,
+      awsEndpoints: awsEndpointsOf(),
       status: FunctionStatus.ACTIVE,
     }) as Function;
 
@@ -122,6 +130,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     accountPlan = plan();
     existingFunctions = 0;
     codeImages.imageFor.mockImplementation(async (_accountId: string, codeSha256: string) => imageOf(codeSha256));
+    // The account's other code: none, unless a test says otherwise.
+    packages.namedBytes.mockResolvedValue(0);
     plans.forAccount.mockImplementation(async () => accountPlan);
     underLock = false;
     plans.withTenant.mockImplementation(async (_accountId: string, write: (tenant: unknown) => Promise<unknown>) => {
@@ -139,7 +149,14 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     const named = (where: { name: string }) => namesInUse.has(where.name);
     transaction.existsBy.mockImplementation(async (_target, where: { name: string }) => named(where) || takenMeanwhile.has(where.name));
     Object.assign(functionsRepo, {
-      manager: { transaction: jest.fn(async (work) => work(transaction)), existsBy: jest.fn(async (_target, where: { name: string }) => named(where)) },
+      manager: {
+        transaction: jest.fn(async (work) => work(transaction)),
+        existsBy: jest.fn(async (_target, where: { name: string }) => named(where)),
+        // No alias's URL that calls $LATEST, unless a test gives one.
+        findOne: jest.fn(async () => null),
+        // No versions, so none to delete nor any version's code to make a one-file package of, unless a test gives some.
+        find: jest.fn(async () => []),
+      },
     });
     // The row as made, with the database's time.
     invocationsRepo.create.mockImplementation((dto) => ({ ...dto, createdAt: new Date('2026-10-17T10:00:00Z') }));
@@ -151,6 +168,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       deploy: jest.fn(),
       update: jest.fn(),
       remove: jest.fn(),
+      deployVersion: jest.fn(),
+      labelLatest: jest.fn(),
+      removeVersion: jest.fn(),
       removeTenant: jest.fn(),
       deleteLogs: jest.fn(),
       waitUntilReady: jest.fn(),
@@ -158,8 +178,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       scale: jest.fn(),
       readyInstances: jest.fn(),
       desiredInstances: jest.fn(),
-      readyInstancesByFunction: jest.fn(),
+      workloads: jest.fn(),
+      podRevisions: jest.fn(),
       codeImagesByFunction: jest.fn(),
+      renewEnvironment: jest.fn(),
       applyTenantLimits: jest.fn(),
       logs: jest.fn(),
       tailLogs: jest.fn(),
@@ -389,6 +411,42 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(storage.uploadCode).toHaveBeenCalledWith('fn-1/code.ts', 'export const main = async () => 2;');
     });
 
+    it("refuses code past the plan's code storage, as Lambda's CodeStorageExceededException, the function's own package left out of what it counts", async () => {
+      const MB = 1_048_576;
+      accountPlan = plan({ codeStorageMb: 1 });
+      packages.namedBytes.mockResolvedValue(MB - 4095);
+      const refused = (await service.create('user-1', dto).catch((err: unknown) => err)) as HttpException;
+      expect([refused.getStatus(), refused.getResponse()]).toEqual([
+        400,
+        {
+          statusCode: 400,
+          error: 'CodeStorageExceededException',
+          message:
+            'The Beta plan keeps 1 MB of code an account, the packages its functions and versions name, each once: this would make 2 MB. ' +
+            'Delete the versions and functions you no longer need, then try again',
+        },
+      ]);
+      expect(packages.namedBytes).toHaveBeenLastCalledWith('user-1', PACKAGE, undefined);
+      expect(functionsRepo.save).not.toHaveBeenCalled();
+
+      // Up to the byte, it fits.
+      packages.namedBytes.mockResolvedValue(MB - 4096);
+      await service.create('user-1', dto);
+
+      // An update counts the account's packages but the one it replaces; inline code is counted as its one-file package.
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const built = inlinePackage('export const main = async () => 2;', Runtime.NODEJS);
+      packages.namedBytes.mockResolvedValue(MB - built.zip.length + 1);
+      expect((await refusal(service.update('user-1', 'fn-1', { code: 'export const main = async () => 2;', handler: 'function.main' })))[0]).toBe(400);
+      expect(packages.namedBytes).toHaveBeenLastCalledWith('user-1', built.codeSha256, 'fn-1');
+      expect(packages.storeInline).not.toHaveBeenCalledWith('user-1', built);
+
+      // A change that names no new code isn't counted: a function past a plan made smaller keeps working.
+      packages.namedBytes.mockClear();
+      await service.update('user-1', 'fn-1', { memory: 256 });
+      expect(packages.namedBytes).not.toHaveBeenCalled();
+    });
+
     it("checks a new handler or runtime against the package's files, keeping the package another hour", async () => {
       functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, codeSize: 4096, handler: 'src/orders.create' });
 
@@ -425,6 +483,47 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       // The attempt ran inline code's package; the rollback, the package before.
       expect(codeImages.imageFor.mock.calls.map(([, codeSha256]) => codeSha256)).toEqual([inlinePackage('broken', Runtime.NODEJS).codeSha256, PACKAGE]);
       expect(orchestrator.update.mock.calls.map(([workload]) => (workload as { codeImage?: string }).codeImage)).toEqual([IMAGE, IMAGE]);
+    });
+  });
+
+  describe("a function's code, as AWS Lambda takes it", () => {
+    const PACKAGE = 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=';
+    const TYPESCRIPT = 'enum Greeting { Hello = "Ahlan" }\nexport const handler = async (event: { name: string }) => `${Greeting.Hello}, ${event.name}`;\n';
+    const named = (fields: Partial<Function>) => functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), ...fields });
+
+    it('gives a package as it was uploaded, read from where object storage keeps it, with javascript too', async () => {
+      const zip = zipOf([{ name: 'src/orders.ts', data: 'export const create = async () => 201;' }]);
+      named({ name: 'orders', packageType: PackageType.ZIP, code: '', codeSha256: PACKAGE, handler: 'src/orders.create' });
+      storage.getDocument.mockResolvedValue({ body: zip, contentType: 'application/zip' });
+
+      await expect(service.code('user-1', 'fn-1')).resolves.toEqual({ name: 'orders', zip });
+      await expect(service.code('user-1', 'fn-1', { javascript: true })).resolves.toEqual({ name: 'orders', zip });
+      expect(storage.getDocument.mock.calls).toEqual([[packageKey('user-1', PACKAGE)], [packageKey('user-1', PACKAGE)]]);
+    });
+
+    it('gives inline code as the one-file package its pods run, byte for byte', async () => {
+      named({ name: 'greet', code: TYPESCRIPT, ...inlineCodeFacts(TYPESCRIPT) });
+
+      const { name, zip } = await service.code('user-1', 'fn-1');
+
+      expect(name).toBe('greet');
+      expect(zip.equals(inlinePackage(TYPESCRIPT, Runtime.NODEJS).zip)).toBe(true);
+      expect(storage.getDocument).not.toHaveBeenCalled();
+    });
+
+    it("gives inline Node.js code as JavaScript with javascript, in function.js, which the function's handler names on Lambda", async () => {
+      named({ code: TYPESCRIPT, ...inlineCodeFacts(TYPESCRIPT), handler: 'function.handler' });
+
+      const { zip } = await service.code('user-1', 'fn-1', { javascript: true });
+
+      expect(await filesOf(zip)).toEqual({ 'function.js': await lambdaJavaScript(TYPESCRIPT) });
+    });
+
+    it('gives Python code as it is, with javascript too', async () => {
+      const python = 'def handler(event, context):\n    return "Ahlan"\n';
+      named({ runtime: Runtime.PYTHON, code: python, ...inlineCodeFacts(python) });
+
+      expect(await filesOf((await service.code('user-1', 'fn-1', { javascript: true })).zip)).toEqual({ 'function.py': python });
     });
   });
 
@@ -518,6 +617,21 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(packages.restoreInlineZip).toHaveBeenCalledWith('user-1', INLINE);
       expect(functionsRepo.find).toHaveBeenCalledWith({ where: { accountId: 'user-1', packageType: PackageType.INLINE, packageSha256: INLINE.codeSha256 } });
       expect(logged).toHaveBeenCalledWith(expect.stringContaining(`package ${UPLOADED} of account user-1 again: its zip is lost too; restore the packages from the second site`));
+    });
+
+    it("makes a one-file package's zip again of a version's code, once its function's code has moved on", async () => {
+      packages.named.mockResolvedValue([{ accountId: 'user-1', codeSha256: INLINE.codeSha256, inline: true }]);
+      codeImages.ensureImage.mockRejectedValueOnce(new StoredObjectMissingError('Object storage has no packages/user-1/….zip'));
+      functionsRepo.find.mockImplementation(async ({ where }: { where: { packageType?: PackageType } }) => (where.packageType === PackageType.INLINE ? [] : working));
+      const { manager } = functionsRepo as unknown as { manager: { find: jest.Mock } };
+      manager.find.mockResolvedValue([{ functionId: 'fn-1', version: 3, code: 'export const handler = async () => 1;', runtime: Runtime.NODEJS }]);
+      const warned = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      expect(await service.restoreCodeImages()).toMatchObject({ zipsMade: 1, failures: 0 });
+      expect(packages.restoreInlineZip).toHaveBeenCalledWith('user-1', INLINE);
+      expect(manager.find).toHaveBeenCalledWith(FunctionVersion, { where: { accountId: 'user-1', packageType: PackageType.INLINE, packageSha256: INLINE.codeSha256 } });
+      expect(warned).toHaveBeenCalledWith(expect.stringContaining("made again of version 3 of function fn-1's code"));
+      expect(logged).not.toHaveBeenCalled();
     });
 
     it('logs a function it could not roll out, and goes on to the next', async () => {
@@ -705,7 +819,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     it("refuses the wrapped event to a function with a URL, which sends AWS Lambda's events, and rolls nothing out", async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
       const { manager } = functionsRepo as unknown as { manager: { existsBy: jest.Mock } };
-      manager.existsBy.mockImplementation(async (target: unknown, where: { functionId?: string }) => target === FunctionUrl && where.functionId === 'fn-1');
+      manager.existsBy.mockImplementation(
+        async (target: unknown, where: { functionId?: string; alias?: unknown }) => target === FunctionUrl && where.functionId === 'fn-1' && where.alias instanceof FindOperator,
+      );
 
       await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
         "The function has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: delete its URL (DELETE /functions/fn-1/url) first, or keep eventFormat lambda",
@@ -714,6 +830,19 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       // Back to lambda, or another change, is no business of its URL's.
       await service.update('user-1', 'fn-1', { eventFormat: EventFormat.LAMBDA, memory: 256 });
       expect(orchestrator.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses the wrapped event while an alias naming $LATEST has a URL, which calls it with AWS Lambda's events", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const { manager } = functionsRepo as unknown as { manager: { findOne: jest.Mock } };
+      manager.findOne.mockResolvedValueOnce({ functionId: 'fn-1', alias: 'dev' });
+
+      await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
+        "The alias dev names $LATEST and has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: " +
+          'point the alias at a version, or delete its URL (DELETE /functions/fn-1/url?qualifier=dev), first, or keep eventFormat lambda',
+      );
+      expect(manager.findOne).toHaveBeenCalledWith(FunctionUrl, { where: { functionId: 'fn-1', alias: Not(IsNull()), aliasOf: { version: IsNull() } } });
+      expect(orchestrator.update).not.toHaveBeenCalled();
     });
 
     it("refuses the wrapped event to a function with schedules, which send EventBridge's Scheduled Event", async () => {
@@ -725,6 +854,26 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         "The function has schedules, which send EventBridge's Scheduled Event, and the wrapped format can't take it: delete them (DELETE /functions/fn-1/schedules/{scheduleId}) first, or keep eventFormat lambda",
       );
       expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses the wrapped event while a schedule runs it through an alias naming $LATEST, and not while its schedules run versions", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const { manager } = functionsRepo as unknown as { manager: { find: jest.Mock; findOne: jest.Mock } };
+      manager.find.mockImplementation(async (target: unknown) => (target === FunctionAlias ? [{ name: 'nightly' }] : []));
+      manager.findOne.mockImplementation(async (target: unknown) => (target === Schedule ? { name: 'cleanup', qualifier: 'nightly' } : null));
+
+      await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
+        "The alias nightly names $LATEST and the schedule cleanup runs it, which sends EventBridge's Scheduled Event, and the wrapped format can't take it: " +
+          'point the alias at a version, or delete the schedule, first, or keep eventFormat lambda',
+      );
+      expect(manager.find).toHaveBeenCalledWith(FunctionAlias, { where: { functionId: 'fn-1', version: IsNull() }, select: { name: true } });
+      expect(manager.findOne).toHaveBeenCalledWith(Schedule, { where: { functionId: 'fn-1', qualifier: In(['nightly']) } });
+      expect(orchestrator.update).not.toHaveBeenCalled();
+
+      // No alias names $LATEST: a schedule through one runs a version, which keeps its own format.
+      manager.find.mockImplementation(async () => []);
+      await service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED });
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ eventFormat: EventFormat.WRAPPED }), TENANT);
     });
 
     it("refuses a handler its runtime can't find in inline code, checking the runtime the function will have", async () => {
@@ -868,9 +1017,21 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
     await service.remove('user-1', 'fn-1');
 
-    expect(orchestrator.remove).toHaveBeenCalledWith(fn);
+    expect(orchestrator.remove).toHaveBeenCalledWith(fn, []);
     expect(storage.deleteCode).toHaveBeenCalledWith('fn-1/code.ts');
     expect(functionsRepo.remove).toHaveBeenCalledWith(fn);
+  });
+
+  it("remove deletes its versions' pods with its own, by the versions it has", async () => {
+    const fn = activeFunction();
+    functionsRepo.findOne.mockResolvedValue(fn);
+    const { manager } = functionsRepo as unknown as { manager: { find: jest.Mock } };
+    manager.find.mockResolvedValue([{ version: 1 }, { version: 3 }]);
+
+    await service.remove('user-1', 'fn-1');
+
+    expect(manager.find).toHaveBeenCalledWith(FunctionVersion, { where: { functionId: 'fn-1' }, select: { version: true } });
+    expect(orchestrator.remove).toHaveBeenCalledWith(fn, [1, 3]);
   });
 
   it("remove revokes the function's key to its account's buckets before its record goes; a failed removal keeps it", async () => {
@@ -947,7 +1108,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       expect(outcome.invocation).toMatchObject({ requestId: 'req-3', attempt: 2, source: InvocationSource.ASYNC, status: InvocationStatus.COMPLETED });
       expect(outcome.invocation.id).toMatch(UUID);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, 'req-3');
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, 'req-3', expect.any(globalThis.Function));
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-3' }), ending);
     });
 
@@ -967,7 +1128,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(inserted).toEqual([
         expect.objectContaining({ id: 'req-1', source: InvocationSource.URL, input: { version: '2.0', headers: { authorization: '***' } }, status: InvocationStatus.RUNNING }),
       ]);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, 'req-1');
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, 'req-1', expect.any(globalThis.Function));
       expect(outcome).toMatchObject({ ok: true, output: { statusCode: 204 }, invocation: { id: 'req-1', status: InvocationStatus.COMPLETED } });
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-1' }), ending);
     });
@@ -998,7 +1159,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1', { a: 1 });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, created().requestId);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, created().requestId, expect.any(globalThis.Function));
       expect(invocation).toMatchObject({
         status: InvocationStatus.COMPLETED,
         output: { hello: 'world' },
@@ -1037,7 +1198,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1');
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, created().requestId);
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, created().requestId, expect.any(globalThis.Function));
       expect(invocation.duration).toBeGreaterThanOrEqual(0);
     });
 
@@ -1308,6 +1469,122 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
   });
 
+  describe("a call naming a version or an alias, as Lambda's Qualifier", () => {
+    const record = () => usage.record.mock.calls[0][0];
+    const version = (number: number, overrides: Partial<FunctionVersion> = {}) =>
+      ({
+        functionId: 'fn-1',
+        version: number,
+        runtime: Runtime.NODEJS,
+        handler: 'function.handler',
+        packageType: PackageType.INLINE,
+        code: `export const handler = async () => ${number};`,
+        codeSha256: `sha-${number}`,
+        codeSize: 40,
+        packageSha256: `package${number}`,
+        memory: 512,
+        timeout: 30,
+        eventFormat: EventFormat.LAMBDA,
+        awsEndpoints: [],
+        environment: { variables: { STAGE: `v${number}` }, secrets: {} },
+        ...overrides,
+      }) as unknown as FunctionVersion;
+    let versions: FunctionVersion[];
+    let aliases: Array<Pick<FunctionAlias, 'name' | 'version' | 'additionalVersion' | 'additionalWeight'>>;
+    const manager = () => (functionsRepo as unknown as { manager: { findOne: jest.Mock; createQueryBuilder: jest.Mock } }).manager;
+
+    beforeEach(() => {
+      versions = [version(1), version(2, { memory: 1024 })];
+      aliases = [
+        { name: 'prod', version: 1, additionalVersion: 2, additionalWeight: 0.25 },
+        { name: 'edge', version: null, additionalVersion: null, additionalWeight: null },
+      ];
+      let number: number;
+      const query = {
+        addSelect: () => query,
+        where: (_sql: string, parameters: { number: number }) => ((number = parameters.number), query),
+        getOne: async () => versions.find((v) => v.version === number) ?? null,
+      };
+      Object.assign(manager(), {
+        findOne: jest.fn(async (_target: unknown, { where }: { where: { name: string } }) => aliases.find((alias) => alias.name === where.name) ?? null),
+        createQueryBuilder: jest.fn(() => query),
+      });
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.invoke.mockResolvedValue({ output: 'ok', durationMs: 3, memoryUsedMb: 40 });
+    });
+    afterEach(() => jest.restoreAllMocks());
+
+    it("runs a version as it was published, billed at its memory and with no warm instance; its first call's pods made of its workload whole", async () => {
+      const answer = await service.invoke('user-1', 'fn-1', { a: 1 }, '2');
+
+      const [running, payload, , deploy] = orchestrator.invoke.mock.calls[0];
+      expect(running).toMatchObject({ id: 'fn-1', version: 2, memory: 1024, timeout: 30, minInstances: 0, code: 'export const handler = async () => 2;' });
+      expect(payload).toEqual({ a: 1 });
+      expect(answer).toMatchObject({ version: 2, alias: null, output: 'ok' });
+      expect(record()).toMatchObject({ functionId: 'fn-1', version: 2, alias: null, memoryMb: 1024, minInstances: 0 });
+      expect(await deploy?.()).toMatchObject({ version: 2, codeImage: imageOf('package2'), environment: { revision: 'v2', values: { STAGE: 'v2' } } });
+      expect(codeImages.imageFor).toHaveBeenLastCalledWith('user-1', 'package2');
+    });
+
+    it("counts a version's call as its version's, for its pods to scale on their own calls", async () => {
+      await service.invoke('user-1', 'fn-1', {}, '2');
+
+      expect([metrics.invocationStarted.mock.calls[0][0], metrics.invocationFinished.mock.calls[0][0]]).toEqual([
+        expect.objectContaining({ id: 'fn-1', version: 2, minInstances: 0 }),
+        expect.objectContaining({ id: 'fn-1', version: 2 }),
+      ]);
+    });
+
+    it("draws an alias's version for each call, its share to its other version, and keeps the alias with each", async () => {
+      jest.spyOn(Math, 'random').mockReturnValueOnce(0.1).mockReturnValueOnce(0.25);
+
+      const first = await service.invoke('user-1', 'fn-1', {}, 'prod');
+      const second = await service.invoke('user-1', 'fn-1', {}, 'prod');
+
+      expect([first.version, first.alias, second.version, second.alias]).toEqual([2, 'prod', 1, 'prod']);
+      expect(usage.record.mock.calls.map(([made]) => [made.version, made.alias])).toEqual([
+        [2, 'prod'],
+        [1, 'prod'],
+      ]);
+    });
+
+    it("runs $LATEST for an alias of $LATEST, or $LATEST named, nothing to make at a cold start while its key isn't due; the alias kept", async () => {
+      await service.invoke('user-1', 'fn-1', {}, 'edge');
+      await service.invoke('user-1', 'fn-1', {}, '$LATEST');
+
+      const starts = await Promise.all(orchestrator.invoke.mock.calls.map(async ([running, , , start]) => [running.version, await start?.()]));
+      expect(starts).toEqual([
+        [undefined, undefined],
+        [undefined, undefined],
+      ]);
+      expect(functionKeys.isDue).toHaveBeenCalledWith('fn-1');
+      expect(usage.record.mock.calls.map(([made]) => [made.version, made.alias, made.memoryMb])).toEqual([
+        [null, 'edge', 128],
+        [null, null, 128],
+      ]);
+      // $LATEST named looks nothing up.
+      expect(manager().findOne).toHaveBeenCalledTimes(1);
+    });
+
+    it("runs a version whatever $LATEST's state, as a rollback needs; $LATEST itself is refused when not ACTIVE", async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.ERROR });
+
+      await expect(service.invoke('user-1', 'fn-1', {}, '1')).resolves.toMatchObject({ version: 1 });
+      await expect(service.invoke('user-1', 'fn-1', {}, 'edge')).rejects.toThrow(new BadRequestException('Function is not active'));
+      await expect(service.invoke('user-1', 'fn-1', {})).rejects.toThrow(new BadRequestException('Function is not active'));
+    });
+
+    it("answers 404 for a version or an alias the function hasn't, before the credit is read or anything runs", async () => {
+      await expect(service.invoke('user-1', 'fn-1', {}, '7')).rejects.toThrow(
+        new NotFoundException('The function hello has no version 7: GET /functions/{id}/versions lists them'),
+      );
+      await expect(service.invoke('user-1', 'fn-1', {}, 'staging')).rejects.toThrow(
+        new NotFoundException('The function hello has no alias staging: GET /functions/{id}/aliases lists them'),
+      );
+      expect([credit.admit.mock.calls.length, invocationsRepo.insert.mock.calls.length, orchestrator.invoke.mock.calls.length]).toEqual([0, 0, 0]);
+    });
+  });
+
   describe('usage records (P-20, D6, D7)', () => {
     const record = () => usage.record.mock.calls[0][0];
 
@@ -1317,7 +1594,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       await service.invoke('user-1', 'fn-1', { name: 'x' });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, created().requestId);
+      // $LATEST's pods are there: nothing to make at a cold start.
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, created().requestId, expect.any(globalThis.Function));
       expect(usage.record).toHaveBeenCalledWith(
         {
           requestId: created().requestId,
@@ -1326,6 +1604,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
           accountId: 'user-1',
           functionId: 'fn-1',
           functionName: 'hello',
+          version: null,
+          alias: null,
           runtime: 'nodejs',
           memoryMb: 256,
           minInstances: 1,
@@ -1694,7 +1974,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     const dto = { name: 'hello', runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5 };
     const KEY = 'AKFF7Q2MLKX4RTZB3W5N';
     const credentials = {
-      keyId: KEY,
+      revision: KEY,
       variables: {
         AWS_ACCESS_KEY_ID: KEY,
         AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
@@ -1725,6 +2005,32 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       expect(given()).toEqual([{ revision: KEY, values: credentials.variables }]);
       expect(environments.saved.has('fn-1')).toBe(false);
+    });
+
+    it('takes every endpoint unless the function names fewer, kept in their order, and gives the key the ones it takes', async () => {
+      functionKeys.credentialsFor.mockResolvedValue(credentials);
+
+      await service.create('user-1', dto);
+      await service.create('user-1', { ...dto, awsEndpoints: [AwsEndpoint.SESV2, AwsEndpoint.SQS] });
+
+      const every = [AwsEndpoint.S3, AwsEndpoint.SQS, AwsEndpoint.SESV2, AwsEndpoint.LAMBDA];
+      expect(functionsRepo.save.mock.calls.map(([fn]) => (fn as Function).awsEndpoints)).toEqual([every, every, [AwsEndpoint.SQS, AwsEndpoint.SESV2], [AwsEndpoint.SQS, AwsEndpoint.SESV2]]);
+      expect(functionKeys.credentialsFor.mock.calls.map(([fn]) => fn.awsEndpoints)).toEqual([every, [AwsEndpoint.SQS, AwsEndpoint.SESV2]]);
+    });
+
+    it('rolls out an update that leaves an endpoint out, its record saying so, and changes nothing for the same ones in another order', async () => {
+      functionKeys.credentialsFor.mockResolvedValue(credentials);
+      functionsRepo.findOne.mockImplementation(async () => activeFunction());
+
+      const left = await service.update('user-1', 'fn-1', { awsEndpoints: [AwsEndpoint.SQS, AwsEndpoint.S3] });
+      await service.update('user-1', 'fn-1', { awsEndpoints: [AwsEndpoint.LAMBDA, AwsEndpoint.SESV2, AwsEndpoint.SQS, AwsEndpoint.S3] });
+
+      expect(left.awsEndpoints).toEqual([AwsEndpoint.S3, AwsEndpoint.SQS]);
+      expect(orchestrator.update).toHaveBeenCalledTimes(1);
+      expect(functionKeys.credentialsFor).toHaveBeenCalledWith(expect.objectContaining({ awsEndpoints: [AwsEndpoint.S3, AwsEndpoint.SQS] }));
+      expect(audit.record.mock.calls.map(([event]) => event.details)).toEqual([
+        { changed: ['awsEndpoints'], awsEndpoints: [AwsEndpoint.S3, AwsEndpoint.SQS], outcome: 'live' },
+      ]);
     });
 
     it('goes with every rollout: an update, and the rollback of a failed one', async () => {
@@ -1759,10 +2065,10 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         expect(workloadOf(fn, environment, 'image').environment).toEqual({ revision: '0123456789abcdef', values: { TABLE: 'orders' } });
       });
 
-      it('makes a new key a new version, as a new environment is, and the same key and environment the same one', () => {
+      it("makes new credentials a new version, as a new environment is, and the same credentials and environment the same one", () => {
         const first = workloadOf(fn, environment, 'image', credentials).environment;
         const again = workloadOf(fn, environment, 'image', credentials).environment;
-        const newKey = workloadOf(fn, environment, 'image', { ...credentials, keyId: 'AKFFBBBBBBBBBBBBBBBB' }).environment;
+        const newKey = workloadOf(fn, environment, 'image', { ...credentials, revision: 'AKFFBBBBBBBBBBBBBBBB' }).environment;
 
         expect(first?.revision).toBe(`0123456789abcdef.${KEY}`);
         expect(again?.revision).toBe(first?.revision);
@@ -1865,7 +2171,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     });
   });
 
-  describe('every method acts for one account (P-10, D4)', () => {
+  describe('every method acts for one account', () => {
     const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
     // One function, of account user-1. The repositories filter as the database would.
     const owned = (): Function => ({ ...activeFunction(), id: ID });
@@ -1884,6 +2190,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
     const calls: Array<[string, (accountId: string, id?: string) => Promise<unknown>]> = [
       ['findOne', (accountId, id = ID) => service.findOne(accountId, id)],
+      ['code', (accountId, id = ID) => service.code(accountId, id)],
       ['update', (accountId, id = ID) => service.update(accountId, id, { code: 'v2' })],
       ['remove', (accountId, id = ID) => service.remove(accountId, id)],
       ['invoke', (accountId, id = ID) => service.invoke(accountId, id, {})],
@@ -2011,6 +2318,25 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(invocationsRepo.findAndCount).toHaveBeenCalledWith(
         expect.objectContaining({ where: { functionId: ID, function: { accountId: 'user-1' } }, take: 5, skip: 10 }),
       );
+    });
+
+    it("reads the calls a filter keeps, by what they named and what ran them, $LATEST and no alias as null, the account's still", async () => {
+      const account = { functionId: ID, function: { accountId: 'user-1' } };
+      const whereOf = async (filter: object) => {
+        await service.getInvocations('user-1', ID, { limit: 10, offset: 0, ...filter });
+        return invocationsRepo.findAndCount.mock.lastCall?.[0].where;
+      };
+
+      expect(await whereOf({ resource: 'live' })).toEqual({ ...account, alias: 'live' });
+      expect(await whereOf({ resource: '3' })).toEqual({ ...account, version: 3, alias: IsNull() });
+      expect(await whereOf({ resource: '$LATEST' })).toEqual({ ...account, version: IsNull(), alias: IsNull() });
+      expect(await whereOf({ executedVersion: '2' })).toEqual({ ...account, version: 2 });
+      expect(await whereOf({ resource: 'live', executedVersion: '$LATEST' })).toEqual({ ...account, version: IsNull(), alias: 'live' });
+    });
+
+    it('answers no call, and reads none, when what a filter names is not what it ran', async () => {
+      expect(await service.getInvocations('user-1', ID, { limit: 10, offset: 0, resource: '3', executedVersion: '4' })).toEqual({ invocations: [], total: 0 });
+      expect(invocationsRepo.findAndCount).not.toHaveBeenCalled();
     });
   });
 });

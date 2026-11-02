@@ -102,7 +102,7 @@ export class PricingService {
     for (const [index, book] of prices.entries()) {
       const start = book.validFrom > from ? book.validFrom : from;
       const end = prices[index + 1]?.validFrom ?? to;
-      segments.push({ book, functions: await this.usage(accountId, start, end, book), resources: await this.resourceUsage(accountId, start, end) });
+      segments.push({ book, functions: await this.functionUsage(accountId, start, end, book), resources: await this.resourceUsage(accountId, start, end) });
     }
     const pricedFrom = prices[0].validFrom > from ? prices[0].validFrom : from;
     return {
@@ -136,7 +136,7 @@ export class PricingService {
    * apart by whether they ran on provisioned concurrency; and from the
    * minute samples, the minInstances that were ready, and the instances above.
    */
-  private async usage(accountId: string, start: Date, end: Date, book: BookPrices): Promise<FunctionUsage[]> {
+  async functionUsage(accountId: string, start: Date, end: Date, book: BookPrices): Promise<FunctionUsage[]> {
     const calls = await this.books.manager.query<UsageRow[]>(
       `SELECT "function_id" AS "functionId", ${callSums('$4')}
          FROM "usage_records"
@@ -170,6 +170,22 @@ export class PricingService {
   }
 
   /**
+   * The start-up time of each function's billed calls in [start, end) that ran
+   * without provisioned concurrency, in MB-ms: AWS bills it as their duration,
+   * which FF doesn't.
+   */
+  async startUpUsage(accountId: string, start: Date, end: Date): Promise<Map<string, bigint>> {
+    const rows = await this.books.manager.query<Array<{ functionId: string; initMbMs: string }>>(
+      `SELECT "function_id" AS "functionId", sum("init_ms"::bigint * "memory_mb")::text AS "initMbMs"
+         FROM "usage_records"
+        WHERE "account_id" = $1 AND "started_at" >= $2 AND "started_at" < $3 AND ${BILLED_CALL} AND "min_instances" = 0 AND "init_ms" IS NOT NULL
+        GROUP BY "function_id"`,
+      [accountId, start, end],
+    );
+    return new Map(rows.map((row) => [row.functionId, BigInt(row.initMbMs)]));
+  }
+
+  /**
    * The account's databases, buckets, queues and caches in [start, end), as
    * the rater takes them: from their hourly samples, each one's byte-hours and
    * the hours it was sampled in, a cache's memory its plan's; a bucket's
@@ -177,7 +193,7 @@ export class PricingService {
    * requests as SQS bills them; and each domain's or address's mail, its
    * messages' recipients and their attachments, as SES bills them.
    */
-  private async resourceUsage(accountId: string, start: Date, end: Date): Promise<ResourceUsage[]> {
+  async resourceUsage(accountId: string, start: Date, end: Date): Promise<ResourceUsage[]> {
     const databases = await this.books.manager.query<SampleRow[]>(
       `SELECT "database_id" AS "resourceId", sum("size_bytes")::text AS "byteHours", count(*)::text AS "hours", '0' AS "tier1", '0' AS "tier2", '0' AS "requests"
          FROM "database_samples"

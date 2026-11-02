@@ -155,6 +155,28 @@ export function metricsView(window: MetricsWindow, rows: PeriodRow[], instances:
   return view;
 }
 
+/**
+ * The metrics of some of a function's calls, by what they named or what ran
+ * them: the series their usage records measure, each record naming its
+ * version and its alias, and the instances of the Deployment that ran them
+ * when the calls are all a version's, or all $LATEST's, whatever they named:
+ * a version's pods run the calls of every alias that names it, so the calls
+ * an alias or a name kept have no instances of their own. The others name no
+ * version, and a view of some calls has none of them: the four of calls that
+ * don't wait, which are counted by function alone, and the refusals of the
+ * account's rate limit, which come before a call chooses what it runs.
+ */
+export interface CallMetricsView extends Omit<MetricsView, 'metrics'> {
+  metrics: Pick<MetricsView['metrics'], 'Invocations' | 'Errors' | 'Throttles' | 'ColdStarts' | 'Duration'> & Partial<Pick<MetricsView['metrics'], 'Instances'>>;
+}
+
+/** The series of some calls, and their Deployment's instances when given. */
+export function callMetricsView(window: MetricsWindow, rows: PeriodRow[], instances?: InstancesRow[]): CallMetricsView {
+  const { metrics, ...view } = metricsView(window, rows, instances ?? []);
+  const { Invocations, Errors, Throttles, ColdStarts, Duration, Instances } = metrics;
+  return { ...view, metrics: { Invocations, Errors, Throttles, ColdStarts, Duration, ...(instances ? { Instances } : {}) } };
+}
+
 /** A database's metrics have a point an hour: its samples' (ADR 0008). */
 export const DATABASE_PERIOD = 3600;
 

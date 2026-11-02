@@ -4,7 +4,7 @@
  * the counts, the duration's statistics (percentiles interpolated), the
  * throttles of both kinds, the cold starts and the instances, a function's
  * and its account's, its asynchronous calls', quiet periods and the window's
- * edges; a customer's database's, from its hourly samples; a bucket's; a
+ * edges; some of a function's calls, by what they named and what ran them; a customer's database's, from its hourly samples; a bucket's; a
  * queue's, sampled each minute from its messages, with its requests' counts;
  * and a cache's, from its hourly samples, its counts from one to the next.
  *   docker compose up -d --wait postgres && npm run test:db
@@ -15,6 +15,7 @@ import { NotFoundException } from '@nestjs/common';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { CustomerQueues } from '../queues/customer-queues';
 import { QueueSamples } from '../queues/queue-samples.service';
@@ -40,24 +41,36 @@ run('metrics (L2)', () => {
   const query = <T = unknown>(sql: string, parameters?: unknown[]) => db.dataSource.query<T>(sql, parameters);
   const fn = (accountId: string, name: string) =>
     db.dataSource.getRepository(Function).save({ name, accountId, runtime: Runtime.NODEJS, code: 'x', memory: 128, timeout: 5, status: FunctionStatus.ACTIVE });
-  /** A usage record of the function, started at the time. */
-  async function record(f: Function, at: string, status: string, durationMs: number, initMs: number | null = null): Promise<void> {
+  /** A usage record of the function, started at the time: of $LATEST, through no alias, unless `ran` says otherwise. */
+  async function record(
+    f: Function,
+    at: string,
+    status: string,
+    durationMs: number,
+    initMs: number | null = null,
+    ran: { version?: number; alias?: string } = {},
+  ): Promise<void> {
     await query(
-      `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb, duration_ms, billed_ms, init_ms, status)
-       VALUES (gen_random_uuid(), $1, $1, $2, $3, $4, 'nodejs', 128, $5, ceil($5::numeric)::int, $6, $7)`,
-      [at, f.accountId, f.id, f.name, durationMs, initMs, status],
+      `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb, duration_ms, billed_ms, init_ms, status, version, alias)
+       VALUES (gen_random_uuid(), $1, $1, $2, $3, $4, 'nodejs', 128, $5, ceil($5::numeric)::int, $6, $7, $8, $9)`,
+      [at, f.accountId, f.id, f.name, durationMs, initMs, status, ran.version ?? null, ran.alias ?? null],
     );
     n++;
   }
-  const sample = (f: Function, minute: string, instances: number) =>
-    query(`INSERT INTO capacity_samples (function_id, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, $3, $4, 0, 128)`, [f.id, minute, f.accountId, instances]);
+  /** A minute's sample of the function's $LATEST, or of its version. */
+  const sample = (f: Function, minute: string, instances: number, version = 0) =>
+    query(`INSERT INTO capacity_samples (function_id, version, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, $3, $4, $5, 0, 128)`, [
+      f.id,
+      version,
+      minute,
+      f.accountId,
+      instances,
+    ]);
 
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'capacity_samples', 'database_samples', 'bucket_samples', 'storage_request_counts', 'queue_request_counts', 'queue_samples', 'async_event_counts', 'cache_samples']) {
-      await query(`SELECT ff_ensure_month_partition($1, '2026-10-01')`, [table]);
-    }
+    await monthPartitions(db.dataSource, ['2026-10']);
     for (const [id, name] of [[A, 'A'], [B, 'B']]) await db.dataSource.getRepository(Account).save({ id, name, planId: 'beta', status: AccountStatus.ACTIVE });
     metrics = new CustomerMetricsService(db.dataSource);
     f1 = await fn(A, 'f1');
@@ -368,6 +381,60 @@ run('metrics (L2)', () => {
       'Reputation.ComplaintRate': { Average: [0, 0.1] },
     });
     expect(view.timestamps).toEqual([new Date('2026-10-01T08:00:00Z'), new Date('2026-10-01T09:00:00Z')]);
+  });
+
+  it("gives some of a function's calls, by what they named and what ran them, as CloudWatch's Resource and ExecutedVersion: their records' series, and by what ran them alone their pods' instances", async () => {
+    const v = await fn(B, 'versioned');
+    const ran = (version?: number, alias?: string) => ({ version, alias });
+    // The first period: a call of $LATEST, one through an alias of $LATEST, one naming version 1 (a cold start that failed),
+    // and one through live that drew version 1. The second: live draws version 2, once run and once no instance free.
+    await record(v, '2026-10-01T10:00:00Z', 'success', 10);
+    await record(v, '2026-10-01T10:01:00Z', 'success', 20, null, ran(undefined, 'edge'));
+    await record(v, '2026-10-01T10:02:00Z', 'error', 30, 500, ran(1));
+    await record(v, '2026-10-01T10:03:00Z', 'success', 40, null, ran(1, 'live'));
+    await record(v, '2026-10-01T10:06:00Z', 'success', 50, null, ran(2, 'live'));
+    await record(v, '2026-10-01T10:07:00Z', 'throttled', 0, null, ran(2, 'live'));
+    // The rate limit's refusals and calls kept to run later: none names a version.
+    await query(`INSERT INTO rate_limited_invocations (function_id, minute, account_id, count) VALUES ($1, '2026-10-01T10:03:00Z', $2, 4)`, [v.id, B]);
+    // $LATEST's two instances, and version 1's three, its Deployment sampled apart; version 2's one the minute after.
+    await sample(v, '2026-10-01T10:00:00Z', 2);
+    await sample(v, '2026-10-01T10:00:00Z', 3, 1);
+    await sample(v, '2026-10-01T10:06:00Z', 1, 2);
+    const calls = async (filter: { resource?: string; executedVersion?: string }) => {
+      const { metrics: m } = await metrics.forCalls(B, v.id, WINDOW, filter);
+      return { Invocations: m.Invocations, Errors: m.Errors, Throttles: m.Throttles, ColdStarts: m.ColdStarts, Average: m.Duration.Average };
+    };
+
+    expect(await calls({ resource: 'live' })).toEqual({ Invocations: [1, 1, 0], Errors: [0, 0, 0], Throttles: [0, 1, 0], ColdStarts: [0, 0, 0], Average: [40, 50, null] });
+    expect(await calls({ resource: '1' })).toEqual({ Invocations: [1, 0, 0], Errors: [1, 0, 0], Throttles: [0, 0, 0], ColdStarts: [1, 0, 0], Average: [30, null, null] });
+    expect(await calls({ resource: '$LATEST' })).toEqual({ Invocations: [1, 0, 0], Errors: [0, 0, 0], Throttles: [0, 0, 0], ColdStarts: [0, 0, 0], Average: [10, null, null] });
+    // What ran, through an alias or not: $LATEST twice, and version 1 twice, failed once.
+    expect(await calls({ executedVersion: '$LATEST' })).toEqual({ Invocations: [2, 0, 0], Errors: [0, 0, 0], Throttles: [0, 0, 0], ColdStarts: [0, 0, 0], Average: [15, null, null] });
+    expect(await calls({ executedVersion: '1' })).toEqual({ Invocations: [2, 0, 0], Errors: [1, 0, 0], Throttles: [0, 0, 0], ColdStarts: [1, 0, 0], Average: [35, null, null] });
+    // An alias's two versions apart, as a weighted alias's are compared.
+    expect(await calls({ resource: 'live', executedVersion: '2' })).toEqual({ Invocations: [0, 1, 0], Errors: [0, 0, 0], Throttles: [0, 1, 0], ColdStarts: [0, 0, 0], Average: [null, 50, null] });
+    expect((await calls({ resource: 'live', executedVersion: '1' })).Invocations).toEqual([1, 0, 0]);
+    // No call is both; and an alias the function hasn't, or no longer has, has no calls rather than none found.
+    expect((await calls({ resource: '1', executedVersion: '2' })).Invocations).toEqual([0, 0, 0]);
+    expect((await calls({ resource: 'gone' })).Invocations).toEqual([0, 0, 0]);
+
+    // By what ran them alone, the instances of the pods that did; by what they named, none, as a version's pods run every
+    // alias's calls. The rate limit's refusals are the whole view's, and so are all its instances together.
+    const instances = async (filter: { resource?: string; executedVersion?: string }) => (await metrics.forCalls(B, v.id, WINDOW, filter)).metrics.Instances?.Maximum;
+    expect(await instances({ executedVersion: '$LATEST' })).toEqual([2, 0, 0]);
+    expect(await instances({ executedVersion: '1' })).toEqual([3, 0, 0]);
+    expect(await instances({ executedVersion: '2' })).toEqual([0, 1, 0]);
+    expect(await instances({ executedVersion: '3' })).toEqual([0, 0, 0]); // never sampled: no instance
+    expect(Object.keys((await metrics.forCalls(B, v.id, WINDOW, { resource: 'live' })).metrics)).toEqual(['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration']);
+    expect(await instances({ resource: '1' })).toBeUndefined();
+    expect(await instances({ resource: 'live', executedVersion: '1' })).toBeUndefined();
+    const whole = await metrics.forFunction(B, v.id, WINDOW);
+    expect([whole.metrics.Invocations, whole.metrics.Throttles, whole.metrics.Instances.Maximum]).toEqual([
+      [4, 1, 0],
+      [4, 1, 0],
+      [5, 1, 0],
+    ]);
+    await expect(metrics.forCalls(A, v.id, WINDOW, { resource: 'live' })).rejects.toThrow(new NotFoundException(`Function with ID ${v.id} not found`));
   });
 
   it("answers another account's function, and one that doesn't exist, with 404", async () => {

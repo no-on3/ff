@@ -10,7 +10,10 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
+import { AwsEndpoint } from '../common/aws-endpoint';
+import { requestTarget, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
+import { SigningChain, decodeEscapes } from '../common/signature-v4';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { countStorageRequest } from '../plans/rate-limits';
@@ -22,12 +25,13 @@ import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket } from './bucket.entity';
 import { CHECKSUM_ALGORITHMS, isChecksumAlgorithm } from './checksums';
 import { fullBuckets } from './bucket-storage';
-import { S3Error, accessDenied, accountProblem, errorDocument, internalError, invalidAccessKeyId, invalidRequest, noSuchBucket, notImplemented } from './s3-error';
+import { S3Error, accessDenied, accountProblem, errorDocument, expiredToken, internalError, invalidAccessKeyId, invalidRequest, noSuchBucket, notImplemented } from './s3-error';
 import { S3Address, S3Operation, addressOf, operationOf } from './s3-requests';
-import { RequestSignature, SigningChain, UNSIGNED_PAYLOAD, checkSignature, decodeEscapes, readSignature } from './sigv4';
+import { RequestSignature, UNSIGNED_PAYLOAD, checkSignature, readSignature } from './s3-signature';
 import { StoreClient } from './store-client';
 import { reachesBucket } from './key-reach';
-import { ActiveKey, StorageDirectory } from './storage-directory.service';
+import { KeyUses } from './key-uses.service';
+import { ActiveKey, EXPIRED, StorageDirectory } from './storage-directory.service';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { noSuchWebsiteConfiguration, websiteFromXml, websiteXml } from './website';
 import { listBucketsDocument, locationDocument, replacing } from './xml';
@@ -60,20 +64,7 @@ const DOCUMENT_BODIES = new Set(['DeleteObjects', 'CompleteMultipartUpload']);
 /** Operations whose object or part is limited to 5 GiB; PutObject's object, to the plan's maxObjectMb too. */
 const UPLOADS = new Set(['PutObject', 'UploadPart']);
 
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
-
 type Stage = NodeJS.ReadableStream | NodeJS.WritableStream | NodeJS.ReadWriteStream;
-
-/** The request's path and query: an absolute target, as a proxy may send one, without its scheme and host. */
-export function originForm(target: string | undefined): string {
-  if (target?.startsWith('/')) return target;
-  try {
-    const url = new URL(target ?? '');
-    return `${url.pathname}${url.search}`;
-  } catch {
-    return '/';
-  }
-}
 
 /** The query that goes to the store: without the signature's parameters, the checksum a presigned URL signs, nor the SDKs' x-id. */
 export function queryForStore(rawQuery: string): string {
@@ -137,6 +128,10 @@ interface Exchange {
 }
 
 /** S3's event for each write that creates an object, by the operation, without its s3: prefix. */
+/** How many times a created object's size and ETag are asked of the store, and the wait before the second, longer for each next. */
+const MEASURE_ATTEMPTS = 3;
+const MEASURE_WAIT_MS = 50;
+
 const CREATED_EVENTS: Record<string, string> = {
   PutObject: 'ObjectCreated:Put',
   CopyObject: 'ObjectCreated:Copy',
@@ -208,6 +203,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     private readonly notifications: BucketNotificationsService,
     private readonly bucketEvents: BucketEvents,
     private readonly websites: BucketWebsitesService,
+    private readonly keyUses: KeyUses,
   ) {
     const base = new URL(config.getOrThrow<string>('storage.base'));
     this.host = base.hostname;
@@ -251,10 +247,7 @@ export class S3FrontDoor implements OnModuleDestroy {
 
   /** Answers one request; never throws, as nothing would catch it. */
   private async serve(request: IncomingMessage, response: ServerResponse, expectsContinue: boolean): Promise<void> {
-    const target = originForm(request.url);
-    const at = target.indexOf('?');
-    const rawPath = at < 0 ? target : target.slice(0, at);
-    const rawQuery = at < 0 ? '' : target.slice(at + 1);
+    const { rawPath, rawQuery } = requestTarget(request.url);
     const exchange: Exchange = {
       id: randomBytes(8).toString('hex').toUpperCase(),
       request,
@@ -318,6 +311,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     const signature = readSignature(request.headers, query);
     if (!signature) throw accessDenied();
     const key = await this.directory.key(signature.accessKeyId);
+    if (key === EXPIRED) throw expiredToken();
     if (!key) throw invalidAccessKeyId();
     const chain = checkSignature({ method, rawPath, rawQuery, rawHeaders: request.rawHeaders }, signature, key.secret, new Date());
     this.directory.touch(key.id);
@@ -326,6 +320,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     const operation = operationOf(method, address, query, request.headers);
     if (operation.name === 'NotImplemented') throw notImplemented();
     if (operation.name === 'ListBuckets') {
+      this.used(key, operation.name, '');
       const buckets = (await this.directory.bucketsOf(key.accountId)).filter((bucket) => reachesBucket(key, bucket.name));
       return this.document(exchange, 200, listBucketsDocument(key.accountId, buckets, this.region));
     }
@@ -333,6 +328,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     exchange.bucket = bucket;
     exchange.operation = operation;
     if (operation.writes && key.readOnly) throw accessDenied();
+    this.used(key, operation.name, bucket.name);
     // A bucket's notifications are set whatever its room or the account's credit, as other settings are.
     if (operation.name === 'GetBucketNotificationConfiguration') return this.document(exchange, 200, rulesXml(bucket.notifications ?? []));
     if (operation.name === 'PutBucketNotificationConfiguration') return this.putNotifications(exchange, signature, chain, key, bucket, operation, plan);
@@ -403,7 +399,14 @@ export class S3FrontDoor implements OnModuleDestroy {
     const slash = path.indexOf('/');
     if (slash <= 0 || slash === path.length - 1) throw invalidRequest('The x-amz-copy-source header is not <bucket>/<key>');
     const bucket = await this.bucketFor(decodeEscapes(path.slice(0, slash)), key);
+    // A copy reads its source, as IAM's s3:GetObject on it.
+    this.used(key, 'GetObject', bucket.name);
     return `/${bucket.storeName}/${path.slice(slash + 1)}`;
+  }
+
+  /** What the key used, by S3's name for the operation, noted for the export's roles: a bucket, or '' for the account's. */
+  private used(key: ActiveKey, operation: string, bucket: string): void {
+    this.keyUses.note({ key, service: AwsEndpoint.S3, resource: bucket, operation });
   }
 
   /** The request to the store, its body checked on the way, and the store's answer back. */
@@ -525,16 +528,29 @@ export class S3FrontDoor implements OnModuleDestroy {
     }
   }
 
-  /** A created object's size and ETag, without its quotes, as the store has them now; nothing it can't say. */
+  /**
+   * A created object's size and ETag, without its quotes, as the store has
+   * them; nothing it can't say. The store may not show an object yet when it
+   * has just answered its write, as SeaweedFS once didn't here: it is asked
+   * again, a little later each time, before the event goes without them.
+   */
   private async measure(storePath: string): Promise<{ size?: number; eTag?: string }> {
-    const head = this.store.send('HEAD', storePath, '', {});
-    head.request.end();
-    const answer = await head.response;
-    answer.resume();
-    if (answer.statusCode !== 200) return {};
-    const size = Number(single(answer.headers['content-length']));
-    const eTag = single(answer.headers.etag)?.replace(/"/g, '');
-    return { ...(Number.isSafeInteger(size) ? { size } : {}), ...(eTag ? { eTag } : {}) };
+    for (let attempt = 1; ; attempt++) {
+      const head = this.store.send('HEAD', storePath, '', {});
+      head.request.end();
+      const answer = await head.response;
+      answer.resume();
+      if (answer.statusCode === 200) {
+        const size = Number(single(answer.headers['content-length']));
+        const eTag = single(answer.headers.etag)?.replace(/"/g, '');
+        return { ...(Number.isSafeInteger(size) ? { size } : {}), ...(eTag ? { eTag } : {}) };
+      }
+      if (attempt === MEASURE_ATTEMPTS) {
+        this.logger.warn(`The store answered ${answer.statusCode} to ${MEASURE_ATTEMPTS} HEADs of ${storePath} after its write: its event goes without its size and ETag`);
+        return {};
+      }
+      await new Promise((resolve) => setTimeout(resolve, MEASURE_WAIT_MS * attempt));
+    }
   }
 
   /**

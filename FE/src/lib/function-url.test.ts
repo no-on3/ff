@@ -63,7 +63,7 @@ describe('a function URL, to read', () => {
   it('says who may call it, and how', () => {
     expect([authTypeText('NONE'), curlExample({ functionUrl: address, authType: 'NONE' })]).toEqual(['Anyone may call it.', `curl ${address}`]);
     expect([authTypeText('AWS_IAM'), curlExample({ functionUrl: address, authType: 'AWS_IAM' })]).toEqual([
-      'Only callers with an API key of this account that has functions:invoke.',
+      'Only callers with an access key of this account that may invoke it, signing for lambda, or an API key of it that has functions:invoke.',
       `curl -H 'Authorization: Bearer ffk_…' ${address}`,
     ]);
   });

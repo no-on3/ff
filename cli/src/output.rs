@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn an_error_reads_as_text_with_its_request_id_and_color_only_when_asked() {
         assert_eq!(error_text(&refused(), false), "error: The function failed to load\nrequest ID: 7d1e5c1a");
-        assert_eq!(error_text(&Error::new(Kind::Usage, "Bad JSON"), false), "error: Bad JSON");
+        assert_eq!(error_text(&Error::usage("Bad JSON"), false), "error: Bad JSON");
         assert!(error_text(&refused(), true).starts_with("\x1b[1;31merror:\x1b[0m The function"));
     }
 
@@ -100,6 +100,6 @@ mod tests {
             error_document(&refused()),
             json!({ "error": { "message": "The function failed to load", "exitCode": 3, "status": 400, "requestId": "7d1e5c1a" } })
         );
-        assert_eq!(error_document(&Error::new(Kind::Usage, "Bad JSON"))["error"]["requestId"], serde_json::Value::Null);
+        assert_eq!(error_document(&Error::usage("Bad JSON"))["error"]["requestId"], serde_json::Value::Null);
     }
 }

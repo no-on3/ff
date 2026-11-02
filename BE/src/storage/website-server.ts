@@ -7,11 +7,12 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { describeError } from '../common/describe-error';
+import { single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { PlansService } from '../plans/plans.service';
 import { Bucket } from './bucket.entity';
 import { servedContentType } from './content-types';
-import { uriEncode } from './sigv4';
+import { uriEncode } from '../common/signature-v4';
 import { SiteTransfer } from './site-transfer.service';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageRequestCountsService } from './storage-request-counts.service';
@@ -25,8 +26,6 @@ const PASSED = ['if-match', 'if-none-match', 'if-modified-since', 'if-unmodified
 
 /** The store's answer headers a browser gets: the object's own, its validators and its range. */
 const ANSWERED = /^(content-length|content-range|content-encoding|content-language|content-disposition|cache-control|expires|etag|last-modified|accept-ranges)$/;
-
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
 
 /** A site's answer of its own, as S3's website endpoint writes its errors: a small HTML page naming the code. */
 class SiteError extends Error {

@@ -133,10 +133,7 @@ pub fn history(name: &str, limit: u32, context: &Context) -> Result<(), Error> {
 
 pub fn scale(name: &str, min: Option<u32>, max: Option<u32>, context: &Context) -> Result<(), Error> {
     if min.is_none() && max.is_none() {
-        return Err(Error::new(
-            Kind::Usage,
-            "Say what changes: --min, the instances kept running, and --max, the most it runs",
-        ));
+        return Err(Error::usage("Say what changes: --min, the instances kept running, and --max, the most it runs"));
     }
     let client = client(context)?;
     let function = function_named(&client, name)?;
@@ -160,10 +157,7 @@ pub fn confirmed(command: &str, question: &str, yes: bool) -> Result<bool, Error
         return Ok(true);
     }
     if !io::stdin().is_terminal() {
-        return Err(Error::new(
-            Kind::Usage,
-            format!("{command} asks first, and there is no terminal to ask in: say --yes"),
-        ));
+        return Err(Error::usage(format!("{command} asks first, and there is no terminal to ask in: say --yes")));
     }
     eprint!("{question} [y/N] ");
     let _ = io::stderr().flush();

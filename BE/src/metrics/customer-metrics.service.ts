@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import {
   AsyncRow,
   BucketMetricsView,
+  CallMetricsView,
   CacheMetricsView,
   DatabaseMetricsView,
   EmailMetricsView,
@@ -15,12 +16,16 @@ import {
   SiteMetricsView,
   bucketMetricsView,
   cacheMetricsView,
+  callMetricsView,
   databaseMetricsView,
   emailMetricsView,
   metricsView,
   queueMetricsView,
   siteMetricsView,
 } from './customer-metrics';
+import { functionNotFound } from '../functions/function-not-found';
+import { CallFilter, KeptCalls, callsKept } from '../functions/qualifier';
+import { LATEST_SAMPLED } from '../usage/capacity-sample.entity';
 
 /** A call that ran: measured by the runtime, and so in the duration's statistics. */
 const RAN = "('success', 'error', 'timeout')";
@@ -31,6 +36,32 @@ interface Scope {
   /** The SQL that picks the scope's rows of a table aliased `t`, with its parameters from $4. */
   where: string;
   parameters: unknown[];
+}
+
+/** A function's scope. */
+function functionScope(accountId: string, functionId: string): Scope {
+  return { where: 't."account_id" = $4 AND t."function_id" = $5', parameters: [accountId, functionId] };
+}
+
+/** A function's Deployment's capacity samples: $LATEST's, or a version's. */
+function deploymentScope(accountId: string, functionId: string, version: number | null): Scope {
+  const scope = functionScope(accountId, functionId);
+  scope.parameters.push(version ?? LATEST_SAMPLED);
+  scope.where += ` AND t."version" = $${3 + scope.parameters.length}`;
+  return scope;
+}
+
+/** A function's calls whose records hold what `kept` says, in a table with their version and alias. */
+function callsScope(accountId: string, functionId: string, kept: KeptCalls): Scope {
+  const scope = functionScope(accountId, functionId);
+  for (const [column, value] of Object.entries(kept) as Array<[keyof KeptCalls, number | string | null]>) {
+    if (value === null) scope.where += ` AND t."${column}" IS NULL`;
+    else {
+      scope.parameters.push(value);
+      scope.where += ` AND t."${column}" = $${3 + scope.parameters.length}`;
+    }
+  }
+  return scope;
 }
 
 /**
@@ -48,9 +79,31 @@ export class CustomerMetricsService {
 
   /** A function's, for its own account only: another account's function is not found. */
   async forFunction(accountId: string, functionId: string, window: MetricsWindow): Promise<MetricsView> {
+    await this.assertFunction(accountId, functionId);
+    return this.metrics(window, functionScope(accountId, functionId));
+  }
+
+  /**
+   * Some of a function's calls', by what they named and what ran them, as
+   * CloudWatch's Resource and ExecutedVersion dimensions pick Lambda's: the
+   * series their usage records measure, and, by what ran them alone, the
+   * instances of the Deployment that did (CallMetricsView). A version or an
+   * alias the function no longer has still has its calls.
+   */
+  async forCalls(accountId: string, functionId: string, window: MetricsWindow, filter: CallFilter): Promise<CallMetricsView> {
+    await this.assertFunction(accountId, functionId);
+    const kept = callsKept(filter);
+    if (!kept) return callMetricsView(window, []);
+    const rows = await this.calls(window, callsScope(accountId, functionId, kept));
+    // By what ran them alone: what they named keeps calls of pods that run others too.
+    const ranBy = filter.resource === undefined ? kept.version : undefined;
+    return callMetricsView(window, rows, ranBy === undefined ? undefined : await this.instances(window, deploymentScope(accountId, functionId, ranBy)));
+  }
+
+  /** Another account's function is not found. */
+  private async assertFunction(accountId: string, functionId: string): Promise<void> {
     const found = await this.dataSource.query<unknown[]>('SELECT 1 FROM "functions" WHERE "id" = $1 AND "account_id" = $2', [functionId, accountId]);
-    if (found.length === 0) throw new NotFoundException(`Function with ID ${functionId} not found`);
-    return this.metrics(window, { where: 't."account_id" = $4 AND t."function_id" = $5', parameters: [accountId, functionId] });
+    if (found.length === 0) throw functionNotFound(functionId);
   }
 
   /** The account's, all its functions together, those deleted since included. */

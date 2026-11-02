@@ -32,7 +32,7 @@ Each connection gets its own thread, started with the low-level `_thread` call. 
 
 ### Stopping
 
-Kubernetes stops the runtime with `SIGTERM` to replace or remove its pod: at a deploy's rollout, a scale-down, a key's renewal. The runtime stops accepting connections, once its accept loop has seen the signal (within half a second), and answers the call it is running. Every other call, one waiting its turn or one that comes on a connection still open, it refuses with `503 Runtime is shutting down` and `X-FF-Not-Run: shutting-down`: the call never ran, and the backend sends it to another instance. Each answer closes its connection (`Connection: close`), so that the caller's next call opens a new one, which the Service gives a ready pod. The runtime closes no other connection itself, since a call could be on its way on it and would be lost: the callers close them, the backend each one it hasn't used for 5 seconds. The runtime exits with status 0 once nothing runs and no connection is open, or, at the latest, a second after the function's timeout or those 5 seconds, whichever is longer; the pod's grace period is the timeout and 5 seconds. Through the cluster API's proxy, development's path, connections stay open 90 seconds, so there the runtime waits until its limit.
+Kubernetes stops the runtime to replace or remove its pod: at a deploy's rollout, a scale-down, a key's renewal. It takes the pod out of its Service first, and waits 5 seconds (the pod's `preStop`) while each node's rules follow, a new connection still reaching it meanwhile, which the runtime answers as before; then it sends `SIGTERM`. The runtime stops accepting connections, once its accept loop has seen the signal (within half a second), and answers the call it is running. Every other call, one waiting its turn or one that comes on a connection still open, it refuses with `503 Runtime is shutting down` and `X-FF-Not-Run: shutting-down`: the call never ran, and the backend sends it to another instance. Each answer closes its connection (`Connection: close`), so that the caller's next call opens a new one, which the Service gives a ready pod. The runtime closes no other connection itself, since a call could be on its way on it and would be lost: the callers close them, the backend each one it hasn't used for 5 seconds. The runtime exits with status 0 once nothing runs and no connection is open, or, at the latest, a second after the function's timeout or those 5 seconds, whichever is longer; the pod's grace period is those first 5 seconds, the timeout and 5 more. Through the cluster API's proxy, development's path, connections stay open 90 seconds, so there the runtime waits until its limit.
 
 ## HTTP protocol
 
@@ -102,6 +102,10 @@ boto3 isn't in the image, as it is in Lambda's Python runtimes: name it in the p
 ### Queues, with boto3
 
 With the same key, the pods get `AWS_ENDPOINT_URL_SQS`, FF's SQS endpoint inside the cluster, so `boto3.client("sqs")` reaches the account's queues as it is ([ADR 0010](../../docs/adr/0010-queue.md)). boto3 sends every request to that endpoint, whatever the host of a queue's URL: a URL from outside (`https://sqs.<domain>/…`, as clients outside the cluster get it) works as it is, FF reading a queue's URL by its path.
+
+### Functions, with boto3
+
+With the same key, the pods get `AWS_ENDPOINT_URL_LAMBDA`, FF's Lambda endpoint inside the cluster, so `boto3.client("lambda")` sends there as it is ([ADR 0014](../../docs/adr/0014-lambda-api.md)). A function's own key invokes its account's functions, as a role allowed to invoke them does, and does nothing else; an operation FF doesn't offer yet is refused in Lambda's words (`UnknownOperationException`).
 
 ## Memory
 

@@ -11,10 +11,12 @@ import {
   formatBytes,
   formatMegabytes,
   isAccountId,
+  keyReach,
   ownersOf,
   ownersSee,
   queueMessagesLabel,
   queueStorageLabel,
+  codeStorageLabel,
   statusLabel,
   storageLabel,
 } from './accounts';
@@ -73,6 +75,7 @@ describe("an account's databases, buckets and queues, to read", () => {
       '0 waiting, 2 delayed',
     ]);
     expect(queueStorageLabel({ bytes: 2048, limitMb: 100 })).toBe("2 KB of the plan's 100 MB, its functions' calls that don't wait among them; past it, sends and those calls are refused");
+    expect(codeStorageLabel({ bytes: 3_670_016, limitMb: 5120 })).toBe("3.5 MB of the plan's 5,120 MB, the packages its functions and their versions name, each once; past it, new code is refused");
   });
 
   it("says how full the buckets are together against the plan's storage, full being when uploads wait", () => {
@@ -80,6 +83,23 @@ describe("an account's databases, buckets and queues, to read", () => {
       "Under 80% of the plan's storage",
       "80% or more of the plan's storage",
       "Full: they hold all of the plan's storage, and uploads wait for room",
+    ]);
+  });
+
+  it('says what each access key reaches, as the console does: everything and the mail when it names nothing, else those it names, functions at their level', () => {
+    const none = { buckets: null, queues: null, readOnly: false, functions: null, functionAccess: null };
+    expect([
+      keyReach(none),
+      keyReach({ ...none, readOnly: true }),
+      keyReach({ ...none, buckets: ['photos'], queues: ['orders', 'invoices'], readOnly: true }),
+      keyReach({ ...none, functions: ['*'], functionAccess: 'invoke', readOnly: true }),
+      keyReach({ ...none, queues: ['orders'], functions: ['orders', 'thumbnails'], functionAccess: 'write' }),
+    ]).toEqual([
+      'Every bucket and queue, and the mail',
+      'Every bucket and queue, and the mail, read-only',
+      'Buckets photos; queues orders, invoices, read-only',
+      'Every function, to invoke',
+      'Queues orders; functions orders, thumbnails, to write',
     ]);
   });
 });

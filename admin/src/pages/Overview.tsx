@@ -105,7 +105,7 @@ const Overview: React.FC<{ email: string | undefined }> = ({ email }) => {
       <section aria-label="Invoices" className="card space-y-3">
         <h2 className="text-lg font-semibold">Invoices</h2>
         <dl className="space-y-2">
-          <Fact label={`Issued in ${overview.month}`}>
+          <Fact label={`Issued in ${invoices.month}`}>
             {count(invoices.issued)} invoice{invoices.issued === 1 ? '' : 's'}, {count(invoices.creditNotes)} credit note{invoices.creditNotes === 1 ? '' : 's'}
           </Fact>
           <Fact label={`${invoices.toIssue.month}'s to issue`}>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Alarm } from '../services/api';
-import { STATE_INFO, conditionText, emptyForm, firingCount, formFromAlarm, formProblem, metricsFor, scopeOf, toBody, withMetric, withScope } from './alarms';
+import { STATE_INFO, conditionText, emptyForm, firingCount, formFromAlarm, formProblem, metricsFor, metricsOf, scopeOf, toBody, withCalls, withMetric, withScope } from './alarms';
 
 const FN = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
 const DB = '7c1d9e2a-4b3f-4e8d-9a6c-5b4a3c2d1e0f';
@@ -14,6 +14,8 @@ describe('the alarm form', () => {
       bucketName: null,
       queueName: null,
       cacheName: null,
+      resource: null,
+      executedVersion: null,
       metric: 'Errors',
       statistic: 'Sum',
       period: 60,
@@ -153,6 +155,24 @@ describe('the alarm form', () => {
     ]);
     // A function's scope takes it to that function's own metrics.
     expect(withScope(bounces, FN)).toMatchObject({ functionId: FN, metric: 'Errors' });
+  });
+
+  it("watches some of a function's calls, by what they named or what ran them, with the metrics they have", () => {
+    const live = withCalls({ ...emptyForm(FN), name: 'Live errors' }, 'live|');
+    expect(toBody(live)).toMatchObject({ functionId: FN, resource: 'live', executedVersion: null, metric: 'Errors' });
+    // The instances by what ran the calls alone; the calls that don't wait are counted by function alone.
+    expect(metricsOf(live)).toEqual(['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration']);
+    expect(metricsOf(withCalls(live, '|3'))).toEqual(['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration', 'Instances']);
+    expect(metricsOf(withCalls(live, '|'))).toContain('AsyncEventsDropped');
+    // A metric the calls haven't gives way to their errors.
+    const dropped = withMetric(emptyForm(FN), 'AsyncEventsDropped');
+    expect([withCalls(dropped, 'live|').metric, withCalls(withMetric(emptyForm(FN), 'Instances'), '|3').metric]).toEqual(['Errors', 'Instances']);
+    expect(formProblem({ ...dropped, name: 'Dropped', resource: 'live' })).toBe("AsyncEventsDropped isn't kept for some of a function's calls: watch every call");
+    // Another scope starts again from every call; the function's own keeps its pick.
+    expect([withScope(live, '').resource, withScope(live, 'database:d-1').resource, withScope(live, FN).resource]).toEqual(['', '', 'live']);
+    expect(toBody({ ...withMetric(live, 'Balance'), name: 'Money' })).toMatchObject({ functionId: null, resource: null, executedVersion: null });
+    const alarm = { ...toBody(withCalls(live, 'live|3')), id: 'a-1', state: 'OK', stateReason: null, stateChangedAt: null, evaluatedAt: null, createdAt: '', updatedAt: '' } as Alarm;
+    expect(formFromAlarm(alarm)).toMatchObject({ resource: 'live', executedVersion: '3' });
   });
 
   it('changes scope with a metric the scope has: a database to the account, a function to a database', () => {

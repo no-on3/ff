@@ -27,8 +27,17 @@ const REGULAR_FILE_0644 = 0o100644 * 0x10000;
 
 export function inlinePackage(code: string, runtime: Runtime): InlinePackage {
   const file = codeFileName(runtime);
-  const name = Buffer.from(file, 'utf8');
   const data = Buffer.from(code, 'utf8');
+  const zip = oneFileZip(file, data);
+  return { zip, codeSha256: createHash('sha256').update(zip).digest('base64'), file, unpackedSize: data.length };
+}
+
+/**
+ * A zip of one file at its root, as described above: the same name and bytes make the same zip. Inline code's
+ * package, and the JavaScript an export gives Lambda for it (GET /functions/:id/code).
+ */
+export function oneFileZip(file: string, data: Buffer): Buffer {
+  const name = Buffer.from(file, 'utf8');
   const crc = crc32(data);
 
   const local = Buffer.alloc(30);
@@ -67,6 +76,5 @@ export function inlinePackage(code: string, runtime: Runtime): InlinePackage {
   end.writeUInt32LE(central.length + name.length, 12);
   end.writeUInt32LE(local.length + name.length + data.length, 16);
 
-  const zip = Buffer.concat([local, name, data, central, name, end]);
-  return { zip, codeSha256: createHash('sha256').update(zip).digest('base64'), file, unpackedSize: data.length };
+  return Buffer.concat([local, name, data, central, name, end]);
 }

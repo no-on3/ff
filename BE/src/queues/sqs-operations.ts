@@ -39,6 +39,8 @@ export interface Caller {
   /** Who the audit log names for the caller's changes, and from where; by default, the request's caller, as FF's API's. */
   actor?: Actor;
   ip?: string;
+  /** What the caller's key used, by SQS's name for the operation: a queue, or '' for the account's; noted at the SQS endpoint alone. */
+  used?: (operation: string, queue: string) => void;
 }
 
 type Input = Record<string, unknown>;
@@ -151,6 +153,7 @@ export class SqsOperations {
     } finally {
       // Each request that named a queue there, answered or refused, whichever way it came; ListQueues names none.
       const { queue } = usage;
+      if (queue || operation === 'ListQueues') caller.used?.(operation, queue?.name ?? '');
       if (queue) {
         this.counts.count({
           queueId: queue.id,

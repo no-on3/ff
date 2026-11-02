@@ -7,36 +7,38 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::function_named;
+use crate::api::types::{function_named, name_in_arn, qualified_name_in_arn, split_qualified};
 use crate::api::{Call, Client};
-use crate::error::{Error, Kind};
+use crate::error::Error;
 use crate::table::{table, time};
 
 /// Lambda's ScalingConfig.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ScalingConfig {
-    maximum_concurrency: u32,
+pub(super) struct ScalingConfig {
+    pub(super) maximum_concurrency: u32,
 }
 
 /// A mapping, as the API answers it, in Lambda's names.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct EventSource {
+pub(super) struct EventSource {
     uuid: String,
-    event_source_arn: String,
-    function_arn: String,
-    batch_size: u32,
-    maximum_batching_window_in_seconds: u32,
-    function_response_types: Vec<String>,
-    scaling_config: Option<ScalingConfig>,
-    state: String,
+    pub(super) event_source_arn: String,
+    pub(super) function_arn: String,
+    pub(super) batch_size: u32,
+    pub(super) maximum_batching_window_in_seconds: u32,
+    pub(super) function_response_types: Vec<String>,
+    pub(super) scaling_config: Option<ScalingConfig>,
+    pub(super) state: String,
     state_transition_reason: String,
     last_modified: String,
 }
 
 /// What `add` and `update` set, as their flags give them.
 pub struct Settings<'a> {
+    /// The version or the alias that reads the queue, `$LATEST` for the function as it is; None to leave it.
+    pub qualifier: Option<String>,
     pub batch_size: Option<u32>,
     pub batching_window: Option<&'a str>,
     /// Some(true) for ReportBatchItemFailures, Some(false) for none, None to leave it.
@@ -46,18 +48,12 @@ pub struct Settings<'a> {
     pub enabled: Option<bool>,
 }
 
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
-
-/// The name an ARN ends with: a queue's, or a function's.
-fn name_of(arn: &str) -> &str {
-    arn.rsplit(':').next().unwrap_or(arn)
-}
-
 /// The body the flags give, checked before any call, by Lambda's names.
 fn body_of(settings: &Settings) -> Result<Map<String, Value>, Error> {
     let mut body = Map::new();
+    if let Some(qualifier) = &settings.qualifier {
+        body.insert("qualifier".into(), json!(super::versions::qualifier_named(qualifier)));
+    }
     if let Some(size) = settings.batch_size {
         body.insert("batchSize".into(), json!(size));
     }
@@ -101,8 +97,8 @@ fn text(mapping: &EventSource) -> String {
     let state = if mapping.state == "Enabled" { "reading" } else { "disabled: nothing read" };
     format!(
         "{} reads the queue {}: batches of {} at most, {window}, {failures}, {concurrency}; {state} ({})",
-        name_of(&mapping.function_arn),
-        name_of(&mapping.event_source_arn),
+        qualified_name_in_arn(&mapping.function_arn),
+        name_in_arn(&mapping.event_source_arn),
         mapping.batch_size,
         mapping.uuid
     )
@@ -114,8 +110,8 @@ fn rows(mappings: &[EventSource]) -> String {
         .map(|mapping| {
             vec![
                 mapping.uuid.clone(),
-                name_of(&mapping.event_source_arn).to_owned(),
-                name_of(&mapping.function_arn).to_owned(),
+                name_in_arn(&mapping.event_source_arn).to_owned(),
+                qualified_name_in_arn(&mapping.function_arn).to_owned(),
                 mapping.batch_size.to_string(),
                 format!("{}s", mapping.maximum_batching_window_in_seconds),
                 if mapping.function_response_types.is_empty() { "batch" } else { "item" }.to_owned(),
@@ -144,7 +140,9 @@ fn checked_uuid(uuid: &str) -> Result<&str, Error> {
     if is_uuid(uuid) {
         Ok(uuid)
     } else {
-        Err(usage(format!("\"{uuid}\" is no event source mapping's ID: a UUID, as `ff event-sources list` shows them")))
+        Err(Error::usage(format!(
+            "\"{uuid}\" is no event source mapping's ID: a UUID, as `ff event-sources list` shows them"
+        )))
     }
 }
 
@@ -154,9 +152,22 @@ fn queue_arn(client: &Client, queue: &str) -> Result<String, Error> {
     Ok(found["arn"].as_str().unwrap_or_default().to_owned())
 }
 
+/// A function named as Lambda's CreateEventSourceMapping takes it, `orders-worker:live`, or with `--qualifier`: one
+/// or the other, as two could say different things.
+fn reader<'a>(function: &'a str, settings: &Settings) -> Result<(&'a str, Option<String>), Error> {
+    match (split_qualified(function), &settings.qualifier) {
+        ((_, Some(_)), Some(_)) => {
+            Err(Error::usage(format!("{function} names its version or alias, and --qualifier another: name it once")))
+        }
+        ((name, Some(qualifier)), None) => Ok((name, Some(qualifier.to_owned()))),
+        ((name, None), qualifier) => Ok((name, qualifier.clone())),
+    }
+}
+
 pub fn add(queue: &str, function: &str, settings: &Settings, context: &Context) -> Result<(), Error> {
     let queue = super::queues::checked_name(queue)?;
-    let mut body = body_of(settings)?;
+    let (function, qualifier) = reader(function, settings)?;
+    let mut body = body_of(&Settings { qualifier, ..*settings })?;
     let client = Client::new(&context.settings()?)?;
     let target = function_named(&client, function)?;
     body.insert("eventSourceArn".into(), json!(queue_arn(&client, queue)?));
@@ -177,7 +188,7 @@ pub fn list(function: Option<&str>, queue: Option<&str>, context: &Context) -> R
         None => client.json(&Call::get("/event-sources"))?,
     };
     if let Some(queue) = queue {
-        mappings.retain(|mapping| name_of(&mapping.event_source_arn) == queue);
+        mappings.retain(|mapping| name_in_arn(&mapping.event_source_arn) == queue);
     }
     context.out.result(&mappings, || {
         if mappings.is_empty() {
@@ -198,9 +209,9 @@ pub fn update(uuid: &str, settings: &Settings, context: &Context) -> Result<(), 
     let uuid = checked_uuid(uuid)?;
     let body = body_of(settings)?;
     if body.is_empty() {
-        return Err(usage(
-            "Say what changes: --batch-size, --batching-window, --report-batch-item-failures or --no-report-batch-item-failures, \
-             --max-concurrency or --no-max-concurrency, --enable or --disable",
+        return Err(Error::usage(
+            "Say what changes: --qualifier, --batch-size, --batching-window, --report-batch-item-failures or \
+             --no-report-batch-item-failures, --max-concurrency or --no-max-concurrency, --enable or --disable",
         ));
     }
     let client = Client::new(&context.settings()?)?;
@@ -227,9 +238,11 @@ pub fn remove(uuid: &str, yes: bool, context: &Context) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend_source::{class_fields, sorted, sorted_keys};
 
     fn settings() -> Settings<'static> {
         Settings {
+            qualifier: None,
             batch_size: None,
             batching_window: None,
             report_batch_item_failures: None,
@@ -257,6 +270,7 @@ mod tests {
     #[test]
     fn the_flags_give_lambdas_settings_and_a_window_is_held_to_its_range_first() {
         let given = Settings {
+            qualifier: Some("latest".into()),
             batch_size: Some(100),
             batching_window: Some("5s"),
             report_batch_item_failures: Some(true),
@@ -265,7 +279,7 @@ mod tests {
         };
         assert_eq!(
             Value::Object(body_of(&given).unwrap()),
-            json!({ "batchSize": 100, "maximumBatchingWindowInSeconds": 5, "functionResponseTypes": ["ReportBatchItemFailures"], "scalingConfig": { "maximumConcurrency": 2 }, "enabled": false })
+            json!({ "qualifier": "$LATEST", "batchSize": 100, "maximumBatchingWindowInSeconds": 5, "functionResponseTypes": ["ReportBatchItemFailures"], "scalingConfig": { "maximumConcurrency": 2 }, "enabled": false })
         );
         let removing = Settings { report_batch_item_failures: Some(false), max_concurrency: Some(None), ..settings() };
         assert_eq!(
@@ -278,6 +292,19 @@ mod tests {
             "--batching-window takes whole seconds from 0s to 5m, such as 30s, 15m or 4d"
         );
         assert!(body_of(&settings()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn what_reads_the_queue_is_named_once_after_a_colon_or_with_qualifier() {
+        let given = |qualifier: Option<&str>| Settings { qualifier: qualifier.map(str::to_owned), ..settings() };
+        assert_eq!(reader("orders-worker:live", &given(None)).unwrap(), ("orders-worker", Some("live".to_owned())));
+        assert_eq!(reader("orders-worker", &given(Some("3"))).unwrap(), ("orders-worker", Some("3".to_owned())));
+        assert_eq!(reader("orders-worker", &given(None)).unwrap(), ("orders-worker", None));
+        let twice = reader("orders-worker:live", &given(Some("3"))).unwrap_err();
+        assert_eq!(
+            twice.message,
+            "orders-worker:live names its version or alias, and --qualifier another: name it once"
+        );
     }
 
     #[test]
@@ -317,17 +344,6 @@ mod tests {
     #[test]
     fn what_ff_reads_has_the_apis_fields() {
         let source = include_str!("../../../BE/src/event-sources/dto/event-source.dto.ts");
-        let body = &source[source.find("export class EventSourceView {").unwrap()..];
-        let mut fields: Vec<&str> = body[..body.find("\n}").unwrap()]
-            .lines()
-            .filter_map(|line| line.strip_prefix("  "))
-            .filter(|line| !line.starts_with(['@', ' ', '}', '/', '*', ')']))
-            .filter_map(|line| line.split([':', '?']).next())
-            .collect();
-        fields.sort();
-        let mut ours: Vec<String> =
-            serde_json::to_value(mapping()).unwrap().as_object().unwrap().keys().cloned().collect();
-        ours.sort();
-        assert_eq!(ours, fields);
+        assert_eq!(sorted_keys(&mapping()), sorted(class_fields(source, "EventSourceView")));
     }
 }

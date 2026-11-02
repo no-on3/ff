@@ -9,7 +9,12 @@ export const LABELS = {
   functionId: 'ff.dev/function-id',
   runtime: 'ff.dev/runtime',
   accountHash: 'ff.dev/account-hash',
+  /** The version a function's pods run: its number, or LATEST_VERSION once the function has versions (ADR 0015). */
+  version: 'ff.dev/version',
 } as const;
+
+/** The version label of $LATEST's pods once their function has a version: a label's value can't hold the "$" of $LATEST. */
+export const LATEST_VERSION = 'latest';
 
 export const ANNOTATIONS = {
   accountId: 'ff.dev/account-id',
@@ -38,6 +43,33 @@ export function functionResourceName(functionId: string): string {
   const id = functionId.toLowerCase();
   if (!FUNCTION_ID.test(id)) throw new Error(`Function ID "${functionId}" cannot be used in a Kubernetes name`);
   return `fn-${id}`;
+}
+
+/** A version's Deployment and Service: its function's, then its number. */
+export function versionResourceName(functionId: string, version: number): string {
+  return `${functionResourceName(functionId)}-v${version}`;
+}
+
+/** The Deployment and Service of what a workload runs: a version's, or $LATEST's. */
+export function workloadResourceName(fn: { id: string; version?: number }): string {
+  return fn.version === undefined ? functionResourceName(fn.id) : versionResourceName(fn.id, fn.version);
+}
+
+/** The version label of a workload's pods: its number; for $LATEST, LATEST_VERSION once its function has a version, else none. */
+export function versionLabel(fn: { version?: number; lastVersion?: number }): string | undefined {
+  if (fn.version !== undefined) return String(fn.version);
+  return (fn.lastVersion ?? 0) > 0 ? LATEST_VERSION : undefined;
+}
+
+/** Whether a pod or a Deployment of a function, by its labels, runs a published version, rather than $LATEST. */
+export function isVersionLabelled(labels: Record<string, string> | undefined): boolean {
+  const version = labels?.[LABELS.version];
+  return version !== undefined && version !== LATEST_VERSION;
+}
+
+/** The Secret a version's environment is written to, once, as it was published: never one of $LATEST's two. */
+export function versionEnvironmentSecretName(functionId: string, version: number): string {
+  return `${versionResourceName(functionId, version)}-env`;
 }
 
 /** A version's code as its pods get it, its runtime and its image: a new one rolls the pods out. */

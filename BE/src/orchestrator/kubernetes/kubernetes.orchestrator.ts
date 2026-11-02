@@ -11,7 +11,7 @@ import {
 } from '../orchestrator.errors';
 import { describeError } from '../../common/describe-error';
 import { REQUEST_ID_HEADER } from '../../common/request-context';
-import { FunctionLogLine, FunctionLogsPage, FunctionWorkload, InvokeResult, LogsFilter, LogsQuery, Orchestrator, TenantLimits } from '../orchestrator.types';
+import { FunctionLogLine, FunctionLogsPage, FunctionRef, FunctionWorkload, InvokeResult, LogsFilter, LogsQuery, Orchestrator, PublishedVersion, TenantLimits, WorkloadInstances } from '../orchestrator.types';
 import { KubeApi, KubeRequestTimeoutError, KubeResponse, paths } from './kube-client';
 import { KubernetesSettings } from './kubernetes.settings';
 import { LogStore, namespaceFilter, pageQuery, quoted, tailQuery, toLine, toPage } from './log-store';
@@ -37,25 +37,33 @@ import {
   ANNOTATIONS,
   EnvironmentSlot,
   LABELS,
+  LATEST_VERSION,
   MANAGED_BY,
   accountNamespace,
   codeHash,
   environmentSecretName,
   environmentSlotOf,
   functionResourceName,
+  isVersionLabelled,
+  versionEnvironmentSecretName,
+  versionResourceName,
+  workloadResourceName,
 } from './naming';
+
+/** A Deployment's template, of what FF reads of it. */
+interface PodTemplate {
+  metadata?: Pick<K8sObject['metadata'], 'labels' | 'annotations'>;
+  spec?: {
+    containers?: Array<{ envFrom?: Array<{ secretRef?: { name?: string } }> }>;
+    volumes?: Array<{ name: string; configMap?: { name?: string }; image?: { reference?: string } }>;
+  };
+}
 
 interface Deployment extends K8sObject {
   metadata: K8sObject['metadata'] & { generation?: number };
   spec?: {
     replicas?: number;
-    template?: {
-      metadata?: Pick<K8sObject['metadata'], 'labels' | 'annotations'>;
-      spec?: {
-        containers?: Array<{ envFrom?: Array<{ secretRef?: { name?: string } }> }>;
-        volumes?: Array<{ name: string; configMap?: { name?: string }; image?: { reference?: string } }>;
-      };
-    };
+    template?: PodTemplate;
   };
   status?: {
     observedGeneration?: number;
@@ -73,6 +81,10 @@ export const LOG_DELETION_TIMEOUT_MS = 120_000;
 
 interface Listed extends K8sObject {
   metadata: K8sObject['metadata'] & { creationTimestamp?: string };
+}
+
+interface Service extends K8sObject {
+  spec?: { selector?: Record<string, string> };
 }
 
 interface Pod extends Listed {
@@ -125,6 +137,11 @@ function environmentInUse(fn: FunctionWorkload, deployment: Deployment | null): 
   return { name, slot, revision: template?.metadata?.annotations?.[ANNOTATIONS.environmentRevision] };
 }
 
+/** The code image a Deployment's template mounts; none for one mounting its code from elsewhere, as a code ConfigMap from before. */
+function codeImageOf(template: PodTemplate | undefined): string | undefined {
+  return template?.spec?.volumes?.find((volume) => volume.name === 'code')?.image?.reference;
+}
+
 /** The rollout is finished: every replica runs the new template and is available (as `kubectl rollout status`). */
 export function isRolledOut(deployment: Deployment): boolean {
   const desired = deployment.spec?.replicas ?? 1;
@@ -162,7 +179,7 @@ export class KubernetesOrchestrator implements Orchestrator {
     this.logStore = new LogStore(settings.invokeMode, api);
   }
 
-  private namespaceOf(fn: FunctionWorkload): string {
+  private namespaceOf(fn: Pick<FunctionRef, 'accountId'>): string {
     return accountNamespace(this.settings.namespacePrefix, fn.accountId);
   }
 
@@ -214,7 +231,10 @@ export class KubernetesOrchestrator implements Orchestrator {
     const hash = codeHash(fn.runtime, fn.codeImage);
 
     await this.ensureTenant(fn, ns, tenant);
-    await this.api.apply(paths.core(ns, 'services', name), serviceManifest(fn, ns));
+    const servicePath = paths.core(ns, 'services', name);
+    // Only a function with a version had its pods moved onto their label (deployVersion), which its Service keeps.
+    const onItsLabel = (fn.lastVersion ?? 0) > 0 && (await this.api.get<Service>(servicePath))?.spec?.selector?.[LABELS.version] === LATEST_VERSION;
+    await this.api.apply(servicePath, serviceManifest(fn, ns, onItsLabel));
 
     // Keep the current replica count (it may have been scaled since), never below
     // minInstances, and never below one: every deploy and update is checked by
@@ -223,9 +243,31 @@ export class KubernetesOrchestrator implements Orchestrator {
     const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
     const replicas = Math.max(existing?.spec?.replicas ?? 0, fn.minInstances, 1);
     if (!Number.isFinite(replicas)) throw new OrchestratorError(`Invalid minInstances ${fn.minInstances} for function ${fn.id}`);
-    const environmentSecret = await this.applyEnvironment(fn, ns, existing);
-    await this.api.apply(paths.apps(ns, 'deployments', name), deploymentManifest(fn, ns, hash, this.settings, replicas, environmentSecret));
+    await this.applyTemplate(fn, ns, hash, existing, replicas);
     await this.collectOldConfigMaps(fn, ns, existing);
+  }
+
+  /**
+   * The workload's environment Secret, then its Deployment with `replicas`: $LATEST's in the Secret its running
+   * version doesn't read, a version's in its own, which its pods read as they start.
+   */
+  private async applyTemplate(fn: FunctionWorkload, ns: string, hash: string, existing: Deployment | null, replicas: number): Promise<void> {
+    const secret = fn.version === undefined ? await this.applyEnvironment(fn, ns, existing) : await this.applyVersionEnvironment(fn, ns);
+    await this.api.apply(paths.apps(ns, 'deployments', workloadResourceName(fn)), deploymentManifest(fn, ns, hash, this.settings, replicas, secret));
+  }
+
+  async renewEnvironment(fn: FunctionWorkload): Promise<boolean> {
+    return this.rollEnvironment(fn);
+  }
+
+  /** renewEnvironment, its Deployment given `replicas`, or keeping its own: false without one. */
+  private async rollEnvironment(fn: FunctionWorkload, replicas?: number): Promise<boolean> {
+    if (!fn.codeImage) throw new OrchestratorError(`Function ${fn.id} has no code image: its code reaches its pods as one (ADR 0003)`);
+    const ns = this.namespaceOf(fn);
+    const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', workloadResourceName(fn)));
+    if (!existing) return false;
+    await this.applyTemplate(fn, ns, codeHash(fn.runtime, fn.codeImage), existing, replicas ?? existing.spec?.replicas ?? 0);
+    return true;
   }
 
   /**
@@ -277,14 +319,81 @@ export class KubernetesOrchestrator implements Orchestrator {
     }
   }
 
-  async remove(fn: FunctionWorkload): Promise<void> {
+  async remove(fn: FunctionWorkload, versions: number[] = []): Promise<void> {
     const ns = this.namespaceOf(fn);
     const name = functionResourceName(fn.id);
+    for (const version of versions) await this.removeVersion({ ...fn, version });
     await this.api.delete(paths.apps(ns, 'deployments', name));
     await this.api.delete(paths.core(ns, 'services', name));
     await this.api.deleteCollection(paths.core(ns, 'configmaps'), `${LABELS.functionId}=${fn.id}`);
     // By name: the backend may delete Secrets, never list them.
     for (const slot of [0, 1] as const) await this.api.delete(paths.core(ns, 'secrets', environmentSecretName(fn.id, slot)));
+  }
+
+  /**
+   * A version's Secret, Service and Deployment, `fn-<id>-v<n>`, with at least one instance, made of its workload as
+   * it was published (ADR 0015): after $LATEST's pods and Service are on a label of their own, so that $LATEST's
+   * Service never takes the version's pods for its own; the Deployment last, so that a version with one has all
+   * three. Its environment's Secret is its own, never one of $LATEST's two. Idempotent.
+   */
+  async deployVersion(fn: FunctionWorkload): Promise<void> {
+    const version = fn.version;
+    if (version === undefined) throw new OrchestratorError(`deployVersion is for a version: function ${fn.id}'s $LATEST is deployed by deploy()`);
+    if (!fn.codeImage) throw new OrchestratorError(`Function ${fn.id} has no code image: its code reaches its pods as one (ADR 0003)`);
+    const ns = this.namespaceOf(fn);
+    const name = versionResourceName(fn.id, version);
+    await this.moveLatestOntoItsLabel(fn, ns);
+    const secret = await this.applyVersionEnvironment(fn, ns);
+    await this.api.apply(paths.core(ns, 'services', name), serviceManifest(fn, ns));
+    // Two first calls at once both deploy: the second keeps what the scaler may have given the first since.
+    const existing = await this.api.get<Deployment>(paths.apps(ns, 'deployments', name));
+    const replicas = Math.max(existing?.spec?.replicas ?? 0, 1);
+    await this.api.apply(paths.apps(ns, 'deployments', name), deploymentManifest(fn, ns, codeHash(fn.runtime, fn.codeImage), this.settings, replicas, secret));
+  }
+
+  /** A version's environment, written to its own Secret, whose name the Deployment takes; nothing without one. */
+  private async applyVersionEnvironment(fn: FunctionWorkload, ns: string): Promise<string | undefined> {
+    if (!hasEnvironment(fn) || fn.version === undefined) return undefined;
+    const secret = versionEnvironmentSecretName(fn.id, fn.version);
+    await this.api.apply(paths.core(ns, 'secrets', secret), environmentSecretManifest(fn, ns, secret));
+    return secret;
+  }
+
+  /** A version's Deployment, Service and Secret, by name; nothing to do for one that has none. */
+  async removeVersion(version: PublishedVersion): Promise<void> {
+    const ns = this.namespaceOf(version);
+    const name = versionResourceName(version.id, version.version);
+    await this.api.delete(paths.apps(ns, 'deployments', name));
+    await this.api.delete(paths.core(ns, 'services', name));
+    await this.api.delete(paths.core(ns, 'secrets', versionEnvironmentSecretName(version.id, version.version)));
+  }
+
+  async labelLatest(fn: FunctionRef): Promise<void> {
+    await this.labelLatestTemplate(fn, this.namespaceOf(fn));
+  }
+
+  /** LATEST_VERSION in $LATEST's Deployment's template, which rolls its pods, unless it is there; the Deployment as read. */
+  private async labelLatestTemplate(fn: FunctionRef, ns: string): Promise<Deployment | null> {
+    const path = paths.apps(ns, 'deployments', functionResourceName(fn.id));
+    const deployment = await this.api.get<Deployment>(path);
+    if (deployment && deployment.spec?.template?.metadata?.labels?.[LABELS.version] !== LATEST_VERSION) {
+      await this.api.mergePatch(path, { spec: { template: { metadata: { labels: { [LABELS.version]: LATEST_VERSION } } } } });
+    }
+    return deployment;
+  }
+
+  /**
+   * $LATEST's pods onto LATEST_VERSION (ADR 0015, 3): first in its Deployment's template, which rolls them, then, once
+   * they all carry it, in its Service's selector, so that the Service never has no pod. Its Deployment's selector
+   * stays. Each step is done once: for a function moved already, two reads.
+   */
+  private async moveLatestOntoItsLabel(fn: FunctionWorkload, ns: string): Promise<void> {
+    const deployment = await this.labelLatestTemplate(fn, ns);
+    const servicePath = paths.core(ns, 'services', functionResourceName(fn.id));
+    const service = await this.api.get<Service>(servicePath);
+    if (!service || service.spec?.selector?.[LABELS.version] === LATEST_VERSION) return;
+    if (deployment) await this.waitFor({ ...fn, version: undefined }, this.settings.readyTimeoutSeconds * 1000, isRolledOut);
+    await this.api.mergePatch(servicePath, { spec: { selector: { [LABELS.version]: LATEST_VERSION } } });
   }
 
   /**
@@ -343,7 +452,8 @@ export class KubernetesOrchestrator implements Orchestrator {
 
   async waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void> {
     const deployment = await this.waitFor(fn, timeoutMs, isRolledOut);
-    await this.collectEnvironments(fn, this.namespaceOf(fn), deployment);
+    // $LATEST's two Secrets are its own: a version's rollout leaves them, and its Secret is the one it reads.
+    if (fn.version === undefined) await this.collectEnvironments(fn, this.namespaceOf(fn), deployment);
   }
 
   /** For a cold start: one ready instance is enough to serve the call. */
@@ -354,7 +464,7 @@ export class KubernetesOrchestrator implements Orchestrator {
   /** Waits until `done` holds for the function's Deployment, and returns it as it was then. */
   private async waitFor(fn: FunctionWorkload, timeoutMs: number, done: (deployment: Deployment) => boolean): Promise<Deployment> {
     const ns = this.namespaceOf(fn);
-    const name = functionResourceName(fn.id);
+    const name = workloadResourceName(fn);
     const deadline = Date.now() + timeoutMs;
     let nextLoadCheck = Date.now() + this.loadCheckIntervalMs;
     let deployment: Deployment | null;
@@ -390,7 +500,7 @@ export class KubernetesOrchestrator implements Orchestrator {
     deployment: Deployment,
   ): Promise<{ details: string; loadError?: FunctionLoadError }> {
     try {
-      const pods = await this.api.list<Pod>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`);
+      const pods = await this.podsOf(fn, ns);
       if (pods.length === 0) {
         // Pods that cannot even be created (quota exceeded, unknown RuntimeClass) show up here.
         const failure = deployment.status?.conditions?.find((c) => c.type === 'ReplicaFailure' && c.status === 'True');
@@ -464,7 +574,7 @@ export class KubernetesOrchestrator implements Orchestrator {
    */
   private async loadErrorSoFar(fn: FunctionWorkload, ns: string, deployment: Deployment): Promise<FunctionLoadError | undefined> {
     try {
-      const pods = await this.api.list<Pod>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`);
+      const pods = await this.podsOf(fn, ns);
       const newest = newestOf(pods.filter((pod) => runsTemplate(pod, deployment)));
       return newest && loadErrorIn(await this.queryLastLines(fn, ns, newest.metadata.name));
     } catch {
@@ -472,18 +582,26 @@ export class KubernetesOrchestrator implements Orchestrator {
     }
   }
 
+  /**
+   * The pods of what the workload runs: a version's, by their label; $LATEST's, those of the function's ID that run no
+   * version, whether or not they carry LATEST_VERSION yet.
+   */
+  private async podsOf(fn: FunctionWorkload, ns: string): Promise<Pod[]> {
+    if (fn.version !== undefined) return this.api.list<Pod>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id},${LABELS.version}=${fn.version}`);
+    const pods = await this.api.list<Pod>(paths.core(ns, 'pods'), `${LABELS.functionId}=${fn.id}`);
+    return pods.filter((pod) => !isVersionLabelled(pod.metadata.labels));
+  }
+
   async scale(fn: FunctionWorkload, replicas: number): Promise<void> {
     // NaN would go out as "replicas": null, which Kubernetes takes as zero.
     if (!Number.isFinite(replicas)) throw new OrchestratorError(`Invalid replica count ${replicas} for function ${fn.id}`);
-    await this.api.scaleDeployment(this.namespaceOf(fn), functionResourceName(fn.id), Math.max(0, Math.floor(replicas)));
+    await this.api.scaleDeployment(this.namespaceOf(fn), workloadResourceName(fn), Math.max(0, Math.floor(replicas)));
   }
 
-  /** The Deployment's desired and ready replicas, in one read; zeros when it doesn't exist. */
-  private async instances(fn: FunctionWorkload): Promise<{ desired: number; ready: number }> {
-    const deployment = await this.api.get<Deployment>(
-      paths.apps(this.namespaceOf(fn), 'deployments', functionResourceName(fn.id)),
-    );
-    return { desired: deployment?.spec?.replicas ?? 0, ready: deployment?.status?.readyReplicas ?? 0 };
+  /** The Deployment's desired and ready replicas, in one read, and whether it exists; zeros when it doesn't. */
+  private async instances(fn: FunctionWorkload): Promise<{ desired: number; ready: number; exists: boolean }> {
+    const deployment = await this.api.get<Deployment>(paths.apps(this.namespaceOf(fn), 'deployments', workloadResourceName(fn)));
+    return { desired: deployment?.spec?.replicas ?? 0, ready: deployment?.status?.readyReplicas ?? 0, exists: deployment !== null };
   }
 
   async readyInstances(fn: FunctionWorkload): Promise<number> {
@@ -500,18 +618,37 @@ export class KubernetesOrchestrator implements Orchestrator {
     if (status !== 200) throw new Error(`the API server answered ${status}`);
   }
 
-  async readyInstancesByFunction(): Promise<Map<string, number>> {
-    // One list of FF's Deployments in every namespace: a read the backend's ClusterRole allows (deploy/k8s/README.md).
-    const deployments = await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);
-    const ready = new Map<string, number>();
+  async workloads(fn?: FunctionRef): Promise<WorkloadInstances[]> {
+    // The function's, in its namespace, by its label; or FF's in every namespace, a read the backend's ClusterRole allows (deploy/k8s/README.md).
+    const deployments = fn
+      ? await this.api.list<Deployment>(paths.apps(this.namespaceOf(fn), 'deployments'), `${LABELS.managedBy}=${MANAGED_BY},${LABELS.functionId}=${fn.id}`)
+      : await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);
+    const workloads: WorkloadInstances[] = [];
     for (const deployment of deployments) {
-      const functionId = deployment.metadata.labels?.[LABELS.functionId];
-      const instances = deployment.status?.readyReplicas ?? 0;
+      const labels = deployment.metadata.labels;
+      const functionId = labels?.[LABELS.functionId];
       // Only FF's tenant namespaces: a label is easy to copy.
-      if (!functionId || instances <= 0 || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
-      ready.set(functionId, instances);
+      if (!functionId || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
+      const version = isVersionLabelled(labels) ? Number(labels?.[LABELS.version]) : undefined;
+      if (version !== undefined && !(Number.isInteger(version) && version > 0)) continue; // no version FF names
+      const template = deployment.spec?.template;
+      workloads.push({
+        functionId,
+        version,
+        desired: deployment.spec?.replicas ?? 0,
+        ready: deployment.status?.readyReplicas ?? 0,
+        revision: template?.metadata?.annotations?.[ANNOTATIONS.environmentRevision],
+        codeImage: codeImageOf(template),
+      });
     }
-    return ready;
+    return workloads;
+  }
+
+  async podRevisions(fn: FunctionRef): Promise<string[]> {
+    const pods = await this.api.list<Pod>(paths.core(this.namespaceOf(fn), 'pods'), `${LABELS.functionId}=${fn.id}`);
+    return pods
+      .filter((pod) => pod.status?.phase !== 'Succeeded' && pod.status?.phase !== 'Failed')
+      .map((pod) => pod.metadata.annotations?.[ANNOTATIONS.environmentRevision] ?? '');
   }
 
   async codeImagesByFunction(): Promise<Map<string, string>> {
@@ -521,25 +658,39 @@ export class KubernetesOrchestrator implements Orchestrator {
     for (const deployment of deployments) {
       const functionId = deployment.metadata.labels?.[LABELS.functionId];
       if (!functionId || !deployment.metadata.namespace?.startsWith(this.settings.namespacePrefix)) continue;
-      const reference = deployment.spec?.template?.spec?.volumes?.find((volume) => volume.name === 'code')?.image?.reference;
+      // $LATEST's alone: a version's Deployment is made of the registry's image at each first call, and goes when idle.
+      if (isVersionLabelled(deployment.metadata.labels)) continue;
+      const reference = codeImageOf(deployment.spec?.template);
       if (reference) images.set(functionId, reference);
     }
     return images;
   }
 
-  async invoke(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<InvokeResult> {
+  async invoke(fn: FunctionWorkload, payload: unknown, requestId?: string, start?: () => Promise<FunctionWorkload | undefined>): Promise<InvokeResult> {
     let initMs: number | undefined;
     try {
-      const { desired, ready } = await this.instances(fn);
+      const { desired, ready, exists } = await this.instances(fn);
       if (ready === 0) {
         // A cold start: how long it takes is recorded, even when it fails (D7 doesn't bill it).
         const waitStarted = Date.now();
         try {
-          // Only raise from zero: an instance may already be starting, perhaps asked for by the
-          // scaler for a burst of calls, and setting 1 here would take the others away again.
-          if (desired === 0) {
-            this.logger.log(`Cold start: scaling ${fn.id} from zero`);
-            await this.scale(fn, 1);
+          if (!exists && fn.version !== undefined) {
+            // A version's first call, or its first since it went idle: its objects made, with one instance.
+            const workload = await start?.();
+            if (!workload) throw new OrchestratorError(`Version ${fn.version} of function ${fn.id} has no Deployment, and the call gave no way to make one`);
+            this.logger.log(`Cold start: deploying version ${fn.version} of ${fn.id}`);
+            await this.deployVersion(workload);
+          } else if (desired === 0) {
+            // Only raise from zero: an instance may already be starting, perhaps asked for by the
+            // scaler for a burst of calls, and setting 1 here would take the others away again.
+            // A key due a renewal is renewed now, while no pod holds it (ADR 0014, 5).
+            const fresh = await start?.();
+            if (fresh && (await this.rollEnvironment(fresh, 1))) {
+              this.logger.log(`Cold start: starting ${fn.id} from zero with a fresh key`);
+            } else {
+              this.logger.log(`Cold start: scaling ${fn.id} from zero`);
+              await this.scale(fn, 1);
+            }
           }
           await this.waitForAnInstance(fn, this.settings.readyTimeoutSeconds * 1000);
         } finally {
@@ -554,7 +705,7 @@ export class KubernetesOrchestrator implements Orchestrator {
 
   private async post(fn: FunctionWorkload, payload: unknown, requestId?: string): Promise<KubeResponse> {
     const ns = this.namespaceOf(fn);
-    const name = functionResourceName(fn.id);
+    const name = workloadResourceName(fn);
     const body = JSON.stringify(payload);
     // The runtime logs the call under this ID, and answers with it (D6).
     const headers: Record<string, string> = requestId ? { [REQUEST_ID_HEADER]: requestId } : {};

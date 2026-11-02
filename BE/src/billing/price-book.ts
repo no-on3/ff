@@ -5,29 +5,27 @@ import { Decimal } from './decimal';
 const decimal = z.string().regex(/^\d+(\.\d+)?$/, 'must be a decimal number written as a string, such as "0.0000166667"');
 const count = z.number().int().min(0);
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a day, such as 2026-10-14');
-/** S3 Standard's storage tiers, by the account's GB-months in the month: they go up, and the last has no end. */
-const gbMonthTiers = z
-  .array(z.strictObject({ upToGbMonths: z.number().int().positive().nullable(), price: decimal }))
-  .min(1)
-  .refine(
-    (list) =>
-      list.every((tier, index) =>
-        index === list.length - 1 ? tier.upToGbMonths === null : tier.upToGbMonths !== null && (index === 0 || tier.upToGbMonths > (list[index - 1].upToGbMonths as number)),
-      ),
-    { message: 'must go up, tier by tier, and the last tier has no end (upToGbMonths null)' },
-  );
-
-/** SQS's requests, per million, in tiers by the account's requests in the month: they go up, and the last has no end. */
-const requestTiers = z
-  .array(z.strictObject({ upToRequests: z.number().int().positive().nullable(), price: decimal }))
-  .min(1)
-  .refine(
-    (list) =>
-      list.every((tier, index) =>
-        index === list.length - 1 ? tier.upToRequests === null : tier.upToRequests !== null && (index === 0 || tier.upToRequests > (list[index - 1].upToRequests as number)),
-      ),
-    { message: 'must go up, tier by tier, and the last tier has no end (upToRequests null)' },
-  );
+/**
+ * A price in tiers by the account's use in the month, each tier to where it ends (`end`, in the SKU's unit): they go
+ * up, and the last has no end. Lambda's duration, S3 Standard's storage and SQS's requests are priced so, and of what
+ * the estimate at AWS's prices adds, data out, Lambda's logs and CloudFront's data out.
+ */
+function tiers<End extends string>(end: End) {
+  const tier = z.strictObject({ [end]: z.number().int().positive().nullable(), price: decimal } as Record<End, z.ZodNullable<z.ZodNumber>> & { price: typeof decimal });
+  return z
+    .array(tier)
+    .min(1)
+    .refine(
+      (list) => {
+        const ends = list.map((item) => (item as unknown as Record<End, number | null>)[end]);
+        return ends.every((upTo, index) => {
+          const before = index === 0 ? null : ends[index - 1];
+          return index === ends.length - 1 ? upTo === null : upTo !== null && (before === null || upTo > before);
+        });
+      },
+      { message: `must go up, tier by tier, and the last tier has no end (${end} null)` },
+    );
+}
 
 /**
  * A price book's document (P-30, D8): AWS Lambda's SKUs, in the book's
@@ -60,16 +58,7 @@ export const priceDocumentSchema = z.strictObject({
   prices: z.strictObject({
     requestsPerMillion: decimal,
     /** On-demand duration, by the account's GB-seconds so far in the month. */
-    gbSecond: z
-      .array(z.strictObject({ upToGbSeconds: z.number().int().positive().nullable(), price: decimal }))
-      .min(1)
-      .refine(
-        (tiers) =>
-          tiers.every((tier, index) =>
-            index === tiers.length - 1 ? tier.upToGbSeconds === null : tier.upToGbSeconds !== null && (index === 0 || tier.upToGbSeconds > (tiers[index - 1].upToGbSeconds as number)),
-          ),
-        { message: 'must go up, tier by tier, and the last tier has no end (upToGbSeconds null)' },
-      ),
+    gbSecond: tiers('upToGbSeconds'),
     /** Per GB-s of minInstances held, from the minute samples (P-21). */
     provisionedGbSecond: decimal,
     /** Per GB-s of calls that ran with minInstances above zero. */
@@ -85,12 +74,12 @@ export const priceDocumentSchema = z.strictObject({
     /** Each database, each month, prorated by the hours it existed: 0 while its storage pays for it. */
     databaseMonthlyFee: decimal.optional(),
     /** Buckets' storage per GB-month, as S3 Standard's, in tiers by the account's GB-months in the month. */
-    bucketStorageGbMonth: gbMonthTiers.optional(),
+    bucketStorageGbMonth: tiers('upToGbMonths').optional(),
     /** S3's requests, per 1,000: its first class (PUT, COPY, POST, LIST) and its second (GET and the others). */
     requestsTier1PerThousand: decimal.optional(),
     requestsTier2PerThousand: decimal.optional(),
     /** SQS's standard queues' requests, per million, each 64 KB of a request's messages one, in tiers by the account's requests in the month. */
-    queueRequestsPerMillion: requestTiers.optional(),
+    queueRequestsPerMillion: tiers('upToRequests').optional(),
     /** A cache's memory, per GB-hour of it, as ElastiCache for Valkey's smallest node prices its memory by the hour. */
     cacheGbHour: decimal.optional(),
     /** SES's outbound mail, per 1,000 recipients of a message, and per GB of its attachments, each recipient's copy. */
@@ -101,6 +90,12 @@ export const priceDocumentSchema = z.strictObject({
 
 export type PriceDocument = z.infer<typeof priceDocumentSchema>;
 
+/** A tier of a price, to where it ends in the SKU's unit (null: no end), at a price per unit. */
+export interface PriceTier {
+  upTo: Decimal | null;
+  price: Decimal;
+}
+
 /** A book's prices, read once into exact decimals for rating. */
 export interface BookPrices {
   id: string;
@@ -108,7 +103,7 @@ export interface BookPrices {
   freeRequests: Decimal;
   freeGbSeconds: Decimal;
   perRequest: Decimal;
-  gbSecondTiers: Array<{ upTo: Decimal | null; price: Decimal }>;
+  gbSecondTiers: PriceTier[];
   provisionedGbSecond: Decimal;
   provisionedDurationGbSecond: Decimal;
   minimumBilledMs: number;
@@ -117,7 +112,7 @@ export interface BookPrices {
   /** Customers' databases, buckets and queues (ADR 0008, ADR 0009, ADR 0010): 0, and no free tier, in a book without them. */
   databaseStorageGbMonth: Decimal;
   databaseMonthlyFee: Decimal;
-  bucketStorageTiers: Array<{ upTo: Decimal | null; price: Decimal }>;
+  bucketStorageTiers: PriceTier[];
   perTier1Request: Decimal;
   perTier2Request: Decimal;
   freeDatabaseGbMonths: Decimal;
@@ -125,7 +120,7 @@ export interface BookPrices {
   freeTier1Requests: Decimal;
   freeTier2Requests: Decimal;
   /** SQS's requests, each tier's price per request. */
-  queueRequestTiers: Array<{ upTo: Decimal | null; price: Decimal }>;
+  queueRequestTiers: PriceTier[];
   freeQueueRequests: Decimal;
   /** A cache's memory, per GB-hour (ADR 0013): 0 in a book without it. */
   cacheGbHour: Decimal;
@@ -141,14 +136,47 @@ export function bookPrices(book: { id: string; validFrom: Date; prices: unknown 
     const problems = parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ');
     throw new Error(`The price book ${book.id} is invalid: ${problems}`);
   }
-  const { freeTier, prices } = parsed.data;
+  return readPrices(book, parsed.data.prices, parsed.data.freeTier);
+}
+
+/**
+ * A book's AWS prices as the rater takes them, for the estimate at AWS's prices: AWS's US$ prices with the free
+ * tier AWS gives every account every month, and none of FF's knobs; null for a book that records no AWS prices with
+ * that free tier. Caches are left at nothing: AWS bills a node for each, which the estimate adds, not their memory.
+ */
+export function awsBookPrices(book: { id: string; validFrom: Date; prices: unknown }): BookPrices | null {
+  const parsed = priceDocumentSchema.safeParse(book.prices);
+  const source = parsed.success ? awsSource(parsed.data) : null;
+  if (!source?.awsFreeTier) return null;
+  const { usdPrices: usd, awsFreeTier: free } = source;
+  const prices: PriceDocument['prices'] = {
+    requestsPerMillion: usd.requestsPerMillion,
+    gbSecond: usd.gbSecond,
+    provisionedGbSecond: usd.provisionedGbSecond,
+    provisionedDurationGbSecond: usd.provisionedDurationGbSecond,
+    minimumBilledMs: 0,
+    idleInstanceGbSecond: '0',
+    monthlyPlanFee: '0',
+    databaseStorageGbMonth: usd.databaseStorageGbMonth,
+    bucketStorageGbMonth: usd.bucketStorageGbMonth,
+    requestsTier1PerThousand: usd.requestsTier1PerThousand,
+    requestsTier2PerThousand: usd.requestsTier2PerThousand,
+    queueRequestsPerMillion: usd.queueRequestsPerMillion,
+    emailRecipientsPerThousand: usd.emailRecipientsPerThousand,
+    emailAttachmentsGb: usd.emailAttachmentsGb,
+  };
+  return readPrices(book, prices, { requests: free.requests, gbSeconds: free.gbSeconds, queueRequests: free.queueRequests });
+}
+
+/** A book's SKUs and free tier in exact decimals: those it lacks at 0, with no free tier. */
+function readPrices(book: { id: string; validFrom: Date }, prices: PriceDocument['prices'], freeTier: PriceDocument['freeTier']): BookPrices {
   return {
     id: book.id,
     validFrom: book.validFrom,
     freeRequests: Decimal.of(freeTier.requests),
     freeGbSeconds: Decimal.of(freeTier.gbSeconds),
-    perRequest: Decimal.parse(prices.requestsPerMillion).times(Decimal.ratio(1n, 1_000_000n)),
-    gbSecondTiers: prices.gbSecond.map((tier) => ({ upTo: tier.upToGbSeconds === null ? null : Decimal.of(tier.upToGbSeconds), price: Decimal.parse(tier.price) })),
+    perRequest: Decimal.parse(prices.requestsPerMillion).times(PER_MILLION),
+    gbSecondTiers: readTiers(prices.gbSecond.map((tier) => ({ upTo: tier.upToGbSeconds, price: tier.price }))),
     provisionedGbSecond: Decimal.parse(prices.provisionedGbSecond),
     provisionedDurationGbSecond: Decimal.parse(prices.provisionedDurationGbSecond),
     minimumBilledMs: prices.minimumBilledMs,
@@ -156,25 +184,24 @@ export function bookPrices(book: { id: string; validFrom: Date; prices: unknown 
     monthlyPlanFee: Decimal.parse(prices.monthlyPlanFee),
     databaseStorageGbMonth: Decimal.parse(prices.databaseStorageGbMonth ?? '0'),
     databaseMonthlyFee: Decimal.parse(prices.databaseMonthlyFee ?? '0'),
-    bucketStorageTiers: (prices.bucketStorageGbMonth ?? [{ upToGbMonths: null, price: '0' }]).map((tier) => ({
-      upTo: tier.upToGbMonths === null ? null : Decimal.of(tier.upToGbMonths),
-      price: Decimal.parse(tier.price),
-    })),
+    bucketStorageTiers: readTiers((prices.bucketStorageGbMonth ?? [{ upToGbMonths: null, price: '0' }]).map((tier) => ({ upTo: tier.upToGbMonths, price: tier.price }))),
     perTier1Request: Decimal.parse(prices.requestsTier1PerThousand ?? '0').times(PER_THOUSAND),
     perTier2Request: Decimal.parse(prices.requestsTier2PerThousand ?? '0').times(PER_THOUSAND),
     freeDatabaseGbMonths: Decimal.of(freeTier.databaseStorageGbMonths ?? 0),
     freeBucketGbMonths: Decimal.of(freeTier.bucketStorageGbMonths ?? 0),
     freeTier1Requests: Decimal.of(freeTier.requestsTier1 ?? 0),
     freeTier2Requests: Decimal.of(freeTier.requestsTier2 ?? 0),
-    queueRequestTiers: (prices.queueRequestsPerMillion ?? [{ upToRequests: null, price: '0' }]).map((tier) => ({
-      upTo: tier.upToRequests === null ? null : Decimal.of(tier.upToRequests),
-      price: Decimal.parse(tier.price).times(PER_MILLION),
-    })),
+    queueRequestTiers: readTiers((prices.queueRequestsPerMillion ?? [{ upToRequests: null, price: '0' }]).map((tier) => ({ upTo: tier.upToRequests, price: tier.price })), PER_MILLION),
     freeQueueRequests: Decimal.of(freeTier.queueRequests ?? 0),
     cacheGbHour: Decimal.parse(prices.cacheGbHour ?? '0'),
     perEmailRecipient: Decimal.parse(prices.emailRecipientsPerThousand ?? '0').times(PER_THOUSAND),
     emailAttachmentsGb: Decimal.parse(prices.emailAttachmentsGb ?? '0'),
   };
+}
+
+/** A document's tiers in exact decimals, each price times `per` where the SKU is priced per thousand or per million of its unit. */
+export function readTiers(tiers: Array<{ upTo: number | null; price: string }>, per?: Decimal): PriceTier[] {
+  return tiers.map((tier) => ({ upTo: tier.upTo === null ? null : Decimal.of(tier.upTo), price: per ? Decimal.parse(tier.price).times(per) : Decimal.parse(tier.price) }));
 }
 
 const PER_THOUSAND = Decimal.ratio(1n, 1000n);
@@ -214,74 +241,132 @@ export const NO_RESOURCE_PRICES: Pick<
   emailAttachmentsGb: Decimal.ZERO,
 };
 
-/** AWS's US$ prices, as a book that says it comes from them records them (P-30, P-73): RDS's, S3's, SQS's, ElastiCache's and SES's too, in a book that prices databases, buckets, queues, caches and mail. */
+/**
+ * AWS's US$ prices, as a book that says it comes from them records them (P-30, P-73): RDS's, S3's, SQS's,
+ * ElastiCache's and SES's too, in a book that prices databases, buckets, queues, caches and mail; and what AWS bills
+ * that FF doesn't, for the estimate at AWS's prices alone, as FF bills none of it. Lambda's start-up time is one
+ * of those, billed as its duration is, at gbSecond's prices.
+ */
 const usdPricesSchema = z.strictObject({
   requestsPerMillion: decimal,
-  gbSecond: z.array(z.strictObject({ upToGbSeconds: z.number().int().positive().nullable(), price: decimal })).min(1),
+  gbSecond: tiers('upToGbSeconds'),
   provisionedGbSecond: decimal,
   provisionedDurationGbSecond: decimal,
   databaseStorageGbMonth: decimal.optional(),
-  bucketStorageGbMonth: z.array(z.strictObject({ upToGbMonths: z.number().int().positive().nullable(), price: decimal })).min(1).optional(),
+  bucketStorageGbMonth: tiers('upToGbMonths').optional(),
   requestsTier1PerThousand: decimal.optional(),
   requestsTier2PerThousand: decimal.optional(),
-  queueRequestsPerMillion: z.array(z.strictObject({ upToRequests: z.number().int().positive().nullable(), price: decimal })).min(1).optional(),
+  queueRequestsPerMillion: tiers('upToRequests').optional(),
   cacheGbHour: decimal.optional(),
   emailRecipientsPerThousand: decimal.optional(),
   emailAttachmentsGb: decimal.optional(),
+  /** RDS for PostgreSQL's smallest instance, db.t4g.micro, in one zone, an hour or part of one: one for each database. */
+  databaseInstanceHour: decimal.optional(),
+  /** ElastiCache for Valkey's smallest node, cache.t4g.micro, an hour or part of one: one for each cache. */
+  cacheNodeHour: decimal.optional(),
+  /** Data sent out to the internet, per GB, in tiers by the account's GB in the month. */
+  dataOutGb: tiers('upToGb').optional(),
+  /** Lambda's logs into CloudWatch Logs, as vended logs, per GB, in tiers by the account's GB in the month; and kept, per GB-month. */
+  logsIngestedGb: tiers('upToGb').optional(),
+  logsStorageGbMonth: decimal.optional(),
+  /** CloudFront in front of a site, its viewers in Europe: data out per GB, in tiers by the month's; HTTPS requests per 10,000; the function each request runs, per million. */
+  cloudFrontDataOutGb: tiers('upToGb').optional(),
+  cloudFrontRequestsPerTenThousand: decimal.optional(),
+  cloudFrontFunctionsPerMillion: decimal.optional(),
+  /** A NAT gateway, for functions in a VPC that reach the internet: an hour, each GB through it, and its public IPv4 address, an hour. */
+  natGatewayHour: decimal.optional(),
+  natGatewayGb: decimal.optional(),
+  publicIpv4Hour: decimal.optional(),
 });
+
+/** What AWS bills that FF doesn't, which a book of AWS's prices records all of, or none of. */
+const ESTIMATE_PRICES = [
+  'databaseInstanceHour',
+  'cacheNodeHour',
+  'dataOutGb',
+  'logsIngestedGb',
+  'logsStorageGbMonth',
+  'cloudFrontDataOutGb',
+  'cloudFrontRequestsPerTenThousand',
+  'cloudFrontFunctionsPerMillion',
+  'natGatewayHour',
+  'natGatewayGb',
+  'publicIpv4Hour',
+] as const;
+
+/**
+ * The source of a book of AWS's prices: its US$ prices and the rate used, and, beside the estimate's prices, the free
+ * tier AWS gives every account every month and the price lists they were read from, each with the day it was read.
+ */
+const awsSourceSchema = z.looseObject({
+  usdPrices: usdPricesSchema,
+  usdRate: decimal,
+  /** Lambda's requests and GB-seconds, SQS's requests, data out, and CloudFront's data out, requests and functions. */
+  awsFreeTier: z
+    .strictObject({ requests: count, gbSeconds: count, queueRequests: count, dataOutGb: count, cloudFrontDataOutGb: count, cloudFrontRequests: count, cloudFrontFunctions: count })
+    .optional(),
+  estimatePriceLists: z
+    .array(z.strictObject({ priceList: z.url(), priceListPublished: z.iso.datetime(), readOn: day, usageTypes: z.array(z.string().min(1)).min(1) }))
+    .min(1)
+    .optional(),
+});
+
+export type AwsSource = z.infer<typeof awsSourceSchema>;
+
+/** A book's AWS prices, as its source records them: null for a book that doesn't say it is AWS's, or whose AWS prices don't fit. */
+export function awsSource(document: PriceDocument): AwsSource | null {
+  if (document.source.kind !== 'aws-lambda') return null;
+  const parsed = awsSourceSchema.safeParse(document.source);
+  return parsed.success ? parsed.data : null;
+}
 
 /**
  * Why a book that says its prices are AWS's US$ prices times a rate
  * (source.kind "aws-lambda") isn't exactly that, SKU by SKU; none for a book
  * that says nothing of the kind. D8's knobs and the free tier are FF's own.
+ * What AWS bills that FF doesn't has no price of FF's: a book has all of it or
+ * none, and with it AWS's free tier and the price lists it was read from.
  */
 export function awsPriceProblems(document: PriceDocument): string[] {
   if (document.source.kind !== 'aws-lambda') return [];
-  const usd = usdPricesSchema.safeParse(document.source.usdPrices);
-  if (!usd.success || document.source.usdRate === undefined) return ['source: an aws-lambda book records usdPrices and usdRate'];
-  const rate = Decimal.parse(document.source.usdRate);
+  if (document.source.usdPrices === undefined || document.source.usdRate === undefined) return ['source: an aws-lambda book records usdPrices and usdRate'];
+  const parsed = awsSourceSchema.safeParse(document.source);
+  if (!parsed.success) return parsed.error.issues.map((issue) => `source.${issue.path.join('.')}: ${issue.message}`);
+  const { usdPrices: usd, awsFreeTier, estimatePriceLists } = parsed.data;
+  const rate = Decimal.parse(parsed.data.usdRate);
   const problems: string[] = [];
   const expect = (sku: string, price: string, usdPrice: string) => {
     const expected = Decimal.parse(usdPrice).times(rate);
-    if (Decimal.parse(price).compare(expected) !== 0) problems.push(`prices.${sku}: must be ${usdPrice} × ${document.source.usdRate} = ${expected.toString()}`);
+    if (Decimal.parse(price).compare(expected) !== 0) problems.push(`prices.${sku}: must be ${usdPrice} × ${parsed.data.usdRate} = ${expected.toString()}`);
+  };
+  /** Tiers priced at AWS's: the same tiers, each at its US$ price times the rate; or neither, for an optional SKU. */
+  const expectTiers = <T extends { price: string }>(sku: string, given: T[] | undefined, usdTiers: T[] | undefined, end: (tier: T) => number | null) => {
+    if (given && usdTiers) {
+      if (usdTiers.length !== given.length || usdTiers.some((tier, index) => end(tier) !== end(given[index]))) problems.push(`prices.${sku}: must have the tiers of source.usdPrices.${sku}`);
+      else usdTiers.forEach((tier, index) => expect(`${sku}.${index}.price`, given[index].price, tier.price));
+    } else if (given || usdTiers) {
+      problems.push(`prices.${sku}: must be in both prices and source.usdPrices, or in neither`);
+    }
   };
   const { prices } = document;
-  expect('requestsPerMillion', prices.requestsPerMillion, usd.data.requestsPerMillion);
-  if (usd.data.gbSecond.length !== prices.gbSecond.length || usd.data.gbSecond.some((tier, index) => tier.upToGbSeconds !== prices.gbSecond[index].upToGbSeconds)) {
-    problems.push('prices.gbSecond: must have the tiers of source.usdPrices.gbSecond');
-  } else {
-    usd.data.gbSecond.forEach((tier, index) => expect(`gbSecond.${index}.price`, prices.gbSecond[index].price, tier.price));
-  }
-  expect('provisionedGbSecond', prices.provisionedGbSecond, usd.data.provisionedGbSecond);
-  expect('provisionedDurationGbSecond', prices.provisionedDurationGbSecond, usd.data.provisionedDurationGbSecond);
-  // RDS's, S3's, ElastiCache's and SES's, when the book records AWS's: each its US$ price times the rate, and none without the other.
+  expect('requestsPerMillion', prices.requestsPerMillion, usd.requestsPerMillion);
+  expectTiers('gbSecond', prices.gbSecond, usd.gbSecond, (tier) => tier.upToGbSeconds);
+  expect('provisionedGbSecond', prices.provisionedGbSecond, usd.provisionedGbSecond);
+  expect('provisionedDurationGbSecond', prices.provisionedDurationGbSecond, usd.provisionedDurationGbSecond);
+  // RDS's, S3's, SQS's, ElastiCache's and SES's, when the book records AWS's: each its US$ price times the rate, and none without the other.
   for (const sku of ['databaseStorageGbMonth', 'requestsTier1PerThousand', 'requestsTier2PerThousand', 'cacheGbHour', 'emailRecipientsPerThousand', 'emailAttachmentsGb'] as const) {
     const price = prices[sku];
-    const usdPrice = usd.data[sku];
+    const usdPrice = usd[sku];
     if (price !== undefined && usdPrice !== undefined) expect(sku, price, usdPrice);
     else if (price !== undefined || usdPrice !== undefined) problems.push(`prices.${sku}: must be in both prices and source.usdPrices, or in neither`);
   }
-  const bucket = prices.bucketStorageGbMonth;
-  const usdBucket = usd.data.bucketStorageGbMonth;
-  if (bucket && usdBucket) {
-    if (usdBucket.length !== bucket.length || usdBucket.some((tier, index) => tier.upToGbMonths !== bucket[index].upToGbMonths)) {
-      problems.push('prices.bucketStorageGbMonth: must have the tiers of source.usdPrices.bucketStorageGbMonth');
-    } else {
-      usdBucket.forEach((tier, index) => expect(`bucketStorageGbMonth.${index}.price`, bucket[index].price, tier.price));
-    }
-  } else if (bucket || usdBucket) {
-    problems.push('prices.bucketStorageGbMonth: must be in both prices and source.usdPrices, or in neither');
-  }
-  const queue = prices.queueRequestsPerMillion;
-  const usdQueue = usd.data.queueRequestsPerMillion;
-  if (queue && usdQueue) {
-    if (usdQueue.length !== queue.length || usdQueue.some((tier, index) => tier.upToRequests !== queue[index].upToRequests)) {
-      problems.push('prices.queueRequestsPerMillion: must have the tiers of source.usdPrices.queueRequestsPerMillion');
-    } else {
-      usdQueue.forEach((tier, index) => expect(`queueRequestsPerMillion.${index}.price`, queue[index].price, tier.price));
-    }
-  } else if (queue || usdQueue) {
-    problems.push('prices.queueRequestsPerMillion: must be in both prices and source.usdPrices, or in neither');
+  expectTiers('bucketStorageGbMonth', prices.bucketStorageGbMonth, usd.bucketStorageGbMonth, (tier) => tier.upToGbMonths);
+  expectTiers('queueRequestsPerMillion', prices.queueRequestsPerMillion, usd.queueRequestsPerMillion, (tier) => tier.upToRequests);
+  // What AWS bills that FF doesn't, for the estimate: all of it or none, read from price lists, with AWS's free tier.
+  if (ESTIMATE_PRICES.some((sku) => usd[sku] !== undefined)) {
+    for (const sku of ESTIMATE_PRICES.filter((key) => usd[key] === undefined)) problems.push(`source.usdPrices.${sku}: what AWS bills that FF doesn't is all in a book, or none of it`);
+    if (!awsFreeTier) problems.push("source.awsFreeTier: a book with what AWS bills that FF doesn't records the free tier AWS gives every month");
+    if (!estimatePriceLists) problems.push("source.estimatePriceLists: a book with what AWS bills that FF doesn't records the price lists it was read from");
   }
   return problems;
 }
@@ -308,14 +393,21 @@ const STORAGE_PRICES = [
 const STORAGE_FREE_TIER = ['databaseStorageGbMonths', 'bucketStorageGbMonths', 'requestsTier1', 'requestsTier2', 'queueRequests'] as const;
 
 /**
- * Those of the book before that a new one lacks, by their paths: a book that
- * follows one with them must have them too, its free tier included, or
- * customers' databases, buckets, queues, caches and mail would be priced at nothing from it
- * on, which no operator means by leaving a field out.
+ * Those of the book before that a new one leaves out, by their paths: a book
+ * that follows one with them must have them too, its free tier included, or
+ * customers' databases, buckets, queues, caches and mail would be priced at
+ * nothing from it on, and the estimate at AWS's prices would lose what AWS
+ * bills that FF doesn't, which no operator means by leaving a field out. A
+ * book of the operator's own prices records no AWS prices to keep.
  */
-export function storageKeysMissing(before: PriceDocument, after: PriceDocument): string[] {
+export function keysLeftOut(before: PriceDocument, after: PriceDocument): string[] {
+  const usd = (document: PriceDocument): Record<string, unknown> => {
+    const prices = document.source.usdPrices;
+    return typeof prices === 'object' && prices !== null ? (prices as Record<string, unknown>) : {};
+  };
   return [
     ...STORAGE_PRICES.filter((key) => before.prices[key] !== undefined && after.prices[key] === undefined).map((key) => `prices.${key}`),
     ...STORAGE_FREE_TIER.filter((key) => before.freeTier[key] !== undefined && after.freeTier[key] === undefined).map((key) => `freeTier.${key}`),
+    ...(after.source.kind === 'aws-lambda' ? ESTIMATE_PRICES.filter((key) => usd(before)[key] !== undefined && usd(after)[key] === undefined).map((key) => `source.usdPrices.${key}`) : []),
   ];
 }

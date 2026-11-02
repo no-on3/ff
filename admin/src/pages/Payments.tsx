@@ -20,7 +20,7 @@ import {
   transferOutcome,
 } from '../lib/payments';
 import { TableQuery, currentCursor, firstPage, nextPage, pageNumber, pageParams, previousPage } from '../lib/table';
-import { whenUtc } from '../lib/time';
+import { tunisDay, whenUtc } from '../lib/time';
 
 const FILTERS: Filter[] = [
   { name: 'reference', label: 'Reference', placeholder: 'FF-7KQ2-9MXA' },
@@ -28,8 +28,8 @@ const FILTERS: Filter[] = [
   { name: 'accountId', label: 'Account', placeholder: '12 digits' },
 ];
 
-/** Today, UTC: the latest day a transfer can be dated. */
-const today = () => new Date().toISOString().slice(0, 10);
+/** Today in Tunisia: the latest day a transfer can be dated, as the API takes a bank statement's. */
+const today = () => tunisDay(new Date());
 
 /**
  * Recording a transfer from the bank statement (P-35): what arrived, what the

@@ -46,12 +46,14 @@ const FF_RESERVED = ['FUNCTION_NAME', 'FUNCTION_VERSION', 'FUNCTION_MEMORY_LIMIT
 /**
  * FF sets these, with the credentials' names AWS Lambda reserves, to give a
  * function its own key to its account's buckets (ADR 0009), queues (ADR
- * 0010) and mail (ADR 0012): the S3, SQS and SES endpoints, inside the cluster.
+ * 0010), mail (ADR 0012) and functions (ADR 0014): the S3, SQS, SES and
+ * Lambda endpoints, inside the cluster.
  */
 const ENDPOINTS_RESERVED = new Map([
   ['AWS_ENDPOINT_URL_S3', "FF sets it, with the function's own key to its account's buckets"],
   ['AWS_ENDPOINT_URL_SQS', "FF sets it, with the function's own key to its account's queues"],
   ['AWS_ENDPOINT_URL_SESV2', "FF sets it, with the function's own key to its account's mail"],
+  ['AWS_ENDPOINT_URL_LAMBDA', "FF sets it, with the function's own key to its account's functions"],
 ]);
 
 const RESERVED = new Set([...LAMBDA_RESERVED, ...FF_RESERVED]);

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsOptional } from 'class-validator';
+import { IsEnum, IsOptional, IsString, Matches } from 'class-validator';
 import { AnyJson } from '../../common/no-nul.pipe';
+import { QUALIFIER } from '../qualifier';
 
 /** How a call is made, as AWS Lambda's X-Amz-Invocation-Type names it. */
 export enum InvocationType {
@@ -32,6 +33,18 @@ export class InvokeFunctionDto {
   @IsOptional()
   @IsEnum(InvocationType)
   invocationType?: InvocationType;
+
+  @ApiPropertyOptional({
+    description:
+      "What runs the call, as Lambda's Qualifier: $LATEST, the function as it is; a version's number; or an alias's name, its other version " +
+      "getting its share of the calls. $LATEST when missing. The answer's version and alias say what ran. An Event's every attempt runs what it " +
+      'names, an alias drawn again for each; a DryRun checks that it is the function\'s',
+    example: 'prod',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(QUALIFIER, { message: "qualifier is $LATEST, a version's number or an alias's name, as Lambda's" })
+  qualifier?: string;
 }
 
 /** The answer to an asynchronous call: 202, and its request ID, which each of its attempts keeps. */

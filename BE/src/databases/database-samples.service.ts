@@ -4,6 +4,7 @@ import { DataSource, EntityManager, IsNull } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { hourOf } from '../billing/rating-hours';
 import { describeError } from '../common/describe-error';
+import { withJobLock } from '../database/job-lock';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
@@ -13,7 +14,7 @@ import { BYTES_PER_MB, StorageStep, storageMail, storageStep } from './storage-n
 
 const MINUTE_MS = 60_000;
 /** One backend samples at a time: the others skip their turn. */
-const SAMPLE_LOCK = `hashtext('ff_database_samples')`;
+const SAMPLE_LOCK = 'ff_database_samples';
 /** The databases an hourly sample measures: those that exist on the server, their users able to log in or not. */
 const SAMPLED = [DatabaseStatus.ACTIVE, DatabaseStatus.READ_ONLY, DatabaseStatus.SUSPENDED];
 
@@ -60,46 +61,37 @@ export class DatabaseSamplesService implements OnModuleInit, OnModuleDestroy {
     const server = this.server;
     if (!server) return 0;
     const hour = hourOf(now);
-    const runner = this.dataSource.createQueryRunner();
-    await runner.connect();
-    try {
-      const [{ locked }] = (await runner.query(`SELECT pg_try_advisory_lock(${SAMPLE_LOCK}) AS "locked"`)) as Array<{ locked: boolean }>;
-      if (!locked) return 0;
-      try {
-        const due = await this.dataSource
-          .getRepository(Database)
-          .createQueryBuilder('d')
-          .innerJoin(Account, 'a', 'a.id = d.accountId')
-          .where('d.status IN (:...sampled)', { sampled: SAMPLED })
-          .andWhere(`a.status <> 'closed'`)
-          .andWhere(`NOT EXISTS (SELECT 1 FROM "database_samples" s WHERE s."database_id" = d."id" AND s."hour" = :hour)`, { hour })
-          .orderBy('d.accountId')
-          .addOrderBy('d.name')
-          .getMany();
-        if (due.length === 0) return 0;
-        const use = await server.use(due.map((row) => row.dbName));
-        const plans = await this.plans.forAccounts([...new Set(due.map((row) => row.accountId))]);
-        let sampled = 0;
-        for (const row of due) {
-          const measured = use.get(row.dbName);
-          const plan = plans.get(row.accountId);
-          if (!measured || !plan) {
-            this.logger.warn(`Database ${row.id} of account ${row.accountId} wasn't measured: ${measured ? 'its account has no plan' : 'the server has no such database'}`);
-            continue;
-          }
-          try {
-            if (await this.sampleOne(server, row, measured, plan, hour, now)) sampled++;
-          } catch (error) {
-            this.logger.error(`Database ${row.id} of account ${row.accountId} wasn't measured: ${describeError(error)}`);
-          }
+    const sampled = await withJobLock(this.dataSource, SAMPLE_LOCK, async () => {
+      const due = await this.dataSource
+        .getRepository(Database)
+        .createQueryBuilder('d')
+        .innerJoin(Account, 'a', 'a.id = d.accountId')
+        .where('d.status IN (:...sampled)', { sampled: SAMPLED })
+        .andWhere(`a.status <> 'closed'`)
+        .andWhere(`NOT EXISTS (SELECT 1 FROM "database_samples" s WHERE s."database_id" = d."id" AND s."hour" = :hour)`, { hour })
+        .orderBy('d.accountId')
+        .addOrderBy('d.name')
+        .getMany();
+      if (due.length === 0) return 0;
+      const use = await server.use(due.map((row) => row.dbName));
+      const plans = await this.plans.forAccounts([...new Set(due.map((row) => row.accountId))]);
+      let sampled = 0;
+      for (const row of due) {
+        const measured = use.get(row.dbName);
+        const plan = plans.get(row.accountId);
+        if (!measured || !plan) {
+          this.logger.warn(`Database ${row.id} of account ${row.accountId} wasn't measured: ${measured ? 'its account has no plan' : 'the server has no such database'}`);
+          continue;
         }
-        return sampled;
-      } finally {
-        await runner.query(`SELECT pg_advisory_unlock(${SAMPLE_LOCK})`);
+        try {
+          if (await this.sampleOne(server, row, measured, plan, hour, now)) sampled++;
+        } catch (error) {
+          this.logger.error(`Database ${row.id} of account ${row.accountId} wasn't measured: ${describeError(error)}`);
+        }
       }
-    } finally {
-      await runner.release();
-    }
+      return sampled;
+    });
+    return sampled ?? 0;
   }
 
   /** One database's sample: the signal on the server as its size says, then the sample, its row and the owners' notice together. */

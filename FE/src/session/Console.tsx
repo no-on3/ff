@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import AccountRejected from '../components/AccountRejected';
 import AccountSettings from '../components/AccountSettings';
+import AccessKeys from '../components/AccessKeys';
 import ApiKeys from '../components/ApiKeys';
 import BalanceProvider from '../components/BalanceProvider';
 import Billing from '../components/Billing';
@@ -49,6 +50,7 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
           <Route path="/accounts/new" element={<Onboarding />} />
           <Route path="/account" element={account ? <AccountSettings /> : <Navigate to="/" replace />} />
           <Route path="/account/api-keys" element={account ? <ApiKeys /> : <Navigate to="/" replace />} />
+          <Route path="/account/access-keys" element={account ? <AccessKeys /> : <Navigate to="/" replace />} />
           <Route path="/account/members" element={account ? <Members /> : <Navigate to="/" replace />} />
           <Route path="/account/notifications" element={account ? <Notifications /> : <Navigate to="/" replace />} />
           <Route path="/alarms" element={account ? <Alarms /> : <Navigate to="/" replace />} />

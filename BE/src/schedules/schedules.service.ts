@@ -2,8 +2,10 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { InjectRepository } from '@nestjs/typeorm';
 import { QueryFailedError, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
-import { EventFormat } from '../functions/entities/function.entity';
+import { wrappedIn } from '../functions/aliases.service';
+import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
+import { LATEST, qualifierDetail, qualifierText, routeNamed, storedQualifier } from '../functions/qualifier';
 import { PlansService } from '../plans/plans.service';
 import { CreateScheduleDto, ScheduleView, UpdateScheduleDto } from './dto/schedule.dto';
 import { InvalidScheduleExpressionError, ScheduleExpression, nextRun, nextRuns, parseScheduleExpression } from './schedule-expression';
@@ -20,6 +22,14 @@ export const WRAPPED_SCHEDULE_REFUSAL =
   "A schedule sends EventBridge's Scheduled Event, as AWS Lambda passes it, and this function takes FF's original wrapped event: switch its " +
   'eventFormat to lambda (PUT /functions/{id} with {"eventFormat": "lambda"}), and read the event as AWS Lambda passes it, then schedule it';
 
+/** A schedule naming a version or an alias that takes FF's original wrapped event, which can't read the Scheduled Event either. */
+export function wrappedQualifierRefusal(wrapped: string): string {
+  return (
+    `A schedule sends EventBridge's Scheduled Event, as AWS Lambda passes it, and ${wrapped} takes FF's original wrapped event: ` +
+    'name a version published with eventFormat lambda, or an alias of such versions'
+  );
+}
+
 /** The expression, parsed, or the request's 400 with what is wrong in it. */
 export function expressionOf(text: string): ScheduleExpression {
   try {
@@ -33,9 +43,11 @@ export function expressionOf(text: string): ScheduleExpression {
 /**
  * Functions' schedules, as SAM's Schedule events: each a name within its
  * function, an expression in UTC, an input or EventBridge's Scheduled Event,
- * enabled or not. Its next run is computed here, at every change, and by the
- * scheduler after each run. The account's plan limits how many it has; each
- * change goes to its audit log.
+ * enabled or not, running the function as it is or a version or an alias of
+ * it, which must be there when it is named (one deleted since skips the
+ * runs). Its next run is computed here, at every change, and by the scheduler
+ * after each run. The account's plan limits how many it has; each change goes
+ * to its audit log.
  */
 @Injectable()
 export class SchedulesService {
@@ -47,10 +59,11 @@ export class SchedulesService {
   ) {}
 
   view(schedule: Schedule): ScheduleView {
-    const { id, functionId, name, description, expression, input, enabled, nextRunAt, lastRunAt, lastRequestId, lastOutcome, createdAt, updatedAt } = schedule;
+    const { id, functionId, qualifier, name, description, expression, input, enabled, nextRunAt, lastRunAt, lastRequestId, lastOutcome, createdAt, updatedAt } = schedule;
     return {
       id,
       functionId,
+      qualifier: qualifier ?? null,
       name,
       description: description ?? null,
       expression,
@@ -76,7 +89,8 @@ export class SchedulesService {
 
   async create(accountId: string, functionId: string, dto: CreateScheduleDto, now = new Date()): Promise<ScheduleView> {
     const function_ = await this.functions.findOne(accountId, functionId);
-    if (function_.eventFormat === EventFormat.WRAPPED) throw new BadRequestException(WRAPPED_SCHEDULE_REFUSAL);
+    const qualifier = storedQualifier(dto.qualifier);
+    await this.refuseTarget(function_, qualifier);
     const expression = expressionOf(dto.expression);
     const plan = await this.plans.forAccount(accountId);
     const count = await this.schedules.countBy({ accountId });
@@ -87,6 +101,7 @@ export class SchedulesService {
     const schedule = this.schedules.create({
       accountId,
       functionId,
+      qualifier,
       name: dto.name,
       description: dto.description ?? null,
       expression: dto.expression.trim(),
@@ -103,7 +118,7 @@ export class SchedulesService {
       accountId,
       action: 'schedule.create',
       resource: `function:${functionId}`,
-      details: { name: saved.name, expression: saved.expression, enabled: saved.enabled },
+      details: { name: saved.name, expression: saved.expression, enabled: saved.enabled, ...qualifierDetail(saved.qualifier) },
     });
     return this.view(saved);
   }
@@ -114,8 +129,11 @@ export class SchedulesService {
    */
   async update(accountId: string, functionId: string, id: string, dto: UpdateScheduleDto, now = new Date()): Promise<ScheduleView> {
     const schedule = await this.scheduleOf(accountId, functionId, id);
-    const changed = (Object.keys(dto) as Array<keyof UpdateScheduleDto>).filter((field) => dto[field] !== undefined && JSON.stringify(dto[field]) !== JSON.stringify(schedule[field]));
+    // $LATEST is kept as none, so that naming it where none is named changes nothing.
+    const sent: Omit<UpdateScheduleDto, 'qualifier'> & { qualifier?: string | null } = dto.qualifier === undefined ? dto : { ...dto, qualifier: storedQualifier(dto.qualifier) };
+    const changed = (Object.keys(sent) as Array<keyof typeof sent>).filter((field) => sent[field] !== undefined && JSON.stringify(sent[field]) !== JSON.stringify(schedule[field]));
     if (changed.length === 0) return this.view(schedule);
+    if (sent.qualifier !== undefined && sent.qualifier !== schedule.qualifier) await this.refuseTarget(await this.functions.findOne(accountId, functionId), sent.qualifier);
     const expressionText = dto.expression?.trim() ?? schedule.expression;
     const expression = expressionOf(expressionText);
     const enabled = dto.enabled ?? schedule.enabled;
@@ -125,6 +143,7 @@ export class SchedulesService {
       description: dto.description === undefined ? schedule.description : dto.description,
       expression: expressionText,
       input: dto.input === undefined ? schedule.input : dto.input,
+      qualifier: sent.qualifier === undefined ? schedule.qualifier : sent.qualifier,
       enabled,
       anchorAt: !enabled ? null : restart ? now : schedule.anchorAt,
       nextRunAt: !enabled ? null : restart ? nextRun(expression, now, now) : schedule.nextRunAt,
@@ -134,7 +153,7 @@ export class SchedulesService {
       accountId,
       action: 'schedule.update',
       resource: `function:${functionId}`,
-      details: { name: saved.name, changed, expression: saved.expression, enabled: saved.enabled },
+      details: { name: saved.name, changed, expression: saved.expression, enabled: saved.enabled, ...qualifierDetail(saved.qualifier) },
     });
     return this.view(saved);
   }
@@ -143,6 +162,19 @@ export class SchedulesService {
     const schedule = await this.scheduleOf(accountId, functionId, id);
     await this.schedules.delete({ id: schedule.id });
     await this.audit.record({ accountId, action: 'schedule.delete', resource: `function:${functionId}`, details: { name: schedule.name } });
+  }
+
+  /**
+   * Refuses what a schedule can't run: a version or an alias the function hasn't, and what takes FF's original
+   * wrapped event, which can't read the Scheduled Event: the function, for $LATEST, or a version an alias sends calls to.
+   */
+  private async refuseTarget(function_: Function, qualifier: string | null): Promise<void> {
+    const manager = this.schedules.manager;
+    const route = await routeNamed(manager, function_.id, qualifier);
+    if (!route) throw new BadRequestException(`qualifier: the function has no ${qualifierText(qualifier)}`);
+    const wrapped = await wrappedIn(manager, function_, route);
+    if (wrapped === LATEST) throw new BadRequestException(WRAPPED_SCHEDULE_REFUSAL);
+    if (wrapped) throw new BadRequestException(wrappedQualifierRefusal(wrapped));
   }
 
   /** An expression's next runs, for a form's preview; 400 with what is wrong in it. */

@@ -37,6 +37,7 @@ export const sendingPaused = (message: string) => new SesError(400, 'SendingPaus
 export const notImplemented = (message: string) => new SesError(501, 'NotImplemented', message);
 export const accessDenied = (message: string) => new SesError(403, 'AccessDeniedException', message);
 export const unrecognizedClient = () => new SesError(403, 'UnrecognizedClientException', 'The security token included in the request is invalid.');
+export const expiredToken = () => new SesError(403, 'ExpiredTokenException', 'The security token included in the request is expired');
 export const missingAuthenticationToken = () => new SesError(403, 'MissingAuthenticationTokenException', 'Missing Authentication Token');
 export const incompleteSignature = (message: string) => new SesError(400, 'IncompleteSignatureException', message);
 export const signatureDoesNotMatch = (

@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::Context;
+use super::estimate::{self, AwsEstimate};
 use crate::api::types::{Me, MeAccount, function_named};
 use crate::api::{Call, Client};
 use crate::cli::Format;
@@ -14,7 +15,7 @@ use crate::config::Settings;
 use crate::error::{Error, Kind};
 use crate::table::{table, time};
 
-fn me(client: &Client) -> Result<Me, Error> {
+pub(super) fn me(client: &Client) -> Result<Me, Error> {
     client.json(&Call::get("/me"))
 }
 
@@ -78,6 +79,7 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     add("memoryMb", &|n| format!("{n} MB of memory a function at most"));
     add("timeoutSeconds", &|n| format!("a timeout of {n} s at most"));
     add("instancesPerFunction", &|n| format!("{n} instances a function at most"));
+    add("codeStorageMb", &|n| format!("{n} MB of code, versions' included"));
     add("invokesPerSecond", &|n| format!("{n} invocations a second"));
     add("writesPerMinute", &|n| format!("{n} changes a minute"));
     add("logRetentionDays", &|n| format!("logs kept {n} days"));
@@ -104,6 +106,7 @@ fn limits(limits: &serde_json::Map<String, Value>) -> Vec<String> {
     });
     add("emailsPerDay", &|n| format!("{n} e-mails a day"));
     add("emailsPerSecond", &|n| format!("{n} e-mails a second"));
+    add("accessKeys", &|n| if n == 1 { "1 access key".to_string() } else { format!("{n} access keys") });
     lines
 }
 
@@ -144,7 +147,7 @@ pub fn month(text: &str) -> Result<String, Error> {
     if valid {
         Ok(text.to_owned())
     } else {
-        Err(Error::new(Kind::Usage, format!("--month is a month as YYYY-MM, such as 2026-10: {text}")))
+        Err(Error::usage(format!("--month is a month as YYYY-MM, such as 2026-10: {text}")))
     }
 }
 
@@ -416,6 +419,31 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
     })
 }
 
+/// `ff usage --aws`: the last months as FF counted them at AWS's prices, an estimate, beside FF's.
+pub fn aws_estimate(months: Option<u32>, without: &[String], context: &Context) -> Result<(), Error> {
+    let call = estimate::call(months, without)?;
+    let client = Client::new(&context.settings()?)?;
+    let estimate: AwsEstimate = client.json(&call)?;
+    context.out.result(&estimate, || {
+        let (headers, rows) = estimate.table();
+        let mut text = format!(
+            "At AWS's prices, an estimate: {}.\n{}",
+            estimate.priced_with(),
+            table(&headers.iter().map(String::as_str).collect::<Vec<_>>(), &rows)
+        );
+        let assumptions = estimate.assumptions();
+        if !assumptions.is_empty() {
+            text.push_str(
+                "\nWhat AWS bills that FF doesn't, each line an estimate of its own, which --without leaves out of the totals:",
+            );
+            for (line, _, assumption) in assumptions {
+                text.push_str(&format!("\n  {line}: {assumption}"));
+            }
+        }
+        text
+    })
+}
+
 #[derive(Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Balance {
@@ -500,7 +528,7 @@ struct Metrics {
 /// A window's start, `since` ago, as the API takes it.
 pub fn start_of(since: &str, now: SystemTime) -> Result<String, Error> {
     let duration = humantime::parse_duration(since)
-        .map_err(|error| Error::new(Kind::Usage, format!("--since takes a duration such as 30m, 6h or 2d: {error}")))?;
+        .map_err(|error| Error::usage(format!("--since takes a duration such as 30m, 6h or 2d: {error}")))?;
     let start = now.checked_sub(duration).unwrap_or(now);
     Ok(humantime::format_rfc3339_seconds(start).to_string())
 }
@@ -633,7 +661,7 @@ mod tests {
 
     #[test]
     fn a_plans_limits_read_as_sentences() {
-        let limits = serde_json::json!({ "functions": 25, "memoryMb": 1024, "timeoutSeconds": 300, "idleSeconds": 900, "quota": { "pods": 20 } });
+        let limits = serde_json::json!({ "functions": 25, "memoryMb": 1024, "timeoutSeconds": 300, "codeStorageMb": 5120, "idleSeconds": 900, "accessKeys": 10, "quota": { "pods": 20 } });
 
         assert_eq!(
             super::limits(limits.as_object().unwrap()),
@@ -641,7 +669,9 @@ mod tests {
                 "25 functions",
                 "1024 MB of memory a function at most",
                 "a timeout of 300 s at most",
-                "scaled to zero after 15 min idle"
+                "5120 MB of code, versions' included",
+                "scaled to zero after 15 min idle",
+                "10 access keys"
             ]
         );
     }

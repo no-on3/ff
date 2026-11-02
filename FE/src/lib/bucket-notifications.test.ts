@@ -29,6 +29,13 @@ describe("a bucket's notifications, as the console says them", () => {
     ]);
   });
 
+  it('says a version or an alias of a function as Lambda names it, and puts its ARN back as the API gave it', () => {
+    const [entry] = entriesOf({ lambdaFunctionConfigurations: [{ id: 'live', lambdaFunctionArn: `${FUNCTION_ARN}:live`, events: ['s3:ObjectCreated:*'] }], queueConfigurations: [] });
+
+    expect(notificationText(entry)).toBe('every new object: run the function thumbnails:live, without waiting');
+    expect(configurationBody([entry]).lambdaFunctionConfigurations).toEqual([{ id: 'live', lambdaFunctionArn: `${FUNCTION_ARN}:live`, events: ['s3:ObjectCreated:*'] }]);
+  });
+
   it('puts the whole list back as the API takes it, without a removed entry', () => {
     const [thumbs, removals] = entriesOf(configuration);
 

@@ -8,7 +8,7 @@
 # URLs are answered on a port of their own, 3001, buckets' S3 requests on another, 3002, and queues' SQS requests on
 # a third, 3003, which the edge reaches, and functions too, with their own keys, through the Service ff-storage;
 # buckets' sites on a fourth, 3004, which the edge alone reaches; customers' mail's SES requests on a fifth, 3005,
-# which the edge reaches, and functions too, through ff-storage.
+# which the edge reaches, and functions too, through ff-storage; Lambda's API on a sixth, 3006, the same way.
 apiVersion: v1
 kind: Service
 metadata:
@@ -39,11 +39,15 @@ spec:
     - name: ses
       port: 3005
       targetPort: ses
+    - name: lambda
+      port: 3006
+      targetPort: lambda
 ---
 # Buckets' S3 front door as functions reach it with their own keys (ADR 0009), at the address that the backend's
 # FF_STORAGE_FUNCTION_ENDPOINT names: an IP address, where AWS's SDKs address buckets path-style by themselves, so that
 # no name of FF's is needed inside the cluster; queues' SQS endpoint at the same address (ADR 0010), as
-# FF_SQS_FUNCTION_ENDPOINT names it, and mail's SES endpoint (ADR 0012), as FF_SES_FUNCTION_ENDPOINT does. A fixed one, in the band of the cluster's Service range that Kubernetes keeps for
+# FF_SQS_FUNCTION_ENDPOINT names it, mail's SES endpoint (ADR 0012), as FF_SES_FUNCTION_ENDPOINT does, and Lambda's
+# (ADR 0014), as FF_LAMBDA_FUNCTION_ENDPOINT does. A fixed one, in the band of the cluster's Service range that Kubernetes keeps for
 # fixed addresses, beside the code registry's: k3s's range is 10.43.0.0/16; an overlay gives one of another.
 apiVersion: v1
 kind: Service
@@ -67,6 +71,9 @@ spec:
     - name: ses
       port: 3005
       targetPort: ses
+    - name: lambda
+      port: 3006
+      targetPort: lambda
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -129,6 +136,9 @@ spec:
             # FF_SES_PORT
             - name: ses
               containerPort: 3005
+            # FF_LAMBDA_PORT
+            - name: lambda
+              containerPort: 3006
             - name: metrics
               containerPort: 9464
           startupProbe:

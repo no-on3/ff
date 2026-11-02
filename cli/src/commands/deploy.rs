@@ -10,8 +10,9 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::package::{folder_name, handler_of, size};
+use super::versions::{AliasRoute, publish_version, set_alias, set_text};
 use super::{Context, env};
-use crate::api::types::{Function, FunctionView, Scaling, StoredPackage, find};
+use crate::api::types::{Function, FunctionAlias, FunctionVersion, FunctionView, Scaling, StoredPackage, find};
 use crate::api::{Call, Client};
 use crate::cli::{DeployArgs, Runtime};
 use crate::config::is_function_name;
@@ -27,10 +28,6 @@ const DEFAULT_MEMORY: u32 = 128;
 const DEFAULT_TIMEOUT: u32 = 5;
 /// Inline code's handler unless one is named: the API's own default.
 const INLINE_HANDLER: &str = "function.handler";
-
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
 
 /// The name a file gives: its own without its extension; for `function.*`, the name of the file
 /// `ff init` makes, its folder's.
@@ -51,7 +48,7 @@ fn checked_name(name: String) -> Result<String, Error> {
     if is_function_name(&name) {
         Ok(name)
     } else {
-        Err(usage(format!(
+        Err(Error::usage(format!(
             "\"{name}\" can't be a function's name: 1 to 64 letters, digits, hyphens or underscores, as on AWS Lambda; name it with --name"
         )))
     }
@@ -70,7 +67,7 @@ pub fn runtime_of(file: &Path, runtime: Option<Runtime>) -> Result<Runtime, Erro
     match file.extension().and_then(|extension| extension.to_str()) {
         Some("ts" | "js" | "cjs") => Ok(Runtime::Nodejs),
         Some("py") => Ok(Runtime::Python),
-        other => Err(usage(format!(
+        other => Err(Error::usage(format!(
             "Can't tell the runtime from {}: .ts, .js and .cjs are nodejs, .py python; or name it with --runtime",
             other
                 .map(|extension| format!("the extension .{extension}"))
@@ -241,6 +238,56 @@ struct Deployed<'a> {
     /// A folder's package, as made.
     #[serde(skip_serializing_if = "Option::is_none")]
     package: Option<PackageSent<'a>>,
+    /// With --publish, the version published, and the alias pointed at it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    published: Option<Published>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Published {
+    version: FunctionVersion,
+    /// False when nothing changed since the last version, which Lambda answers with.
+    new: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alias: Option<FunctionAlias>,
+    /// What the alias was and is, for people.
+    #[serde(skip)]
+    alias_text: Option<String>,
+}
+
+/// With --publish, a version of the function as deployed, and the alias pointed at it.
+fn publish_deployed(client: &Client, function: &Function, args: &DeployArgs) -> Result<Option<Published>, Error> {
+    if !args.publish {
+        return Ok(None);
+    }
+    let (version, new) = publish_version(client, &function.id, None)?;
+    let (alias, alias_text) = match &args.alias {
+        Some(name) => {
+            let route = AliasRoute { version: version.version.clone(), also: None };
+            let (alias, before) = set_alias(client, &function.id, name, &route, None)?;
+            let text = set_text(&function.name, &alias, before.as_ref());
+            (Some(alias), Some(text))
+        }
+        None => (None, None),
+    };
+    Ok(Some(Published { version, new, alias, alias_text }))
+}
+
+/// `version 3 published`, then the alias's line.
+fn published_text(published: &Published) -> String {
+    let mut text = if published.new {
+        format!("\nversion {} published", published.version.version)
+    } else {
+        format!(
+            "\nversion {}, as nothing but the description changed since it was published",
+            published.version.version
+        )
+    };
+    if let Some(alias) = &published.alias_text {
+        text.push_str(&format!("\n{alias}"));
+    }
+    text
 }
 
 /// What one deploy is about: the function's name, what it should be, and its package.
@@ -259,18 +306,18 @@ pub fn run(args: DeployArgs, context: &Context) -> Result<(), Error> {
         return run_folder(&args, environment, context);
     }
     if args.build.container || args.build.no_build {
-        return Err(usage(
+        return Err(Error::usage(
             "--container and --no-build are for a folder, which ff packages: a file is deployed as it is",
         ));
     }
     if args.path.extension().is_some_and(|extension| extension == "zip") {
-        return Err(usage(format!(
+        return Err(Error::usage(format!(
             "{} is a zip: ff deploy takes the function's folder, which it packages itself, or its code's one file",
             args.path.display()
         )));
     }
     let code = std::fs::read_to_string(&args.path)
-        .map_err(|error| usage(format!("Couldn't read {} as UTF-8 text: {error}", args.path.display())))?;
+        .map_err(|error| Error::usage(format!("Couldn't read {} as UTF-8 text: {error}", args.path.display())))?;
     let name = name_of(&args.path, args.name.as_deref())?;
     let runtime = runtime_of(&args.path, args.runtime)?;
     let settings = context.settings()?;
@@ -317,7 +364,7 @@ fn run_folder(args: &DeployArgs, environment: Option<env::Variables>, context: &
         (false, default, None) => default,
     }
     .ok_or_else(|| {
-        usage(format!(
+        Error::usage(format!(
             "Can't tell the handler of {}: it has no function.* file, nor {}; name it with --handler, such as src/app.handler",
             args.path.display(),
             match package.runtime {
@@ -373,6 +420,7 @@ fn finish(
         function
     };
 
+    let published = publish_deployed(client, &function, args)?;
     let package = deploy.package.map(|package| PackageSent {
         code_sha256: &package.code_sha256,
         code_size: package.zip.len() as u64,
@@ -391,14 +439,15 @@ fn finish(
         ),
         _ => String::new(),
     };
-    let deployed = Deployed { action, changed, seconds, function: function.view(), package };
+    let published_line = published.as_ref().map(published_text).unwrap_or_default();
+    let deployed = Deployed { action, changed, seconds, function: function.view(), package, published };
     context.out.result(&deployed, || match action {
         "unchanged" => format!(
-            "{name}: no changes ({}, {} MB, {} s, {})",
+            "{name}: no changes ({}, {} MB, {} s, {}){published_line}",
             function.runtime, function.memory, function.timeout, function.status
         ),
         _ => format!(
-            "{action} {name} ({}, {} MB, {} s): {} in {seconds} s{}{package_line}",
+            "{action} {name} ({}, {} MB, {} s): {} in {seconds} s{}{package_line}{published_line}",
             function.runtime,
             function.memory,
             function.timeout,

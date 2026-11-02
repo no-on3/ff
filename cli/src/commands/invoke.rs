@@ -9,7 +9,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::Context;
-use crate::api::types::{Invocation, function_named};
+use crate::api::types::{Invocation, function_named, split_qualified};
 use crate::api::{Call, Client};
 use crate::cli::{Format, InvokeArgs};
 use crate::error::{Error, Kind};
@@ -22,13 +22,13 @@ pub fn input_of(data: Option<&str>) -> Result<Option<Value>, Error> {
             let mut text = String::new();
             std::io::stdin()
                 .read_to_string(&mut text)
-                .map_err(|error| Error::new(Kind::Usage, format!("Couldn't read the event from stdin: {error}")))?;
+                .map_err(|error| Error::usage(format!("Couldn't read the event from stdin: {error}")))?;
             (text, "stdin".to_owned())
         }
         _ => match data.strip_prefix('@') {
             Some(path) => {
                 let text = std::fs::read_to_string(path)
-                    .map_err(|error| Error::new(Kind::Usage, format!("Couldn't read {path}: {error}")))?;
+                    .map_err(|error| Error::usage(format!("Couldn't read {path}: {error}")))?;
                 (text, path.to_owned())
             }
             None => (data.to_owned(), "--data".to_owned()),
@@ -36,7 +36,7 @@ pub fn input_of(data: Option<&str>) -> Result<Option<Value>, Error> {
     };
     serde_json::from_str(&text)
         .map(Some)
-        .map_err(|error| Error::new(Kind::Usage, format!("The event in {from} isn't JSON: {error}")))
+        .map_err(|error| Error::usage(format!("The event in {from} isn't JSON: {error}")))
 }
 
 /// A request's body, as given: inline text, `@file`, or `-` for stdin, not necessarily JSON.
@@ -46,13 +46,11 @@ pub fn raw_data(data: &str) -> Result<Vec<u8>, Error> {
             let mut bytes = Vec::new();
             std::io::stdin()
                 .read_to_end(&mut bytes)
-                .map_err(|error| Error::new(Kind::Usage, format!("Couldn't read the body from stdin: {error}")))?;
+                .map_err(|error| Error::usage(format!("Couldn't read the body from stdin: {error}")))?;
             Ok(bytes)
         }
         _ => match data.strip_prefix('@') {
-            Some(path) => {
-                std::fs::read(path).map_err(|error| Error::new(Kind::Usage, format!("Couldn't read {path}: {error}")))
-            }
+            Some(path) => std::fs::read(path).map_err(|error| Error::usage(format!("Couldn't read {path}: {error}"))),
             None => Ok(data.as_bytes().to_vec()),
         },
     }
@@ -118,20 +116,38 @@ fn summary(invocation: &Invocation) -> String {
     parts.join(" · ")
 }
 
+/// The call's body: its event, if given, and the version or the alias it names, as Lambda's `Qualifier`.
+fn body_of(input: Option<Value>, qualifier: Option<&str>) -> Value {
+    let mut body = json!({});
+    if let Some(input) = input {
+        body["input"] = input;
+    }
+    if let Some(qualifier) = qualifier {
+        body["qualifier"] = qualifier.into();
+    }
+    body
+}
+
 pub fn run(args: InvokeArgs, context: &Context) -> Result<(), Error> {
+    let (name, qualifier) = split_qualified(&args.name);
     if let Some(http) = &args.http {
-        return super::url::invoke_http(&args.name, &http[0], &http[1], &args.headers, args.data.as_deref(), context);
+        return super::url::invoke_http(
+            name,
+            qualifier,
+            &http[0],
+            &http[1],
+            &args.headers,
+            args.data.as_deref(),
+            context,
+        );
     }
     let input = input_of(args.data.as_deref())?;
     let settings = context.settings()?;
     let client = Client::new(&settings)?;
-    let function = function_named(&client, &args.name)?;
-    let body = match input {
-        Some(input) => json!({ "input": input }),
-        None => json!({}),
-    };
+    let function = function_named(&client, name)?;
+    let body = body_of(input, qualifier);
     if args.asynchronous || args.dry_run {
-        return without_waiting(&client, &args.name, &function.id, body, &args, context);
+        return without_waiting(&client, name, &function.id, body, &args, context);
     }
     let call = Call::post(format!("/functions/{}/invoke", function.id), body).timeout(timeout_for(function.timeout));
     let invocation: Invocation = client.json(&call).map_err(invocation_failed)?;
@@ -162,6 +178,13 @@ mod tests {
         let refused = input_of(Some("{name: x}")).unwrap_err();
         assert_eq!(refused.exit_code(), 2);
         assert!(refused.message.starts_with("The event in --data isn't JSON: "), "{}", refused.message);
+    }
+
+    #[test]
+    fn a_call_names_its_event_and_the_version_or_the_alias_it_runs() {
+        assert_eq!(body_of(None, None), json!({}));
+        assert_eq!(body_of(Some(json!({ "a": 1 })), Some("live")), json!({ "input": { "a": 1 }, "qualifier": "live" }));
+        assert_eq!(body_of(None, Some("3")), json!({ "qualifier": "3" }));
     }
 
     #[test]

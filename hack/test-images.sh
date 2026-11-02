@@ -32,19 +32,21 @@ docker build -q -t "ff-backend:$tag" "$FF_REPO_ROOT/BE" >/dev/null
 echo "  built ff-backend:$tag ($(size "ff-backend:$tag"))"
 check "it runs as the numeric user 10001, Node.js 24.21.0" "10001:10001 v24.21.0" \
   "$(docker image inspect "ff-backend:$tag" --format '{{.Config.User}}') $(docker run --rm "ff-backend:$tag" node --version)"
-check "with its production dependencies only: no TypeScript, no ts-node, no Jest, no Nest CLI" "0" \
-  "$(docker run --rm "ff-backend:$tag" sh -c 'ls -d node_modules/typescript node_modules/ts-node node_modules/jest node_modules/@nestjs/cli 2>/dev/null | wc -l')"
+check "with its production dependencies only: TypeScript, which turns inline code into the JavaScript an export gives Lambda, but no ts-node, Jest or Nest CLI" \
+  "node_modules/typescript" \
+  "$(docker run --rm "ff-backend:$tag" sh -c 'ls -d node_modules/typescript node_modules/ts-node node_modules/jest node_modules/@nestjs/cli 2>/dev/null | paste -sd" "')"
 
 pg_port="$(free_port)"
 docker run -d --name "$prefix-db" -e POSTGRES_PASSWORD=images-test-password -e POSTGRES_DB=ff -p "127.0.0.1:$pg_port:5432" postgres:15-alpine >/dev/null
 for _ in $(seq 1 60); do docker exec "$prefix-db" pg_isready -h 127.0.0.1 -U postgres -d ff >/dev/null 2>&1 && break; sleep 1; done
 port="$(free_port)"
 metrics_port="$(free_port)"
-# Function URLs', buckets', queues' and mail's ports too: with host networking, a development backend here may hold the defaults.
+# Function URLs', buckets', queues', mail's and Lambda's ports too: with host networking, a development backend here may hold the defaults.
 url_port="$(free_port)"
 storage_port="$(free_port)"
 sqs_port="$(free_port)"
 ses_port="$(free_port)"
+lambda_port="$(free_port)"
 # The backend's cluster credentials, readable by the container's user: copies in the test's own directory, which
 # only this user may enter.
 install -m 644 "$FF_SA_TOKEN_FILE" "$work/token"
@@ -68,8 +70,9 @@ env=(
   # Production's addresses are https, and every function's code comes from the code registry, never reached here.
   -e FF_FUNCTION_URL_BASE=https://fn.ff.test -e FF_STORAGE_BASE=https://s3.ff.test -e FF_SQS_BASE=https://sqs.ff.test -e FF_WEBSITE_BASE=https://site.ff.test
   -e FF_SES_BASE=https://email.ff.test -e FF_EMAIL_MAIL_HOST=mail.ff.test -e FF_EMAIL_BOUNCE_DOMAIN=bounces.mail.ff.test
+  -e FF_LAMBDA_BASE=https://lambda.ff.test
   -e FF_CODE_REGISTRY=http://127.0.0.1:1
-  -e FF_FUNCTION_URL_PORT="$url_port" -e FF_STORAGE_PORT="$storage_port" -e FF_SQS_PORT="$sqs_port" -e FF_SES_PORT="$ses_port" -e FF_WEBSITE_PORT=0
+  -e FF_FUNCTION_URL_PORT="$url_port" -e FF_STORAGE_PORT="$storage_port" -e FF_SQS_PORT="$sqs_port" -e FF_SES_PORT="$ses_port" -e FF_LAMBDA_PORT="$lambda_port" -e FF_WEBSITE_PORT=0
   -e FF_ENCRYPTION_KEYS_FILE=/etc/ff/keys/keys -v "$work/encryption-keys:/etc/ff/keys/keys:ro"
 )
 # Host networking: the database's and the cluster's ports are this machine's.
@@ -107,6 +110,8 @@ check "queues' SQS endpoint, on its own port, refuses a request with no signatur
   "$(curl -s -o "$work/sqs" -w '%{http_code}' -X POST -H 'Content-Type: application/x-amz-json-1.0' -H 'X-Amz-Target: AmazonSQS.ListQueues' -d '{}' "http://127.0.0.1:$sqs_port/") $(jq -r .__type "$work/sqs")"
 check "mail's SES endpoint, on its own port, refuses a request with no signature as SES does" "403 MissingAuthenticationTokenException" \
   "$(curl -s -o /dev/null -D "$work/ses" -w '%{http_code}' "http://127.0.0.1:$ses_port/v2/email/account") $(tr -d '\r' <"$work/ses" | awk -F': ' 'tolower($1) == "x-amzn-errortype" {print $2}' | cut -d: -f1)"
+check "Lambda's endpoint, on its own port, refuses a request with no signature as Lambda does" "403 MissingAuthenticationTokenException" \
+  "$(curl -s -o /dev/null -D "$work/lambda" -w '%{http_code}' "http://127.0.0.1:$lambda_port/2015-03-31/functions/") $(tr -d '\r' <"$work/lambda" | awk -F': ' 'tolower($1) == "x-amzn-errortype" {print $2}')"
 check "every line of its log is one JSON object" true \
   "$(docker logs "$prefix-backend" 2>&1 | python3 -c '
 import json, sys

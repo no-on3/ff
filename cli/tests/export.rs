@@ -1,0 +1,287 @@
+//! `ff export` against a scripted API: the account read, route by route, and the folder it writes.
+
+mod common;
+
+use common::{Reply, Server, ff, with_key};
+use predicates::prelude::*;
+use serde_json::{Value, json};
+
+const ACCOUNT: &str = "123456789012";
+const AT: &str = "2026-10-21T09:00:00.000Z";
+
+fn me() -> Value {
+    json!({ "user": null, "key": { "id": "0123456789ab", "name": "ci", "scopes": ["functions:read"] },
+            "accounts": [{ "id": ACCOUNT, "name": "Shop", "status": "active", "role": "developer",
+                           "plan": { "id": "beta", "name": "Beta", "limits": {} },
+                           "internetEgress": false, "dataDeletionDueAt": null, "dataDeletedAt": null }] })
+}
+
+fn function(environment: Option<Value>) -> Value {
+    let mut function = json!({ "id": "f1", "name": "send-receipts", "runtime": "nodejs", "code": "", "packageType": "inline",
+                               "handler": "function.handler", "memory": 256, "timeout": 60, "status": "ACTIVE",
+                               "eventFormat": "lambda", "minInstances": 0, "maxInstances": 3, "scaleToZero": true,
+                               "createdAt": AT, "updatedAt": AT });
+    if let Some(environment) = environment {
+        function["environment"] = environment;
+    }
+    function
+}
+
+fn queue(name: &str, visibility: u32) -> Value {
+    json!({ "name": name, "url": format!("https://sqs.ff.tn/{ACCOUNT}/{name}"), "arn": format!("arn:aws:sqs:tn-tunis-1:{ACCOUNT}:{name}"),
+            "visibilityTimeout": visibility, "messageRetentionPeriod": 345_600, "delaySeconds": 0, "maximumMessageSize": 1_048_576,
+            "receiveMessageWaitTimeSeconds": 0, "redrivePolicy": null, "messages": { "available": 0, "inFlight": 0, "delayed": 0 },
+            "sizeBytes": 0, "createdAt": AT, "updatedAt": AT })
+}
+
+/// The account's last three months at AWS's prices, as the API gives them.
+fn estimate() -> Value {
+    let month = |month: &str, until: Option<&str>, usd: &str| {
+        json!({ "month": month, "until": until, "requests": 12,
+                "lines": [{ "line": "functions", "label": "AWS Lambda: requests and duration", "usd": usd, "amount": "0.000",
+                            "extra": false, "leftOut": false, "assumption": null },
+                          { "line": "dataOut", "label": "Data out to the internet", "usd": "0.00", "amount": "0.000", "extra": true,
+                            "leftOut": false, "assumption": "What the buckets sent out, as FF counts it, past AWS's free 100 GB a month" }],
+                "totalUsd": usd, "total": "0.000", "ffTotal": "0.000" })
+    };
+    json!({ "currency": "TND", "usdRate": "3.0080", "usdRateDate": "2026-10-14", "region": "us-east-1",
+            "pricesReadOn": ["2026-10-17", "2026-10-31"], "priceBook": "pb1",
+            "months": [month("2026-09", None, "0.00"), month("2026-10", None, "0.02"), month("2026-11", Some(AT), "0.00")] })
+}
+
+/// The replies, in the order ff export asks: the account, the function, what calls it and what its
+/// keys used, the queues, the buckets, the databases, caches and mail, the estimate at AWS's prices,
+/// then the function's code.
+fn account(zip: &[u8], estimate: Reply) -> Vec<Reply> {
+    vec![
+        Reply::json(200, me()),
+        Reply::json(200, json!([function(None)])),
+        Reply::json(200, function(Some(json!({ "LOG_LEVEL": "info" })))),
+        Reply::json(200, json!({ "secrets": [{ "name": "DATABASE_URL", "updatedAt": AT }] })),
+        Reply::json(
+            200,
+            json!([{ "functionUrl": "https://abc.fn.ff.tn/", "functionId": "f1", "alias": null, "authType": "NONE",
+                                 "cors": { "allowOrigins": ["https://shop.tn"] }, "invokeMode": "BUFFERED", "createdAt": AT, "updatedAt": AT },
+                   { "functionUrl": "https://beta.fn.ff.tn/", "functionId": "f1", "alias": "beta", "authType": "NONE",
+                                 "cors": null, "invokeMode": "BUFFERED", "createdAt": AT, "updatedAt": AT }]),
+        ),
+        Reply::json(200, json!([])),
+        Reply::json(
+            200,
+            json!([{ "domain": "beta.shop.tn", "status": "active", "records": { "cname": [], "txt": [] },
+                     "checkedAt": AT, "checkError": null }]),
+        ),
+        Reply::json(
+            200,
+            json!([{ "aliasArn": format!("arn:aws:lambda:tn-tunis-1:{ACCOUNT}:function:send-receipts:beta"), "name": "beta",
+                     "functionVersion": "2", "description": "", "revisionId": "r-2", "createdAt": AT, "updatedAt": AT },
+                   { "aliasArn": format!("arn:aws:lambda:tn-tunis-1:{ACCOUNT}:function:send-receipts:live"), "name": "live",
+                     "functionVersion": "$LATEST", "description": "", "revisionId": "r-1", "createdAt": AT, "updatedAt": AT }]),
+        ),
+        Reply::json(
+            200,
+            json!([{ "id": "s1", "functionId": "f1", "name": "nightly", "description": null, "expression": "cron(0 2 * * ? *)",
+                                  "input": { "report": true }, "enabled": true, "nextRunAt": null, "lastRunAt": null,
+                                  "lastRequestId": null, "lastOutcome": null, "createdAt": AT, "updatedAt": AT }]),
+        ),
+        Reply::json(
+            200,
+            json!([{ "uuid": "9a1c1b52-5c87-4e0e-9a43-0d2f6f0d6c11", "eventSourceArn": format!("arn:aws:sqs:tn-tunis-1:{ACCOUNT}:orders"),
+                                  "functionArn": format!("arn:aws:lambda:tn-tunis-1:{ACCOUNT}:function:send-receipts"), "batchSize": 10,
+                                  "maximumBatchingWindowInSeconds": 0, "functionResponseTypes": ["ReportBatchItemFailures"],
+                                  "scalingConfig": null, "state": "Enabled", "stateTransitionReason": "USER_INITIATED", "lastModified": AT }]),
+        ),
+        Reply::json(
+            200,
+            json!({ "functionArn": format!("arn:aws:lambda:tn-tunis-1:{ACCOUNT}:function:send-receipts:$LATEST"),
+                                 "maximumRetryAttempts": 1, "maximumEventAgeInSeconds": null,
+                                 "destinationConfig": { "onSuccess": {}, "onFailure": { "destination": format!("arn:aws:sqs:tn-tunis-1:{ACCOUNT}:failed-receipts") } },
+                                 "lastModified": AT }),
+        ),
+        Reply::json(
+            200,
+            json!({ "uses": [{ "service": "s3", "resource": "uploads", "operation": "GetObject", "firstDay": "2026-10-21", "lastDay": "2026-10-30" },
+                             { "service": "sqs", "resource": "orders", "operation": "SendMessage", "firstDay": "2026-10-22", "lastDay": "2026-10-31" }] }),
+        ),
+        Reply::json(200, json!([queue("failed-receipts", 30), queue("orders", 30)])),
+        Reply::json(
+            200,
+            json!([{ "name": "uploads", "status": "active", "region": "tn-tunis-1", "endpoint": "https://s3.ff.tn",
+                                  "url": "https://uploads.s3.ff.tn", "sizeBytes": null, "objects": null, "measuredAt": null, "createdAt": AT }]),
+        ),
+        Reply::json(404, json!({ "statusCode": 404, "message": "The bucket uploads is no site" })),
+        Reply::json(
+            200,
+            json!({ "queueConfigurations": [{ "id": "incoming", "events": ["s3:ObjectCreated:*"],
+                                                           "queueArn": format!("arn:aws:sqs:tn-tunis-1:{ACCOUNT}:orders") }] }),
+        ),
+        Reply::json(
+            200,
+            json!([{ "id": "d1", "name": "shop", "status": "available", "host": "db.ff.tn", "port": 5432, "database": "shop",
+                                  "user": "shop", "connectionUrl": "postgresql://shop@db.ff.tn:5432/shop", "sizeBytes": 52_428_800,
+                                  "connections": 0, "connectionLimit": 10, "storageLimitMb": 1024, "passwordSetAt": AT, "createdAt": AT }]),
+        ),
+        Reply::json(200, json!([])),
+        Reply::json(200, json!([])),
+        estimate,
+        Reply::bytes(200, "application/zip", zip.to_vec()),
+    ]
+}
+
+#[test]
+fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook() {
+    let zip = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec();
+    let api = Server::start(account(&zip, Reply::json(200, estimate())));
+    let dir = with_key(&api.url);
+    let out = tempfile::TempDir::new().unwrap();
+    let folder = out.path().join("to-aws");
+
+    ff(&dir)
+        .args(["export", folder.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MIGRATION.md"));
+
+    let paths: Vec<String> = api.requests().iter().map(|request| request.path.clone()).collect();
+    assert_eq!(
+        paths,
+        [
+            "/me",
+            "/functions",
+            "/functions/f1",
+            "/functions/f1/secrets",
+            "/functions/f1/urls",
+            "/functions/f1/url/domains",
+            "/functions/f1/url/domains?qualifier=beta",
+            "/functions/f1/aliases",
+            "/functions/f1/schedules",
+            "/functions/f1/event-sources",
+            "/functions/f1/event-invoke-config",
+            "/functions/f1/key-uses",
+            "/queues",
+            "/buckets",
+            "/buckets/uploads/website",
+            "/buckets/uploads/notifications",
+            "/databases",
+            "/caches",
+            "/email/identities",
+            "/usage/aws-estimate?months=3",
+            "/functions/f1/code?javascript=true",
+        ]
+    );
+    assert_eq!(api.requests()[20].header("accept"), Some("application/zip"));
+    assert_eq!(std::fs::read(folder.join("code/send-receipts.zip")).unwrap(), zip);
+    let read = |path: &str| std::fs::read_to_string(folder.join(path)).unwrap();
+    let template = read("template.yaml");
+    for line in [
+        "  SendReceiptsFunction:\n    Type: AWS::Serverless::Function\n",
+        "      CodeUri: code/send-receipts.zip\n",
+        "      Runtime: nodejs24.x\n",
+        "          LOG_LEVEL: !Ref SendReceiptsLogLevel\n",
+        "          DATABASE_URL: !Ref SendReceiptsDatabaseUrl\n",
+        "            Queue: !GetAtt OrdersQueue.Arn\n",
+        "            Destination: !GetAtt FailedReceiptsQueue.Arn\n",
+        "            State: !Ref ScheduleState\n",
+        "      AutoPublishAlias: live\n",
+        "      BucketName: !Ref UploadsBucketName\n",
+        "      VisibilityTimeout: 60\n",
+        "        - S3ReadPolicy:\n            BucketName: !Ref UploadsBucketName\n",
+        "        - SQSSendMessagePolicy:\n            QueueName: !GetAtt OrdersQueue.QueueName\n",
+    ] {
+        assert!(template.contains(line), "{line:?} in:\n{template}");
+    }
+    assert!(!read("template-before-copy.yaml").contains("QueueConfigurations"));
+    let functions = read("terraform/functions.tf");
+    for line in [
+        "resource \"aws_lambda_function\" \"send_receipts\" {\n",
+        "  filename         = \"${path.module}/../code/send-receipts.zip\"\n",
+        "= aws_sqs_queue.orders.arn\n",
+        "    actions   = [\"sqs:DeleteMessage\", \"sqs:GetQueueAttributes\", \"sqs:ReceiveMessage\", \"sqs:SendMessage\"]\n",
+    ] {
+        assert!(functions.contains(line), "{line:?} in:\n{functions}");
+    }
+    assert!(read("terraform/buckets.tf").contains("  count  = var.bucket_events ? 1 : 0\n"));
+    assert!(read("terraform/terraform.tfvars.example").contains("\nsend_receipts_database_url = \"\"\n"));
+    assert_eq!(
+        read("secrets.template.env").lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(),
+        ["SendReceiptsLogLevel=", "SendReceiptsDatabaseUrl="]
+    );
+    let migration = read("MIGRATION.md");
+    assert!(migration.starts_with("# Moving Shop from FF to AWS\n"), "{migration}");
+    assert!(migration.contains("`ff schedule disable send-receipts nightly`"), "{migration}");
+    assert!(migration.contains("on FF from 2026-10-21 to 2026-10-31, as FF noted each use"), "{migration}");
+    for note in [
+        "- **send-receipts**'s alias `live` names `$LATEST` on FF: on AWS, it is the template's `AutoPublishAlias`",
+        "- **send-receipts**'s alias `beta` names version 2 on FF, whose code the export hasn't",
+        "- **send-receipts**'s alias `beta` has a URL of its own on FF, `https://beta.fn.ff.tn/`",
+        "; `beta.shop.tn` reaches it through a CloudFront distribution",
+        "its alias `beta`'s URL's callers from https://beta.fn.ff.tn/ to the address `aws lambda create-function-url-config` answers; `beta.shop.tn` through CloudFront",
+    ] {
+        assert!(migration.contains(note), "{note:?} in:\n{migration}");
+    }
+    assert!(read("data/postgres.md").contains("> **In this account:** the database `shop` (50 MB)."));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_ne!(std::fs::metadata(folder.join("data/s3-sync.sh")).unwrap().permissions().mode() & 0o111, 0);
+    }
+    assert!(!folder.join("data/elasticache.md").exists(), "a page for what the account has alone");
+    let estimate = read("cost-estimate.md");
+    for line in [
+        "# Shop at AWS's prices, an estimate\n",
+        "from FF's account 123456789012: its last 3 months, all of its usage, this one so far last: what FF counted, at AWS's US$ list prices in us-east-1",
+        "\n| US$ | 2026-09 | 2026-10 | 2026-11 so far |\n|---|---:|---:|---:|\n| AWS Lambda: requests and duration | 0.00 | 0.02 | 0.00 |\n",
+        "\n- **Data out to the internet** (`dataOut`): What the buckets sent out, as FF counts it, past AWS's free 100 GB a month.\n",
+    ] {
+        assert!(estimate.contains(line), "{line:?} in:\n{estimate}");
+    }
+}
+
+#[test]
+fn an_export_without_the_estimate_says_why_and_writes_the_kit_all_the_same() {
+    let zip = b"PK\x05\x06\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec();
+    let refused = json!({ "statusCode": 403, "message": "This API key lacks the scope usage:read" });
+    let api = Server::start(account(&zip, Reply::json(403, refused)));
+    let dir = with_key(&api.url);
+    let out = tempfile::TempDir::new().unwrap();
+    let folder = out.path().join("to-aws");
+
+    ff(&dir)
+        .args(["export", folder.to_str().unwrap()])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("cost-estimate.md has no estimate: This API key lacks the scope usage:read"));
+
+    assert_eq!(std::fs::read(folder.join("code/send-receipts.zip")).unwrap(), zip);
+    assert!(
+        std::fs::read_to_string(folder.join("cost-estimate.md"))
+            .unwrap()
+            .contains("`ff export` wrote no estimate on 2")
+    );
+    assert!(std::fs::read_to_string(folder.join("cost-estimate.md")).unwrap().contains(
+        ": FF's API answered \"This API key lacks the scope usage:read\". Once it can, `ff usage --aws` makes one.\n"
+    ));
+}
+
+#[test]
+fn an_export_refuses_a_folder_with_files_before_any_call_and_a_function_the_account_lacks() {
+    let out = tempfile::TempDir::new().unwrap();
+    std::fs::write(out.path().join("notes.txt"), "mine").unwrap();
+    let dir = with_key(&common::unreachable_url());
+
+    ff(&dir)
+        .args(["export", out.path().to_str().unwrap()])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("already holds files: ff export writes a new folder"));
+
+    let api = Server::start(vec![Reply::json(200, me()), Reply::json(200, json!([function(None)]))]);
+    let dir = with_key(&api.url);
+    let folder = out.path().join("to-aws");
+    ff(&dir)
+        .args(["export", "--functions", "send-receipts,orders", folder.to_str().unwrap()])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("There is no function named \"orders\" in the account"));
+    assert!(!folder.exists(), "nothing written");
+}

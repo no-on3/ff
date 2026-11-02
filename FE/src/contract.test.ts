@@ -5,6 +5,7 @@ import scopesSource from '../../BE/src/api-keys/api-key-format.ts?raw';
 import planLimitsSource from '../../BE/src/plans/plan-limits.ts?raw';
 import invocationSource from '../../BE/src/functions/entities/function-invocation.entity.ts?raw';
 import usageDtoSource from '../../BE/src/usage/usage.dto.ts?raw';
+import awsEstimateSource from '../../BE/src/billing/aws-estimate.ts?raw';
 import billingDtoSource from '../../BE/src/billing/billing.dto.ts?raw';
 import paymentsDtoSource from '../../BE/src/billing/payments/payments.dto.ts?raw';
 import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
@@ -32,6 +33,8 @@ import functionUrlEntitySource from '../../BE/src/functions/entities/function-ur
 import customDomainDtoSource from '../../BE/src/function-urls/dto/custom-domain.dto.ts?raw';
 import customDomainEntitySource from '../../BE/src/function-urls/custom-domain.entity.ts?raw';
 import scheduleDtoSource from '../../BE/src/schedules/dto/schedule.dto.ts?raw';
+import versionsDtoSource from '../../BE/src/functions/dto/versions.dto.ts?raw';
+import aliasesDtoSource from '../../BE/src/functions/dto/aliases.dto.ts?raw';
 import cacheDtoSource from '../../BE/src/caches/dto/cache.dto.ts?raw';
 import emailDtoSource from '../../BE/src/email/dto/email.dto.ts?raw';
 import emailIdentityEntitySource from '../../BE/src/email/email-identity.entity.ts?raw';
@@ -43,6 +46,7 @@ import databaseEntitySource from '../../BE/src/databases/database.entity.ts?raw'
 import databaseNamesSource from '../../BE/src/databases/database-names.ts?raw';
 import storageDtoSource from '../../BE/src/storage/dto/storage.dto.ts?raw';
 import storageNamesSource from '../../BE/src/storage/storage-names.ts?raw';
+import storageKeySource from '../../BE/src/storage/storage-key.entity.ts?raw';
 import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
 import eventSourceDtoSource from '../../BE/src/event-sources/dto/event-source.dto.ts?raw';
 import bucketNotificationsDtoSource from '../../BE/src/storage/dto/notifications.dto.ts?raw';
@@ -52,17 +56,19 @@ import viteConfigSource from '../vite.config.ts?raw';
 import { LOGGED_OUT_PATH, oidcSettings } from './auth/oidc';
 import { CREDIT_LIMITS } from './lib/billing';
 import { MAX_ATTEMPTS } from './lib/notifications';
-import { CACHE_METRICS, COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS } from './lib/alarms';
+import { CACHE_METRICS, CALL_METRICS, COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSING_DATA, PERIODS, STATISTICS, emptyForm, toBody } from './lib/alarms';
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME, ORIGIN } from './lib/function-url';
 import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
-import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
+import { SCHEDULE_FIELDS, SCHEDULE_NAME, emptyForm as emptyScheduleForm, scheduleOf } from './lib/schedules';
+import { ALIAS_FIELDS, ALIAS_NAME, VERSION_FIELDS, aliasBody, rollbackBody } from './lib/versions';
 import { CACHE_NAME } from './lib/caches';
 import { EMAIL_ACCOUNT_FIELDS, IDENTITY_FIELDS, IDENTITY_STATUSES, MESSAGE_FIELDS, RECIPIENT_FIELDS, RECIPIENT_STATUSES, SEND_FIELDS, SUPPRESSION_FIELDS } from './lib/email';
 import { DATABASE_NAME } from './lib/databases';
+import { KEY_NAME } from './lib/access-keys';
 import { BUCKET_NAME } from './lib/buckets';
 import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
-import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES } from './lib/event-sources';
+import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES, eventSourceBody, eventSourceForm } from './lib/event-sources';
 import { EVENT_TYPES as NOTIFICATION_EVENTS } from './lib/bucket-notifications';
 import { SITE_DOMAIN_FIELDS, SITE_METRICS, WEBSITE_FIELDS } from './lib/sites';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
@@ -79,6 +85,8 @@ import {
   CACHE_USAGE_FIELDS,
   EMAIL_USAGE_FIELDS,
   STORAGE_KEY_FIELDS,
+  FUNCTION_ACCESS,
+  ALL_FUNCTIONS,
   CACHE_FIELDS,
   CACHE_STATUSES,
   DATABASE_FIELDS,
@@ -113,11 +121,15 @@ import {
   TRANSFER_FIELDS,
   USAGE_AMOUNTS,
   USAGE_ESTIMATE_FIELDS,
+  AWS_ESTIMATE_FIELDS,
+  AWS_ESTIMATE_LINE_FIELDS,
+  AWS_ESTIMATE_MONTH_FIELDS,
+  AWS_EXTRA_LINES,
 } from './services/api';
 
 // What the console shares with the API and the development realm, read from
 // their files: a console on another port than the realm and the API allow
-// can't log in, and the browser blocks its calls (P-14).
+// can't log in, and the browser blocks its calls.
 
 const port = /const CONSOLE_PORT = (\d+)/.exec(viteConfigSource)?.[1];
 const origin = `http://localhost:${port}`;
@@ -154,7 +166,7 @@ describe("the console's address", () => {
 
   it("is one of the backend's CORS origins in development, by default and in BE/.env.example", () => {
     expect(corsSource).toContain(`const DEV_CORS_ORIGIN = '${origin}';`);
-    // Next to the admin dashboard's (P-70).
+    // Next to the admin dashboard's.
     expect(backendEnvExample).toMatch(new RegExp(`^CORS_ORIGIN=(.*,)?${origin}(,.*)?$`, 'm'));
   });
 });
@@ -181,7 +193,7 @@ describe('API key scopes', () => {
 });
 
 describe("an invocation's status", () => {
-  it("is one of the API's, so the history has a style for each one it may show (P-20 added LOST)", () => {
+  it("is one of the API's, so the history has a style for each one it may show, LOST among them", () => {
     const enumBody = invocationSource.slice(invocationSource.indexOf('export enum InvocationStatus'));
     const backendStatuses = [...enumBody.slice(0, enumBody.indexOf('\n}')).matchAll(/^ {2}\w+ = '(\w+)',$/gm)].map((match) => match[1]);
 
@@ -236,27 +248,32 @@ describe("a function's settings for its asynchronous calls", () => {
   });
 });
 
-describe('the usage of a month (P-22)', () => {
+describe('the usage of a month', () => {
   it("has the API's amounts, so the page shows each one and reads none that isn't there", () => {
-    const body = usageDtoSource.slice(usageDtoSource.indexOf('export class UsageAmountsView {'));
-    const backendAmounts = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+): /gm)].map((match) => match[1]);
-
-    expect(backendAmounts).toEqual([...USAGE_AMOUNTS]);
+    expect(dtoFields(usageDtoSource, 'export class UsageAmountsView {')).toEqual([...USAGE_AMOUNTS]);
   });
 });
 
-describe("the usage of a month's estimated cost (P-30)", () => {
+describe("the usage of a month's estimated cost", () => {
   it("has the API's fields, and each function its cost", () => {
-    const body = usageDtoSource.slice(usageDtoSource.indexOf('export class UsageEstimateView {'));
-    const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}(\w+): /gm)].map((match) => match[1]);
     const functionView = usageDtoSource.slice(usageDtoSource.indexOf('export class FunctionUsageView'));
 
-    expect(backendFields).toEqual([...USAGE_ESTIMATE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class UsageEstimateView {')).toEqual([...USAGE_ESTIMATE_FIELDS]);
     expect(functionView.slice(0, functionView.indexOf('\n}'))).toMatch(/^ {2}cost: string \| null;$/m);
   });
 });
 
-describe("the account's balance (P-32)", () => {
+describe('the estimate at AWS prices', () => {
+  it("has the API's fields, a month's and a line's, and the lines of what AWS bills that FF doesn't, which the page can leave out", () => {
+    expect(dtoFields(usageDtoSource, 'export class AwsEstimateView {')).toEqual([...AWS_ESTIMATE_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class AwsEstimateMonthView {')).toEqual([...AWS_ESTIMATE_MONTH_FIELDS]);
+    expect(dtoFields(usageDtoSource, 'export class AwsEstimateLineView {')).toEqual([...AWS_ESTIMATE_LINE_FIELDS]);
+    const extra = /export const EXTRA_LINES = \[([^\]]*)\]/.exec(awsEstimateSource)?.[1] ?? '';
+    expect([...extra.matchAll(/'(\w+)'/g)].map((match) => match[1])).toEqual([...AWS_EXTRA_LINES]);
+  });
+});
+
+describe("the account's balance", () => {
   it("has the API's fields, so the header reads each one that is there", () => {
     const body = billingDtoSource.slice(billingDtoSource.indexOf('export class BalanceView {'));
     const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
@@ -264,7 +281,7 @@ describe("the account's balance (P-32)", () => {
     expect(backendFields).toEqual([...BALANCE_FIELDS]);
   });
 
-  it("has the API's credit state (P-33), so the banner and the Billing page read each field there is", () => {
+  it("has the API's credit state, so the banner and the Billing page read each field there is", () => {
     const body = billingDtoSource.slice(billingDtoSource.indexOf('export class CreditStateView {'));
     const backendFields = [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) (\w+): |^ {2}(\w+): /gm)].map((match) => match[1] ?? match[2]);
 
@@ -275,10 +292,11 @@ describe("the account's balance (P-32)", () => {
 /** The fields of a class in a DTO file, its own only: `  @ApiProperty(...) name:` or `  name:` lines, a name quoted when it starts with a digit. */
 function dtoFields(source: string, start: string): string[] {
   const body = source.slice(source.indexOf(start));
-  return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) '?(\w+)'?: |^ {2}'?(\w+)'?: /gm)].map((match) => match[1] ?? match[2]);
+  // A field may be optional: a function's metrics by version have only the series each call's record measures.
+  return [...body.slice(0, body.indexOf('\n}')).matchAll(/^ {2}@ApiProperty\(.*\) '?(\w+)'?\??: |^ {2}'?(\w+)'?\??: /gm)].map((match) => match[1] ?? match[2]);
 }
 
-describe('a pro-forma (P-35)', () => {
+describe('a pro-forma', () => {
   it("has the API's fields, and its transfer too, so the Billing page and the printed pro-forma read each one there is", () => {
     expect(dtoFields(paymentsDtoSource, 'export class ProFormaView {')).toEqual([...PRO_FORMA_FIELDS]);
     expect(dtoFields(paymentsDtoSource, 'export class TransferView {')).toEqual([...TRANSFER_FIELDS]);
@@ -293,14 +311,14 @@ describe('a pro-forma (P-35)', () => {
     expect(dtoFields(paymentsDtoSource, 'export class BankView {')).toEqual([...PRO_FORMA_PARTY_FIELDS.bank]);
   });
 
-  it("quotes at the VAT rate the API gives with the list (P-36), and takes the API's credit limits, so the quote is the pro-forma's", () => {
+  it("quotes at the VAT rate the API gives with the list, and takes the API's credit limits, so the quote is the pro-forma's", () => {
     expect(dtoFields(paymentsDtoSource, 'export class ProFormasPage {')).toEqual([...PRO_FORMAS_PAGE_FIELDS]);
     const limits = /export const CREDIT_LIMITS = \{ min: ([\d_]+)n, max: ([\d_]+)n \};/.exec(proFormaSource);
     expect(limits?.slice(1).map((limit) => Number(limit.replace(/_/g, '')))).toEqual([CREDIT_LIMITS.min, CREDIT_LIMITS.max]);
   });
 });
 
-describe("a function's logs (P-43, P-44)", () => {
+describe("a function's logs", () => {
   it("have the API's fields, so the logs tab shows each one there is", () => {
     expect(dtoFields(logsDtoSource, 'export class FunctionLogLineView {')).toEqual([...LOG_LINE_FIELDS]);
     expect(dtoFields(logsDtoSource, 'export class FunctionLogsView {')).toEqual([...LOGS_PAGE_FIELDS]);
@@ -314,7 +332,7 @@ describe("a function's logs (P-43, P-44)", () => {
   });
 });
 
-describe('an invoice (P-36)', () => {
+describe('an invoice', () => {
   it("has the API's fields, so the Billing page lists each one there is", () => {
     expect(dtoFields(invoicesDtoSource, 'export class InvoiceView {')).toEqual([...INVOICE_FIELDS]);
   });
@@ -354,9 +372,9 @@ describe('the notifications', () => {
 });
 
 describe('the alarms', () => {
-  /** A literal list in the backend's source: \`export const NAME = [...]\`. */
+  /** A literal list in the backend's source: \`export const NAME = [...]\`, its type written or not. */
   const listIn = (source: string, name: string) =>
-    /export const \w+ = \[([^\]]*)\]/.exec(source.slice(source.indexOf(`export const ${name} =`)))?.[1].split(',').map((item) => item.trim().replace(/'/g, '')).filter(Boolean);
+    new RegExp(`export const ${name}(?::[^=]+)? = \\[([^\\]]*)\\]`).exec(source)?.[1].split(',').map((item) => item.trim().replace(/'/g, '')).filter(Boolean);
 
   it("offer the API's metrics, each with its statistics", () => {
     const block = alarmRulesSource.slice(alarmRulesSource.indexOf('export const STATISTICS = {'), alarmRulesSource.indexOf('} as const;'));
@@ -373,6 +391,11 @@ describe('the alarms', () => {
     expect(alarmRulesSource).toContain(`export const MAX_EVALUATION_PERIODS = ${MAX_EVALUATION_PERIODS};`);
     expect(alarmRulesSource).toContain(`export const MAX_WEBHOOKS = ${MAX_WEBHOOKS};`);
     expect(dtoFields(alarmsDtoSource, 'export class AlarmView {')).toEqual([...ALARM_FIELDS]);
+  });
+
+  it("send what the API takes, some of a function's calls with the metrics they have", () => {
+    expect(dtoFields(alarmsDtoSource, 'export class AlarmDto {')).toEqual(Object.keys(toBody(emptyForm())));
+    expect(listIn(alarmRulesSource, 'CALL_METRICS')).toEqual([...CALL_METRICS]);
   });
 });
 
@@ -589,8 +612,11 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
   it("have the API's fields and name rule, so the page reads each one there is and the form refuses what the API would", () => {
     expect(dtoFields(storageDtoSource, 'export class BucketView {')).toEqual([...BUCKET_FIELDS]);
     expect(dtoFields(storageDtoSource, 'export class StorageKeyView {')).toEqual([...STORAGE_KEY_FIELDS]);
-    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'sqsEndpoint', 'sesEndpoint', 'region']);
+    expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'sqsEndpoint', 'sesEndpoint', 'lambdaEndpoint', 'region']);
     expect(/export const BUCKET_NAME = \/(.+)\/;/.exec(storageNamesSource)?.[1]).toBe(BUCKET_NAME.source);
+    expect(/export const KEY_NAME = \/(.+)\/;/.exec(storageDtoSource)?.[1]).toBe(KEY_NAME.source);
+    expect(/export const FUNCTION_ACCESS = \[(.+)\] as const;/.exec(storageKeySource)?.[1].match(/'[^']+'/g)?.map((quoted) => quoted.slice(1, -1))).toEqual([...FUNCTION_ACCESS]);
+    expect(/export const ALL_FUNCTIONS = '(.+)';/.exec(storageKeySource)?.[1]).toBe(ALL_FUNCTIONS);
   });
 
   it("have the API's metrics, as CloudWatch names S3's, and their month on the Usage page", () => {
@@ -624,5 +650,30 @@ describe("a function's schedule", () => {
   it("has the API's fields and name rule, so the tab reads each one there is and the form refuses what the API would", () => {
     expect(dtoFields(scheduleDtoSource, 'export class ScheduleView {')).toEqual([...SCHEDULE_FIELDS]);
     expect(scheduleDtoSource).toContain(`export const SCHEDULE_NAME = ${SCHEDULE_NAME.toString()};`);
+  });
+});
+
+/** The fields a form's body sends; none when the form is refused. */
+const sentFields = (built: { body: object } | { problem: string }) => ('body' in built ? Object.keys(built.body) : ['refused: ' + built.problem]);
+
+describe("a function's versions and aliases", () => {
+  it("have the API's fields and an alias's name rule, so the Versions tab reads each one there is and the form refuses what the API would", () => {
+    expect(dtoFields(versionsDtoSource, 'export class FunctionVersionView {')).toEqual([...VERSION_FIELDS]);
+    expect(dtoFields(aliasesDtoSource, 'export class FunctionAliasView {')).toEqual([...ALIAS_FIELDS]);
+    expect(aliasesDtoSource).toContain(`export const ALIAS_NAME = ${ALIAS_NAME.toString()};`);
+  });
+
+  it('are published, made, changed and rolled back with fields the API takes', () => {
+    const form = { name: 'live', version: '3', shareVersion: '2', sharePercent: '10', description: 'The shop' };
+    expect(dtoFields(versionsDtoSource, 'export class PublishVersionDto {')).toContain('description');
+    expect(dtoFields(aliasesDtoSource, 'export class CreateAliasDto {')).toEqual(expect.arrayContaining(sentFields(aliasBody(form, true))));
+    expect(dtoFields(aliasesDtoSource, 'export class UpdateAliasDto {')).toEqual(
+      expect.arrayContaining([...sentFields(aliasBody(form, false)), ...Object.keys(rollbackBody({ revisionId: 'r-1' }, '2'))]),
+    );
+  });
+
+  it('are named by a schedule and a queue reader with the field the API takes', () => {
+    expect(dtoFields(scheduleDtoSource, 'export class CreateScheduleDto {')).toEqual(expect.arrayContaining(sentFields(scheduleOf({ ...emptyScheduleForm(), name: 'nightly', qualifier: 'live' }))));
+    expect(dtoFields(eventSourceDtoSource, 'export class EventSourceSettingsDto {')).toEqual(expect.arrayContaining(sentFields(eventSourceBody({ ...eventSourceForm(), qualifier: '3' }))));
   });
 });

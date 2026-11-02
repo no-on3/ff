@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectThrottlerStorage, ThrottlerStorage } from '@nestjs/throttler';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -8,9 +8,11 @@ import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
-import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY } from '../functions/async-invoke';
+import { unlessGone } from '../common/unless-gone';
+import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY, qualifierAttributes } from '../functions/async-invoke';
 import { EventFormat, Function, FunctionStatus } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
+import { qualifierText } from '../functions/qualifier';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { refusals } from '../monitoring/operator-metrics';
 import { PlansService } from '../plans/plans.service';
@@ -44,9 +46,11 @@ interface Admitted {
  * runs to Lambda. The asynchronous calls' worker then runs it (ADR 0010),
  * retried by the function's settings, else Lambda's, and says each attempt's
  * outcome on the schedule. A late schedule runs once, then follows its
- * expression from now. A run is checked as a call is when it is taken (the
- * account's state, its credit, the plan's rate and its room for messages); one
- * that can't be made is skipped, and the schedule says why.
+ * expression from now. A run is checked as a call is when it is taken (what
+ * it names there, the account's state, its credit, the plan's rate and its
+ * room for messages); one that can't be made is skipped, and the schedule says
+ * why. A run of a version or an alias names it in the queue, as an Event does,
+ * so that each attempt runs it.
  */
 @Injectable()
 export class SchedulerService implements OnModuleInit, OnModuleDestroy {
@@ -150,22 +154,21 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     const expiresAt = new Date(now.getTime() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
     await this.queues.sendEvent(admitted.fn, requestId, JSON.stringify(admitted.event), expiresAt, {
       manager,
-      attributes: { origin: SCHEDULE_ORIGIN, scheduleId: schedule.id },
+      attributes: { origin: SCHEDULE_ORIGIN, scheduleId: schedule.id, ...qualifierAttributes(schedule.qualifier) },
     });
     return admitted.fn;
   }
 
   /** The run, checked as the API's invoke checks a call: its function and event, or why it is skipped. */
   private async admit(schedule: Schedule, dueAt: Date, requestId: string): Promise<Admitted | string> {
-    let fn: Function;
-    try {
-      fn = await this.functions.findOne(schedule.accountId, schedule.functionId);
-    } catch (error) {
-      if (error instanceof NotFoundException) return 'skipped: the function is gone';
-      throw error;
-    }
-    if (fn.status !== FunctionStatus.ACTIVE) return 'skipped: the function is not ACTIVE';
-    if (fn.eventFormat !== EventFormat.LAMBDA) return "skipped: the function takes FF's original wrapped event";
+    const fn = await unlessGone(this.functions.findOne(schedule.accountId, schedule.functionId));
+    if (!fn) return 'skipped: the function is gone';
+    const target = await unlessGone(this.functions.callTarget(fn, schedule.qualifier ?? undefined));
+    if (!target) return `skipped: the function has no ${qualifierText(schedule.qualifier)}`;
+    // A version runs whatever $LATEST's state, as a call that waits does.
+    if (!target.version && fn.status !== FunctionStatus.ACTIVE) return 'skipped: the function is not ACTIVE';
+    if (target.version && target.version.eventFormat !== EventFormat.LAMBDA) return `skipped: version ${target.version.version} takes FF's original wrapped event`;
+    if (!target.version && fn.eventFormat !== EventFormat.LAMBDA) return "skipped: the function takes FF's original wrapped event";
     const account = await this.accounts.findOne({ where: { id: schedule.accountId }, select: { id: true, status: true, planId: true } });
     if (!account || account.status !== AccountStatus.ACTIVE) return 'skipped: the account is not active';
     try {

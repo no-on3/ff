@@ -198,6 +198,109 @@ pub struct Plan {
     pub limits: serde_json::Map<String, serde_json::Value>,
 }
 
+/// `$LATEST`, the function as it is: what a call, an alias, a schedule or a queue reader runs when it names no version.
+pub const LATEST: &str = "$LATEST";
+
+/// A version, as `GET /functions/:id/versions` lists it: the function as it was published, which never changes.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionVersion {
+    pub function_id: String,
+    pub function_arn: String,
+    /// Its number, as Lambda writes it: "1", "2", "3"…
+    pub version: String,
+    pub description: String,
+    pub runtime: String,
+    pub handler: String,
+    pub package_type: String,
+    pub code_sha256: String,
+    pub code_size: u64,
+    pub memory: u32,
+    pub timeout: u32,
+    pub event_format: String,
+    pub aws_endpoints: Vec<String>,
+    pub revision_id: String,
+    pub created_at: String,
+}
+
+/// An alias, as `GET /functions/:id/aliases` lists it: a name for a version, or `$LATEST`, with at most one
+/// more version and its share of the calls.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionAlias {
+    pub alias_arn: String,
+    pub name: String,
+    /// `$LATEST`, or the number of the version its calls go to.
+    pub function_version: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_config: Option<RoutingConfig>,
+    pub revision_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingConfig {
+    /// One version, by its number, and its share of the calls, from 0 to 1.
+    pub additional_version_weights: std::collections::BTreeMap<String, f64>,
+}
+
+impl FunctionAlias {
+    /// The other version that gets a share of its calls, and that share, from 0 to 1.
+    pub fn share(&self) -> Option<(&str, f64)> {
+        let weights = &self.routing_config.as_ref()?.additional_version_weights;
+        weights.iter().next().map(|(version, weight)| (version.as_str(), *weight))
+    }
+
+    /// Where its calls go, in words: `version 3`, `$LATEST`, `version 3, 10% of its calls to version 4`.
+    pub fn route(&self) -> String {
+        let own = if self.function_version == LATEST {
+            LATEST.to_owned()
+        } else {
+            format!("version {}", self.function_version)
+        };
+        match self.share() {
+            Some((version, weight)) => format!("{own}, {} of its calls to version {version}", percent(weight)),
+            None => own,
+        }
+    }
+}
+
+/// A share of the calls as a percentage, to a tenth: 0.1 is `10%`, 0.125 `12.5%`.
+pub fn percent(weight: f64) -> String {
+    format!("{}%", (weight * 1000.0).round() / 10.0)
+}
+
+/// A function's name as Lambda takes it, with a version or an alias after a colon (`orders:live`): the name, and
+/// the qualifier when there is one, `$LATEST` as none. A function's name has no colon.
+pub fn split_qualified(name: &str) -> (&str, Option<&str>) {
+    match name.split_once(':') {
+        Some((function, qualifier)) if !qualifier.is_empty() && qualifier != LATEST => (function, Some(qualifier)),
+        Some((function, _)) => (function, None),
+        None => (name, None),
+    }
+}
+
+/// The name in an ARN: a function's, without the version or alias after it; else its last part, a
+/// queue's or a bucket's.
+pub fn name_in_arn(arn: &str) -> &str {
+    match arn.split_once(":function:") {
+        Some((_, rest)) => rest.split(':').next().unwrap_or(rest),
+        None => arn.rsplit(':').next().unwrap_or(arn),
+    }
+}
+
+/// The name in an ARN as people read it: a function's, with the version or the alias that qualifies it after a
+/// colon, as Lambda writes a qualified name (`thumbnails:live`), `$LATEST` as none; else its last part.
+pub fn qualified_name_in_arn(arn: &str) -> &str {
+    match arn.split_once(":function:") {
+        Some((_, rest)) => rest.strip_suffix(":$LATEST").unwrap_or(rest),
+        None => name_in_arn(arn),
+    }
+}
+
 /// The account's function of that name: `GET /functions?name=`, compared exactly.
 pub fn find(client: &Client, name: &str) -> Result<Option<Function>, Error> {
     let found: Vec<Function> = client.json(&Call::get("/functions").query("name", name))?;
@@ -212,4 +315,69 @@ pub fn function_named(client: &Client, name: &str) -> Result<Function, Error> {
             format!("There is no function named \"{name}\" in the account: `ff list` shows its functions"),
         )
     })
+}
+
+/// The function's versions, oldest first.
+pub fn versions_of(client: &Client, function_id: &str) -> Result<Vec<FunctionVersion>, Error> {
+    client.json(&Call::get(format!("/functions/{function_id}/versions")))
+}
+
+/// The function's aliases, by name.
+pub fn aliases_of(client: &Client, function_id: &str) -> Result<Vec<FunctionAlias>, Error> {
+    client.json(&Call::get(format!("/functions/{function_id}/aliases")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn alias(version: &str, weights: serde_json::Value) -> FunctionAlias {
+        serde_json::from_value(json!({
+            "aliasArn": "arn:aws:lambda:tn-tunis-1:000000000001:function:orders:live", "name": "live",
+            "functionVersion": version, "description": "", "routingConfig": { "additionalVersionWeights": weights },
+            "revisionId": "r-1", "createdAt": "2026-11-02T08:00:00.000Z", "updatedAt": "2026-11-02T08:00:00.000Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_qualified_name_is_the_function_and_its_version_or_alias() {
+        assert_eq!(split_qualified("orders:live"), ("orders", Some("live")));
+        assert_eq!(split_qualified("orders:3"), ("orders", Some("3")));
+        assert_eq!(split_qualified("orders"), ("orders", None));
+        assert_eq!(split_qualified("orders:$LATEST"), ("orders", None));
+        assert_eq!(split_qualified("orders:"), ("orders", None));
+    }
+
+    #[test]
+    fn an_alias_says_where_its_calls_go() {
+        assert_eq!(alias("3", json!({})).route(), "version 3");
+        assert_eq!(alias("$LATEST", json!({})).route(), "$LATEST");
+        assert_eq!(alias("3", json!({ "4": 0.125 })).route(), "version 3, 12.5% of its calls to version 4");
+        assert_eq!(alias("3", json!({ "4": 0.1 })).share(), Some(("4", 0.1)));
+        assert_eq!([percent(0.0), percent(1.0), percent(0.05)], ["0%", "100%", "5%"]);
+    }
+
+    #[test]
+    fn a_version_and_an_alias_have_the_apis_fields() {
+        use crate::backend_source::{class_fields, sorted, sorted_keys};
+        let version: FunctionVersion = serde_json::from_value(json!({
+            "functionId": "f1", "functionArn": "arn:aws:lambda:tn-tunis-1:000000000001:function:orders:1", "version": "1",
+            "description": "", "runtime": "python", "handler": "orders.handler", "packageType": "Zip", "codeSha256": "c1",
+            "codeSize": 99, "memory": 128, "timeout": 5, "eventFormat": "lambda", "awsEndpoints": [], "revisionId": "v-1",
+            "createdAt": "2026-11-02T08:00:00.000Z"
+        }))
+        .unwrap();
+        // The list ff reads leaves out a version's variables, which a single version's answer alone has.
+        let version_view =
+            class_fields(include_str!("../../../BE/src/functions/dto/versions.dto.ts"), "FunctionVersionView");
+        assert_eq!(
+            sorted_keys(&version),
+            sorted(version_view.into_iter().filter(|field| field != "environment").collect())
+        );
+        let alias_view =
+            class_fields(include_str!("../../../BE/src/functions/dto/aliases.dto.ts"), "FunctionAliasView");
+        assert_eq!(sorted_keys(&alias("3", json!({ "4": 0.1 }))), sorted(alias_view));
+    }
 }

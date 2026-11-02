@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Post } from '@nestjs/common';
+import { Body, Controller, Delete, ForbiddenException, Get, HttpCode, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope } from '../auth/route-rules';
@@ -6,9 +6,11 @@ import { CreateStorageKeyDto, CreatedStorageKey, StorageKeyView } from './dto/st
 import { StorageKeysService } from './storage-keys.service';
 
 /**
- * The account's access keys to its buckets (ADR 0009), as an IAM user's: an ID
- * and a secret for AWS's SDKs and CLI, shown once. Credentials, as API keys
- * are: its owners alone see, make and revoke them.
+ * The account's access keys to its buckets, queues, mail and functions, as an
+ * IAM user's: an ID and a secret for AWS's SDKs and CLI, shown once.
+ * Credentials, as API keys are: its owners alone see, make and revoke them.
+ * An API key makes one that reaches functions only with the scope for its
+ * level, so that a key to storage can't give itself the right to deploy code.
  */
 @ApiTags('storage keys')
 @Controller('storage-keys')
@@ -29,13 +31,19 @@ export class StorageKeysController {
   @RequireRole('owner')
   @RequireActiveAccount()
   @ApiOperation({
-    summary: 'Make an access key to the account\'s buckets',
+    summary: "Make an access key to the account's buckets, queues, mail or functions",
     description:
-      "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for AWS's SDKs and CLI, with the endpoint and the region: the secret is in this answer only. Two at most, as IAM gives a user, so that one can replace the other.",
+      "AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY for AWS's SDKs and CLI, with the endpoints and the region: the secret is in this answer only. As many as the plan's accessKeys. An API key makes one that reaches functions with the scope functions:read, functions:invoke or functions:write, as its functionAccess.",
   })
   @ApiResponse({ status: 201, type: CreatedStorageKey })
-  @ApiResponse({ status: 409, description: 'The account has two keys already' })
+  @ApiResponse({ status: 400, description: "The account has as many keys as its plan allows, or the request isn't valid" })
+  @ApiResponse({ status: 403, description: "The API key lacks the scope for the functions' level" })
+  @ApiResponse({ status: 409, description: 'The account has a working key of that name' })
   create(@Body() dto: CreateStorageKeyDto, @Principal() principal: Principal): Promise<CreatedStorageKey> {
+    const scope = dto.functionAccess && `functions:${dto.functionAccess}`;
+    if (scope && principal.keyId && !principal.scopes?.includes(scope)) {
+      throw new ForbiddenException(`This API key lacks the scope ${scope}, which a key that may ${dto.functionAccess} functions needs`);
+    }
     return this.keys.create(principal.accountId, dto);
   }
 

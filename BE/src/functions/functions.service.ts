@@ -7,7 +7,6 @@ import {
   InternalServerErrorException,
   Logger,
   MessageEvent,
-  NotFoundException,
   PayloadTooLargeException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -15,11 +14,12 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { Observable } from 'rxjs';
-import { EntityManager, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
+import { EntityManager, FindOptionsWhere, In, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import { jsonBytes } from '../common/byte-limits';
 import { describeError } from '../common/describe-error';
+import { withJobLock } from '../database/job-lock';
 import {
   FunctionRuntimeError,
   FunctionThrottledError,
@@ -28,7 +28,7 @@ import {
   LogStoreUnavailableError,
   initMsOf,
 } from '../orchestrator/orchestrator.errors';
-import { FunctionWorkload, ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { FunctionWorkload, ORCHESTRATOR, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
@@ -44,8 +44,11 @@ import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { SecretsView } from './dto/secrets.dto';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
+import { awsEndpointsOf } from '../common/aws-endpoint';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
 import { FunctionUrl } from './entities/function-url.entity';
+import { FunctionAlias } from './entities/function-alias.entity';
+import { FunctionVersion } from './entities/function-version.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import {
   FunctionEnvironmentValues,
@@ -64,21 +67,29 @@ import {
 } from './environment';
 import { EnvironmentStore } from './environment.store';
 import { DEFAULT_HANDLER, handlerProblem, inlineCodeFacts, packageHandlerProblem } from './code-package';
-import { inlinePackage } from './inline-package';
+import { inlinePackage, oneFileZip } from './inline-package';
+import { lambdaJavaScript } from './lambda-javascript';
 import { CodeImagesService } from '../packages/code-images.service';
 import { RegistryError } from '../packages/registry';
+import { packageKey } from '../packages/package.entity';
 import { PackagesService } from '../packages/packages.service';
 import { callersFailure, failureResponse, platformFailure } from './failures';
 import { keptJson, keptText } from './history';
 import { liveTail } from './live-tail';
 import { logsQuery } from './logs-window';
 import { MAX_INPUT_BYTES } from './limits';
+import { functionNotFound, noSuchAlias, noSuchVersion } from './function-not-found';
+import { callsKept, drawVersion, parseQualifier } from './qualifier';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
-const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat'] as const;
+const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat', 'awsEndpoints'] as const;
+
+/** Whether a change sends a field another value than the function's: a list, such as its endpoints, by what it holds. */
+const sendsOther = (value: unknown, current: unknown): boolean =>
+  value !== undefined && (Array.isArray(value) && Array.isArray(current) ? value.join() !== current.join() : value !== current);
 
 /** The advisory lock the restore of lost code images holds: one backend runs it at a time. */
-const RESTORE_LOCK = `hashtext('ff_code_images_restore')`;
+const RESTORE_LOCK = 'ff_code_images_restore';
 
 /** A package, by its account and SHA-256, as a key. */
 const packageRef = (accountId: string, codeSha256: string): string => `${accountId}/${codeSha256}`;
@@ -108,18 +119,69 @@ function viewOf(function_: Function, environment: FunctionEnvironmentValues): Fu
 /**
  * The function as the orchestrator runs it: its record, its code's image, and
  * what its process gets: its variables and secrets, and its key to its
- * account's buckets with the region and the endpoint, under names FF reserves.
- * A new key is a new version, as a new environment is: its ID joins the
- * environment's revision, so that the pods roll out with it.
+ * account's buckets with the region and the endpoints, under names FF
+ * reserves. A new key, or an endpoint more or less, is a new version, as a new
+ * environment is: the credentials' revision joins the environment's, so that
+ * the pods roll out with it.
  */
 export function workloadOf(function_: Function, environment: FunctionEnvironmentValues, codeImage: string, credentials?: FunctionCredentials): FunctionWorkload {
   const values = { ...processEnvironment(environment), ...credentials?.variables };
-  const revision = [environment.revision, credentials?.keyId].filter(Boolean).join('.');
+  const revision = [environment.revision, credentials?.revision].filter(Boolean).join('.');
   return { ...function_, environment: Object.keys(values).length > 0 ? { revision, values } : undefined, codeImage };
+}
+
+/**
+ * What of a workload's revision is its environment's, without its key's: workloadOf joins the two with a dot, an
+ * environment's being hexadecimal and a key's starting with its ID, AKFF.
+ */
+function environmentPart(revision: string | undefined): string {
+  const [first = ''] = (revision ?? '').split('.');
+  return first.startsWith('AKFF') ? '' : first;
+}
+
+/**
+ * Whether a Deployment's template runs the workload but for its key: the same code image and the same environment,
+ * which a renewal may roll onto the new key. Another is an update's under way, or one that failed, whose own rollout
+ * gives the pods the current key.
+ */
+export function differsByKeyAlone(template: Pick<WorkloadInstances, 'revision' | 'codeImage'>, workload: FunctionWorkload): boolean {
+  return template.codeImage === workload.codeImage && environmentPart(template.revision) === environmentPart(workload.environment?.revision);
 }
 
 /** A function's code, as its record keeps it. */
 type CodeFields = Pick<Function, 'packageType' | 'code' | 'codeSha256' | 'codeSize'>;
+
+/** What a call runs, as the qualifier it named chose it: a version as published, or $LATEST without one; and the alias it named. */
+export interface CallTarget {
+  version?: FunctionVersion;
+  alias?: string;
+}
+
+/** What runs a call: its function as it is, or as a version froze it. */
+type Running = Function & { version?: number };
+
+/**
+ * A version as its calls run it: its function, with the code and settings the
+ * version froze, and no warm instance, which stay $LATEST's.
+ */
+export function versionRun(function_: Function, version: FunctionVersion): Running {
+  return {
+    ...function_,
+    runtime: version.runtime,
+    handler: version.handler,
+    packageType: version.packageType,
+    code: version.code,
+    codeSha256: version.codeSha256,
+    codeSize: version.codeSize,
+    packageSha256: version.packageSha256,
+    memory: version.memory,
+    timeout: version.timeout,
+    eventFormat: version.eventFormat,
+    awsEndpoints: version.awsEndpoints,
+    minInstances: 0,
+    version: version.version,
+  };
+}
 
 /** An environment with these variables, and a new revision when there is anything: a change rolls out. */
 function withVariables(environment: FunctionEnvironmentValues, variables: Record<string, string>): FunctionEnvironmentValues {
@@ -146,7 +208,7 @@ interface EnvironmentChange {
 }
 
 /** The fields of a function a change asks for, without its environment; with new code, how it comes, its hash and size. */
-type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<CodeFields> & { packageSha256?: string };
+type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<CodeFields> & { packageSha256?: string; revisionId?: string };
 
 /** Each secret's value, by name: to tell which changed, for the audit log, which keeps only the names. */
 const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string> =>
@@ -192,6 +254,25 @@ export function planProblems(plan: PlanView, change: Sized, current: Sized = {})
 function refuseOverPlan(plan: PlanView, change: Sized, current?: Sized): void {
   const problems = planProblems(plan, change, current);
   if (problems.length) throw new BadRequestException(problems);
+}
+
+const MB = 1_048_576;
+
+/**
+ * As Lambda's CodeStorageExceededException: the packages the account's
+ * functions and versions would name, each once, hold more than its plan keeps.
+ * Undefined while they fit.
+ */
+export function codeStorageRefusal(plan: PlanView, bytes: number): BadRequestException | undefined {
+  const allowed = plan.limits.codeStorageMb;
+  if (bytes <= allowed * MB) return undefined;
+  return new BadRequestException({
+    statusCode: HttpStatus.BAD_REQUEST,
+    error: 'CodeStorageExceededException',
+    message:
+      `The ${plan.name} plan keeps ${allowed} MB of code an account, the packages its functions and versions name, each once: ` +
+      `this would make ${Math.ceil(bytes / MB)} MB. Delete the versions and functions you no longer need, then try again`,
+  });
 }
 
 /**
@@ -255,9 +336,20 @@ export class FunctionsService {
     private functionKeys: FunctionKeys,
   ) {}
 
-  /** The function as its pods run it, with its key to its account's buckets, made at its first deploy. */
+  /**
+   * The function as its pods run it, with its key to its account's buckets, made at its first deploy, and its last
+   * version's number, which its record isn't read with: once it has one, $LATEST's pods and Service keep a label of
+   * their own, which a rollout without it would take off, its Service then sending calls to a version's pods too.
+   */
   private async workload(function_: Function, environment: FunctionEnvironmentValues, codeImage: string): Promise<FunctionWorkload> {
-    return workloadOf(function_, environment, codeImage, await this.functionKeys.credentialsFor(function_));
+    const lastVersion = function_.lastVersion ?? (await this.lastVersionOf(function_.id));
+    return workloadOf({ ...function_, lastVersion }, environment, codeImage, await this.functionKeys.credentialsFor(function_));
+  }
+
+  /** The number of the function's last version published; 0 for none, or for a function not saved yet. */
+  private async lastVersionOf(id: string): Promise<number> {
+    const row = await this.functionsRepository.manager.findOne(Function, { where: { id }, select: { id: true, lastVersion: true } });
+    return row?.lastVersion ?? 0;
   }
 
   private readyTimeoutMs(): number {
@@ -270,6 +362,7 @@ export class FunctionsService {
     const { environment: variables, secrets, ...fields } = createFunctionDto;
     const handler = fields.handler ?? DEFAULT_HANDLER;
     const code = await this.codeOf(accountId, fields, handler, fields.runtime);
+    await this.refuseOverCodeStorage(plan, accountId, fields.runtime, code);
     const environment = withSecrets(withVariables(NO_ENVIRONMENT, variables ?? {}), storedSecrets(secrets ?? {}, new Date()));
     refuseCombined(environment);
     // The code's image before anything is saved: without it, there is no function to keep.
@@ -277,6 +370,7 @@ export class FunctionsService {
     const function_ = this.functionsRepository.create({
       ...fields,
       handler,
+      awsEndpoints: awsEndpointsOf(fields.awsEndpoints),
       ...code,
       packageSha256,
       accountId,
@@ -333,6 +427,19 @@ export class FunctionsService {
     const problem = packageHandlerProblem(named.files, handler, runtime);
     if (problem) throw new BadRequestException([problem]);
     return { packageType: PackageType.ZIP, code: '', codeSha256: sent.codeSha256, codeSize: named.codeSize };
+  }
+
+  /**
+   * Refuses code whose package would take the account past its plan's code
+   * storage: the packages its functions and versions name, each once, and this
+   * one; the record of the function that `changing` names left out, as the
+   * change replaces its package. Its versions keep theirs.
+   */
+  private async refuseOverCodeStorage(plan: PlanView, accountId: string, runtime: Runtime, code: CodeFields, changing?: string): Promise<void> {
+    const built = code.packageType === PackageType.INLINE ? inlinePackage(code.code, runtime) : undefined;
+    const added = built ? { codeSha256: built.codeSha256, codeSize: built.zip.length } : code;
+    const refusal = codeStorageRefusal(plan, (await this.packages.namedBytes(accountId, added.codeSha256, changing)) + added.codeSize);
+    if (refusal) throw refusal;
   }
 
   /**
@@ -441,11 +548,27 @@ export class FunctionsService {
     return viewOf(function_, await this.environments.load(id));
   }
 
+  /**
+   * The function's code as a zip, as AWS Lambda takes one (GET /functions/:id/code): a package as it was uploaded,
+   * from object storage; inline code as the one-file package its pods run, or, with javascript, Node.js code as the
+   * JavaScript Lambda's runtime loads, in `function.js`, which `function.handler` names as it named `function.ts`.
+   */
+  async code(accountId: string, id: string, { javascript = false } = {}): Promise<{ name: string; zip: Buffer }> {
+    const function_ = await this.findOne(accountId, id);
+    if (function_.packageType === PackageType.ZIP) {
+      return { name: function_.name, zip: (await this.objectStore.getDocument(packageKey(accountId, function_.codeSha256))).body };
+    }
+    if (javascript && function_.runtime === Runtime.NODEJS) {
+      return { name: function_.name, zip: oneFileZip('function.js', Buffer.from(await lambdaJavaScript(function_.code), 'utf8')) };
+    }
+    return { name: function_.name, zip: inlinePackage(function_.code, function_.runtime).zip };
+  }
+
   /** The account's function; another account's is not found, exactly like one that doesn't exist (D4). */
   async findOne(accountId: string, id: string): Promise<Function> {
     const function_ = await this.functionsRepository.findOne({ where: { id, accountId } });
     if (!function_) {
-      throw new NotFoundException(`Function with ID ${id} not found`);
+      throw functionNotFound(id);
     }
     return function_;
   }
@@ -455,12 +578,14 @@ export class FunctionsService {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
     const { environment: variables, ...changes } = updateFunctionDto;
+    if (changes.awsEndpoints) changes.awsEndpoints = awsEndpointsOf(changes.awsEndpoints);
     const handler = changes.handler ?? function_.handler;
     const runtime = changes.runtime ?? function_.runtime;
     // New code, inline or a package, with its handler; or the handler and runtime checked against the code there.
     let code: CodeFields | undefined;
     if (changes.code !== undefined || changes.codeSha256 !== undefined) {
       code = await this.codeOf(accountId, changes, handler, runtime);
+      await this.refuseOverCodeStorage(plan, accountId, runtime, code, id);
     } else if (changes.handler !== undefined || changes.runtime !== undefined) {
       if (function_.packageType === PackageType.ZIP) await this.codeOf(accountId, { codeSha256: function_.codeSha256 }, handler, runtime);
       else refuseHandler(handler, runtime, PackageType.INLINE);
@@ -476,7 +601,7 @@ export class FunctionsService {
     const after = environmentChanges ? withVariables(before, variables) : before;
     if (environmentChanges) refuseCombined(after);
     const changed: string[] = (Object.keys(changes) as Array<keyof typeof changes>).filter(
-      (field) => changes[field] !== undefined && changes[field] !== function_[field],
+      (field) => sendsOther(changes[field], function_[field]),
     );
     if (environmentChanges) changed.push('environment');
     const fieldChanges: FieldChanges = code ? { ...changes, ...code } : changes;
@@ -492,18 +617,34 @@ export class FunctionsService {
 
   /**
    * A function URL and a schedule send AWS's events: their function can't go
-   * back to FF's original wrapped one while it has either.
+   * back to FF's original wrapped one while either calls it, through an alias
+   * naming $LATEST included; one that runs a version doesn't call it.
    */
   private async refuseWrappedWhileSent(id: string): Promise<void> {
     const manager = this.functionsRepository.manager;
-    if (await manager.existsBy(FunctionUrl, { functionId: id })) {
+    if (await manager.existsBy(FunctionUrl, { functionId: id, alias: IsNull() })) {
       throw new BadRequestException(
         `The function has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: delete its URL (DELETE /functions/${id}/url) first, or keep eventFormat lambda`,
       );
     }
-    if (await manager.existsBy(Schedule, { functionId: id })) {
+    const aliased = await manager.findOne(FunctionUrl, { where: { functionId: id, alias: Not(IsNull()), aliasOf: { version: IsNull() } } });
+    if (aliased) {
+      throw new BadRequestException(
+        `The alias ${aliased.alias} names $LATEST and has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: ` +
+          `point the alias at a version, or delete its URL (DELETE /functions/${id}/url?qualifier=${aliased.alias}), first, or keep eventFormat lambda`,
+      );
+    }
+    if (await manager.existsBy(Schedule, { functionId: id, qualifier: IsNull() })) {
       throw new BadRequestException(
         `The function has schedules, which send EventBridge's Scheduled Event, and the wrapped format can't take it: delete them (DELETE /functions/${id}/schedules/{scheduleId}) first, or keep eventFormat lambda`,
+      );
+    }
+    const onLatest = (await manager.find(FunctionAlias, { where: { functionId: id, version: IsNull() }, select: { name: true } })).map((alias) => alias.name);
+    const scheduled = onLatest.length ? await manager.findOne(Schedule, { where: { functionId: id, qualifier: In(onLatest) } }) : null;
+    if (scheduled) {
+      throw new BadRequestException(
+        `The alias ${scheduled.qualifier} names $LATEST and the schedule ${scheduled.name} runs it, which sends EventBridge's Scheduled Event, and the wrapped format can't take it: ` +
+          'point the alias at a version, or delete the schedule, first, or keep eventFormat lambda',
       );
     }
   }
@@ -538,15 +679,17 @@ export class FunctionsService {
    */
   private async change(
     function_: Function,
-    changes: FieldChanges,
+    sent: FieldChanges,
     environment: EnvironmentChange,
     changed: string[],
   ): Promise<{ saved: Function; environment: FunctionEnvironmentValues }> {
+    // Any change is a new revision, as Lambda's RevisionId: a publish given the one read before it is refused.
+    const changes: FieldChanges = changed.length ? { ...sent, revisionId: randomUUID() } : sent;
     const previousName = function_.name;
     const newName = changes.name !== undefined && changes.name !== previousName ? changes.name : undefined;
     const environmentChanges = environment.after !== environment.before;
     const updated = { ...function_, ...changes };
-    const changesVersion = environmentChanges || ROLLOUT_FIELDS.some((field) => changes[field] !== undefined && changes[field] !== function_[field]);
+    const changesVersion = environmentChanges || ROLLOUT_FIELDS.some((field) => sendsOther(changes[field], function_[field]));
     // A function that isn't ACTIVE always rolls out, even unchanged, so the same code
     // can be retried after a passing failure (a full quota, a missing image).
     const repairing = function_.status !== FunctionStatus.ACTIVE;
@@ -713,19 +856,10 @@ export class FunctionsService {
   async restoreCodeImages(): Promise<CodeImagesRestore> {
     const report: CodeImagesRestore = { packages: 0, imagesMade: 0, zipsMade: 0, rolledOut: 0, failures: 0 };
     if (!this.codeImages.available) return report;
-    const runner = this.functionsRepository.manager.connection.createQueryRunner();
-    await runner.connect();
-    try {
-      const [{ locked }] = (await runner.query(`SELECT pg_try_advisory_lock(${RESTORE_LOCK}) AS "locked"`)) as Array<{ locked: boolean }>;
-      if (!locked) return report;
-      try {
-        await this.rollOutLostImages(await this.restorePackageImages(report), report);
-      } finally {
-        await runner.query(`SELECT pg_advisory_unlock(${RESTORE_LOCK})`);
-      }
-    } finally {
-      await runner.release();
-    }
+    // Another backend's turn leaves the report as it is: nothing done, nothing to log.
+    await withJobLock(this.functionsRepository.manager.connection, RESTORE_LOCK, async () =>
+      this.rollOutLostImages(await this.restorePackageImages(report), report),
+    );
     if (report.imagesMade || report.zipsMade || report.rolledOut || report.failures) {
       this.logger.log(
         `Lost code images restored: of ${report.packages} package(s) in use, ${report.imagesMade} image(s) made again, ${report.zipsMade} zip(s) made again of inline code; ` +
@@ -763,14 +897,20 @@ export class FunctionsService {
     return references;
   }
 
-  /** Makes again, of a function's code, a one-file package whose zip object storage lost: false when no function's code makes it. */
+  /** Makes again, of a function's or a version's code, a one-file package whose zip object storage lost: false when no code makes it. */
   private async restoreInlineZip(accountId: string, codeSha256: string): Promise<boolean> {
-    const functions = await this.functionsRepository.find({ where: { accountId, packageType: PackageType.INLINE, packageSha256: codeSha256 } });
-    for (const function_ of functions) {
-      const built = inlinePackage(function_.code, function_.runtime);
+    const where = { accountId, packageType: PackageType.INLINE, packageSha256: codeSha256 };
+    const functions = await this.functionsRepository.find({ where });
+    const versions = await this.functionsRepository.manager.find(FunctionVersion, { where });
+    const sources = [
+      ...functions.map((function_) => ({ ...function_, of: `function ${function_.id}` })),
+      ...versions.map((version) => ({ ...version, of: `version ${version.version} of function ${version.functionId}` })),
+    ];
+    for (const source of sources) {
+      const built = inlinePackage(source.code, source.runtime);
       if (built.codeSha256 !== codeSha256) continue;
       await this.packages.restoreInlineZip(accountId, built);
-      this.logger.warn(`Object storage had lost the one-file package ${codeSha256} of account ${accountId}: made again of function ${function_.id}'s code`);
+      this.logger.warn(`Object storage had lost the one-file package ${codeSha256} of account ${accountId}: made again of ${source.of}'s code`);
       return true;
     }
     return false;
@@ -809,11 +949,11 @@ export class FunctionsService {
     const function_ = await this.findOne(accountId, id);
 
     try {
-      await this.orchestrator.remove(function_);
-      
+      // Its versions' pods go with its own; their records go with its record.
+      const versions = await this.functionsRepository.manager.find(FunctionVersion, { where: { functionId: id }, select: { version: true } });
+      await this.orchestrator.remove(function_, versions.map((v) => v.version));
       // Remove the code's copy from object storage
       await this.objectStore.deleteCode(this.codePath(function_));
-      
       // Its key to its account's buckets stops working, then its record goes
       await this.functionKeys.revoke(function_.id);
       await this.functionsRepository.remove(function_);
@@ -824,7 +964,11 @@ export class FunctionsService {
   }
 
   /** Calls the function with `input` as its event, any JSON value, as AWS Lambda's Invoke does; {} when there is none. */
-  async invoke(accountId: string, id: string, input?: unknown): Promise<FunctionInvocation> {
+  /**
+   * Calls the function, or what `qualifier` names, as Lambda's Invoke with its Qualifier: a version, or an alias, whose
+   * share is drawn for the call. A version runs whatever $LATEST's state, as a rollback needs.
+   */
+  async invoke(accountId: string, id: string, input?: unknown, qualifier?: string): Promise<FunctionInvocation> {
     const payload = input === undefined ? {} : input;
     // As AWS Lambda refuses a synchronous call's payload over 6 MB, with its words and its exception's name.
     const size = jsonBytes(payload);
@@ -836,13 +980,14 @@ export class FunctionsService {
       });
     }
     const function_ = await this.findOne(accountId, id);
-    if (function_.status !== FunctionStatus.ACTIVE) {
+    const target = await this.callTarget(function_, qualifier);
+    if (!target.version && function_.status !== FunctionStatus.ACTIVE) {
       throw new BadRequestException('Function is not active');
     }
-    // D9: 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
+    // 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
     await this.credit.admit(accountId);
 
-    const outcome = await this.call(function_, payload, { source: InvocationSource.API });
+    const outcome = await this.call(function_, payload, { source: InvocationSource.API, target });
     // A call that failed is named, as the history keeps it: its ID finds its logs, its status says how it ended.
     if (!outcome.ok) {
       const { id: invocationId, status, duration, memoryUsed } = outcome.invocation;
@@ -867,8 +1012,10 @@ export class FunctionsService {
   async call(
     function_: Function,
     payload: unknown,
-    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number },
+    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number; target?: CallTarget },
   ): Promise<CallOutcome> {
+    const { version, alias } = options.target ?? {};
+    const running: Running = version ? versionRun(function_, version) : function_;
     // The history keeps a capped copy of the input, output and error (P-45); the caller gets them whole.
     const keptInput = keptJson(options.history === undefined ? payload : options.history);
     const requestId = options.requestId ?? randomUUID();
@@ -880,6 +1027,8 @@ export class FunctionsService {
       attempt,
       functionId: function_.id,
       source: options.source,
+      version: running.version ?? null,
+      alias: alias ?? null,
       input: keptInput.value,
       inputTruncated: keptInput.truncated,
       status: InvocationStatus.RUNNING,
@@ -889,11 +1038,14 @@ export class FunctionsService {
     await this.invocationsRepository.insert(invocation as QueryDeepPartialEntity<FunctionInvocation>);
 
     // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once (D14).
-    this.metricsService.invocationStarted(function_);
+    this.metricsService.invocationStarted(running);
     const startTime = Date.now();
     try {
       // The runtime logs the request's ID, and the usage record is keyed by it and the attempt's start (D6).
-      const result = await this.orchestrator.invoke(function_, payload, invocation.requestId);
+      // A version's first call, or its first since it went idle, makes its pods of its workload whole; $LATEST at
+      // zero starts with a fresh key when its key is due a renewal.
+      const start = version ? () => this.versionWorkload(running, version.version) : () => this.withFreshKey(function_.id);
+      const result = await this.orchestrator.invoke(running, payload, invocation.requestId, start);
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
@@ -909,7 +1061,7 @@ export class FunctionsService {
       invocation.memoryUsed = result.memoryUsedMb;
       invocation.status = InvocationStatus.COMPLETED;
       // Should this fail, the catch below ends the call as a platform failure, unbilled: its outcome couldn't be kept.
-      await this.finish(function_, invocation, UsageStatus.SUCCESS, result.initMs);
+      await this.finish(running, invocation, UsageStatus.SUCCESS, result.initMs);
       return { invocation, ok: true, output: result.output };
     } catch (error) {
       const duration = Date.now() - startTime;
@@ -930,10 +1082,10 @@ export class FunctionsService {
       const keptError = keptText(visible);
       invocation.error = keptError.value;
       invocation.errorTruncated = keptError.truncated;
-      await this.finish(function_, invocation, failureStatus(error), initMsOf(error));
+      await this.finish(running, invocation, failureStatus(error), initMsOf(error));
       return { invocation, ok: false, error, visible };
     } finally {
-      this.metricsService.invocationFinished(function_);
+      this.metricsService.invocationFinished(running);
     }
   }
 
@@ -943,7 +1095,7 @@ export class FunctionsService {
    * the reaper locks it: a call it already marked LOST (the backend was
    * stopped past the call's deadline) stays LOST, with the record it got.
    */
-  private finish(function_: Function, invocation: FunctionInvocation, status: UsageStatus, initMs: number | undefined): Promise<void> {
+  private finish(running: Running, invocation: FunctionInvocation, status: UsageStatus, initMs: number | undefined): Promise<void> {
     return this.invocationsRepository.manager.transaction(async (manager) => {
       const current = await manager.findOne(FunctionInvocation, { where: { id: invocation.id }, lock: { mode: 'pessimistic_write' } });
       if (current && current.status !== InvocationStatus.RUNNING) {
@@ -953,17 +1105,91 @@ export class FunctionsService {
       // Deleting the function during the call took its history along; the call ran all the same, and is billed.
       const endedAt = current ? (await manager.save(FunctionInvocation, invocation)).updatedAt : new Date();
       await this.usage.record(
-        usageRecord(function_, {
+        usageRecord(running, {
           requestId: invocation.requestId,
           startedAt: invocation.createdAt,
           endedAt,
           status,
           durationMs: invocation.duration ?? 0,
           initMs,
+          alias: invocation.alias,
         }),
         manager,
       );
     });
+  }
+
+  /**
+   * What a call naming `qualifier` runs: $LATEST for none; a version; or an alias's version, its share drawn, at each
+   * call, an asynchronous call's attempts included. 404 for a version or an alias the function hasn't.
+   */
+  async callTarget(function_: Function, qualifier: string | undefined): Promise<CallTarget> {
+    const named = parseQualifier(qualifier);
+    if (!named) return {};
+    const manager = this.functionsRepository.manager;
+    let alias: string | undefined;
+    let number: number | undefined;
+    if ('alias' in named) {
+      const found = await manager.findOne(FunctionAlias, { where: { functionId: function_.id, name: named.alias } });
+      if (!found) throw noSuchAlias(function_, named.alias);
+      alias = found.name;
+      number = drawVersion(found);
+    } else {
+      number = named.version;
+    }
+    if (number === undefined) return { alias };
+    const version = await this.publishedVersion(function_.id, number);
+    // An alias's versions are there: none is deleted while an alias names it.
+    if (!version) throw noSuchVersion(function_, number);
+    return { version, alias };
+  }
+
+  /** The function's version of that number, with its package; null for one it hasn't. */
+  private publishedVersion(functionId: string, number: number): Promise<FunctionVersion | null> {
+    return this.functionsRepository.manager
+      .createQueryBuilder(FunctionVersion, 'v')
+      .addSelect('v.packageSha256')
+      .where('v.functionId = :id AND v.version = :number', { id: functionId, number })
+      .getOne();
+  }
+
+  /**
+   * What a renewal of the function's key rolls out to its Deployment, $LATEST's or the version `version` names: the
+   * code image and the environment its record has, as its pods run them, with its current key, renewed if due (ADR
+   * 0014, 5). Null for a function that isn't ACTIVE, whose change under way, or failed, holds its pods; one that has
+   * no package, deployed before code came as images; and a version deleted.
+   */
+  async runningWorkload(functionId: string, version?: number): Promise<FunctionWorkload | null> {
+    const function_ = await this.functionsRepository
+      .createQueryBuilder('f')
+      .addSelect(['f.packageSha256', 'f.lastVersion'])
+      .where('f.id = :functionId AND f.status = :status', { functionId, status: FunctionStatus.ACTIVE })
+      .getOne();
+    if (!function_?.packageSha256) return null;
+    if (version === undefined) {
+      const image = await this.codeImages.imageFor(function_.accountId, function_.packageSha256);
+      return this.workload(function_, await this.environments.load(function_.id), image);
+    }
+    const published = await this.publishedVersion(function_.id, version);
+    return published && this.versionWorkload(versionRun(function_, published), version);
+  }
+
+  /** $LATEST's workload with a fresh key, when its key is due a renewal as it starts from zero; nothing otherwise. */
+  private async withFreshKey(functionId: string): Promise<FunctionWorkload | undefined> {
+    if (!(await this.functionKeys.isDue(functionId))) return undefined;
+    return (await this.runningWorkload(functionId)) ?? undefined;
+  }
+
+  /** A version's workload whole, as its first call makes its pods: its environment as published, its package's image, its function's key. */
+  private async versionWorkload(running: Running, number: number): Promise<FunctionWorkload> {
+    const sealed = await this.functionsRepository.manager
+      .createQueryBuilder(FunctionVersion, 'v')
+      .addSelect('v.environment')
+      .where('v.functionId = :id AND v.version = :number', { id: running.id, number })
+      .getOne();
+    if (!sealed) throw new Error(`Version ${number} of function ${running.id} was deleted during its call`);
+    const environment = this.environments.openVersion(running.id, number, sealed.environment);
+    return this.workload(running, environment, await this.codeImages.imageFor(running.accountId, running.packageSha256 as string));
   }
 
   /** What GET /functions/:id/scaling-config answers. */
@@ -1006,16 +1232,21 @@ export class FunctionsService {
     }
   }
 
-  /** One page of a function's history, newest first. */
+  /** One page of a function's history, newest first: every call, or those that named a version or an alias, or that a version ran. */
   async getInvocations(
     accountId: string,
     id: string,
-    page: Pick<ListInvocationsQuery, 'limit' | 'offset'>,
+    page: Pick<ListInvocationsQuery, 'limit' | 'offset' | 'resource' | 'executedVersion'>,
   ): Promise<{ invocations: FunctionInvocation[]; total: number }> {
     await this.findOne(accountId, id); // another account's function is not found
+    const kept = callsKept(page);
+    if (!kept) return { invocations: [], total: 0 };
+    // The account here too, so that this query alone never reads another account's history.
+    const where: FindOptionsWhere<FunctionInvocation> = { functionId: id, function: { accountId } };
+    if (kept.version !== undefined) where.version = kept.version ?? IsNull();
+    if (kept.alias !== undefined) where.alias = kept.alias ?? IsNull();
     const [invocations, total] = await this.invocationsRepository.findAndCount({
-      // The account here too, so that this query alone never reads another account's history.
-      where: { functionId: id, function: { accountId } },
+      where,
       order: { createdAt: 'DESC' },
       take: page.limit,
       skip: page.offset,
@@ -1023,13 +1254,7 @@ export class FunctionsService {
     return { invocations, total };
   }
 
-  /**
-   * GET /functions/:id/logs (P-40): the account's function's newest lines,
-   * read from its running instances. Another account's function is not found.
-   * An instance's lines go with it, at scale to zero too, until the log store
-   * keeps them (P-42), when `next` pages back through them (P-43).
-   */
-  /** A page of the function's log lines, from the log store, within its account's plan's retention (P-43). */
+  /** A page of the function's log lines, from the log store, within its account's plan's retention. Another account's function is not found. */
   async logs(accountId: string, id: string, request: FunctionLogsQuery): Promise<FunctionLogsView> {
     const function_ = await this.findOne(accountId, id);
     const plan = await this.plans.forAccount(accountId);

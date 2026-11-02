@@ -17,11 +17,13 @@ import { PriceBook } from '../billing/price-book.entity';
 import { PricingService } from '../billing/pricing.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { monthPartitions } from '../usage/usage.service';
 import { FIRST_PRICE_BOOK } from '../migrations/1792235773406-PriceBooks';
 import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
 import { withCachePrices } from '../migrations/1793333328301-CacheMeasures';
 import { withEmailPrices } from '../migrations/1793345460517-EmailBilling';
+import { withEstimatePrices } from '../migrations/1793486079752-AwsEstimatePrices';
 import { Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
 import { BETA_LIMITS } from '../plans/test-fixtures';
@@ -32,8 +34,8 @@ const OPERATOR = { id: 'kc-op-1', email: 'operator@ff.test' };
 /** Next year: whatever day the tests run, its months are in the future. */
 const Y = new Date().getUTCFullYear() + 1;
 const NOW = new Date(`${Y}-02-10T10:15:00Z`);
-/** The migrations' last book, the first one with customers' databases', buckets', queues', caches' and mail's prices. */
-const LATEST = withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))) as unknown as typeof FIRST_PRICE_BOOK;
+/** The migrations' last book: customers' databases', buckets', queues', caches' and mail's prices, and what AWS bills that FF doesn't. */
+const LATEST = withEstimatePrices(withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))))) as unknown as typeof FIRST_PRICE_BOOK;
 /** That book, its on-demand duration price doubled: a draft. */
 const DOUBLED = {
   ...LATEST,
@@ -72,7 +74,7 @@ run('price books and plans, for operators (L2, P-73)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    for (const table of ['usage_records', 'capacity_samples']) await query('SELECT ff_ensure_month_partition($1, $2::date)', [table, `${Y}-01-01`]);
+    await monthPartitions(db.dataSource, [`${Y}-01`]);
     const ds = db.dataSource;
     const audit = new AuditService(ds.getRepository(AuditEntry));
     // As the request context would name the operator: the audit service takes the actor from it.

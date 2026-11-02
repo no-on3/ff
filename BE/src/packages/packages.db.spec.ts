@@ -5,7 +5,8 @@
  * names, are counted and purged after an hour with their zips; the one-file
  * packages the backend makes of inline code are kept while a function names
  * them, as no upload; those functions name are listed for the restore of lost
- * code images; and a closed account's go. Each run works in a scratch
+ * code images; what they name is counted, each package once, for the plan's
+ * code storage; and a closed account's go. Each run works in a scratch
  * database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
@@ -225,6 +226,60 @@ run("functions' packages (L2)", () => {
     stored.delete(packageKey(b, live.codeSha256));
     await packages.restoreInlineZip(b, live);
     expect(stored.get(packageKey(b, live.codeSha256))).toBe(live.zip.length);
+  });
+
+  it("keeps the package a version names once its function's code has moved on, until the version goes", async () => {
+    const a = await account();
+    const [kept, current] = [zip('exports.handler = async () => "v1";'), zip('exports.handler = async () => "v2";')];
+    for (const bytes of [kept, current]) await upload(a, bytes);
+    await named(a, sha(current));
+    const [{ id }] = await query<Array<{ id: string }>>(`SELECT id FROM functions WHERE account_id = $1`, [a]);
+    await query(
+      `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+       VALUES ($1, 1, $2, 'nodejs', 'app.handler', 'zip', '', $3, 100, $3, 128, 5, 'lambda', '{s3}')`,
+      [id, a, sha(kept)],
+    );
+    for (const bytes of [kept, current]) await usedAgo(a, sha(bytes), 90);
+
+    await expect(packages.purgeUnused()).resolves.toBe(0);
+    const namedOfA = (await packages.named()).filter((found) => found.accountId === a).map((found) => found.codeSha256);
+    expect(namedOfA.sort()).toEqual([sha(current), sha(kept)].sort());
+
+    await query(`DELETE FROM function_versions WHERE function_id = $1`, [id]);
+    await expect(packages.purgeUnused()).resolves.toBe(1);
+    expect(await rowsOf(a)).toEqual([sha(current)]);
+  });
+
+  it("counts what the account's functions and versions name, each package once, for the plan's code storage: one function's record left out, its versions not", async () => {
+    const [a, b] = [await account(), await account()];
+    const [shared, versioned, unused] = [zip('exports.handler = async () => "shared";'), zip('exports.handler = async () => "v1";'), zip('exports.handler = async () => "unused";')];
+    for (const bytes of [shared, versioned, unused]) await upload(a, bytes);
+    await upload(b, shared);
+    for (const name of ['one', 'two']) await named(a, sha(shared), name);
+    await named(b, sha(shared));
+    const live = inlinePackage("export const handler = async () => 'inline';\n", Runtime.NODEJS);
+    await packages.storeInline(a, live);
+    await query(
+      `INSERT INTO functions (name, account_id, runtime, code, package_type, code_sha256, code_size, memory, timeout, package_sha256) VALUES ('inline', $1, 'nodejs', $2, 'inline', 'x', 1, 128, 5, $3)`,
+      [a, "export const handler = async () => 'inline';\n", live.codeSha256],
+    );
+    const idOf = async (name: string) => (await query<Array<{ id: string }>>(`SELECT id FROM functions WHERE account_id = $1 AND name = $2`, [a, name]))[0].id;
+    await query(
+      `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+       VALUES ($1, 1, $2, 'nodejs', 'app.handler', 'zip', '', $3, 100, $3, 128, 5, 'lambda', '{s3}')`,
+      [await idOf('one'), a, sha(versioned)],
+    );
+    const NONE = sha(Buffer.from('a package no one names'));
+
+    // The shared package once, though two functions name it; the version's; inline code's; not the unused one, nor b's.
+    expect(await packages.namedBytes(a)).toBe(shared.length + versioned.length + live.zip.length);
+    expect(await packages.namedBytes(a, NONE)).toBe(shared.length + versioned.length + live.zip.length);
+    // The package a change is about to name, which the change adds itself.
+    expect(await packages.namedBytes(a, sha(shared))).toBe(versioned.length + live.zip.length);
+    // A function's record left out: its package still counted while another names it, its versions' too.
+    expect(await packages.namedBytes(a, NONE, await idOf('one'))).toBe(shared.length + versioned.length + live.zip.length);
+    expect(await packages.namedBytes(a, NONE, await idOf('inline'))).toBe(shared.length + versioned.length);
+    expect(await packages.namedBytes(await account())).toBe(0);
   });
 
   it("deletes all of an account's packages and their zips, and no other account's", async () => {

@@ -6,7 +6,7 @@ export class DestinationDto {
   @ApiProperty({
     example: 'arn:aws:lambda:tn-tunis-1:000000000001:function:failed-orders',
     description:
-      "Another function of the account, by its ARN, as Lambda's, or by its name, kept as its ARN; it gets the call's record as an asynchronous call of its own",
+      "Another function of the account, by its ARN, as Lambda's, a version or an alias of it by its qualified ARN (…:function:failed-orders:live), or by its name, with a version or an alias after a colon (failed-orders:live), kept as its ARN; it gets the call's record as an asynchronous call of its own",
   })
   @IsString()
   @MaxLength(256)

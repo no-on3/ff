@@ -9,12 +9,16 @@ mod completion;
 mod config;
 mod db;
 mod deploy;
+mod doctor;
 mod email;
 mod env;
+mod estimate;
 mod event_sources;
+mod export;
 mod functions;
 mod init;
 mod invoke;
+mod keys;
 mod local;
 mod logs;
 mod package;
@@ -24,10 +28,11 @@ mod secrets;
 mod sites;
 mod url;
 mod version;
+mod versions;
 mod whoami;
 
 use crate::cli::{
-    BucketKeysCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EmailCommand,
+    AliasCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EmailCommand,
     EnvCommand, EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, SiteDomainsCommand,
     SitesCommand, UrlCommand,
 };
@@ -57,6 +62,8 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Init { name, runtime } => init::run(&name, runtime, context),
         Command::Deploy(args) => deploy::run(args, context),
         Command::Package(args) => package::run(args, context),
+        Command::Doctor(args) => doctor::run(args, context),
+        Command::Export(args) => export::run(args, context),
         Command::Invoke(args) => invoke::run(args, context),
         Command::AsyncConfig(args) => async_config::run(args, context),
         Command::List => functions::list(context),
@@ -65,6 +72,17 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::History { name, limit } => functions::history(&name, limit, context),
         Command::Scale { name, min, max } => functions::scale(&name, min, max, context),
         Command::Delete { name, yes } => functions::delete(&name, yes, context),
+        Command::Publish { name, description } => versions::publish(&name, description.as_deref(), context),
+        Command::Versions { name, delete: Some(version), yes } => versions::delete(&name, version, yes, context),
+        Command::Versions { name, delete: None, .. } => versions::list(&name, context),
+        Command::Alias(AliasCommand::Set { function, alias, version, also, description }) => {
+            let route = versions::AliasRoute::from_args(&version, also.as_deref())?;
+            versions::alias_set(&function, &alias, route, description.as_deref(), context)
+        }
+        Command::Alias(AliasCommand::List { function }) => versions::alias_list(&function, context),
+        Command::Alias(AliasCommand::Remove { function, alias, yes }) => {
+            versions::alias_remove(&function, &alias, yes, context)
+        }
         Command::Local(LocalCommand::Invoke { function, data, raw }) => {
             local::invoke(&function, data.as_deref(), raw, context)
         }
@@ -77,29 +95,34 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Secrets(SecretsCommand::List { name }) => secrets::list(&name, context),
         Command::Secrets(SecretsCommand::Set { name, secrets }) => secrets::set(&name, &secrets, context),
         Command::Secrets(SecretsCommand::Unset { name, secrets }) => secrets::unset(&name, &secrets, context),
-        Command::Url(UrlCommand::Show { name }) => url::show(&name, context),
-        Command::Url(UrlCommand::Enable { name, auth, cors_origins, cors_methods, cors_headers }) => {
-            url::enable(&name, auth, url::cors(&cors_origins, &cors_methods, &cors_headers), context)
+        Command::Url(UrlCommand::Show { name, alias }) => url::show(&name, alias.as_deref(), context),
+        Command::Url(UrlCommand::Enable { name, alias, auth, cors_origins, cors_methods, cors_headers }) => {
+            url::enable(&name, alias.as_deref(), auth, url::cors(&cors_origins, &cors_methods, &cors_headers), context)
         }
-        Command::Url(UrlCommand::Disable { name, yes }) => url::disable(&name, yes, context),
-        Command::Domains(DomainsCommand::List { name }) => url::domains_list(&name, context),
-        Command::Domains(DomainsCommand::Add { name, domain }) => url::domains_add(&name, &domain, context),
-        Command::Domains(DomainsCommand::Verify { name, domain }) => url::domains_verify(&name, &domain, context),
-        Command::Domains(DomainsCommand::Remove { name, domain, yes }) => {
-            url::domains_remove(&name, &domain, yes, context)
+        Command::Url(UrlCommand::Disable { name, alias, yes }) => url::disable(&name, alias.as_deref(), yes, context),
+        Command::Domains(DomainsCommand::List { name, alias }) => url::domains_list(&name, alias.as_deref(), context),
+        Command::Domains(DomainsCommand::Add { name, alias, domain }) => {
+            url::domains_add(&name, alias.as_deref(), &domain, context)
+        }
+        Command::Domains(DomainsCommand::Verify { name, alias, domain }) => {
+            url::domains_verify(&name, alias.as_deref(), &domain, context)
+        }
+        Command::Domains(DomainsCommand::Remove { name, alias, domain, yes }) => {
+            url::domains_remove(&name, alias.as_deref(), &domain, yes, context)
         }
         Command::Schedule(ScheduleCommand::List { name }) => schedule::list(&name, context),
         Command::Schedule(ScheduleCommand::Set {
             name,
             expression,
             schedule,
+            qualifier,
             input,
             no_input,
             description,
             disabled,
         }) => {
             let input = schedule::input(input.as_deref())?;
-            let changes = schedule::ScheduleChanges { expression, input, no_input, description, disabled };
+            let changes = schedule::ScheduleChanges { expression, qualifier, input, no_input, description, disabled };
             schedule::set(&name, &schedule, changes, context)
         }
         Command::Schedule(ScheduleCommand::Enable { name, schedule }) => {
@@ -185,13 +208,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Buckets(BucketsCommand::List) => buckets::list(context),
         Command::Buckets(BucketsCommand::Get { name }) => buckets::get(&name, context),
         Command::Buckets(BucketsCommand::Delete { name, force, yes }) => buckets::delete(&name, force, yes, context),
-        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::List)) => buckets::keys_list(context),
-        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Create { buckets, queues, read_only })) => {
-            buckets::keys_create(&buckets, &queues, read_only, context)
-        }
-        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Revoke { id, yes })) => {
-            buckets::keys_revoke(&id, yes, context)
-        }
+        Command::Keys(command) | Command::Buckets(BucketsCommand::Keys(command)) => keys::run(command, context),
         Command::Buckets(BucketsCommand::Notify { bucket, function, queue, events, prefix, suffix, id }) => {
             let destination = match (&function, &queue) {
                 (_, Some(queue)) => bucket_notifications::Destination::Queue(queue),
@@ -235,11 +252,13 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::EventSources(EventSourcesCommand::Add {
             queue,
             function,
+            qualifier,
             batches,
             report_batch_item_failures,
             disabled,
         }) => {
             let settings = event_sources::Settings {
+                qualifier,
                 batch_size: batches.batch_size,
                 batching_window: batches.batching_window.as_deref(),
                 report_batch_item_failures: report_batch_item_failures.then_some(true),
@@ -254,6 +273,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::EventSources(EventSourcesCommand::Get { uuid }) => event_sources::get(&uuid, context),
         Command::EventSources(EventSourcesCommand::Update {
             uuid,
+            qualifier,
             batches,
             report_batch_item_failures,
             no_report_batch_item_failures,
@@ -262,6 +282,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             disable,
         }) => {
             let settings = event_sources::Settings {
+                qualifier,
                 batch_size: batches.batch_size,
                 batching_window: batches.batching_window.as_deref(),
                 report_batch_item_failures: if report_batch_item_failures {
@@ -278,7 +299,12 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),
-        Command::Usage { month, csv } => account::usage(month.as_deref(), csv, context),
+        Command::Usage { aws: true, months, without, .. } => account::aws_estimate(months, &without, context),
+        // Clap takes a flag's default as given, so it can't say these two need --aws.
+        Command::Usage { months, without, .. } if months.is_some() || !without.is_empty() => {
+            Err(Error::usage("--months and --without go with --aws, as in `ff usage --aws --months 6`"))
+        }
+        Command::Usage { month, csv, .. } => account::usage(month.as_deref(), csv, context),
         Command::Balance => account::balance(context),
         Command::Metrics { name, period, since } => account::metrics(name.as_deref(), period, &since, context),
         Command::Config(command) => config::run(command, context),

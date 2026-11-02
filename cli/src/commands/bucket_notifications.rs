@@ -6,6 +6,7 @@
 use serde_json::{Map, Value, json};
 
 use super::Context;
+use crate::api::types::qualified_name_in_arn;
 use crate::api::{Call, Client};
 use crate::error::{Error, Kind};
 use crate::table::table;
@@ -37,15 +38,6 @@ pub struct NewConfiguration<'a> {
     pub id: Option<&'a str>,
 }
 
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
-
-/// The name an ARN ends with: a function's or a queue's.
-fn name_of(arn: &str) -> &str {
-    arn.rsplit(':').next().unwrap_or(arn)
-}
-
 /// One configuration of the API's answer, as `(id, events, filter, destination)` in words.
 fn row_of(configuration: &Value, queue: bool) -> Vec<String> {
     let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
@@ -61,7 +53,7 @@ fn row_of(configuration: &Value, queue: bool) -> Vec<String> {
         text(&configuration["id"]),
         events.join(","),
         if filter.is_empty() { "every key".to_owned() } else { filter.join(", ") },
-        format!("{} {}", if queue { "queue" } else { "function" }, name_of(&arn)),
+        format!("{} {}", if queue { "queue" } else { "function" }, qualified_name_in_arn(&arn)),
     ]
 }
 
@@ -79,7 +71,7 @@ fn rows(configuration: &Value) -> Vec<Vec<String>> {
 fn configuration_of(new: &NewConfiguration) -> Result<(String, Value), Error> {
     for event in new.events {
         if !EVENT_TYPES.contains(&event.as_str()) {
-            return Err(usage(format!("\"{event}\" is no event a bucket sends: {}", EVENT_TYPES.join(", "))));
+            return Err(Error::usage(format!("\"{event}\" is no event a bucket sends: {}", EVENT_TYPES.join(", "))));
         }
     }
     let events: Vec<&str> = if new.events.is_empty() {
@@ -184,6 +176,7 @@ pub fn clear(bucket: &str, yes: bool, context: &Context) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend_source::listed;
 
     #[test]
     fn a_new_configuration_names_its_destination_and_s3s_events_a_filter_when_given() {
@@ -231,7 +224,8 @@ mod tests {
     fn a_configuration_reads_as_rows_its_destination_by_name() {
         let configuration = json!({
             "lambdaFunctionConfigurations": [{ "id": "thumbs", "lambdaFunctionArn": "arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails", "events": ["s3:ObjectCreated:*"],
-                "filter": { "key": { "filterRules": [{ "name": "prefix", "value": "images/" }, { "name": "suffix", "value": ".jpg" }] } } }],
+                "filter": { "key": { "filterRules": [{ "name": "prefix", "value": "images/" }, { "name": "suffix", "value": ".jpg" }] } } },
+                { "id": "live", "lambdaFunctionArn": "arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails:live", "events": ["s3:ObjectCreated:Copy"] }],
             "queueConfigurations": [{ "id": "removals", "queueArn": "arn:aws:sqs:tn-tunis-1:000000000001:removals", "events": ["s3:ObjectRemoved:*"] }]
         });
         assert_eq!(
@@ -242,6 +236,12 @@ mod tests {
                     "s3:ObjectCreated:*".to_owned(),
                     "prefix images/, suffix .jpg".to_owned(),
                     "function thumbnails".to_owned()
+                ],
+                vec![
+                    "live".to_owned(),
+                    "s3:ObjectCreated:Copy".to_owned(),
+                    "every key".to_owned(),
+                    "function thumbnails:live".to_owned()
                 ],
                 vec![
                     "removals".to_owned(),
@@ -256,9 +256,6 @@ mod tests {
     #[test]
     fn the_events_are_the_apis() {
         let source = include_str!("../../../BE/src/storage/bucket-notifications.ts");
-        let start = source.find("export const EVENT_TYPES = [").unwrap();
-        let body = &source[start..start + source[start..].find("] as const").unwrap()];
-        let api: Vec<&str> = body.split('\'').skip(1).step_by(2).collect();
-        assert_eq!(api, EVENT_TYPES);
+        assert_eq!(listed(source, "EVENT_TYPES"), EVENT_TYPES);
     }
 }

@@ -1,5 +1,6 @@
 import type { Alarm, AlarmBody, AlarmState } from '../services/api';
 import { testUrlProblem } from './notifications';
+import { CallsPick, EVERY_CALL, pickOf } from './versions';
 
 /** The metrics an alarm watches and the statistics each has, as the API takes them; contract.test.ts checks them against its own. */
 export const STATISTICS = {
@@ -86,6 +87,12 @@ export const QUEUE_METRICS: readonly Metric[] = [
 ];
 /** A customer's cache's, an hour at a time, as CloudWatch names ElastiCache's: what its keys use, its connections, and its hits, misses and evictions. */
 export const CACHE_METRICS: readonly Metric[] = ['BytesUsedForCache', 'CurrConnections', 'CacheHits', 'CacheMisses', 'Evictions'];
+/**
+ * A function's metrics that some of its calls have, as CloudWatch keeps
+ * Lambda's by their Resource and ExecutedVersion dimensions: the instances by
+ * what ran them alone, as a version's instances run every alias's calls.
+ */
+export const CALL_METRICS: readonly Metric[] = ['Invocations', 'Errors', 'Throttles', 'ColdStarts', 'Duration', 'Instances'];
 /** The account's mail's, an hour at a time, as CloudWatch names SES's: its recipients sent, taken, bounced and complained of, and its reputation, a fraction. */
 export const EMAIL_METRICS: readonly Metric[] = ['Send', 'Delivery', 'Bounce', 'Complaint', 'Reputation.BounceRate', 'Reputation.ComplaintRate'];
 
@@ -178,6 +185,9 @@ export interface AlarmForm {
   queueName: string;
   /** '': none; a cache's name, for its own metrics. */
   cacheName: string;
+  /** The function's calls it watches, by what they named and what ran them: '' for each, all of them. */
+  resource: string;
+  executedVersion: string;
   metric: Metric;
   statistic: string;
   period: number;
@@ -206,6 +216,7 @@ export const emptyForm = (functionId = '', databaseId = '', bucketName = '', que
         bucketName: queueName ? '' : bucketName,
         queueName,
         cacheName: '',
+        ...EVERY_CALL,
         metric: queueName ? 'ApproximateNumberOfMessagesVisible' : bucketName ? '5xxErrors' : databaseId ? 'VolumeBytesUsed' : functionId ? 'Errors' : 'Invocations',
         statistic: queueName || (databaseId && !bucketName) ? 'Maximum' : 'Sum',
         period: databaseId && !bucketName && !queueName ? 3600 : bucketName && !queueName ? 300 : 60,
@@ -225,6 +236,8 @@ export const formFromAlarm = (alarm: Alarm): AlarmForm => ({
   bucketName: alarm.bucketName ?? '',
   queueName: alarm.queueName ?? '',
   cacheName: alarm.cacheName ?? '',
+  resource: alarm.resource ?? '',
+  executedVersion: alarm.executedVersion ?? '',
   metric: alarm.metric as Metric,
   statistic: alarm.statistic,
   period: alarm.period,
@@ -253,6 +266,19 @@ export const metricsFor = (functionId: string, databaseId = '', bucketName = '',
                 !(functionId && (BILLING_METRICS.includes(metric) || EMAIL_METRICS.includes(metric))),
             );
 
+/** The metrics the form's scope offers, and of a function's, those the calls it picks have. */
+export function metricsOf(form: AlarmForm): Metric[] {
+  const offered = metricsFor(form.functionId, form.databaseId, form.bucketName, form.queueName, form.cacheName);
+  if (!form.functionId || (!form.resource && !form.executedVersion)) return offered;
+  return offered.filter((metric) => CALL_METRICS.includes(metric) && !(metric === 'Instances' && form.resource));
+}
+
+/** The form once it picks some of its function's calls, with a metric they have. */
+export function withCalls(form: AlarmForm, value: string): AlarmForm {
+  const next = { ...form, ...pickOf(value) };
+  return metricsOf(next).includes(next.metric) ? next : withMetric(next, 'Errors');
+}
+
 /** The form once the metric changes: a statistic it has; for the money the account's, one datapoint; for a database's, a cache's or the mail's, an hour a period; for a bucket's, a queue's or a cache's, it alone. */
 export function withMetric(form: AlarmForm, metric: Metric): AlarmForm {
   const statistics = STATISTICS[metric] as readonly string[];
@@ -278,7 +304,9 @@ export function withScope(form: AlarmForm, scope: string): AlarmForm {
   const databaseId = scope.startsWith('database:') ? scope.slice('database:'.length) : '';
   const functionId = databaseId || bucketName || queueName || cacheName ? '' : scope;
   const metrics = metricsFor(functionId, databaseId, bucketName, queueName, cacheName);
-  const next = { ...form, functionId, databaseId, bucketName, queueName, cacheName };
+  // Another function's calls are its own: the pick starts again from every call.
+  const pick: CallsPick = functionId === form.functionId ? { resource: form.resource, executedVersion: form.executedVersion } : EVERY_CALL;
+  const next = { ...form, functionId, databaseId, bucketName, queueName, cacheName, ...pick };
   const fallback: Metric = cacheName ? 'BytesUsedForCache' : queueName ? 'ApproximateNumberOfMessagesVisible' : bucketName ? '5xxErrors' : databaseId ? 'VolumeBytesUsed' : 'Errors';
   return withMetric(next, metrics.includes(form.metric) ? form.metric : fallback);
 }
@@ -320,6 +348,7 @@ export function formProblem(form: AlarmForm): string | null {
   } else if (form.period * n > 86_400) {
     return 'The periods judged look back more than a day: take fewer, or shorter ones';
   }
+  if (form.functionId && !metricsOf(form).includes(form.metric)) return `${form.metric} isn't kept for some of a function's calls: watch every call`;
   const urls = webhookList(form.webhookUrls);
   if (urls.length > MAX_WEBHOOKS) return `An alarm tells at most ${MAX_WEBHOOKS} webhooks`;
   for (const url of urls) {
@@ -337,6 +366,9 @@ export const toBody = (form: AlarmForm): AlarmBody => ({
   bucketName: form.bucketName || null,
   queueName: form.queueName || null,
   cacheName: form.cacheName || null,
+  // Some of a function's calls: the form's other scopes keep none.
+  resource: (form.functionId && form.resource) || null,
+  executedVersion: (form.functionId && form.executedVersion) || null,
   metric: form.metric,
   statistic: form.statistic,
   period: form.period,

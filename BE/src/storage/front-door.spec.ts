@@ -16,6 +16,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { IncomingMessage, Server, ServerResponse, createServer, request as httpRequest } from 'node:http';
 import { AddressInfo } from 'node:net';
@@ -34,19 +35,22 @@ import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { S3FrontDoor } from './front-door';
 import { CountedRequest } from './request-tally';
-import { RequestSignature, checkSignature, readSignature, signedForStore } from './sigv4';
-import { ActiveKey, StorageDirectory } from './storage-directory.service';
+import { RequestSignature, checkSignature, readSignature, signedForStore } from './s3-signature';
+import { ActiveKey, EXPIRED, StorageDirectory } from './storage-directory.service';
+import { notedUses, useLine } from './test-fixtures';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { WebsiteConfiguration } from './website';
 
 const STORE_KEY = 'storekey';
 const STORE_SECRET = 'store-secret';
-const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, queues: null, readOnly: false, secret: 'a'.repeat(40) };
+const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', name: null, functionId: null, buckets: null, queues: null, functions: null, functionAccess: null, readOnly: false, secret: 'a'.repeat(40) };
 const READ_ONLY: ActiveKey = { ...KEY, id: 'AKFFBBBBBBBBBBBBBBBB', readOnly: true };
 const OTHERS: ActiveKey = { ...KEY, id: 'AKFFCCCCCCCCCCCCCCCC', accountId: '000000000002' };
 const NARROW: ActiveKey = { ...KEY, id: 'AKFFDDDDDDDDDDDDDDDD', buckets: ['photos'] };
 /** A key that names queues alone: it reaches no bucket. */
 const QUEUES_ONLY: ActiveKey = { ...KEY, id: 'AKFFEEEEEEEEEEEEEEEE', queues: ['orders'] };
+/** A function's key past its end, which the directory says so of. */
+const ENDED = 'AKFFFFFFFFFFFFFFFFFF';
 const bucket = (name: string, accountId: string, storeName: string): Bucket =>
   Object.assign(new Bucket(), { id: `id-${name}`, accountId, name, storeName, status: BucketStatus.ACTIVE, createdAt: new Date('2026-10-23T06:00:00Z') });
 const BUCKETS = [bucket('photos', KEY.accountId, 'ff-000000000000000000000001'), bucket('exports', KEY.accountId, 'ff-000000000000000000000002'), bucket('theirs', OTHERS.accountId, 'ff-000000000000000000000003')];
@@ -64,6 +68,9 @@ interface StoreRequestSeen {
  * A store in memory that checks FF's own signature to it, as any S3 store
  * would, keeps what is put, and lists it in its own name for the bucket.
  */
+/** How many HEADs of an object the store answers 404 before it shows it, as a store may just after its write. */
+let headsBeforeShown = 0;
+
 function fakeStore(seen: StoreRequestSeen[]): Server {
   const objects = new Map<string, Buffer>();
   return createServer((request: IncomingMessage, response: ServerResponse) => {
@@ -108,10 +115,13 @@ function fakeStore(seen: StoreRequestSeen[]): Server {
           .end(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Name>${storeName}</Name><KeyCount>${keys.length}</KeyCount>${keys.map((k) => `<Contents><Key>${k}</Key><Size>1</Size></Contents>`).join('')}<IsTruncated>false</IsTruncated></ListBucketResult>`);
       } else if (request.method === 'HEAD' && key.length) {
         const object = objects.get(name);
-        if (!object) response.writeHead(404).end();
+        if (!object || headsBeforeShown-- > 0) response.writeHead(404).end();
         else response.writeHead(200, { 'content-length': object.length, etag: '"etag-1"' }).end();
       } else if (request.method === 'POST') {
         response.writeHead(200, { 'content-type': 'application/xml' }).end('<DeleteResult><Deleted><Key>a.txt</Key></Deleted></DeleteResult>');
+      } else if (request.method === 'DELETE' && key.length) {
+        objects.delete(name);
+        response.writeHead(204).end();
       } else {
         response.writeHead(204).end();
       }
@@ -132,7 +142,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   const counted: CountedRequest[] = [];
   const keys = new Map([KEY, READ_ONLY, OTHERS, NARROW, QUEUES_ONLY].map((key) => [key.id, key]));
   const directory = {
-    key: async (id: string) => keys.get(id) ?? null,
+    key: async (id: string) => (id === ENDED ? EXPIRED : (keys.get(id) ?? null)),
     bucket: async (name: string) => BUCKETS.find((b) => b.name === name) ?? null,
     bucketsOf: async (accountId: string) => BUCKETS.filter((b) => b.accountId === accountId),
     touch: () => undefined,
@@ -167,6 +177,8 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   /** What the buckets' website configurations got: each kept, or removed, and by whom. */
   const keptWebsites: Array<[string, WebsiteConfiguration | null, ChangedBy]> = [];
   const websites = { keep: async (bucket: Bucket, website: WebsiteConfiguration | null, by: ChangedBy) => void keptWebsites.push([bucket.name, website, by]) } as unknown as BucketWebsitesService;
+  /** What each key used, as the front door noted it. */
+  const keyUses = notedUses();
   const client = (key: ActiveKey = KEY, secret = key.secret) =>
     new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: secret }, maxAttempts: 1 });
   /** The SDK's error for a refused call: its name and status. */
@@ -187,7 +199,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       storage: { base: 'http://s3.example.test:3002', region: 'tn-tunis-1' },
       objectStore: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
     });
-    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites);
+    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites, keyUses);
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
 
@@ -197,12 +209,34 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   });
 
   beforeEach(() => {
+    headsBeforeShown = 0;
     seen.length = 0;
     counted.length = 0;
     hits.clear();
     kept.length = 0;
     published.length = 0;
     keptWebsites.length = 0;
+    keyUses.seen.length = 0;
+  });
+
+  it("notes what each key used, by S3's names, for the export's roles: a bucket, a copy's source as a read of it, the account's list, nothing refused", async () => {
+    await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'noted.txt', Body: 'noted' }));
+    await client().send(new CopyObjectCommand({ Bucket: 'exports', Key: 'noted.txt', CopySource: 'photos/noted.txt' }));
+    await client().send(new ListBucketsCommand({}));
+    await client(READ_ONLY).send(new GetObjectCommand({ Bucket: 'photos', Key: 'noted.txt' }));
+    await refused(client(READ_ONLY).send(new PutObjectCommand({ Bucket: 'photos', Key: 'refused.txt', Body: 'no' })));
+    await refused(client(NARROW).send(new GetObjectCommand({ Bucket: 'exports', Key: 'noted.txt' })));
+    await refused(client().send(new GetObjectCommand({ Bucket: 'theirs', Key: 'noted.txt' })));
+
+    expect(keyUses.seen.map(useLine)).toEqual([
+      `${KEY.id} s3 photos PutObject`,
+      `${KEY.id} s3 exports CopyObject`,
+      `${KEY.id} s3 photos GetObject`,
+      `${KEY.id} s3 (the account) ListBuckets`,
+      `${READ_ONLY.id} s3 photos GetObject`,
+    ]);
+    // Nothing left in the buckets that other tests list.
+    for (const Bucket of ['photos', 'exports']) await client().send(new DeleteObjectCommand({ Bucket, Key: 'noted.txt' }));
   });
 
   it("puts a string, its SHA-256 and CRC-32 checked, and the store gets the object under its own name, FF's signature, no checksum", async () => {
@@ -292,11 +326,12 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     expect(seen).toEqual([]);
   });
 
-  it("refuses, in S3's words, before the store hears of it: a wrong secret, an unknown key, another account's bucket, a bucket the key doesn't reach, a write with a read-only key, none at all", async () => {
+  it("refuses, in S3's words, before the store hears of it: a wrong secret, an unknown key, one past its end, another account's bucket, a bucket the key doesn't reach, a write with a read-only key, none at all", async () => {
     const get = new GetObjectCommand({ Bucket: 'photos', Key: 'range.txt' });
 
     expect(await refused(client(KEY, 'b'.repeat(40)).send(get))).toBe('403 SignatureDoesNotMatch');
     expect(await refused(client({ ...KEY, id: 'AKFFZZZZZZZZZZZZZZZZ' }).send(get))).toBe('403 InvalidAccessKeyId');
+    expect(await refused(client({ ...KEY, id: ENDED }).send(get))).toBe('400 ExpiredToken');
     expect(await refused(client().send(new GetObjectCommand({ Bucket: 'theirs', Key: 'x' })))).toBe('403 AccessDenied');
     expect(await refused(client(NARROW).send(new ListObjectsV2Command({ Bucket: 'exports' })))).toBe('403 AccessDenied');
     expect(await refused(client(QUEUES_ONLY).send(new ListObjectsV2Command({ Bucket: 'photos' })))).toBe('403 AccessDenied');
@@ -605,6 +640,26 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       });
       // The object's size and ETag, asked of the store once, for the write a rule named.
       expect(seen.filter((request) => request.method === 'HEAD')).toHaveLength(1);
+    });
+
+    it("asks the store again for a created object's size and ETag while it doesn't show the object yet, and sends the event without them after three tries", async () => {
+      photos.notifications = [{ id: 'thumbs', target: 'function', arn: FUNCTION_ARN, events: ['s3:ObjectCreated:*'], prefix: null, suffix: null }];
+      const warned = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      headsBeforeShown = 2;
+      await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'late.txt', Body: 'hello' }));
+      await frontDoor.notified();
+      headsBeforeShown = 3;
+      await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'never.txt', Body: 'hello' }));
+      await frontDoor.notified();
+
+      expect(records()).toEqual([
+        ['ObjectCreated:Put', 'thumbs', 'late.txt', 5],
+        ['ObjectCreated:Put', 'thumbs', 'never.txt', undefined],
+      ]);
+      expect(seen.filter((request) => request.method === 'HEAD')).toHaveLength(6);
+      expect(warned).toHaveBeenCalledWith(expect.stringMatching(/^The store answered 404 to 3 HEADs of \/[^ ]+\/never\.txt after its write/));
+      warned.mockRestore();
     });
 
     it('sends a copy as ObjectCreated:Copy, and a deletion as ObjectRemoved:Delete, one for each key DeleteObjects deleted', async () => {

@@ -48,18 +48,26 @@ export function rateLimitTracker(request: RateLimitedRequest): string {
 }
 
 /**
- * Counts a call that didn't come through the API (a request to a function's
- * URL) against the account's invocations per second, in the throttler's own
- * storage and under the key the API's invokes count under: one count for the
- * account, whichever way its calls come. Answers the seconds to wait when the
- * call is over the limit, and undefined when it may go on.
+ * Counts a request that didn't come through the API against one of the API's
+ * limits for the account, in the throttler's own storage and under the key the
+ * API's requests count under: one count for the account, whichever way its
+ * requests come. Answers the seconds to wait when the request is over the
+ * limit, and undefined when it may go on.
  */
-export async function countInvocation(storage: ThrottlerStorage, accountId: string, limit: number): Promise<number | undefined> {
-  const { ttlMs } = RATE_LIMITS.invokes;
-  // The guard's key for the account's invokes (generateKey below, with rateLimitTracker's account), its window, and a block as long.
-  const record = await storage.increment(`invokes:account:${accountId}`, ttlMs, limit, ttlMs, 'invokes');
+async function countAgainstApiLimit(storage: ThrottlerStorage, name: RateLimitName, accountId: string, limit: number): Promise<number | undefined> {
+  const { ttlMs } = RATE_LIMITS[name];
+  // The guard's key for the account (generateKey below, with rateLimitTracker's account), its window, and a block as long.
+  const record = await storage.increment(`${name}:account:${accountId}`, ttlMs, limit, ttlMs, name);
   return record.isBlocked ? record.timeToBlockExpire : undefined;
 }
+
+/** Counts a call that didn't come through the API (a request to a function's URL, an Invoke at Lambda's endpoint) against the account's invocations per second. */
+export const countInvocation = (storage: ThrottlerStorage, accountId: string, limit: number): Promise<number | undefined> =>
+  countAgainstApiLimit(storage, 'invokes', accountId, limit);
+
+/** Counts a change that didn't come through the API (one made at Lambda's endpoint) against the account's changes per minute. */
+export const countWrite = (storage: ThrottlerStorage, accountId: string, limit: number): Promise<number | undefined> =>
+  countAgainstApiLimit(storage, 'writes', accountId, limit);
 
 /**
  * Counts an S3 request against the account's storageRequestsPerSecond, in the

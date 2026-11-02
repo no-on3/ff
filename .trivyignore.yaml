@@ -1,11 +1,6 @@
 # Vulnerabilities hack/ci.sh's image scans accept, each in the one binary named, with why, and until when:
 # from expired_at on, the scan reports it again. Anything else, anywhere, fails the scan.
 vulnerabilities:
-  - id: CVE-2026-111943
-    paths: [usr/bin/caddy]
-    statement: >-
-      Caddy 2.11.7, the latest release, in the console's, the admin app's and the edge's images, is built here with Go 1.26.9, which fixes its release's advisories (HTTP/2 and TLS) but not this one: crypto/x509 may accept a chain through untrusted intermediates. Only Go 1.26.10 (2026-10-19) fixes it, two weeks old on 2026-11-02: Caddy is built with it then. Caddy checks a server's certificate only as the edge's ACME client, to Let's Encrypt: the console's and the admin app's Caddy only serves files, and the edge reaches every app behind it in plain HTTP. Nothing is in production before then.
-    expired_at: 2026-11-02
   - id: CVE-2026-111181
     paths: [app/node_modules/body-parser/package.json]
     statement: >-

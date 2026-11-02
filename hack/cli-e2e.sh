@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # L3 for the ff command: the built binary against the whole stack, as a developer runs it:
-#   PostgreSQL + S3 (compose project "ff-cli-e2e", ports 55436 / 59007) + the k3d dev cluster
+#   PostgreSQL + S3 (compose project "ff-cli-e2e", ports 25436 / 29007) + the k3d dev cluster
 #   + the backend (built, started on a free port in development mode, which acts as the account
 #   a profile names, as hack/e2e.sh's requests do).
 # For examples/hello.ts and examples/hello.py: deploy, invoke, the handler's line in ff logs and
 # in ff logs --follow, an asynchronous call and a dry run, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
 # exit 5 with the call's ID, which the history shows, the Python one's calls that don't wait set
 # by ff async-config to go on to another function; code that fails to load exits 4, and the
-# function is kept, in ERROR, with its error. A second account finds none of the first's. Then
+# function is kept, in ERROR, with its error. A second account finds none of the first's. A function's versions
+# and aliases: published by ff deploy --publish and by ff publish, called as name:alias and name:version, an alias
+# moved with a share of its calls and rolled back, its own URL, a schedule through it, a version it names kept. Then
 # ff init for both runtimes, its folder run locally, deployed and invoked; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
@@ -31,13 +33,14 @@
 # the latest kept in FF's cache, each one put in a queue with the function's own key, read by a function
 # that writes its receipt to a bucket and e-mails it through the SES endpoint from an address proved by its
 # link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called
-# without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; and ff local, in
-# Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
+# without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; the account exported
+# to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's role what its keys used; and
+# ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
 # time) is started in its section and read a few sections on, in a section of its own (schedules_ran, databases_used,
-# buckets_used, sites_counted, queues_counted), so that its minute passes while the sections between run: what it
-# checks is the same, a real minute of the product's, and a section run alone waits as long as before.
+# buckets_used, sites_counted, queues_counted, small_app_exported), so that its minute passes while the sections between
+# run: what it checks is the same, a real minute of the product's, and a section run alone waits as long as before.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster. Its sections run alone
 # too, with what they need (hack/lib/sections.sh): --list names them, --only and --from choose. --keep removes
 # nothing on exit, for a look and for the next run, which --reuse runs against the same stack (hack/lib/e2e-stack.sh
@@ -47,8 +50,8 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-cli-e2e
 E2E_NAME=cli-e2e
-export FF_PG_PORT="${FF_CLI_E2E_PG_PORT:-55436}"
-export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-59007}"
+export FF_PG_PORT="${FF_CLI_E2E_PG_PORT:-25436}"
+export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-29007}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 sections_options "$@"
@@ -78,6 +81,7 @@ sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform
 
 section_stack() {
 section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
+e2e_within_one_month 12
 e2e_dependencies
 e2e_cluster
 # This machine as the cluster's pods see it, the gateway of the cluster's Docker network: functions reach the S3 front
@@ -340,7 +344,7 @@ ff url enable cli-url --auth key
 ff invoke cli-url --http GET /
 check "once it takes API keys, a call without one is refused there" "0 HTTP 403" "$(code) $(out | head -1)"
 ff url show cli-url
-check "ff url show says its address and who may call it" "0 $address callers need an API key of the account with functions:invoke" \
+check "ff url show says its address and who may call it" "0 $address callers need an access key of the account that may invoke it, signing for lambda, or an API key of it with functions:invoke" \
   "$(code) $(out | head -1) $(out | sed -n 2p | cut -d';' -f1)"
 ff domains add cli-url shop.cli-e2e.test
 check "ff domains add says the records that prove it" "0 shop.cli-e2e.test: pending true" \
@@ -357,6 +361,64 @@ check "after which ff invoke --http has nowhere to call" "3 error: cli-url has n
 ff delete cli-url --yes
 }
 section_def url section_url backend budget=15
+
+section_versions() {
+section "versions and aliases: ff publish, ff alias, name:alias called, through its URL and a schedule"
+answering() {
+  printf 'export async function handler() {\n  return { statusCode: 200, headers: { "content-type": "text/plain" }, body: "%s" };\n}\n' "$1" >"$work/versioned.ts"
+}
+answering one
+ff deploy "$work/versioned.ts" --name cli-ver --publish --alias live
+check "ff deploy --publish --alias publishes version 1 and points the alias at it" "0 version 1 published cli-ver:live made: version 1" \
+  "$(code) $(out | sed -n 2p) $(out | sed -n 3p)"
+answering two
+ff deploy "$work/versioned.ts" --name cli-ver --publish
+check "changed and published again, version 2, the alias where it was" "0 version 2 published" "$(code) $(out | tail -1)"
+answers=""
+for target in cli-ver cli-ver:live cli-ver:2; do
+  ff invoke "$target" --raw
+  answers+=" $(code) $(out | jq -r .body)"
+done
+check "a call runs \$LATEST, name:alias what the alias names, name:version that version" " 0 two 0 one 0 two" "$answers"
+ff publish cli-ver
+check "ff publish with nothing changed answers the last version, as Lambda does" \
+  "0 cli-ver: nothing but the description changed since version 2, which it is again, as Lambda answers" "$(code) $(out)"
+ff alias set cli-ver live 2 --also 1 10%
+check "ff alias set moves it, a share of its calls to the version before, saying what it was and is" \
+  "0 cli-ver:live: version 1 → version 2, 10% of its calls to version 1" "$(code) $(out)"
+ff versions cli-ver
+check "ff versions lists them newest first, with the aliases whose calls reach each" "0 2 live 90% 1 live 10%" \
+  "$(code) $(out | sed -n '2,3p' | awk '{ print $1, $9, $10 }' | paste -sd' ')"
+ff alias set cli-ver live 1
+check "a rollback is a set to the version before: every call to it, the share gone" \
+  "0 cli-ver:live: version 2, 10% of its calls to version 1 → version 1" "$(code) $(out)"
+ff invoke cli-ver:live --raw
+check "which the alias's calls run at once" "0 one" "$(code) $(out | jq -r .body)"
+ff url enable cli-ver --alias live --auth none
+alias_address="$(out | head -1 | sed 's/^cli-ver:live has a URL: //')"
+ff invoke cli-ver:live --http GET /
+check "the alias's own URL, which ff invoke name:alias --http calls, runs what it names" "0 HTTP 200 one" "$(code) $(out | head -1) $(out | tail -1)"
+ff alias list cli-ver
+check "ff alias list says where its calls go, and its URL" "0 live version 1 $alias_address" "$(code) $(out | sed -n 2p | awk '{ print $1, $2, $3, $4 }')"
+ff schedule set cli-ver "rate(1 hour)" --qualifier live
+check "a schedule runs the alias, which ff schedule set and list say" \
+  "0 cli-ver's schedule schedule made: rate(1 hour), running alias live, with EventBridge's Scheduled Event alias live" \
+  "$(code) $(out | head -1) $(ff schedule list cli-ver; out | sed -n 2p | awk '{ print $2, $3 }')"
+ff versions cli-ver --delete 1 --yes
+check "a version an alias names isn't deleted, in the API's words" \
+  "3 error: Version 1 of the function cli-ver is named by its alias live: point it at another version, or delete it, first" "$(code) $(err | head -1)"
+ff alias remove cli-ver live --yes
+check "ff alias remove removes it" "0 cli-ver:live removed: what names it stops until an alias of that name is made again" "$(code) $(out)"
+ff url show cli-ver --alias live
+check "its URL with it" "3" "$(code)"
+ff invoke cli-ver:live --raw
+check "and a call to it is refused, in the API's words" \
+  "3 error: The function cli-ver has no alias live: GET /functions/{id}/aliases lists them" "$(code) $(err | head -1)"
+ff versions cli-ver --delete 1 --yes
+check "then the version is deleted" "0 cli-ver: version 1 deleted" "$(code) $(out)"
+ff delete cli-ver --yes
+}
+section_def versions section_versions backend budget=40
 
 section_schedules() {
 section "schedules: ff schedule set, its runs read a few sections on"
@@ -642,7 +704,7 @@ check "  ... which writes again through its new secret" "0 HTTP 201 2" "$(code) 
 section_def databases section_databases small_app_db budget=55
 
 section_buckets() {
-section "buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
+section "buckets, with ff buckets and ff keys: one made, a named key for AWS's tools, the AWS CLI with those alone, a key to functions"
 ff buckets create My.Photos
 check "ff buckets create refuses a name AWS wouldn't take, before calling" "2 true" "$(code) $(err | grep "can't be a bucket's name" >/dev/null && echo true || echo false)"
 ff buckets create cli-photos
@@ -650,8 +712,8 @@ check "ff buckets create makes it, and says where AWS's tools reach it" "0 cli-p
   "$(code) $(out | head -1) $(out | sed -n 3p | awk '{ print $2 }')"
 ff buckets list
 check "ff buckets list shows it" "0 cli-photos active" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
-ff buckets keys create --bucket cli-photos
-check "ff buckets keys create prints its secret once, as the six variables AWS's tools read" "0 6" "$(code) $(out | grep -c '^export AWS_')"
+ff keys create --name cli-photos-key --bucket cli-photos
+check "ff keys create prints its secret once, as the seven variables AWS's tools read" "0 7" "$(code) $(out | grep -c '^export AWS_')"
 out | grep '^export AWS_' >"$work/s3.env"
 key_id="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/s3.env")"
 printf 'Ahlan from the CLI' >"$work/hello.txt"
@@ -666,14 +728,29 @@ aws_with_key() { (set -a; . "$work/s3.env"; set +a; AWS_CONFIG_FILE=/dev/null AW
 uploaded="$(aws_with_key s3 cp "$work/hello.txt" s3://cli-photos/hello.txt --only-show-errors >/dev/null 2>&1; echo $?)"
 check "the AWS CLI uploads with them and reads it back, AWS_ENDPOINT_URL_S3 its only change" "0 Ahlan from the CLI" \
   "$uploaded $(aws_with_key s3 cp s3://cli-photos/hello.txt - 2>/dev/null)"
+ff keys list
+check "ff keys list names each key and what it reaches, never its secret" "0 $key_id cli-photos-key cli-photos - read-write - false" \
+  "$(code) $(out | sed -n 2p | awk '{ print $1, $2, $3, $4, $5, $6 }') $(out | grep "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" >/dev/null && echo true || echo false)"
+listed="$(out | sed -n 2p | awk '{ print $1, $2, $3, $4, $5, $6 }')"
 ff buckets keys list
-check "ff buckets keys list names what it reaches, never its secret" "0 $key_id cli-photos false" \
-  "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }') $(out | grep "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" >/dev/null && echo true || echo false)"
+check "  ... ff buckets keys, its name before, the same" "0 $listed" "$(code) $(out | sed -n 2p | awk '{ print $1, $2, $3, $4, $5, $6 }')"
+# A key to the account's functions alone, to invoke them: no bucket or queue, so no read-only either.
+ff keys create --name cli-invoker --function '*' --read-only
+check "ff keys create refuses --read-only for a key to functions alone, before calling" "2 true" \
+  "$(code) $(err | grep -- "--read-only is for a key's buckets and queues" >/dev/null && echo true || echo false)"
+ff keys create --name cli-invoker --function '*'
+check "ff keys create makes a key to every function, to invoke when no level is said" "0 every function of the account, to invoke" \
+  "$(code) $(out | head -1 | sed -n 's/^cli-invoker (AKFF[A-Z2-7]\{16\}) made, reaching \(.*\): its secret.*/\1/p')"
+ff keys list
+check "  ... listed with its functions and their level, no bucket or queue" "0 - - - all (invoke)" \
+  "$(code) $(out | awk '$2 == "cli-invoker" { print $3, $4, $5, $6, $7 }')"
+ff keys revoke cli-invoker --yes
+check "ff keys revoke takes a key's name" "0 true" "$(code) $(out | grep -E '^revoked the access key cli-invoker \(AKFF[A-Z2-7]{16}\)$' >/dev/null && echo true || echo false)"
 # The export kit's way out to AWS S3, both halves: the bucket to a folder with the key's variables, then the folder to
 # "S3", here another bucket behind an AWS CLI profile whose key reaches that one alone, so that a second half still
 # holding FF's variables would be refused there. The script calls the AWS CLI by name: the one above.
 ff buckets create cli-photos-out
-ff buckets keys create --bucket cli-photos-out
+ff keys create --bucket cli-photos-out
 printf '[profile as-s3]\nregion = %s\nendpoint_url = %s\n' "$(sed -n 's/^export AWS_REGION=//p' "$work/s3.env")" \
   "$(sed -n 's/^export AWS_ENDPOINT_URL_S3=//p' "$work/s3.env")" >"$work/aws-config"
 printf '[as-s3]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$(out | sed -n 's/^export AWS_ACCESS_KEY_ID=//p')" \
@@ -688,10 +765,10 @@ check "the export kit's s3-sync.sh copies the bucket to a folder, then to S3 wit
   "0 Ahlan from the CLI Ahlan from the CLI" \
   "$synced $(cat "$work/backup/hello.txt" 2>/dev/null) $(as_s3 "${aws_cli[@]}" s3 cp s3://cli-photos-out/hello.txt - 2>/dev/null)"
 ff buckets delete cli-photos-out --force --yes
-ff buckets keys revoke "$key_id" --yes
+ff keys revoke cli-photos-key --yes
 # The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
 refused="$(aws_with_key s3 ls 2>&1 || true)"
-check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
+check "ff keys revoke, by its name, stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
 }
 section_def buckets section_buckets backend budget=15
 
@@ -721,7 +798,7 @@ check "the site answers its index, an app's route with it, each file typed and c
   "$(visit /)|$(visit /orders/42)|$(curl -s -o /dev/null -w '%{content_type}' "$site_url/assets/app-3c9d1a2b.js") \
 $(curl -sI "$site_url/assets/app-3c9d1a2b.js" | tr -d '\r' | sed -n 's/^cache-control: //Ip')|$(curl -sI "$site_url/" | tr -d '\r' | sed -n 's/^cache-control: //Ip')"
 check "  ... with a key of its own, never one of the account's keys" "0 0" \
-  "$(ff buckets keys list --output json; code) $(out | jq '[.[] | select(.buckets == ["cli-site"])] | length')"
+  "$(ff keys list --output json; code) $(out | jq '[.[] | select(.buckets == ["cli-site"])] | length')"
 rm "$work/dist/assets/app-3c9d1a2b.js"
 printf '<!doctype html><title>cli shop, again</title>' >"$work/dist/index.html"
 ff sites deploy cli-site "$work/dist" --output json
@@ -752,8 +829,8 @@ check "  ... with its attributes, its dead-letter queue by the ARN of the queue 
   "$(code) $(out | jq -r '"\(.visibilityTimeout) \(.messageRetentionPeriod) \(.redrivePolicy.maxReceiveCount) \(.redrivePolicy.deadLetterTargetArn | split(":")[5])"')"
 ff queues send cli-orders '{"order": 1}' --attribute item=bsissa
 check "ff queues send sends a message, an attribute with it" "0 true" "$(code) $(out | grep -E '^sent [0-9a-f-]{36} to cli-orders$' >/dev/null && echo true || echo false)"
-ff buckets keys create --queue cli-orders
-check "a key for that queue alone gives the SQS endpoint among its six variables" "0 6 http://localhost:$sqs_port" \
+ff keys create --queue cli-orders
+check "a key for that queue alone gives the SQS endpoint among its seven variables" "0 7 http://localhost:$sqs_port" \
   "$(code) $(out | grep -c '^export AWS_') $(out | sed -n 's/^export AWS_ENDPOINT_URL_SQS=//p')"
 out | grep '^export AWS_' >"$work/sqs.env"
 queue_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/sqs.env")"
@@ -792,8 +869,8 @@ check "  ... as the AWS CLI sees it" "3600" \
   "$(aws_sqs get-queue-attributes --queue-url "$queue_url" --attribute-names MessageRetentionPeriod 2>/dev/null | jq -r .Attributes.MessageRetentionPeriod)"
 ff queues list --profile b
 check "the other account has none of them" "0 The account has no queue: \`ff queues create <name>\` makes one" "$(code) $(out)"
-# Its key's last use is above: revoked now, so that the account's two keys are free for the sections after.
-ff buckets keys revoke "$queue_key" --yes
+# Its key's last use is above: revoked now, so that the sections after find the account's keys as they left them.
+ff keys revoke "$queue_key" --yes
 }
 section_def queues section_queues buckets budget=15
 
@@ -857,7 +934,7 @@ check "  ... and its deletions go to a queue, both now listed" "0 uploads,remova
   "$(code) $("$ff_bin" buckets notifications cli-drop --output json | jq -r '[.lambdaFunctionConfigurations[].id, .queueConfigurations[].id] | join(",")')"
 ff buckets notify cli-drop cli-on-upload --id again
 check "  ... a configuration one event could match twice refused, in S3's words, exit 3" "3 true" "$(code) $(err | grep 'Configuration is ambiguously defined' >/dev/null && echo true || echo false)"
-ff buckets keys create --bucket cli-drop
+ff keys create --bucket cli-drop
 out | grep '^export AWS_' >"$work/drop.env"
 drop_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/drop.env")"
 aws_drop() { (set -a; . "$work/drop.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
@@ -875,7 +952,7 @@ check "ff buckets notifications --remove takes one away by its ID" "0 removals" 
   "$(code) $("$ff_bin" buckets notifications cli-drop --output json | jq -r '[.lambdaFunctionConfigurations[].id, .queueConfigurations[].id] | join(",")')"
 ff buckets notifications cli-drop --clear --yes
 check "  ... and --clear all of them" "0 cli-drop sends no event any more" "$(code) $(out)"
-ff buckets keys revoke "$drop_key" --yes
+ff keys revoke "$drop_key" --yes
 ff buckets delete cli-drop --force --yes
 ff queues delete cli-drop-events --yes
 ff delete cli-on-upload --yes
@@ -987,7 +1064,7 @@ ff url enable shop-api --auth none --cors-origin "$site_origin" --cors-method GE
 check "  ... and the function URL lets the page's origin in, as a browser's preflight asks" "$site_origin" \
   "$(curl -s -o /dev/null -D - -X OPTIONS "$shop_url/orders" -H "Origin: $site_origin" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
 # The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
-ff buckets keys create --bucket cli-receipts --read-only
+ff keys create --bucket cli-receipts --read-only
 out | grep '^export AWS_' >"$work/receipts.env"
 receipts_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/receipts.env")"
 aws_receipts() { (set -a; . "$work/receipts.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
@@ -1008,18 +1085,7 @@ done
 check "the night 91 days on, called without waiting, removes the order and its receipt, which the bucket no longer has" "async 1 1 0" \
   "$night $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
 check "  ... and clears the latest orders, which the cache had" "hit miss" "$kept $(latest)"
-ff buckets keys revoke "$receipts_key" --yes
-ff queues delete cli-new-orders --yes
-check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
-ff buckets delete cli-receipts --force --yes
-ff buckets delete cli-shop-site --force --yes
-ff caches delete cli-orders --yes
-ff email delete orders@shop-cli.tn --yes
-ff email delete buyer@shop-cli.tn --yes
-ff db delete shop --yes
-ff delete shop-nightly --yes
-ff delete shop-receipts --yes
-ff delete shop-api --yes
+ff keys revoke "$receipts_key" --yes
 }
 section_def small_app section_small_app small_app_db buckets budget=195
 
@@ -1082,6 +1148,96 @@ check "ff usage lists the queue's month after the buckets, deleted since: its re
 }
 section_def queues_counted section_queues_counted queues budget=5
 
+section_small_app_exported() {
+section "the small app exported to AWS, minutes after: ff export's template and terraform/, which the SAM CLI and OpenTofu take, each function's role what its keys used; then the app removed"
+# Its keys' uses are written at the minute's turn: by now the small app's; run alone, they are waited for, as long as
+# before.
+receipts_id="$("$ff_bin" get shop-receipts --output json | jq -r .id)"
+for _ in $(seq 75); do
+  curl -s "$api/functions/$receipts_id/key-uses" | jq -e '.uses | any(.operation == "SendEmail")' >/dev/null && break
+  sleep 1
+done
+# An alias naming $LATEST, which the files publish as SAM's AutoPublishAlias, and one naming a version, whose code the
+# export hasn't, which MIGRATION.md says.
+ff alias set shop-receipts live latest
+ff publish shop-api
+ff alias set shop-api stable 1
+check "shop-receipts's alias live names \$LATEST, shop-api's stable its version 1" "0 shop-api:stable made: version 1" "$(code) $(out)"
+# stable's own URL, with a domain on it, which the runbook says how to make on AWS and moves at the cutover.
+ff url enable shop-api --alias stable --auth none
+ff domains add shop-api stable.shop-cli.tn --alias stable
+check "  ... stable with a URL of its own, and a domain on it" "0 stable.shop-cli.tn: pending" "$(code) $(out | head -1)"
+ff doctor "$app" --output json
+check "ff doctor finds nothing in the small app's code that works on FF alone, its template-free folder read as its package" \
+  "0 0 0" "$(code) $(out | jq -r '"\(.errors) \(.warnings)"')"
+# What still points at FF: the shop's functions reached its S3, SQS and SES through FF's endpoints, as their keys say.
+endpoints_of() { jq -r --arg resource "function $1" '.findings[] | select(.resource == $resource and .check == "ff-endpoints") | .message' "$work/out"; }
+ff doctor --deployed --output json
+check "ff doctor --deployed: shop-receipts reached FF's S3 and SES, shop-api FF's SQS, through the endpoints FF set them" \
+  "0 true true true" \
+  "$(code) $(endpoints_of shop-receipts | grep -F "S3 (cli-receipts" >/dev/null && echo true || echo false) \
+$(endpoints_of shop-receipts | grep -F "SES (" >/dev/null && echo true || echo false) \
+$(endpoints_of shop-api | grep -F "SQS (cli-new-orders)" >/dev/null && echo true || echo false)"
+deployed="$(jq -c .findings "$work/out")"
+ff doctor --deployed --strict
+check "  ... which --strict fails on, with 1" "1" "$(code)"
+kit="$work/shop-to-aws"
+rm -rf "$kit"
+ff export "$kit" --output json
+check "ff export writes the account's kit: the template, terraform/, each function's zip, the runbook and the estimate" "0 true" \
+  "$(code) $(for file in template.yaml terraform/functions.tf terraform/terraform.tfvars.example code/shop-api.zip code/shop-receipts.zip MIGRATION.md \
+    cost-estimate.md; do [ -s "$kit/$file" ] || { echo false; exit; }; done; echo true)"
+check "  ... cost-estimate.md, the last three months at AWS's prices, a column each" "3" \
+  "$(grep -F '| US$ |' "$kit/cost-estimate.md" | tr '|' '\n' | grep -cE '^ [0-9]{4}-[0-9]{2}')"
+ff doctor --deployed --output json
+check "  ... and ff doctor --deployed says the same after it: an export changes nothing in the account" "0 true" \
+  "$(code) $([ "$(jq -c .findings "$work/out")" = "$deployed" ] && echo true || echo false)"
+# A function's resource in the template, up to the next one.
+resource_of() { awk -v id="  $1:" '$0 == id { on = 1; next } on && /^  [A-Za-z]/ { exit } on' "$kit/template.yaml"; }
+check "  ... shop-receipts's role writes the receipts and sends from the proved address, as its keys did, and neither reads the bucket nor sends to the queue" "true true false" \
+  "$(resource_of ShopReceiptsFunction | grep -A1 -- '- S3WritePolicy:' | grep 'BucketName: !Ref CliReceiptsBucketName' >/dev/null && echo true || echo false) \
+$(resource_of ShopReceiptsFunction | grep -A1 -- '- ses:SendEmail' | grep -F 'identity/orders@shop-cli.tn' >/dev/null && echo true || echo false) \
+$(resource_of ShopReceiptsFunction | grep -E 'S3ReadPolicy|S3CrudPolicy|SQSSendMessagePolicy' >/dev/null && echo true || echo false)"
+check "  ... shop-api's sends to the queue of new orders, which it can't read, and reads the receipts" "true false true" \
+  "$(resource_of ShopApiFunction | grep -A1 -- '- SQSSendMessagePolicy:' | grep 'QueueName: !GetAtt CliNewOrdersQueue.QueueName' >/dev/null && echo true || echo false) \
+$(resource_of ShopApiFunction | grep -- '- SQSPollerPolicy:' >/dev/null && echo true || echo false) \
+$(resource_of ShopApiFunction | grep -A1 -- '- S3ReadPolicy:' | grep 'BucketName: !Ref CliReceiptsBucketName' >/dev/null && echo true || echo false)"
+# The tools AWS's users check a template and Terraform with, as hack/install-tools.sh pins them, the provider from
+# its mirror; the region any, as nothing here reaches AWS.
+tool() { local code=0; "$@" >"$work/out" 2>"$work/err" || code=$?; echo "$code" >"$work/code"; }
+check "  ... shop-receipts's alias live its AutoPublishAlias, and Terraform's alias; shop-api's alias stable in MIGRATION.md, with the commands that make it" \
+  "true true true" \
+  "$(resource_of ShopReceiptsFunction | grep -F 'AutoPublishAlias: live' >/dev/null && echo true || echo false) \
+$(grep -A1 -F 'resource "aws_lambda_alias" "shop_receipts"' "$kit/terraform/functions.tf" | grep -F 'name             = "live"' >/dev/null && echo true || echo false) \
+$(grep -F "**shop-api**'s alias \`stable\` names version 1 on FF" "$kit/MIGRATION.md" | grep -F 'aws lambda create-alias --function-name shop-api --name stable' >/dev/null && echo true || echo false)"
+check "  ... and stable's URL, made with the AWS CLI, its callers and its domain moved at the cutover" "true true" \
+  "$(grep -F "**shop-api**'s alias \`stable\` has a URL of its own on FF" "$kit/MIGRATION.md" | grep -F -e '--qualifier stable --auth-type NONE' | grep -F '`stable.shop-cli.tn` reaches it' >/dev/null && echo true || echo false) \
+$(grep -F "its alias \`stable\`'s URL's callers from http" "$kit/MIGRATION.md" | grep -F '`stable.shop-cli.tn` through CloudFront' >/dev/null && echo true || echo false)"
+tool env -C "$kit" SAM_CLI_TELEMETRY=0 "$FF_REPO_ROOT/hack/bin/sam" validate --lint --region eu-west-3
+check "  ... the template, which sam validate --lint takes, cfn-lint inside it" "0 true" \
+  "$(code) $(out | grep 'is a valid SAM Template' >/dev/null && echo true || echo false)"
+tofu=(env TF_CLI_CONFIG_FILE="$FF_REPO_ROOT/hack/.terraform/cli.tfrc" TF_IN_AUTOMATION=1 "$FF_REPO_ROOT/hack/bin/tofu" -chdir="$kit/terraform")
+tool "${tofu[@]}" fmt -check
+formatted="$(code)"
+tool "${tofu[@]}" init -input=false -no-color
+initialized="$(code)"
+tool "${tofu[@]}" validate -no-color
+check "  ... terraform/, which tofu fmt leaves as it is, and tofu init and validate take" "0 0 0 Success! The configuration is valid." \
+  "$formatted $initialized $(code) $(out | head -1)"
+ff queues delete cli-new-orders --yes
+check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
+ff buckets delete cli-receipts --force --yes
+ff buckets delete cli-shop-site --force --yes
+ff caches delete cli-orders --yes
+ff email delete orders@shop-cli.tn --yes
+ff email delete buyer@shop-cli.tn --yes
+ff db delete shop --yes
+ff delete shop-nightly --yes
+ff delete shop-receipts --yes
+ff delete shop-api --yes
+}
+section_def small_app_exported section_small_app_exported small_app budget=120
+
 section_account() {
 section "the account: who, its plan, what it used and owes, how its functions ran"
 ff accounts
@@ -1096,6 +1252,15 @@ check "ff usage counts this month's calls of the functions deleted since, by nam
   "$(code) $(out | jq -r '.functions[] | select(.functionName == "cli-hello-ts") | .requests') $(out | jq -r '[.functions[] | select(.functionName == "cli-hello-ts") | .deleted] | first')"
 ff usage --csv
 check "and gives the API's CSV" "0 true" "$(code) $(out | head -1 | grep 'requests' >/dev/null && echo true || echo false)"
+ff usage --aws --months 2 --output json
+check "ff usage --aws: last month and this one so far at AWS's prices, an estimate, Lambda's line and the NAT gateway's among them, beside FF's own" \
+  "0 2 true 2 true" \
+  "$(code) $(out | jq '.months | length') $(out | jq '.months[0].until == null and .months[1].until != null') \
+$(out | jq '[.months[1].lines[] | select(.line == "functions" or .line == "natGateway")] | length') $(out | jq '.months[1] | has("ffTotal")')"
+ff usage --aws --without natGateway,logs
+check "  ... and as text, from the prices' days, the lines left out marked" "0 true true" \
+  "$(code) $(out | head -1 | grep -E "^At AWS's prices, an estimate: .* as FF read them (on|from) [0-9]{4}-" >/dev/null && echo true || echo false) \
+$(out | grep -E '^A NAT gateway \(natGateway, left out\) ' >/dev/null && echo true || echo false)"
 ff balance --output json
 check "ff balance says the balance, in dinars" "0 TND" "$(code) $(out | jq -r .currency)"
 ff metrics --since 2h --output json

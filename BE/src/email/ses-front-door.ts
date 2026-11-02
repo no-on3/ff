@@ -3,39 +3,22 @@ import { randomUUID } from 'node:crypto';
 import { IncomingMessage, Server, ServerResponse, createServer } from 'node:http';
 import { AddressInfo } from 'node:net';
 import { AccountStatus } from '../accounts/entities/account.entity';
+import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
+import { BodyRefusals, readBody, requestTarget } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
-import { originForm } from '../storage/front-door';
-import { StorageDirectory } from '../storage/storage-directory.service';
+import { reachesMail } from '../storage/key-reach';
+import { KeyUses } from '../storage/key-uses.service';
+import { EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
 import { EmailIdentitiesService } from './email-identities.service';
-import { SesError, accessDenied, badRequest, internalFailure, missingAuthenticationToken, requestTooLarge, unrecognizedClient } from './ses-error';
+import { SesError, accessDenied, badRequest, expiredToken, internalFailure, missingAuthenticationToken, requestTooLarge, unrecognizedClient } from './ses-error';
 import { SesOperations } from './ses-operations';
 import { checkSesSignature, readSesSignature } from './ses-signature';
 
 /** The most a request's body holds: a raw message of 10 MB, SES's, in base64, and its JSON around it. */
 const MAX_BODY_BYTES = 14 * 1024 * 1024;
 
-const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
-
-/** The request's body, whole, `limit` bytes at most: past it, what is left isn't read, and the answer closes the connection. */
-function bodyOf(request: IncomingMessage, limit: number): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    if (Number(single(request.headers['content-length']) ?? 0) > limit) return reject(requestTooLarge(limit));
-    const chunks: Buffer[] = [];
-    let size = 0;
-    const onData = (chunk: Buffer) => {
-      size += chunk.length;
-      if (size <= limit) return void chunks.push(chunk);
-      request.off('data', onData);
-      request.pause();
-      reject(requestTooLarge(limit));
-    };
-    request.on('data', onData);
-    request.once('end', () => resolve(Buffer.concat(chunks)));
-    request.once('error', reject);
-    request.once('close', () => request.complete || reject(badRequest('The client went before its request ended.')));
-  });
-}
+const BODY_REFUSALS: BodyRefusals = { tooLarge: requestTooLarge, incomplete: () => badRequest('The client went before its request ended.') };
 
 /** A page of the address's link: a sentence in French, then in English. */
 const page = (title: string, french: string, english: string): string =>
@@ -65,6 +48,7 @@ export class SesFrontDoor implements OnModuleDestroy {
     private readonly directory: StorageDirectory,
     private readonly operations: SesOperations,
     private readonly identities: EmailIdentitiesService,
+    private readonly keyUses: KeyUses,
   ) {}
 
   /** Starts answering on the port; main.ts calls it once the API listens. Port 0 takes any free one, as the tests do. */
@@ -87,10 +71,7 @@ export class SesFrontDoor implements OnModuleDestroy {
   private async serve(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const id = randomUUID();
     try {
-      const target = originForm(request.url);
-      const at = target.indexOf('?');
-      const rawPath = at < 0 ? target : target.slice(0, at);
-      const rawQuery = at < 0 ? '' : target.slice(at + 1);
+      const { rawPath, rawQuery } = requestTarget(request.url);
       if (request.method === 'GET' && rawPath === '/verify') return await this.verify(response, id, new URLSearchParams(rawQuery));
       this.reply(request, response, id, 200, await this.answer(request, rawPath, rawQuery));
     } catch (error) {
@@ -116,16 +97,16 @@ export class SesFrontDoor implements OnModuleDestroy {
 
   /** The operation's answer, once the request is signed by a key that reaches its account's mail. */
   private async answer(request: IncomingMessage, rawPath: string, rawQuery: string): Promise<unknown> {
-    const body = await bodyOf(request, MAX_BODY_BYTES);
+    const body = await readBody(request, MAX_BODY_BYTES, BODY_REFUSALS);
     const signature = readSesSignature(request.headers);
     if (!signature) throw missingAuthenticationToken();
     const key = await this.directory.key(signature.accessKeyId);
+    if (key === EXPIRED) throw expiredToken();
     if (!key) throw unrecognizedClient();
     const method = request.method ?? 'GET';
     checkSesSignature({ method, rawPath, rawQuery, rawHeaders: request.rawHeaders }, body, signature, key.secret, new Date());
     this.directory.touch(key.id);
-    // A key that names buckets or queues reaches those alone, as at the S3 front door and the SQS endpoint.
-    if (key.buckets !== null || key.queues !== null) throw accessDenied(`The access key ${key.id} names buckets or queues, and reaches those alone: not the account's mail.`);
+    if (!reachesMail(key)) throw accessDenied(`The access key ${key.id} names buckets, queues or functions, and reaches those alone: not the account's mail.`);
     const account = await this.directory.account(key.accountId);
     if (!account || account.status !== AccountStatus.ACTIVE) throw accessDenied(`The account is ${account?.status ?? 'gone'}: its mail answers no key.`);
     let input: Record<string, unknown> = {};
@@ -140,7 +121,14 @@ export class SesFrontDoor implements OnModuleDestroy {
     // The path's segments are matched as sent, each name then decoded, so that an escaped "/" in a name stays in its segment.
     return this.operations.run(
       { method, path: rawPath, query: new URLSearchParams(rawQuery), input },
-      { accountId: key.accountId, keyId: key.id, readOnly: key.readOnly, actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` }, ip: request.socket.remoteAddress },
+      {
+        accountId: key.accountId,
+        keyId: key.id,
+        readOnly: key.readOnly,
+        actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` },
+        ip: request.socket.remoteAddress,
+        used: (operation, identity) => this.keyUses.note({ key, service: AwsEndpoint.SESV2, resource: identity, operation }),
+      },
     );
   }
 

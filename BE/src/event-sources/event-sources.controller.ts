@@ -35,10 +35,14 @@ export class EventSourcesController {
       "FF receives the queue's messages in batches and calls the function with SQS's event, Records[]. A call that succeeds deletes its batch; one " +
       'that fails deletes nothing, and its messages come back after the queue\'s visibility timeout, towards its dead-letter queue. With ' +
       'ReportBatchItemFailures, the answer {"batchItemFailures": [{"itemIdentifier": "<messageId>"}]} keeps those alone. Lambda\'s defaults: 10 ' +
-      "messages a batch, no window. The queue's visibility timeout must be at least the function's timeout, as Lambda requires.",
+      "messages a batch, no window. A qualifier runs a version or an alias of the function, as Lambda's qualified FunctionName; one deleted " +
+      "since leaves the messages waiting. The queue's visibility timeout must be at least the timeout of what reads it, as Lambda requires.",
   })
   @ApiResponse({ status: 201, type: EventSourceView })
-  @ApiResponse({ status: 400, description: "No queue of the account by that ARN, a visibility timeout under the function's timeout, settings out of range, or the plan's queues a function reads" })
+  @ApiResponse({
+    status: 400,
+    description: "No queue of the account by that ARN, a version or an alias the function hasn't, a visibility timeout under what reads it's timeout, settings out of range, or the plan's queues a function reads",
+  })
   @ApiResponse({ status: 404, description: 'No such function in the account' })
   @ApiResponse({ status: 409, description: 'The function reads that queue already: its mapping is named' })
   create(@Param('id', ParseUUIDPipe) id: string, @Body() dto: CreateEventSourceDto, @Principal() principal: Principal): Promise<EventSourceView> {

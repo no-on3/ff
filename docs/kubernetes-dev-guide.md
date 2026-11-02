@@ -120,7 +120,7 @@ hack/e2e.sh --only queues --reuse --keep   # again, against the stack kept, and 
 hack/e2e-tenancy.sh        # L5: every route as another account and anonymously, a function's logs, then the operator's routes, bank transfers, invoices and credit grants, and last, closing an account and deleting its data (about 7 min)
 ```
 
-The script starts its own compose project (`ff-e2e`, ports 55432 and 59003, which `FF_E2E_PG_PORT` and `FF_E2E_S3_PORT` move when another program holds one: the suite names it before compose starts), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
+The script starts its own compose project (`ff-e2e`, ports 25432 and 29003, which `FF_E2E_PG_PORT` and `FF_E2E_S3_PORT` move when another program holds one: the suite names it before compose starts; L5 has 25433, 29004, 28180, 21026 and 28026, the `ff` suite 25436 and 29007, each under Linux's range for outgoing connections, 32768 to 60999, where a connection of the machine's can hold a port for a moment and Docker then refuses to publish it, as it once refused L5's Mailpit; a start that fails says compose's own words), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
 1. create (waits for ACTIVE);
 2. invoke;
 3. history (with duration);
@@ -144,7 +144,7 @@ The sections of L4, L5 (`hack/e2e-tenancy.sh`) and the `ff` suite (`hack/cli-e2e
 
 ### A wait on the clock
 
-What the product does on its own clock is started in its section and read a few sections on, in a section of its own that needs it: a schedule's runs, a sample taken each minute, counts written a minute at a time, the reaper's minute. In L4 those are `schedules` and `schedules_ran`, `async` and `async_metrics`, `databases` and `databases_sampled`, `caches` and `caches_sampled`, `sites` and `sites_counted`, and `usage_records` and `usage_lost`, the alarms' section between those last two; in the `ff` suite, `schedules_ran`, `databases_used`, `buckets_used`, `sites_counted` and `queues_counted`. The minute passes while the sections between run, so the waits overlap instead of adding up. The product's intervals stay as they are, and a late section run alone waits as long as its section did. A late section reads what the minute did, not the clock: the schedules' runs of their first minute, by their start (`createdAt`), since they run every minute after; and where a check says "within a minute", a sample's time from the backend's log, which in development has each query with its time (`written_within`). L4's late sections come before `usage_records`, which kills the backend, since its counts of the minute are in its memory until written. A new section that waits on the clock does the same.
+What the product does on its own clock is started in its section and read a few sections on, in a section of its own that needs it: a schedule's runs, a sample taken each minute, counts written a minute at a time, the reaper's minute. In L4 those are `schedules` and `schedules_ran`, `async` and `async_metrics`, `databases` and `databases_sampled`, `caches` and `caches_sampled`, `sites` and `sites_counted`, `versions` and `versions_idle` (a version's objects removed by the idle sweep of the minute), and `usage_records` and `usage_lost`, the alarms' section between those last two; in the `ff` suite, `schedules_ran`, `databases_used`, `buckets_used`, `sites_counted` and `queues_counted`. The minute passes while the sections between run, so the waits overlap instead of adding up. The product's intervals stay as they are, and a late section run alone waits as long as its section did. A late section reads what the minute did, not the clock: the schedules' runs of their first minute, by their start (`createdAt`), since they run every minute after; and where a check says "within a minute", a sample's time from the backend's log, which in development has each query with its time (`written_within`). L4's late sections come before `usage_records`, which kills the backend, since its counts of the minute are in its memory until written. A new section that waits on the clock does the same.
 
 ### A stack kept up
 
@@ -278,7 +278,7 @@ curl -s http://127.0.0.1:9428/select/logsql/query --data-urlencode 'query={names
 ```
 
 The L3 suite (`log-pipeline.it.spec.ts`, run where the pipeline is installed) deploys functions in two throw-away accounts and checks:
-- a Node.js call's lines (stdout and stderr) and a Python call's, with their namespace, function, pod, stream and request ID, all queryable within 5 s;
+- a Node.js call's lines (stdout and stderr) and a Python call's, with their namespace, function, pod, stream and request ID, all queryable within 15 s, the live tail's bound (under 5 s on a laptop; GitHub's shared runners took up to 9.5 s);
 - pages read as the logs API reads them: a call's lines, a phrase, pages of 3 back with the cursor giving the same lines once each, and a phrase written as LogsQL finding nothing;
 - the live tail, opened before two calls and narrowed to one: that call's five lines, in order, within 15 s;
 - a call printing 30,000 lines: at most 2,000 of them stored per second, every other one counted in a notice, so that stored and counted add up to the call's 30,003 lines; and another account calling meanwhile keeps all its lines;

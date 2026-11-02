@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EventSource } from '../services/api';
-import { eventSourceBody, eventSourceForm, eventSourceText, nameOfArn } from './event-sources';
+import { nameOfArn } from './arns';
+import { eventSourceBody, eventSourceForm, eventSourceText } from './event-sources';
 
 const mapping = (values: Partial<EventSource> = {}): EventSource => ({
   uuid: '1f0e2d3c-4b5a-4968-8776-655443322110',
@@ -29,9 +30,20 @@ describe('a function reading a queue, as the console says it', () => {
 
 describe("a mapping's form", () => {
   it("starts from Lambda's defaults, or from the mapping there is", () => {
-    expect(eventSourceForm()).toEqual({ queue: '', batchSize: '10', window: '0', reportFailures: false, maximumConcurrency: '', enabled: true });
-    expect(eventSourceForm(mapping({ scalingConfig: { maximumConcurrency: 4 }, functionResponseTypes: ['ReportBatchItemFailures'], state: 'Disabled' }))).toEqual({
+    expect(eventSourceForm()).toEqual({ queue: '', qualifier: '', batchSize: '10', window: '0', reportFailures: false, maximumConcurrency: '', enabled: true });
+    expect(eventSourceForm(mapping())).toMatchObject({ queue: 'orders', qualifier: '' });
+    expect(
+      eventSourceForm(
+        mapping({
+          functionArn: 'arn:aws:lambda:tn-tunis-1:000000000001:function:orders-worker:live',
+          scalingConfig: { maximumConcurrency: 4 },
+          functionResponseTypes: ['ReportBatchItemFailures'],
+          state: 'Disabled',
+        }),
+      ),
+    ).toEqual({
       queue: 'orders',
+      qualifier: 'live',
       batchSize: '10',
       window: '0',
       reportFailures: true,
@@ -40,12 +52,19 @@ describe("a mapping's form", () => {
     });
   });
 
-  it("sends Lambda's settings by their names, no maximum as null", () => {
-    expect(eventSourceBody({ ...eventSourceForm(), batchSize: '100', window: '2', reportFailures: true, maximumConcurrency: '5' })).toEqual({
-      body: { batchSize: 100, maximumBatchingWindowInSeconds: 2, functionResponseTypes: ['ReportBatchItemFailures'], scalingConfig: { maximumConcurrency: 5 }, enabled: true },
+  it("sends Lambda's settings by their names, no maximum as null, $LATEST when it names no version or alias", () => {
+    expect(eventSourceBody({ ...eventSourceForm(), qualifier: '3', batchSize: '100', window: '2', reportFailures: true, maximumConcurrency: '5' })).toEqual({
+      body: {
+        qualifier: '3',
+        batchSize: 100,
+        maximumBatchingWindowInSeconds: 2,
+        functionResponseTypes: ['ReportBatchItemFailures'],
+        scalingConfig: { maximumConcurrency: 5 },
+        enabled: true,
+      },
     });
     expect(eventSourceBody(eventSourceForm())).toEqual({
-      body: { batchSize: 10, maximumBatchingWindowInSeconds: 0, functionResponseTypes: [], scalingConfig: null, enabled: true },
+      body: { qualifier: '$LATEST', batchSize: 10, maximumBatchingWindowInSeconds: 0, functionResponseTypes: [], scalingConfig: null, enabled: true },
     });
   });
 

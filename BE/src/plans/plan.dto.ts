@@ -13,6 +13,8 @@ export class PlanLimitsView implements PlanLimits {
   @ApiProperty({ example: 1024, description: 'The most memory one function may have, in MB' }) memoryMb: number;
   @ApiProperty({ example: 300, description: 'The longest timeout one function may have, in seconds' }) timeoutSeconds: number;
   @ApiProperty({ example: 10, description: 'The most instances one function may run' }) instancesPerFunction: number;
+  @ApiProperty({ example: 5120, description: "What the packages the account's functions and versions name may hold together, in MB, as Lambda's code storage" })
+  codeStorageMb: number;
   @ApiProperty({ type: QuotaView, description: "The account's quota, for all its functions together" }) quota: QuotaView;
   @ApiProperty({ example: 60, description: 'Changes per minute: creating, changing and deleting' }) writesPerMinute: number;
   @ApiProperty({ example: 100, description: 'Invocations per second, all functions together' }) invokesPerSecond: number;
@@ -40,6 +42,7 @@ export class PlanLimitsView implements PlanLimits {
   @ApiProperty({ example: 2, description: 'The domains the account may send mail from, its proved addresses apart' }) emailIdentities: number;
   @ApiProperty({ example: 200, description: "Messages a day, each recipient one, as SES's Max24HourSend" }) emailsPerDay: number;
   @ApiProperty({ example: 1, description: "Messages a second, as SES's MaxSendRate" }) emailsPerSecond: number;
+  @ApiProperty({ example: 10, description: "The account's own access keys, each named, for AWS's SDKs and CLI" }) accessKeys: number;
 }
 
 /** An account's plan. */

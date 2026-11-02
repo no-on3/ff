@@ -38,7 +38,7 @@ pub fn local_function(args: &LocalArgs) -> Result<LocalFunction, Error> {
     };
     let environment = super::env::variables(&args.env)?;
     if let Some(problem) = environment.keys().find_map(|name| super::env::reserved(name)) {
-        return Err(Error::new(Kind::Usage, problem));
+        return Err(Error::usage(problem));
     }
     Ok(LocalFunction {
         name: name_of(&path, args.name.as_deref())?,
@@ -57,13 +57,10 @@ fn folder_runtime(dir: &Path) -> Result<Runtime, Error> {
     } else if has("function.py") {
         Ok(Runtime::Python)
     } else {
-        Err(Error::new(
-            Kind::Usage,
-            format!(
-                "{} has no function.ts, function.js, function.mjs, function.cjs or function.py, which the runtime loads: name a file, or the runtime with --runtime",
-                dir.display()
-            ),
-        ))
+        Err(Error::usage(format!(
+            "{} has no function.ts, function.js, function.mjs, function.cjs or function.py, which the runtime loads: name a file, or the runtime with --runtime",
+            dir.display()
+        )))
     }
 }
 

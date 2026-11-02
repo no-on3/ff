@@ -15,11 +15,13 @@ export interface DomainRecord {
 }
 
 /** The fields of a domain as the API answers them. */
-export const CUSTOM_DOMAIN_FIELDS = ['domain', 'functionId', 'status', 'records', 'checkedAt', 'checkError', 'verifiedAt', 'createdAt'] as const;
+export const CUSTOM_DOMAIN_FIELDS = ['domain', 'functionId', 'alias', 'status', 'records', 'checkedAt', 'checkError', 'verifiedAt', 'createdAt'] as const;
 
 export interface CustomDomain {
   domain: string;
   functionId: string;
+  /** The alias whose URL it serves; null for $LATEST's. */
+  alias: string | null;
   status: DomainStatus;
   /** Either set proves the domain: a CNAME to the URL's host, or the TXT record and the edge's addresses. */
   records: { cname: DomainRecord[]; txt: DomainRecord[] };

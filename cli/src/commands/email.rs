@@ -11,7 +11,7 @@ use serde_json::json;
 use super::Context;
 use super::url::encode;
 use crate::api::{Call, Client};
-use crate::error::{Error, Kind};
+use crate::error::Error;
 use crate::table::{table, time};
 
 /// A record a domain publishes at its DNS.
@@ -28,11 +28,11 @@ struct Record {
 /// A domain or an address, as `GET /email/identities` and `GET /email/identities/:identity` answer it.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Identity {
-    identity: String,
+pub(super) struct Identity {
+    pub(super) identity: String,
     #[serde(rename = "type")]
     kind: String,
-    status: String,
+    pub(super) status: String,
     sending_enabled: bool,
     dkim_selector: Option<String>,
     mail_from_domain: Option<String>,
@@ -171,12 +171,9 @@ fn checked_identity(name: &str) -> Result<String, Error> {
     let problem = if identity.contains('@') { address_problem(&identity) } else { domain_problem(&identity) };
     match problem {
         None => Ok(identity),
-        Some(problem) => Err(Error::new(
-            Kind::Usage,
-            format!(
-                "\"{name}\" is neither a domain, such as shop.example.tn, nor an address, such as orders@shop.example.tn: {problem}"
-            ),
-        )),
+        Some(problem) => Err(Error::usage(format!(
+            "\"{name}\" is neither a domain, such as shop.example.tn, nor an address, such as orders@shop.example.tn: {problem}"
+        ))),
     }
 }
 
@@ -184,7 +181,7 @@ fn checked_address(address: &str) -> Result<String, Error> {
     let key = identity_key(address);
     match address_problem(&key) {
         None => Ok(key),
-        Some(problem) => Err(Error::new(Kind::Usage, format!("\"{address}\" is not an address: {problem}"))),
+        Some(problem) => Err(Error::usage(format!("\"{address}\" is not an address: {problem}"))),
     }
 }
 

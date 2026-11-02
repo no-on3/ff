@@ -7,7 +7,7 @@ FF fait le travail qui peut attendre **comme AWS** : une fonction appelée sans 
 | | FF | AWS |
 |---|---|---|
 | Appeler sans attendre | `X-Amz-Invocation-Type: Event`, ou `ff invoke <nom> --async` : la réponse 202 donne tout de suite l'identifiant de la requête ; après un échec, deux nouvelles tentatives, une minute puis deux plus tard, pendant six heures au plus | L'invocation asynchrone de Lambda, aux mêmes règles |
-| Ses réglages | Comme `EventInvokeConfig` : le nombre de nouvelles tentatives (0 à 2), la durée de conservation (60 s à 6 h), une destination pour les appels réussis et une pour ceux qui ont échoué : une fonction ou une file du compte | Les mêmes, plus SNS et EventBridge |
+| Ses réglages | Comme `EventInvokeConfig` : le nombre de nouvelles tentatives (0 à 2), la durée de conservation (60 s à 6 h), une destination pour les appels réussis et une pour ceux qui ont échoué : une fonction du compte, une version ou un alias d'une fonction par son ARN qualifié (`…:function:commandes-ratees:live`), ou une file du compte | Les mêmes, plus SNS et EventBridge |
 | Files d'attente | Les files standard de SQS et leur API, signée avec AWS Signature Version 4 ; les SDK et la CLI d'AWS, l'adresse de FF dans `AWS_ENDPOINT_URL_SQS` | Les files standard et FIFO |
 | Livraison | Au moins une fois : un message reçu est caché pendant son délai de visibilité, et revient s'il n'a pas été supprimé | La même |
 | File de lettres mortes | Un message reçu plus de `maxReceiveCount` fois y passe, comme avec la politique de redirection de SQS | La même, et le renvoi de ses messages vers leur file |
@@ -30,12 +30,12 @@ L'appel est gardé dans la base de FF et lancé dans la seconde ; chaque tentati
 ```bash
 ff queues create commandes-dlq
 ff queues create commandes --visibility-timeout 1m --dead-letter-queue commandes-dlq --max-receive-count 3
-eval "$(ff buckets keys create --queue commandes | grep '^export ')"
+eval "$(ff keys create --queue commandes | grep '^export ')"
 aws sqs send-message --queue-url "$(aws sqs get-queue-url --queue-name commandes --query QueueUrl --output text)" \
   --message-body '{"commande": 42}'
 ```
 
-`ff buckets keys create --queue commandes` crée une clé qui n'atteint que cette file, et n'en affiche le secret qu'à ce moment-là, sous la forme des six variables que lisent les outils d'AWS, `AWS_ENDPOINT_URL_SQS` parmi elles. Depuis une fonction, rien à régler : `new SQSClient({})` en Node.js et `boto3.client("sqs")` en Python marchent tels quels, la fonction ayant sa propre clé, comme sur AWS Lambda avec un rôle. Dans la console, la page « Queues » : les files du compte et leurs messages ; pour chacune, ses attributs, l'envoi et la réception de messages pour la déboguer, ses dernières heures et ses alarmes.
+`ff keys create --queue commandes` crée une clé qui n'atteint que cette file, et n'en affiche le secret qu'à ce moment-là, sous la forme des sept variables que lisent les outils d'AWS, `AWS_ENDPOINT_URL_SQS` parmi elles. Depuis une fonction, rien à régler : `new SQSClient({})` en Node.js et `boto3.client("sqs")` en Python marchent tels quels, la fonction ayant sa propre clé, comme sur AWS Lambda avec un rôle. Dans la console, la page « Queues » : les files du compte et leurs messages ; pour chacune, ses attributs, l'envoi et la réception de messages pour la déboguer, ses dernières heures et ses alarmes.
 
 ## Une fonction qui lit une file
 
@@ -43,7 +43,7 @@ aws sqs send-message --queue-url "$(aws sqs get-queue-url --queue-name commandes
 ff event-sources add commandes traiter-commande --batching-window 2s --report-batch-item-failures
 ```
 
-FF appelle la fonction avec l'événement de SQS, `Records[]`, et supprime les messages que l'appel a traités. Avec `--report-batch-item-failures`, la réponse de la fonction, `batchItemFailures`, nomme ceux qui ont échoué : eux seuls reviennent après le délai de visibilité de la file, puis passent dans sa file de lettres mortes. Le délai de visibilité de la file doit être au moins le délai d'exécution de la fonction, comme Lambda l'exige. Désactivé (`ff event-sources update <uuid> --disable`), le mappage ne lit plus rien, et les messages attendent.
+FF appelle la fonction avec l'événement de SQS, `Records[]`, et supprime les messages que l'appel a traités. Avec `--report-batch-item-failures`, la réponse de la fonction, `batchItemFailures`, nomme ceux qui ont échoué : eux seuls reviennent après le délai de visibilité de la file, puis passent dans sa file de lettres mortes. Une version ou un alias de la fonction peut lire la file à sa place (`"qualifier": "live"` dans l'API), comme le mappage de Lambda d'une fonction qualifiée ; un alias supprimé depuis laisse les messages attendre. Le délai de visibilité de la file doit être au moins le délai d'exécution de ce qui la lit, le plus long des versions d'un alias, comme Lambda l'exige. Désactivé (`ff event-sources update <uuid> --disable`), le mappage ne lit plus rien, et les messages attendent.
 
 ## Un fichier qui lance une fonction
 
@@ -63,4 +63,4 @@ Chaque fichier créé sous `entree/` lance la fonction sans attendre, avec l'év
 
 ## Partir vers AWS
 
-La page [`cli/templates/export/data/sqs.md`](../../cli/templates/export/data/sqs.md) (en anglais), que `ff export` mettra dans son kit de sortie, dit comment chaque file, mappage, réglage d'appel sans attente et notification de compartiment devient sa ressource AWS (`AWS::SQS::Queue`, `AWS::Lambda::EventSourceMapping`, `AWS::Lambda::EventInvokeConfig`, la `NotificationConfiguration` du compartiment), avec un modèle SAM. Les messages en attente ne sont pas copiés : on envoie d'abord vers AWS, on laisse FF traiter ce qui attend, puis on supprime les files sur FF. Le code ne change pas : seule l'adresse du service disparaît de son environnement.
+La page [`cli/templates/export/data/sqs.md`](../../cli/templates/export/data/sqs.md) (en anglais), que `ff export` met dans son kit de sortie ([Partir vers AWS](partir-vers-aws.md)), dit comment chaque file, mappage, réglage d'appel sans attente et notification de compartiment devient sa ressource AWS (`AWS::SQS::Queue`, `AWS::Lambda::EventSourceMapping`, `AWS::Lambda::EventInvokeConfig`, la `NotificationConfiguration` du compartiment), avec un modèle SAM. Les messages en attente ne sont pas copiés : on envoie d'abord vers AWS, on laisse FF traiter ce qui attend, puis on supprime les files sur FF. Le code ne change pas : seule l'adresse du service disparaît de son environnement.

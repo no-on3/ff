@@ -1,5 +1,5 @@
 import { IncomingHttpHeaders } from 'node:http';
-import { decodeEscapes } from './sigv4';
+import { decodeEscapes } from '../common/signature-v4';
 
 /** A request's bucket and key: by its host (virtual-hosted) or its path's first segment (path-style). */
 export interface S3Address {

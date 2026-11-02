@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { BATCH_SIZE, BATCHING_WINDOW, EventSourceForm, MAXIMUM_CONCURRENCY, eventSourceBody, eventSourceForm, eventSourceText, nameOfArn } from '../lib/event-sources';
+import { functionOfArn, nameOfArn } from '../lib/arns';
+import { BATCH_SIZE, BATCHING_WINDOW, EventSourceForm, MAXIMUM_CONCURRENCY, eventSourceBody, eventSourceForm, eventSourceText } from '../lib/event-sources';
 import { apiErrorMessage } from '../lib/functions';
+import { runsText } from '../lib/versions';
 import { EventSource, Function, Queue, eventSourcesApi, queuesApi } from '../services/api';
 import { Callout, Panel } from './Panel';
 import StatusPill from './StatusPill';
+import { useQualifierChoices } from './useFunctionRoutes';
 
 /**
  * The queues a function reads, as AWS Lambda's event source mappings for
@@ -22,6 +25,7 @@ export const FunctionEventSources: React.FC<{ func: Function; mayChange: boolean
   const [removing, setRemoving] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const qualifiers = useQualifierChoices(func.id, editing !== null, form.qualifier);
 
   const load = useCallback(async () => {
     try {
@@ -107,12 +111,14 @@ export const FunctionEventSources: React.FC<{ func: Function; mayChange: boolean
         <ul className="mb-2 divide-y divide-gray-100" aria-label="The queues it reads">
           {mappings.map((mapping) => {
             const queue = nameOfArn(mapping.eventSourceArn);
+            const runs = runsText(functionOfArn(mapping.functionArn)?.qualifier);
             return (
               <li key={mapping.uuid} className="flex flex-wrap items-center gap-x-4 gap-y-2 py-3">
                 <Link to={`/queues/${queue}`} className="font-semibold text-ink hover:underline">
                   {queue}
                 </Link>
                 <StatusPill tone={mapping.state === 'Enabled' ? 'ok' : 'idle'} label={mapping.state === 'Enabled' ? 'Reading' : 'Disabled'} />
+                {runs && <span className="text-[13px] font-medium text-gray-700">{runs}</span>}
                 <span className="text-[13px] text-gray-600">{eventSourceText(mapping)}</span>
                 {mayChange && editing === null && (
                   <span className="ml-auto flex flex-wrap gap-2">
@@ -167,12 +173,26 @@ export const FunctionEventSources: React.FC<{ func: Function; mayChange: boolean
                       </option>
                     ))}
                 </select>
-                <span className="text-xs text-gray-500">Its visibility timeout must be at least the function&apos;s timeout, {func.timeout} s, as Lambda requires.</span>
+                <span className="text-xs text-gray-500">
+                  Its visibility timeout must be at least the timeout of what reads it, as Lambda requires: {func.timeout} s for $LATEST, a version&apos;s as published.
+                </span>
               </label>
             ) : (
               <p className="self-end text-[13px] text-gray-700">
                 The queue <span className="font-semibold">{nameOfArn(editing.eventSourceArn)}</span>
               </p>
+            )}
+            {qualifiers && qualifiers.length > 1 && (
+              <label className="flex flex-col gap-1 text-[13px] text-gray-700">
+                What reads it
+                <select className="input" value={form.qualifier} onChange={(e) => setForm({ ...form, qualifier: e.target.value })}>
+                  {qualifiers.map((choice) => (
+                    <option key={choice.value} value={choice.value}>
+                      {choice.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             )}
             {number('batchSize', `Messages a batch, at most (${BATCH_SIZE.min} to ${BATCH_SIZE.max.toLocaleString('en-US')})`, BATCH_SIZE.min, BATCH_SIZE.max)}
             {number('window', `Batching window, in seconds (${BATCHING_WINDOW.min} to ${BATCHING_WINDOW.max}): how long to gather a batch`, BATCHING_WINDOW.min, BATCHING_WINDOW.max)}

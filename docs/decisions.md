@@ -25,8 +25,8 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 ### Step 5: the way out
 
 **51. The order: the export kit first,** with the cost estimate and `ff doctor`, then versions and aliases, keys, Lambda's API, Terraform, SAM. ✅ Your answer: as recommended. The export only reads FF's API as it is, so the promise is kept soonest with the least risk; Lambda's API comes after the versions it must translate.
-- **Changed already:** nothing yet.
-- **Still to change:** X-02 to X-13, in that order.
+- **Changed already:** X-02, the export kit, and X-03, the cost estimate at AWS's prices, done by 1 November.
+- **Still to change:** X-04 to X-13, in that order.
 
 **52. Lambda's API: the 41 operations that AWS's CLI, its SDKs, Terraform's provider and SAM's resources call,** every other one answering a clear "later" in Lambda's shape, which no client retries. ✅ Your answer: as recommended. The same rule as S3's, SQS's and SES's front doors.
 - **Still to change:** X-01's spike confirms the list; X-09 and X-10 build it.
@@ -59,7 +59,8 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 - **Still to change:** nothing in this step.
 
 **62. The cost estimate counts what AWS bills that FF doesn't:** an RDS instance for each database, an ElastiCache node for each cache, cold starts, data out, logs, CloudFront, a NAT gateway, each line with its assumption and a way to leave it out. ✅ Your answer: as recommended. Without them the estimate is far too low for any app with a database.
-- **Still to change:** X-03.
+- **Changed already:** X-03: those lines' prices in the books (`1cfcc8b`); `GET /usage/aws-estimate`, each line with what it assumes, `without` leaving it out of the totals (`2df7b6c`); `ff usage --aws --without` and the export's `cost-estimate.md` (`f5783f2`); and the console's Usage page, a box a line (`9fc79f7`).
+- **Still to change:** nothing.
 
 **63. The way out is checked offline in every run** (`sam validate --lint`, cfn-lint, `tofu validate`, Moto), **and on a real AWS account once a month once you have one.** ✅ Your answer: as recommended. Until then the docs say the export is checked offline.
 - **Still to change:** X-02, X-15 and T-10.
@@ -151,8 +152,8 @@ You asked, with step 3 done, for four things: the step-3 migrations on your deve
 
 **35, done: Caddy rebuilt.** ✅ Your answer. The three images that carry Caddy now build it themselves, 2.11.7 with Go 1.26.9 and x/net v0.60.0, which fix its release's three advisories (`3d1635a`). A newer one of Go's (CVE-2026-111943, crypto/x509) needs Go 1.26.10, released 2026-10-19: accepted until 2026-11-02, when it is two weeks old.
 - **Found on the way** (`d4eaa94`): the security stage hadn't passed since 2026-10-21. Gitleaks' nine findings were made-up test values, now listed. npm audit found new advisories in the backend's dependencies whose fixes are under two weeks old: `.npmauditignore` now accepts such an advisory for a while, as `.trivyignore.yaml` does for images, and the API refuses compressed bodies, which closes body-parser's.
-- **Changed already:** zod 4.6.7 in the backend on 2026-10-30, with step 4's merge, its exception having ended on 2026-10-25; and the same day, go-jose v4.1.6 in the three images' Caddy, whose v4.1.5 a new advisory names (CVE-2026-116587, a denial of service through a JWK's RSA parameters), its fix two weeks old since 2026-10-28; in WAL-G's release binary, built with v4.1.4, the same advisory accepted until 2026-11-20 with its others, as WAL-G reaches S3 with a key and parses no JWK.
-- **Still to change:** each fix once it is two weeks old, when its exception expires and the security stage says so: Go 1.26.10 for Caddy on 2026-11-02, body-parser 2.4.0 and multer 2.5.0 on 2026-11-05, follow-redirects 1.16.2 in the console and the admin app on 2026-11-08 (an advisory of 2026-10-30, which nothing they ship reaches).
+- **Changed already:** zod 4.6.7 in the backend on 2026-10-30, with step 4's merge, its exception having ended on 2026-10-25; and the same day, go-jose v4.1.6 in the three images' Caddy, whose v4.1.5 a new advisory names (CVE-2026-116587, a denial of service through a JWK's RSA parameters), its fix two weeks old since 2026-10-28; in WAL-G's release binary, built with v4.1.4, the same advisory accepted until 2026-11-20 with its others, as WAL-G reaches S3 with a key and parses no JWK. On 2026-11-02, Go 1.26.10 in the three images' Caddy, the day its exception ended, which the nightly's scan said.
+- **Still to change:** each fix once it is two weeks old, when its exception expires and the security stage says so: body-parser 2.4.0 and multer 2.5.0 on 2026-11-05, follow-redirects 1.16.2 in the console and the admin app on 2026-11-08 (an advisory of 2026-10-30, which nothing they ship reaches).
 
 **36, done: step 3 is in `master`.** ✅ Your answer. Merged on 2026-10-24 (`2a381f4`), without a checkout, as step 2 was: `master` had not moved, so no file changed, and your dev servers saw nothing.
 
@@ -343,9 +344,10 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Changed already:** `2883be7` (U-03): the runtimes' protocol v3 (`ff-runtime-nodejs:24-v3`, `ff-runtime-python:3.13-v3`), `functions.event_format` with the migration `EventFormat`, the console's switch, and [ADR 0007](adr/0007-function-events.md).
 - **Still to change:** nothing. Once no function uses the old event, its code can go.
 
-**16. A protected function URL (`AWS_IAM`) takes an FF API key.** ✅ Confirmed, until FF checks AWS's signatures.
+**16. A protected function URL (`AWS_IAM`) takes an FF API key.** ✅ Confirmed, and AWS's signatures too since step 5.
 - **Changed already:** `7eb725b` and `f8886c5` (U-04): function URLs, `AWS_IAM` checked as an API key of the function's account with `functions:invoke`, sent as `Authorization: Bearer ffk_…`.
-- **Still to change:** later, AWS's signatures (SigV4), with the Lambda API of step 5, or reusing the signature checks step 2 builds for buckets.
+- **Changed already:** step 5 (X-07, part 3): a request signed for `lambda` by an access key of the account that may invoke the function, checked by the one signature module of every front door; the API key still works.
+- **Still to change:** nothing.
 
 **17. Certificates for function URLs: one for all of them if FF's DNS allows it, else one per URL.** ✅ Confirmed. The domain: `ffunc.tn` (20). ⏳ **Waiting for you:** who hosts its DNS, chosen when you register it.
 - **Changed already:** `d13581b` (U-05): the edge built with the standard module for DNS updates (RFC 2136), both ways (`wildcard`, `on-demand`), and `deploy.sh`'s checks; `d0f5604` (U-06): customers' own domains, always one certificate each.

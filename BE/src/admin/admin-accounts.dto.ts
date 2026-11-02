@@ -4,6 +4,7 @@ import { CacheStatus } from '../caches/cache.entity';
 import { DatabaseStatus } from '../databases/database.entity';
 import { BucketStatus } from '../storage/bucket.entity';
 import { QueueMessagesView } from '../queues/dto/queue.dto';
+import { StorageKeyView } from '../storage/dto/storage.dto';
 import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min } from 'class-validator';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import type { Role } from '../auth/principal';
@@ -183,10 +184,10 @@ export class AdminQueueView {
   @ApiProperty() createdAt: Date;
 }
 
-/** What the account's queues hold together with its functions' calls that don't wait, against its plan's room for them. */
-export class AdminQueueStorageView {
-  @ApiProperty({ example: 2_048, description: "Bytes: its queues' messages and its functions' calls that don't wait, as the plan counts them" }) bytes: number;
-  @ApiProperty({ example: 100, description: "The plan's room for them, in MB: past it, messages and calls that don't wait are refused" }) limitMb: number;
+/** What some of the account's things hold together, as its plan counts them, against the plan's room for them. */
+export class AdminStorageView {
+  @ApiProperty({ example: 2_048, description: 'Bytes, as the plan counts them' }) bytes: number;
+  @ApiProperty({ example: 100, description: "The plan's room for them, in MB: past it, what would add to them is refused" }) limitMb: number;
 }
 
 /** One status the account went through: its creation, or an operator's change. */
@@ -232,7 +233,12 @@ export class AdminAccountView {
   @ApiProperty({ type: [AdminCacheView], description: 'Its caches, by name' }) caches: AdminCacheView[];
   @ApiProperty({ type: [AdminBucketView], description: 'Its buckets, by name' }) buckets: AdminBucketView[];
   @ApiProperty({ type: [AdminQueueView], description: 'Its queues, by name' }) queues: AdminQueueView[];
-  @ApiProperty({ type: AdminQueueStorageView }) queueStorage: AdminQueueStorageView;
+  @ApiProperty({ type: [StorageKeyView], description: "Its access keys, oldest first, as its owners see them: never a secret; neither a function's own key nor a site deploy's" })
+  accessKeys: StorageKeyView[];
+  @ApiProperty({ type: AdminStorageView, description: "Its queues' messages and its functions' calls that don't wait, against the plan's queueStorageMb" })
+  queueStorage: AdminStorageView;
+  @ApiProperty({ type: AdminStorageView, description: "The packages its functions and their versions name, each once, against the plan's codeStorageMb" })
+  codeStorage: AdminStorageView;
   @ApiProperty({ type: AdminAccountUsageView }) usage: AdminAccountUsageView;
   @ApiProperty({ type: [AdminBalanceView], description: "Each wallet's balance (P-31); none before the account's first credit or debit" })
   balances: AdminBalanceView[];

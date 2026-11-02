@@ -4,14 +4,14 @@ import { consoleNav, isOpen, type NavItem } from './navigation';
 const labels = (role: Parameters<typeof consoleNav>[0]) => consoleNav(role).map((group) => [group.label, group.items.map((item) => item.label)]);
 
 describe('consoleNav', () => {
-  it("gives an owner the account's members and API keys, as the API lets owners alone manage them", () => {
+  it("gives an owner the account's members, API keys and access keys, as the API lets owners alone manage them", () => {
     expect(labels('owner')).toEqual([
       [null, ['Functions', 'Databases', 'Caches', 'Buckets', 'Queues', 'E-mail', 'Alarms', 'Usage', 'Billing']],
-      ['Account', ['Settings', 'Notifications', 'Members', 'API keys']],
+      ['Account', ['Settings', 'Notifications', 'Members', 'API keys', 'Access keys']],
     ]);
   });
 
-  it.each(['developer', 'viewer'] as const)('gives a %s the same pages without members and API keys', (role) => {
+  it.each(['developer', 'viewer'] as const)('gives a %s the same pages without members, API keys and access keys', (role) => {
     expect(labels(role)).toEqual([
       [null, ['Functions', 'Databases', 'Caches', 'Buckets', 'Queues', 'E-mail', 'Alarms', 'Usage', 'Billing']],
       ['Account', ['Settings', 'Notifications']],
@@ -46,6 +46,7 @@ describe('isOpen', () => {
     expect(open('/account')).toEqual(['Settings']);
     expect(open('/account/')).toEqual(['Settings']);
     expect(open('/account/api-keys')).toEqual(['API keys']);
+    expect(open('/account/access-keys')).toEqual(['Access keys']);
     expect(open('/account/members')).toEqual(['Members']);
   });
 

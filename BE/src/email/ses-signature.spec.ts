@@ -6,25 +6,12 @@
  * once refused, each in SES's words.
  */
 import { SignatureV4 } from '@smithy/signature-v4';
-import { createHash, createHmac } from 'node:crypto';
+import { canonicalUriTwice } from '../common/signature-v4';
+import { Sha256 } from '../common/test-fixtures';
 import { SesError } from './ses-error';
-import { SesSignature, canonicalUriTwice, checkSesSignature, readSesSignature } from './ses-signature';
+import { SesSignature, checkSesSignature, readSesSignature } from './ses-signature';
 
 const KEY = { accessKeyId: 'AKFFAAAAAAAAAAAAAAAA', secretAccessKey: 'a'.repeat(40) };
-
-/** SHA-256 and its HMAC, as AWS's signer takes them: from node's crypto. */
-class Sha256 {
-  private readonly hash;
-  constructor(secret?: string | Uint8Array) {
-    this.hash = secret === undefined ? createHash('sha256') : createHmac('sha256', Buffer.from(secret));
-  }
-  update(data: string | Uint8Array): void {
-    this.hash.update(data);
-  }
-  digest(): Promise<Uint8Array> {
-    return Promise.resolve(new Uint8Array(this.hash.digest()));
-  }
-}
 
 /** A request as AWS's SDK sends it, signed for `service`: its path as on the wire, escaped once. */
 async function signed(path: string, { service = 'ses', credentials = KEY, body = '', at = new Date(), escapeTwice = true } = {}) {

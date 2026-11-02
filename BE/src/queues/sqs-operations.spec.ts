@@ -324,7 +324,7 @@ describe("SQS's operations on an account's queues", () => {
   });
 
   describe("a key's reach", () => {
-    const naming = (queues: string[] | null, buckets: string[] | null = null) => caller({ reach: { buckets, queues } });
+    const naming = (queues: string[] | null, buckets: string[] | null = null, functions: string[] | null = null) => caller({ reach: { buckets, queues, functions } });
 
     it('lets a key that names queues reach those alone, refusing another before it is looked for, as IAM refuses one', async () => {
       const { operations, queues } = setup();
@@ -341,10 +341,26 @@ describe("SQS's operations on an account's queues", () => {
       await expect(operations.run('GetQueueUrl', { QueueName: 'orders' }, naming(['orders']))).resolves.toEqual({ QueueUrl: URL_ });
     });
 
-    it('lets a key that names buckets alone reach no queue, and one that names neither every one', async () => {
+    it('lets a key that names buckets or functions alone reach no queue, and one that names nothing every one', async () => {
       const { operations } = setup();
       expect((await refusal(operations.run('GetQueueUrl', { QueueName: 'orders' }, naming(null, ['photos'])))).type).toBe('AccessDenied');
+      expect((await refusal(operations.run('GetQueueUrl', { QueueName: 'orders' }, naming(null, null, ['thumbnails'])))).type).toBe('AccessDenied');
       await expect(operations.run('GetQueueUrl', { QueueName: 'orders' }, naming(null))).resolves.toEqual({ QueueUrl: URL_ });
+    });
+
+    it("tells the caller what its key used, by SQS's names: a queue it reached, the account's for ListQueues; nothing refused, nor a queue that isn't there", async () => {
+      const { operations } = setup();
+      const used: string[] = [];
+      const noting = (extra: Partial<Caller> = {}) => caller({ used: (operation, queue) => void used.push(`${operation} ${queue || '(the account)'}`), ...extra });
+
+      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x' }, noting());
+      await operations.run('ReceiveMessage', { QueueUrl: URL_ }, noting({ readOnly: true }));
+      await operations.run('ListQueues', {}, noting());
+      await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x' }, noting({ readOnly: true })));
+      await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x' }, noting({ reach: { buckets: null, queues: ['invoices'], functions: null } })));
+      await refusal(operations.run('GetQueueUrl', { QueueName: 'gone' }, noting()));
+
+      expect(used).toEqual(['SendMessage orders', 'ReceiveMessage orders', 'ListQueues (the account)']);
     });
   });
 

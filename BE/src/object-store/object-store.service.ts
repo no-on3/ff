@@ -1,4 +1,12 @@
-import { CreateBucketCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  CreateBucketCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+  GetObjectCommandOutput,
+  HeadBucketCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3';
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { Readable } from 'node:stream';
@@ -82,11 +90,8 @@ export class ObjectStoreService implements OnModuleInit, OnModuleDestroy {
 
   /** An object, streamed to a file: a package, to make its code image. StoredObjectMissingError when storage hasn't it. */
   async getFile(key: string, file: string): Promise<void> {
-    const object = await this.s3.send(new GetObjectCommand({ Bucket: this.bucketName, Key: key })).catch((error: unknown) => {
-      throw httpStatus(error) === 404 ? new StoredObjectMissingError(`Object storage has no ${key}`) : error;
-    });
-    if (!object.Body) throw new Error(`The object ${key} has no body`);
-    await pipeline(object.Body as Readable, createWriteStream(file, { mode: 0o600 }));
+    const { body } = await this.getObject(key);
+    await pipeline(body as Readable, createWriteStream(file, { mode: 0o600 }));
   }
 
   /** Removes an object; one already gone is no error, as S3 answers. */
@@ -99,11 +104,19 @@ export class ObjectStoreService implements OnModuleInit, OnModuleDestroy {
     await this.s3.send(new PutObjectCommand({ Bucket: this.bucketName, Key: key, Body: body, ContentType: contentType }));
   }
 
-  /** A document kept, with its type. */
+  /** An object whole, with its type: a document kept, or a package. StoredObjectMissingError when storage hasn't it. */
   async getDocument(key: string): Promise<{ body: Buffer; contentType: string }> {
-    const object = await this.s3.send(new GetObjectCommand({ Bucket: this.bucketName, Key: key }));
+    const { body, contentType } = await this.getObject(key);
+    return { body: Buffer.from(await body.transformToByteArray()), contentType: contentType ?? 'application/octet-stream' };
+  }
+
+  /** An object's body and type, as storage answers: StoredObjectMissingError when it hasn't the object. */
+  private async getObject(key: string): Promise<{ body: NonNullable<GetObjectCommandOutput['Body']>; contentType?: string }> {
+    const object = await this.s3.send(new GetObjectCommand({ Bucket: this.bucketName, Key: key })).catch((error: unknown) => {
+      throw httpStatus(error) === 404 ? new StoredObjectMissingError(`Object storage has no ${key}`) : error;
+    });
     if (!object.Body) throw new Error(`The object ${key} has no body`);
-    return { body: Buffer.from(await object.Body.transformToByteArray()), contentType: object.ContentType ?? 'application/octet-stream' };
+    return { body: object.Body, contentType: object.ContentType };
   }
 
   private async bucketExists(): Promise<boolean> {

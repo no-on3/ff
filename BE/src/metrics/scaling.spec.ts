@@ -1,4 +1,4 @@
-import { ScalingInput, burstTarget, decideReplicas, shouldScaleToZero } from './scaling';
+import { ScalingInput, burstTarget, decideReplicas, instancesOf, shouldScaleToZero, workloadKey } from './scaling';
 
 const input = (overrides: Partial<ScalingInput>): ScalingInput => ({
   desiredInstances: 1,
@@ -53,5 +53,25 @@ describe('shouldScaleToZero', () => {
     ['already at zero', { readyInstances: 0 }],
   ])('does not scale when %s', (_label, overrides) => {
     expect(shouldScaleToZero({ ...base, ...overrides })).toBe(false);
+  });
+});
+
+describe('workloadKey', () => {
+  it("keys a function's $LATEST and each of its versions apart, and apart from the function's own count", () => {
+    expect([workloadKey({ id: 'fn-1' }), workloadKey({ id: 'fn-1', version: 2 }), workloadKey({ id: 'fn-1', version: undefined })]).toEqual(['fn-1:$LATEST', 'fn-1:2', 'fn-1:$LATEST']);
+  });
+});
+
+describe('instancesOf', () => {
+  const deployments = [{ desired: 3 }, { version: 2, desired: 1 }, { version: 5, desired: 2 }];
+
+  it("gives a workload's instances asked for, and its function's others' together", () => {
+    expect(instancesOf(deployments, undefined)).toEqual({ own: 3, others: 3 });
+    expect(instancesOf(deployments, 2)).toEqual({ own: 1, others: 5 });
+  });
+
+  it('gives none of its own to a workload without a Deployment: a version never called, or removed while idle', () => {
+    expect(instancesOf(deployments, 9)).toEqual({ own: undefined, others: 6 });
+    expect(instancesOf([], undefined)).toEqual({ own: undefined, others: 0 });
   });
 });

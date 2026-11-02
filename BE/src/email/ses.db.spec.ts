@@ -14,12 +14,13 @@
 import 'dotenv/config';
 import { ConfigService } from '@nestjs/config';
 import { SignatureV4 } from '@smithy/signature-v4';
-import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
 import { CreditService } from '../billing/credit.service';
+import { Sha256 } from '../common/test-fixtures';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
@@ -27,6 +28,8 @@ import { Mail, MailService } from '../mail/mail.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { Bucket } from '../storage/bucket.entity';
 import { StorageDirectory } from '../storage/storage-directory.service';
+import { KeyUse } from '../storage/key-use.entity';
+import { KeyUses } from '../storage/key-uses.service';
 import { StorageKey } from '../storage/storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey } from '../storage/storage-names';
 import { EmailAccountService } from './email-account.service';
@@ -49,31 +52,20 @@ const SUSPENDED = '810000000003';
 const REGION = 'tn-tunis-1';
 const MAIL_HOST = 'mail.ff.test';
 
-/** SHA-256 and its HMAC, as AWS's signer takes them. */
-class Sha256 {
-  private readonly hash;
-  constructor(secret?: string | Uint8Array) {
-    this.hash = secret === undefined ? createHash('sha256') : createHmac('sha256', Buffer.from(secret));
-  }
-  update(data: string | Uint8Array): void {
-    this.hash.update(data);
-  }
-  digest(): Promise<Uint8Array> {
-    return Promise.resolve(new Uint8Array(this.hash.digest()));
-  }
-}
-
 run("customers' mail's identities through the SES endpoint, in FF's database (L2)", () => {
   const encryption = new EncryptionService({ getOrThrow: () => [{ id: 'test', key: randomBytes(32) }] } as unknown as ConfigService);
   let db: ScratchDatabase;
   let frontDoor: SesFrontDoor;
+  let keyUses: KeyUses;
   let identities: EmailIdentitiesService;
   let port: number;
   const key = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const reader = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const theirs = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const photosOnly = { id: newAccessKeyId(), secret: newSecretAccessKey() };
+  const functionsOnly = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   const suspended = { id: newAccessKeyId(), secret: newSecretAccessKey() };
+  const ended = { id: newAccessKeyId(), secret: newSecretAccessKey() };
   /** The DNS, as the stand-in answers it: the records published so far. */
   const zone = { txt: new Map<string, string[]>(), mx: new Map<string, string[]>() };
   const resolver: MailResolver = { txt: async (name) => zone.txt.get(name) ?? [], mx: async (name) => zone.mx.get(name) ?? [] };
@@ -148,7 +140,9 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
       { id: reader.id, accountId: ACCOUNT, readOnly: true, secret: directory.sealSecret(reader.id, reader.secret) },
       { id: theirs.id, accountId: OTHER, secret: directory.sealSecret(theirs.id, theirs.secret) },
       { id: photosOnly.id, accountId: ACCOUNT, buckets: ['photos'], secret: directory.sealSecret(photosOnly.id, photosOnly.secret) },
+      { id: functionsOnly.id, accountId: ACCOUNT, functions: ['*'], functionAccess: 'write', secret: directory.sealSecret(functionsOnly.id, functionsOnly.secret) },
       { id: suspended.id, accountId: SUSPENDED, secret: directory.sealSecret(suspended.id, suspended.secret) },
+      { id: ended.id, accountId: ACCOUNT, secret: directory.sealSecret(ended.id, ended.secret), expiresAt: new Date(Date.now() - 1000) },
     ]);
     const plans = onePlan(plan({ emailIdentities: 2, emailsPerDay: 200, emailsPerSecond: 1 }));
     const audit = new AuditService(db.dataSource.getRepository(AuditEntry));
@@ -161,7 +155,8 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
     const suppressions = new EmailSuppressionsService(db.dataSource.getRepository(EmailSuppression), audit);
     const account = new EmailAccountService(plans, db.dataSource.getRepository(EmailSending));
     const messages = new EmailMessagesService(db.dataSource.getRepository(EmailMessage), identities, suppressions, account, plans, { kick: () => undefined } as unknown as EmailSender, { admit: async () => undefined } as unknown as CreditService, config);
-    frontDoor = new SesFrontDoor(directory, new SesOperations(identities, suppressions, account, messages), identities);
+    keyUses = new KeyUses(db.dataSource.getRepository(KeyUse));
+    frontDoor = new SesFrontDoor(directory, new SesOperations(identities, suppressions, account, messages), identities, keyUses);
     port = (await frontDoor.listen(0, '127.0.0.1')).port;
   });
 
@@ -289,20 +284,48 @@ run("customers' mail's identities through the SES endpoint, in FF's database (L2
       expect(await ses('POST', '/v2/email/identities', { input: { EmailIdentity: 'more.example.tn' }, as: reader })).toMatchObject({ status: 403, error: 'AccessDeniedException' });
     });
 
-    it("shows another account nothing of this one's, and refuses a key that names buckets, and a suspended account's", async () => {
+    it("shows another account nothing of this one's, and refuses a key that names buckets or functions, and a suspended account's", async () => {
       expect((await ses('POST', '/v2/email/list-identities', { input: {}, as: theirs })).body.EmailIdentities).toEqual([]);
       expect((await ses('GET', identityPath('shop.example.tn'), { as: theirs })).error).toBe('NotFoundException');
       expect((await ses('GET', '/v2/email/account', { as: photosOnly })).error).toBe('AccessDeniedException');
+      expect(await ses('GET', '/v2/email/account', { as: functionsOnly })).toMatchObject({
+        status: 403,
+        error: 'AccessDeniedException',
+        body: { message: `The access key ${functionsOnly.id} names buckets, queues or functions, and reaches those alone: not the account's mail.` },
+      });
       expect(await ses('GET', '/v2/email/account', { as: suspended })).toMatchObject({ status: 403, error: 'AccessDeniedException', body: { message: 'The account is suspended: its mail answers no key.' } });
     });
 
-    it("refuses a request that isn't signed and a key FF doesn't know; without a mail server, sends nothing; and answers NotImplemented for what it doesn't do", async () => {
+    it("refuses a request that isn't signed, a key FF doesn't know and one past its end; without a mail server, sends nothing; and answers NotImplemented for what it doesn't do", async () => {
       expect(await send('GET', '/v2/email/account', { host: `127.0.0.1:${port}` })).toMatchObject({ status: 403, error: 'MissingAuthenticationTokenException' });
       expect((await ses('GET', '/v2/email/account', { as: { id: newAccessKeyId(), secret: newSecretAccessKey() } })).error).toBe('UnrecognizedClientException');
+      expect(await ses('GET', '/v2/email/account', { as: ended })).toMatchObject({ status: 403, error: 'ExpiredTokenException' });
       expect(await ses('POST', '/v2/email/outbound-emails', { input: {} })).toMatchObject({ status: 400, error: 'BadRequestException', body: { message: 'Content is required: Simple or Raw' } });
       const message = { FromEmailAddress: 'orders@shop.example.tn', Destination: { ToAddresses: ['orders@shop.example.tn'] }, Content: { Simple: { Subject: { Data: 'Hi' }, Body: { Text: { Data: 'Hello' } } } } };
       expect(await ses('POST', '/v2/email/outbound-emails', { input: message })).toMatchObject({ status: 400, error: 'SendingPausedException' });
       expect(await ses('GET', '/v2/email/configuration-sets')).toMatchObject({ status: 501, error: 'NotImplemented' });
+    });
+
+    it("writes what each key used, for the export's roles, by SES's names: the identity made, read or deleted, a message's sender, the account's own; nothing refused", async () => {
+      await keyUses.flush();
+
+      const rows = await db.dataSource.query<Array<{ holder: string; resource: string; operation: string }>>(
+        `SELECT holder, resource, operation FROM key_uses WHERE service = 'sesv2' AND account_id = $1 ORDER BY holder, operation, resource`,
+        [ACCOUNT],
+      );
+      const lines = rows.map((row) => `${row.holder === reader.id ? 'the reader' : row.holder === key.id ? 'the key' : row.holder} ${row.operation} ${row.resource || '(the account)'}`);
+      expect(lines).toEqual(
+        expect.arrayContaining([
+          'the key CreateEmailIdentity shop.example.tn',
+          'the key GetEmailIdentity shop.example.tn',
+          'the key DeleteEmailIdentity news.example.tn',
+          'the key SendEmail orders@shop.example.tn',
+          'the key GetAccount (the account)',
+          'the key PutSuppressedDestination (the account)',
+          'the reader GetAccount (the account)',
+        ]),
+      );
+      expect(lines.filter((line) => line.startsWith('the reader'))).toEqual(['the reader GetAccount (the account)']);
     });
   });
 });

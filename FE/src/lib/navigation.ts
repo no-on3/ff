@@ -20,14 +20,18 @@ export interface NavGroup {
   items: NavItem[];
 }
 
-/** The sidebar's pages for a role: the account's pages for every member; its members and API keys for those who may manage it (D4). */
+/** The sidebar's pages for a role: the account's pages for every member; its members, API keys and access keys for those who may manage it (D4). */
 export function consoleNav(role: Role): NavGroup[] {
   const account: NavItem[] = [
     { to: '/account', label: 'Settings', icon: 'settings', end: true },
     { to: '/account/notifications', label: 'Notifications', icon: 'notifications' },
   ];
   if (can(role, 'manage the account')) {
-    account.push({ to: '/account/members', label: 'Members', icon: 'members' }, { to: '/account/api-keys', label: 'API keys', icon: 'keys' });
+    account.push(
+      { to: '/account/members', label: 'Members', icon: 'members' },
+      { to: '/account/api-keys', label: 'API keys', icon: 'keys' },
+      { to: '/account/access-keys', label: 'Access keys', icon: 'keys' },
+    );
   }
   return [
     {

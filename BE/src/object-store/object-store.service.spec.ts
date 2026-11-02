@@ -5,9 +5,12 @@
  */
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
-import { ObjectStoreService } from './object-store.service';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { ObjectStoreService, StoredObjectMissingError } from './object-store.service';
 
 interface Captured {
   method: string;
@@ -17,7 +20,7 @@ interface Captured {
 }
 
 /** A local stand-in for an S3 server: records requests, answers with the handler's reply. */
-async function fakeS3(reply: (req: Captured) => { status: number; body?: string } = () => ({ status: 200 })) {
+async function fakeS3(reply: (req: Captured) => { status: number; body?: string; type?: string } = () => ({ status: 200 })) {
   const captured: Captured[] = [];
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -30,8 +33,8 @@ async function fakeS3(reply: (req: Captured) => { status: number; body?: string 
         body: Buffer.concat(chunks).toString('utf8'),
       };
       captured.push(request);
-      const { status, body } = reply(request);
-      res.writeHead(status, { 'content-type': 'application/xml' });
+      const { status, body, type } = reply(request);
+      res.writeHead(status, { 'content-type': type ?? 'application/xml' });
       res.end(body ?? '');
     });
   });
@@ -141,5 +144,45 @@ describe('ObjectStoreService (L1)', () => {
     const s3 = await server(() => ({ status: 403, body: s3Error('AccessDenied') }));
 
     await expect(storage(s3.port).uploadCode('3f9c2a1e/code.ts', 'code')).rejects.toMatchObject({ name: 'AccessDenied' });
+  });
+
+  describe('reading an object back', () => {
+    /** The store's one package, and NoSuchKey for any other key, as S3 answers. */
+    const PACKAGE = '/functions/packages/user-1/ab12.zip';
+    const reply = (req: Captured) =>
+      req.path === PACKAGE ? { status: 200, body: 'PK\u0003\u0004 the zip', type: 'application/zip' } : { status: 404, body: s3Error('NoSuchKey') };
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'ff-object-store-'));
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    it('reads one whole, with its type, or streams it to a file', async () => {
+      const store = storage((await server(reply)).port);
+      const file = join(dir, 'package.zip');
+
+      await store.getFile('packages/user-1/ab12.zip', file);
+
+      await expect(store.getDocument('packages/user-1/ab12.zip')).resolves.toEqual({ body: Buffer.from('PK\u0003\u0004 the zip'), contentType: 'application/zip' });
+      expect(readFileSync(file, 'utf8')).toBe('PK\u0003\u0004 the zip');
+    });
+
+    it("says the store hasn't one, either way, so that a caller tells a lost object from a failing store", async () => {
+      const store = storage((await server(reply)).port);
+      const file = join(dir, 'lost.zip');
+
+      for (const read of [() => store.getDocument('packages/user-1/cd34.zip'), () => store.getFile('packages/user-1/cd34.zip', file)]) {
+        const error = await read().catch((thrown: unknown) => thrown);
+        expect(error).toBeInstanceOf(StoredObjectMissingError);
+        expect(error).toHaveProperty('message', 'Object storage has no packages/user-1/cd34.zip');
+      }
+      expect(existsSync(file)).toBe(false);
+    });
+
+    it('fails as the store answers when it refuses', async () => {
+      const store = storage((await server(() => ({ status: 403, body: s3Error('AccessDenied') }))).port);
+
+      await expect(store.getDocument('packages/user-1/ab12.zip')).rejects.toMatchObject({ name: 'AccessDenied' });
+    });
   });
 });

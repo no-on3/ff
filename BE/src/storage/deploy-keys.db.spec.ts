@@ -15,8 +15,9 @@ import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
+import { onePlan, plan } from '../plans/test-fixtures';
 import { Bucket } from './bucket.entity';
-import { StorageDirectory } from './storage-directory.service';
+import { EXPIRED, StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { DEPLOY_KEY_MS, StorageKeysService } from './storage-keys.service';
 
@@ -43,7 +44,7 @@ run("deploys' own keys to a bucket, in FF's database (L2)", () => {
     const encryption = new EncryptionService({ getOrThrow: () => [{ id: 'test', key: randomBytes(32) }] } as unknown as ConfigService);
     directory = new StorageDirectory(db.dataSource.getRepository(Bucket), db.dataSource.getRepository(StorageKey), encryption);
     const config = new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, sqs: { base: 'https://sqs.example.tn' } });
-    keys = new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, new AuditService(db.dataSource.getRepository(AuditEntry)), config);
+    keys = new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, new AuditService(db.dataSource.getRepository(AuditEntry)), onePlan(plan({ accessKeys: 2 })), config);
   });
 
   afterAll(async () => {
@@ -57,9 +58,12 @@ run("deploys' own keys to a bucket, in FF's database (L2)", () => {
     expect(await directory.key(made.accessKeyId)).toEqual({
       id: made.accessKeyId,
       accountId: ACCOUNT,
+      name: null,
       functionId: null,
       buckets: ['deploy-site'],
       queues: null,
+      functions: null,
+      functionAccess: null,
       readOnly: false,
       secret: made.secretAccessKey,
     });
@@ -75,10 +79,11 @@ run("deploys' own keys to a bucket, in FF's database (L2)", () => {
 
     expect(made.expiresAt).toEqual(new Date(now.getTime() + DEPLOY_KEY_MS));
     expect(await directory.key(made.accessKeyId, new Date(now.getTime() + DEPLOY_KEY_MS - 1000))).not.toBeNull();
-    expect(await directory.key(made.accessKeyId, new Date(now.getTime() + DEPLOY_KEY_MS))).toBeNull();
+    // Past its end, it says so, as AWS says a token expired.
+    expect(await directory.key(made.accessKeyId, new Date(now.getTime() + DEPLOY_KEY_MS))).toBe(EXPIRED);
   });
 
-  it("is never one of the account's own keys: not listed with them, nor counted against their two, nor revoked as one", async () => {
+  it("is never one of the account's own keys: not listed with them, nor counted against the plan's two, nor revoked as one", async () => {
     const deploy = await keys.createDeployKey(ACCOUNT, 'deploy-site');
     const own = [await keys.create(ACCOUNT, {}), await keys.create(ACCOUNT, {})];
 

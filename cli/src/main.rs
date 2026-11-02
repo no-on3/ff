@@ -2,6 +2,8 @@
 
 mod api;
 mod auth;
+#[cfg(test)]
+mod backend_source;
 mod cli;
 mod commands;
 mod config;
@@ -13,6 +15,7 @@ mod output;
 mod package;
 mod progress;
 mod s3;
+mod sam;
 mod table;
 
 use std::process::ExitCode;

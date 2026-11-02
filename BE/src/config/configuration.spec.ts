@@ -40,6 +40,7 @@ const production: Env = {
   FF_STORAGE_BASE: 'https://s3.ff.example',
   FF_SQS_BASE: 'https://sqs.ff.example',
   FF_SES_BASE: 'https://email.ff.example',
+  FF_LAMBDA_BASE: 'https://lambda.ff.example',
   FF_EMAIL_MAIL_HOST: 'mail.ff.example',
   FF_EMAIL_BOUNCE_DOMAIN: 'bounces.mail.ff.example',
   FF_WEBSITE_BASE: 'https://site.ff.example',
@@ -328,6 +329,12 @@ describe('configuration', () => {
     expect(problems({ ...production, FF_ALARM_INTERVAL_SECONDS: '0' })).toEqual([expect.stringContaining('FF_ALARM_INTERVAL_SECONDS')]);
   });
 
+  it("looks for functions' keys to renew every minute, unless told otherwise", () => {
+    expect(configuration(production).keyRenewal).toEqual({ intervalSeconds: 60 });
+    expect(configuration({ ...production, FF_KEY_RENEWAL_INTERVAL_SECONDS: '5' }).keyRenewal).toEqual({ intervalSeconds: 5 });
+    expect(problems({ ...production, FF_KEY_RENEWAL_INTERVAL_SECONDS: '0' })).toEqual([expect.stringContaining('FF_KEY_RENEWAL_INTERVAL_SECONDS')]);
+  });
+
   it("sends notifications every 10 s, never to a private address, unless told otherwise", () => {
     expect(configuration(production).notifications).toEqual({ intervalSeconds: 10, allowPrivate: false });
     expect(configuration({ ...production, NODE_ENV: 'development', FF_NOTIFY_INTERVAL_SECONDS: '1', FF_WEBHOOK_ALLOW_PRIVATE: 'true' }).notifications).toEqual({ intervalSeconds: 1, allowPrivate: true });
@@ -574,6 +581,45 @@ describe('configuration', () => {
       expect(problems({ ...dev, FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003/sqs' })).toEqual([
         expect.stringMatching(/^FF_SQS_FUNCTION_ENDPOINT must be an origin, such as http:\/\/10.43.0.251:3003, at which functions reach queues' SQS endpoint/),
       ]);
+    });
+  });
+
+  describe("Lambda's endpoint", () => {
+    it("is served on port 3006, apart from the API, at localhost in development, naming FF's region", () => {
+      expect(configuration(dev).lambda).toEqual({ port: 3006, base: 'http://localhost:3006', region: 'tn-tunis-1', functionEndpoint: '' });
+    });
+
+    it('takes an origin, a trailing slash dropped, and port 0 for none', () => {
+      const config = configuration({ ...production, FF_LAMBDA_BASE: 'https://lambda.example.tn/', FF_LAMBDA_PORT: '0' });
+
+      expect([config.lambda.port, config.lambda.base]).toEqual([0, 'https://lambda.example.tn']);
+      expect(problems({ ...dev, FF_LAMBDA_BASE: 'https://lambda.example.tn/2015-03-31' })).toEqual([expect.stringMatching(/^FF_LAMBDA_BASE must be an origin, such as https:\/\/lambda.example.tn/)]);
+    });
+
+    it("is reached over TLS in production: its requests carry functions' code and calls", () => {
+      expect(problems({ ...production, FF_LAMBDA_BASE: 'http://lambda.example.tn' })).toEqual([expect.stringMatching(/^FF_LAMBDA_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
+    });
+
+    it("is reached by functions at a Service's fixed address, on the endpoint's port, after the others, or at addresses of its own", () => {
+      const config = configuration({ ...production, FF_SES_FUNCTION_ENDPOINT: 'http://10.43.0.251:3005', FF_LAMBDA_FUNCTION_ENDPOINT: 'http://10.43.0.251:3006/' });
+
+      expect(config.lambda.functionEndpoint).toBe('http://10.43.0.251:3006');
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: [], port: 3005 },
+        { cidrs: [], port: 3006 },
+      ]);
+      const gateway = configuration({ ...dev, FF_LAMBDA_FUNCTION_ENDPOINT: 'http://172.18.0.1:3006', FF_LAMBDA_FUNCTION_CIDRS: '172.18.0.1/32' });
+      expect(gateway.kubernetes.platformEgress).toEqual([{ cidrs: ['172.18.0.1/32'], port: 3006 }]);
+    });
+
+    it("refuses functions' endpoint without Lambda's, and their addresses without functions' endpoint", () => {
+      expect(problems({ ...dev, FF_LAMBDA_PORT: '0', FF_LAMBDA_FUNCTION_ENDPOINT: 'http://10.43.0.251:3006' })).toEqual([
+        "FF_LAMBDA_FUNCTION_ENDPOINT is set, but FF_LAMBDA_PORT is 0: functions' keys reach their account's functions through Lambda's endpoint, which isn't running",
+      ]);
+      expect(problems({ ...dev, FF_LAMBDA_FUNCTION_CIDRS: '172.18.0.1/32' })).toEqual([
+        "FF_LAMBDA_FUNCTION_CIDRS is set, but FF_LAMBDA_FUNCTION_ENDPOINT is not: it names where functions reach Lambda's endpoint",
+      ]);
+      expect(problems({ ...dev, FF_LAMBDA_FUNCTION_ENDPOINT: 'http://10.43.0.251:3006/2015-03-31' })).toEqual([expect.stringMatching(/^FF_LAMBDA_FUNCTION_ENDPOINT must be an origin, such as http:\/\/10.43.0.251:3006/)]);
     });
   });
 

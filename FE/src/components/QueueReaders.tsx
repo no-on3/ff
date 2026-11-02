@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { eventSourceText, nameOfArn } from '../lib/event-sources';
+import { functionOfArn, nameOfArn } from '../lib/arns';
+import { eventSourceText } from '../lib/event-sources';
 import { apiErrorMessage } from '../lib/functions';
 import { EventSource, Queue, eventSourcesApi, functionsApi } from '../services/api';
 import { Panel } from './Panel';
@@ -21,7 +22,7 @@ export const QueueReaders: React.FC<{ queue: Queue }> = ({ queue }) => {
       .then(([mappings, functions]) => {
         if (!current) return;
         const ids = new Map(functions.data.map((fn) => [fn.name, fn.id]));
-        setReaders(mappings.data.map((mapping) => ({ mapping, functionId: ids.get(nameOfArn(mapping.functionArn)) })));
+        setReaders(mappings.data.map((mapping) => ({ mapping, functionId: ids.get(functionOfArn(mapping.functionArn)?.name ?? '') })));
       })
       .catch((err: unknown) => current && setError(apiErrorMessage(err)));
     return () => {

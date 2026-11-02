@@ -38,7 +38,8 @@ run('the scheduler, in the database (L2)', () => {
     new SchedulerService(
       { getOrThrow: (key: string) => ({ 'schedules.intervalSeconds': 0, 'schedules.region': 'tn-tunis-1' })[key] } as unknown as ConfigService,
       db.dataSource,
-      { findOne: async () => fn } as never,
+      // The schedules here run $LATEST: none names a version or an alias.
+      { findOne: async () => fn, callTarget: async () => ({}) } as never,
       { admit: async () => undefined } as never,
       { get: async () => plan({ invokesPerSecond: 1000 }) } as never,
       { count: () => undefined } as never,

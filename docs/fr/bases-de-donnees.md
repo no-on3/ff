@@ -46,4 +46,4 @@ La chaîne de connexion, avec son mot de passe, n'est montrée qu'à ce moment-l
 
 ## Partir vers AWS RDS
 
-`pg_dump` depuis FF, puis `pg_restore` dans une instance RDS PostgreSQL 18 : les étapes, en anglais, sont dans [`cli/templates/export/data/postgres.md`](../../cli/templates/export/data/postgres.md), que `ff export` mettra dans son kit de sortie.
+`pg_dump` depuis FF, puis `pg_restore` dans une instance RDS PostgreSQL 18 : les étapes, en anglais, sont dans [`cli/templates/export/data/postgres.md`](../../cli/templates/export/data/postgres.md), que `ff export` met dans son kit de sortie ([Partir vers AWS](partir-vers-aws.md)).

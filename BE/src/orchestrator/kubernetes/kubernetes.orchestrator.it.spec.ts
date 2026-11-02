@@ -225,18 +225,131 @@ run('KubernetesOrchestrator against the dev cluster (L3)', () => {
     expect((await orchestrator.invoke(fn, {})).output).toEqual({ version: 2, message: 'Hello world' });
   });
 
-  it("counts the function's ready instances in one cluster-wide list, at 1, 2 and 0 replicas (P-21)", async () => {
-    const counted = async () => (await orchestrator.readyInstancesByFunction()).get(fn.id);
-    expect(await counted()).toBe(1);
+  it("runs a version in pods of its own beside $LATEST, each call answered by the one it names; $LATEST's Service keeps its label through an update; both counted together, each scaled apart", async () => {
+    const tellsItsVersion = (code: string) => `
+export async function handler(_event: unknown, context: { functionVersion: string }) {
+  return { version: context.functionVersion, code: '${code}' };
+}`;
+    const latest = await imaged({ id: randomUUID(), accountId: tenant, name: 'it-versions', code: tellsItsVersion('a'), memory: 128, timeout: 5 });
+    const servicePath = paths.core(ns, 'services', functionResourceName(latest.id));
+    const selector = async () => (await client.get<{ spec: { selector: Record<string, string> } }>(servicePath))?.spec.selector;
+    try {
+      await orchestrator.deploy(latest, limits());
+      await orchestrator.waitUntilReady(latest, 90_000);
+      // Published: version 1 is the function as it is, whose pods carry no version label yet.
+      const version1 = { ...latest, version: 1, lastVersion: 1 };
+
+      const first = await orchestrator.invoke({ ...version1, codeImage: undefined }, {}, undefined, async () => version1);
+
+      expect(first.output).toEqual({ version: '1', code: 'a' });
+      expect(first.initMs).toBeGreaterThan(0);
+      expect(await selector()).toEqual({ [LABELS.functionId]: latest.id, [LABELS.version]: 'latest' });
+      // $LATEST's code moves on, its pods keeping their label, which its apply now names too.
+      latest.lastVersion = 1;
+      await withCode(latest, tellsItsVersion('b'));
+      await orchestrator.update(latest, limits());
+      await orchestrator.waitUntilReady(latest, 90_000);
+      // The apply left the label in its Service's selector, which another field manager set.
+      expect(await selector()).toEqual({ [LABELS.functionId]: latest.id, [LABELS.version]: 'latest' });
+      // A hundred calls each, each answered by the version it names: $LATEST's Service never takes version 1's pod.
+      for (let i = 0; i < 100; i++) {
+        expect((await orchestrator.invoke(latest, {})).output).toEqual({ version: '$LATEST', code: 'b' });
+        expect((await orchestrator.invoke(version1, {})).output).toEqual({ version: '1', code: 'a' });
+      }
+      // The function's ready instances, its Deployments' together.
+      const ready = async () => (await orchestrator.workloads(latest)).reduce((sum, workload) => sum + workload.ready, 0);
+      await eventually(async () => (await ready()) === 2, 90_000);
+      // The version scales on its own calls, its function's Deployments listed apart, each with its instances.
+      const byVersion = (a: { version?: number }, b: { version?: number }) => (a.version ?? 0) - (b.version ?? 0);
+      await orchestrator.scale(version1, 2);
+      await eventually(async () => (await ready()) === 3, 90_000);
+      expect((await orchestrator.workloads(latest)).sort(byVersion)).toMatchObject([
+        { functionId: latest.id, version: undefined, desired: 1, ready: 1, codeImage: latest.codeImage },
+        { functionId: latest.id, version: 1, desired: 2, ready: 2 },
+      ]);
+
+      await orchestrator.removeVersion(version1);
+      expect(await client.get(paths.apps(ns, 'deployments', `${functionResourceName(latest.id)}-v1`))).toBeNull();
+      await eventually(async () => (await ready()) === 1, 90_000);
+      expect(await orchestrator.workloads(latest)).toMatchObject([{ functionId: latest.id, version: undefined, desired: 1, ready: 1 }]);
+      expect((await orchestrator.invoke(latest, {})).output).toEqual({ version: '$LATEST', code: 'b' });
+    } finally {
+      await orchestrator.remove(latest, [1]);
+    }
+    expect(await client.get(servicePath)).toBeNull();
+  });
+
+  it("rolls a new key out to a function at two instances, called without pause, losing no call; one at zero starts on a fresh key", async () => {
+    const tellsItsKey = `
+export async function handler() {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  return { key: process.env.AWS_ACCESS_KEY_ID };
+}`;
+    const keyed = (key: string): FunctionWorkload['environment'] => ({ revision: `${key}.0`, values: { AWS_ACCESS_KEY_ID: key } });
+    const renewing = await imaged({ id: randomUUID(), accountId: tenant, name: 'it-renewal', code: tellsItsKey, memory: 128, timeout: 5, environment: keyed('first') });
+    try {
+      await orchestrator.deploy(renewing, limits());
+      await orchestrator.waitUntilReady(renewing, 90_000);
+      await orchestrator.scale(renewing, 2);
+      await eventually(async () => (await orchestrator.readyInstances(renewing)) === 2, 90_000);
+      expect((await orchestrator.workloads(renewing))[0]).toMatchObject({ desired: 2, ready: 2, revision: 'first.0', codeImage: renewing.codeImage });
+
+      // Four callers without pause, as the renewal will find a busy function, each call's answer or error kept.
+      const answers: string[] = [];
+      const errors: string[] = [];
+      let calling = true;
+      const caller = async () => {
+        while (calling) {
+          try {
+            answers.push(((await orchestrator.invoke(renewing, {})).output as { key: string }).key);
+          } catch (error) {
+            errors.push(String(error));
+          }
+        }
+      };
+      const callers = [caller(), caller(), caller(), caller()];
+      const renewed = { ...renewing, environment: keyed('second') };
+      expect(await orchestrator.renewEnvironment(renewed)).toBe(true);
+      await orchestrator.waitUntilReady(renewed, 90_000);
+      // Calls on, a while after the last old pod went, then stop.
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      calling = false;
+      await Promise.all(callers);
+
+      expect(errors).toEqual([]);
+      expect(answers.length).toBeGreaterThan(20);
+      expect(answers.at(-1)).toBe('second');
+      expect(new Set(answers)).toEqual(new Set(['first', 'second']));
+      // Its two pods are new.
+      expect((await orchestrator.workloads(renewing))[0]).toMatchObject({ desired: 2, ready: 2, revision: 'second.0' });
+
+      // At zero, a call that brings a fresh key starts the function on it; one that brings none, on the key it had.
+      await orchestrator.scale(renewing, 0);
+      await eventually(async () => (await orchestrator.readyInstances(renewing)) === 0, 90_000);
+      const cold = await orchestrator.invoke(renewed, {}, undefined, async () => ({ ...renewing, environment: keyed('third') }));
+      expect(cold.output).toEqual({ key: 'third' });
+      expect(cold.initMs).toBeGreaterThan(0);
+      await orchestrator.scale(renewing, 0);
+      await eventually(async () => (await orchestrator.readyInstances(renewing)) === 0, 90_000);
+      expect((await orchestrator.invoke(renewed, {}, undefined, async () => undefined)).output).toEqual({ key: 'third' });
+    } finally {
+      await orchestrator.remove(renewing);
+    }
+  });
+
+  it("lists the function's Deployment in one cluster-wide list, as the capacity samples read it, at 1, 2 and 0 replicas", async () => {
+    const counted = async () => (await orchestrator.workloads()).find((workload) => workload.functionId === fn.id);
+    expect(await counted()).toMatchObject({ functionId: fn.id, version: undefined, desired: 1, ready: 1 });
 
     await orchestrator.scale(fn, 2);
-    await eventually(async () => (await counted()) === 2, 90_000);
+    await eventually(async () => (await counted())?.ready === 2, 90_000);
 
     await orchestrator.scale(fn, 0);
-    await eventually(async () => (await counted()) === undefined, 90_000); // no ready instance: left out
+    await eventually(async () => (await counted())?.ready === 0, 90_000);
+    expect((await counted())?.desired).toBe(0);
 
     await orchestrator.scale(fn, 1); // as the next test expects
-    await eventually(async () => (await counted()) === 1, 90_000);
+    await eventually(async () => (await counted())?.ready === 1, 90_000);
   });
 
   it('scales to zero and cold-starts on the next invocation', async () => {

@@ -1,12 +1,15 @@
-import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res } from '@nestjs/common';
-import { ApiHeader, ApiOperation, ApiProduces, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { BadRequestException, Body, Controller, Delete, Get, Headers, Param, ParseUUIDPipe, Patch, Post, Put, Query, Res, StreamableFile } from '@nestjs/common';
+import { ApiHeader, ApiOperation, ApiProduces, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import type { ServerResponse } from 'node:http';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
+import { booleanQuery } from '../common/boolean-query';
 import { Invocation } from '../plans/rate-limits';
+import { KeyUses } from '../storage/key-uses.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
+import { FunctionKeyUsesView } from './dto/key-uses.dto';
 import { AsyncInvocationView, InvocationType, InvokeFunctionDto } from './dto/invoke-function.dto';
 import { ListFunctionsQuery } from './dto/list-functions.dto';
 import { ListInvocationsQuery } from './dto/list-invocations.dto';
@@ -28,6 +31,9 @@ export function invocationTypeOf(header: string | undefined, body: InvocationTyp
   return header as InvocationType;
 }
 
+/** The name of the function's zip, which any header holds: its own, a character Lambda's rule for names refuses made `_`. */
+export const codeFileName = (name: string): string => `${name.replace(/[^A-Za-z0-9_-]/g, '_')}.zip`;
+
 /**
  * Every route acts for the caller's account (D4): without a principal it
  * answers 401, and another account's function answers 404, exactly like one
@@ -40,6 +46,7 @@ export class FunctionsController {
   constructor(
     private readonly functionsService: FunctionsService,
     private readonly asyncInvocations: AsyncInvocationsService,
+    private readonly keyUses: KeyUses,
   ) {}
 
   @Post()
@@ -78,6 +85,43 @@ export class FunctionsController {
   @ApiResponse({ status: 200, description: "Function details, with its environment variables; never its secrets' values", type: Function })
   async findOne(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<FunctionView> {
     return this.functionsService.describe(principal.accountId, id);
+  }
+
+  @Get(':id/code')
+  @RequireScope('functions:read')
+  @ApiOperation({
+    summary: "The function's code, as a zip AWS Lambda takes",
+    description:
+      'A package as it was uploaded; inline code as the one-file package its pods run, `function.ts` or `function.py`. ' +
+      'With javascript=true, inline Node.js code as JavaScript, `function.js`, transpiled as FF\'s runtime transpiles it before ' +
+      "running it, which Lambda's Node.js runtime loads under the same handler; a package, and Python code, as they are",
+  })
+  @ApiQuery({ name: 'javascript', required: false, enum: ['true', 'false'] })
+  @ApiProduces('application/zip')
+  @ApiResponse({ status: 200, description: "The zip, named after the function: a character a function's name may no longer hold as _" })
+  @ApiResponse({ status: 400, description: "javascript isn't true or false, or the inline code doesn't transpile, which never loaded on FF either" })
+  async code(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query('javascript') javascript: string | undefined,
+    @Principal() principal: Principal,
+  ): Promise<StreamableFile> {
+    const { name, zip } = await this.functionsService.code(principal.accountId, id, { javascript: booleanQuery('javascript', javascript) });
+    return new StreamableFile(zip, { type: 'application/zip', disposition: `attachment; filename="${codeFileName(name)}"`, length: zip.length });
+  }
+
+  @Get(':id/key-uses')
+  @RequireScope('functions:read')
+  @ApiOperation({
+    summary: "What the function's keys used of the account's buckets, queues and mail",
+    description:
+      "Each bucket, queue or e-mail identity its keys reached through the S3 front door, the SQS endpoint or the SES endpoint, by which of the " +
+      "service's operations, with the first and the last day, UTC: what an export's IAM role grants it, and no more. Noted once a day since " +
+      '2026-10-31; a key replaced keeps its uses with its function',
+  })
+  @ApiResponse({ status: 200, type: FunctionKeyUsesView })
+  async keyUsesOf(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<FunctionKeyUsesView> {
+    const function_ = await this.functionsService.findOne(principal.accountId, id);
+    return { uses: await this.keyUses.of(function_.accountId, function_.id) };
   }
 
   @Put(':id')
@@ -120,7 +164,8 @@ export class FunctionsController {
       "As AWS Lambda's Invoke, its invocation type in the header X-Amz-Invocation-Type or in invocationType: RequestResponse waits for the call; " +
       "Event keeps it in the function's queue and answers 202 with its request ID at once, then runs it, retried twice on the function's " +
       'failure (a minute, then two minutes later), with a backoff when throttled, for six hours at most, each attempt in the history under ' +
-      'that request ID; DryRun only checks, and answers 204.',
+      'that request ID; DryRun only checks, and answers 204. qualifier names what runs, for each type: $LATEST, a version, or an alias; ' +
+      '404 for one the function hasn\'t.',
   })
   @ApiHeader({ name: 'X-Amz-Invocation-Type', required: false, enum: InvocationType })
   @ApiResponse({ status: 201, description: 'Function invoked successfully', type: FunctionInvocation })
@@ -140,22 +185,27 @@ export class FunctionsController {
     @Res({ passthrough: true }) response: Response,
   ): Promise<FunctionInvocation | AsyncInvocationView | void> {
     const type = invocationTypeOf(invocationType, invokeFunctionDto.invocationType);
+    const { qualifier } = invokeFunctionDto;
     if (type === InvocationType.EVENT) {
-      const queued = await this.asyncInvocations.queue(principal.accountId, id, invokeFunctionDto.input);
+      const queued = await this.asyncInvocations.queue(principal.accountId, id, invokeFunctionDto.input, qualifier);
       response.status(202);
       return queued;
     }
     if (type === InvocationType.DRY_RUN) {
-      await this.asyncInvocations.dryRun(principal.accountId, id, invokeFunctionDto.input);
+      await this.asyncInvocations.dryRun(principal.accountId, id, invokeFunctionDto.input, qualifier);
       response.status(204);
       return;
     }
-    return this.functionsService.invoke(principal.accountId, id, invokeFunctionDto.input);
+    return this.functionsService.invoke(principal.accountId, id, invokeFunctionDto.input, qualifier);
   }
 
   @Get(':id/invocations')
   @RequireScope('functions:read')
-  @ApiOperation({ summary: 'Get function invocations, newest first' })
+  @ApiOperation({
+    summary: 'Get function invocations, newest first',
+    description:
+      "resource keeps the calls that named an alias or a version, $LATEST those that named neither; executedVersion those a version ran, or $LATEST, as CloudWatch's dimensions of Lambda's.",
+  })
   @ApiResponse({ status: 200, description: 'List of function invocations', type: [FunctionInvocation] })
   async getInvocations(
     @Param('id', ParseUUIDPipe) id: string,

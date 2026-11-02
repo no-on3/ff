@@ -18,6 +18,7 @@ import { AsyncInvocationsService } from './functions/async-invocations.service';
 import { EventInvokeConfigController } from './functions/event-invoke-config.controller';
 import { EventInvokeConfigService } from './functions/event-invoke-config.service';
 import { FunctionsService } from './functions/functions.service';
+import { KeyUses } from './storage/key-uses.service';
 import { FunctionUrlsController } from './function-urls/function-urls.controller';
 import { FunctionUrlsService } from './function-urls/function-urls.service';
 import { CustomDomainsController } from './function-urls/custom-domains.controller';
@@ -43,6 +44,7 @@ import { PlatformSettingsService } from './admin/platform-settings.service';
 import { UsageController } from './usage/usage.controller';
 import { PlansService } from './plans/plans.service';
 import { PricingService } from './billing/pricing.service';
+import { AwsEstimateService } from './usage/aws-estimate.service';
 import { BillingController } from './billing/billing.controller';
 import { BillingService } from './billing/billing.service';
 import { ProFormasController } from './billing/payments/pro-formas.controller';
@@ -118,10 +120,15 @@ describe('the OpenAPI document (L1, P-08)', () => {
         // The caller owns the function, so the ownership checks pass.
         {
           provide: FunctionsService,
-          // The live tail answers with an event stream, which ends here at once (P-43).
-          useValue: succeeding(FunctionsService, { findOne: async () => ({ id: ID, accountId: ACCOUNT }), liveLogs: async () => of({ data: {} }) }),
+          // The live tail answers with an event stream, which ends here at once (P-43); the code, with a zip: an empty one.
+          useValue: succeeding(FunctionsService, {
+            findOne: async () => ({ id: ID, accountId: ACCOUNT }),
+            liveLogs: async () => of({ data: {} }),
+            code: async () => ({ name: 'hello', zip: Buffer.from([0x50, 0x4b, 0x05, 0x06, ...new Array<number>(18).fill(0)]) }),
+          }),
         },
         { provide: AsyncInvocationsService, useValue: succeeding(AsyncInvocationsService, { queue: async () => ({ requestId: ID }), dryRun: async () => undefined }) },
+        { provide: KeyUses, useValue: succeeding(KeyUses, { of: async () => [] }) },
         { provide: QueuesService, useValue: succeeding(QueuesService, { list: async () => [], receive: async () => [], remove: async () => undefined, purge: async () => undefined, deleteMessage: async () => undefined }) },
         { provide: EventInvokeConfigService, useValue: succeeding(EventInvokeConfigService, { remove: async () => undefined }) },
         { provide: EventSourcesService, useValue: succeeding(EventSourcesService, { list: async () => [], listForFunction: async () => [], remove: async () => undefined }) },
@@ -144,6 +151,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
           }),
         },
         { provide: PricingService, useValue: succeeding(PricingService, { estimate: async () => null }) },
+        { provide: AwsEstimateService, useValue: succeeding(AwsEstimateService) },
         { provide: PlatformSettingsService, useValue: succeeding(PlatformSettingsService) },
         { provide: AuditService, useValue: succeeding(AuditService, { operatorActions: async () => ({ entries: [], next: null }) }) },
         { provide: AdminAccountsService, useValue: succeeding(AdminAccountsService) },

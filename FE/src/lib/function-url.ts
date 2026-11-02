@@ -31,13 +31,15 @@ export interface UrlCors {
 }
 
 /** The fields of a function's URL as the API answers them: contract.test.ts checks them against its view. */
-export const FUNCTION_URL_FIELDS = ['functionUrl', 'functionId', 'authType', 'cors', 'invokeMode', 'createdAt', 'updatedAt'] as const;
+export const FUNCTION_URL_FIELDS = ['functionUrl', 'functionId', 'alias', 'authType', 'cors', 'invokeMode', 'createdAt', 'updatedAt'] as const;
 
 /** A function's URL, as the API answers it. */
 export interface FunctionUrl {
   /** Its address, fixed for its life: https://<32 letters and digits>.<the function domain>/. */
   functionUrl: string;
   functionId: string;
+  /** The alias whose calls it makes; null for $LATEST's URL, the one the console shows. */
+  alias: string | null;
   authType: AuthType;
   cors: UrlCors | null;
   /** BUFFERED: the answer is sent whole, once the function returns. */
@@ -118,7 +120,9 @@ export function corsOf(form: CorsForm): { cors: UrlCors | null } | { problem: st
 
 /** Who may call a URL, in a sentence. */
 export const authTypeText = (authType: AuthType): string =>
-  authType === 'NONE' ? 'Anyone may call it.' : 'Only callers with an API key of this account that has functions:invoke.';
+  authType === 'NONE'
+    ? 'Anyone may call it.'
+    : 'Only callers with an access key of this account that may invoke it, signing for lambda, or an API key of it that has functions:invoke.';
 
 /** A URL's CORS, in a sentence. */
 export function corsText(cors: UrlCors | null): string {

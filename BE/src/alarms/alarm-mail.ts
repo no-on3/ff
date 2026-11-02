@@ -1,13 +1,16 @@
 import { frenchDecimal, frenchTime } from '../common/french';
 import type { Language } from '../mail/language';
 import type { Mail } from '../mail/mail.service';
+import { LATEST } from '../functions/qualifier';
 import { AlarmRule, AlarmState, BILLING_METRICS, EMAIL_METRICS, Evaluation, SYMBOL } from './alarm-rules';
 
 export interface AlarmChange {
   account: { id: string; name: string };
   alarm: Pick<AlarmRule, 'metric' | 'statistic' | 'period' | 'comparison' | 'threshold' | 'evaluationPeriods' | 'datapointsToAlarm'> & { name: string };
-  /** The alarm's function's name, or null for the account's. */
+  /** The alarm's function's name, with the alias or the version its calls named (`checkout:live`), or null for the account's. */
   functionName: string | null;
+  /** The version that ran the calls it watches, or $LATEST; null or absent for all of them. */
+  executedVersion?: string | null;
   /** The alarm's database's name, for a database's metric; null otherwise. */
   databaseName?: string | null;
   /** The alarm's bucket's name, for a bucket's metric; null otherwise. */
@@ -34,8 +37,9 @@ export function alarmMail(change: AlarmChange, language: Language): Omit<Mail, '
   const allMissing = e.missing === e.datapoints.length;
   if (language === 'fr') {
     const account = `du compte « ${change.account.name} » (${change.account.id})`;
+    const ran = change.executedVersion ? ` (les appels qu'exécute ${change.executedVersion === LATEST ? LATEST : `sa version ${change.executedVersion}`})` : '';
     const on = change.functionName
-      ? `la fonction « ${change.functionName} » ${account}`
+      ? `la fonction « ${change.functionName} »${ran} ${account}`
       : change.databaseName
         ? `la base de données « ${change.databaseName} » ${account}`
         : change.bucketName
@@ -62,8 +66,9 @@ export function alarmMail(change: AlarmChange, language: Language): Omit<Mail, '
       ].join('\n'),
     };
   }
+  const ran = change.executedVersion ? ` (the calls ${change.executedVersion === LATEST ? LATEST : `its version ${change.executedVersion}`} runs)` : '';
   const on = change.functionName
-    ? `the function "${change.functionName}" of the account "${change.account.name}" (${change.account.id})`
+    ? `the function "${change.functionName}"${ran} of the account "${change.account.name}" (${change.account.id})`
     : change.databaseName
       ? `the database "${change.databaseName}" of the account "${change.account.name}" (${change.account.id})`
       : change.bucketName

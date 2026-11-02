@@ -54,7 +54,7 @@
 #     secrets sign. Each account reads and changes only its own.
 # A route without a rule here fails the suite, so a new route can't skip it.
 # Same stack as hack/e2e.sh (hack/lib/e2e-stack.sh), plus Keycloak and Mailpit, in
-# compose project "ff-e2e-tenancy" (ports 55433 / 59004 / 58180 / 51026 / 58026);
+# compose project "ff-e2e-tenancy" (ports 25433 / 29004 / 28180 / 21026 / 28026);
 # removed on exit with the namespaces. Its sections run alone too, with what they
 # need (hack/lib/sections.sh): --list names them, --only and --from choose. --keep
 # removes nothing on exit, for a look and for the next run, which --reuse runs
@@ -64,11 +64,11 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/k8s/env.sh"
 E2E_PROJECT=ff-e2e-tenancy
 E2E_NAME=e2e-tenancy
-export FF_PG_PORT="${FF_E2E_TENANCY_PG_PORT:-55433}"
-export FF_S3_PORT="${FF_E2E_TENANCY_S3_PORT:-59004}"
-export FF_KEYCLOAK_PORT="${FF_E2E_TENANCY_KEYCLOAK_PORT:-58180}"
-export FF_MAIL_SMTP_PORT="${FF_E2E_TENANCY_MAIL_SMTP_PORT:-51026}"
-export FF_MAIL_UI_PORT="${FF_E2E_TENANCY_MAIL_UI_PORT:-58026}"
+export FF_PG_PORT="${FF_E2E_TENANCY_PG_PORT:-25433}"
+export FF_S3_PORT="${FF_E2E_TENANCY_S3_PORT:-29004}"
+export FF_KEYCLOAK_PORT="${FF_E2E_TENANCY_KEYCLOAK_PORT:-28180}"
+export FF_MAIL_SMTP_PORT="${FF_E2E_TENANCY_MAIL_SMTP_PORT:-21026}"
+export FF_MAIL_UI_PORT="${FF_E2E_TENANCY_MAIL_UI_PORT:-28026}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 sections_options "$@"
@@ -90,6 +90,8 @@ sqs_port="$(free_port)"
 sqs_port_oidc="$(free_port)"
 # Mail's SES endpoint, on the development backend alone, which the accounts' keys are tried at.
 ses_port="$(free_port)"
+# And Lambda's endpoint, the same way.
+lambda_port="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
@@ -238,10 +240,10 @@ function_body() { jq -cn --arg code "$code" --arg name "$1" '{name: $name, runti
 snapshot() {
   local caller=$1 fn=$2
   jq -cn --argjson fn "$("$caller" GET "/functions/$fn")" --argjson history "$("$caller" GET "/functions/$fn/invocations")" \
-    --argjson url "$("$caller" GET "/functions/$fn/url")" \
-    '{name: $fn.name, code: $fn.code, status: $fn.status, memory: $fn.memory, timeout: $fn.timeout,
+    --argjson urls "$("$caller" GET "/functions/$fn/urls")" \
+    '{name: $fn.name, code: $fn.code, status: $fn.status, memory: $fn.memory, timeout: $fn.timeout, revisionId: $fn.revisionId,
       minInstances: $fn.minInstances, maxInstances: $fn.maxInstances, invocations: $history.total,
-      url: $url.functionUrl, urlAuthType: $url.authType}'
+      urls: [$urls[] | "\(.alias // "$LATEST") \(.authType) \(.functionUrl)"]}'
 }
 
 # proved_domain <account> <domain>: the domain marked proved, as its DKIM record found would prove it.
@@ -292,7 +294,9 @@ path_for() {
   path="${path//\{identity\}/shop.l5.example.tn}" # a domain or an address to send mail from
   path="${path//\{address\}/gone@l5.example.tn}"
   path="${path//\{scheduleId\}/$missing}"
+  path="${path//\{version\}/1}" # a function's version: A's first
   [[ $path != *'{month}'* ]] || path="${path//\{month\}/$(date -u +%Y-%m)}"
+  [[ $template != /functions/*/aliases/* ]] || path="${path//\{name\}/live}" # A's alias
   path="${path//\{name\}/l5-photos-a}" # a bucket's, or a queue's
   path="${path//\{receiptHandle\}/bm90LWEtaGFuZGxl}"
   path="${path//\{uuid\}/$missing}" # an event source mapping's, which each loop names itself
@@ -315,7 +319,9 @@ body_for() {
   case "$1 $2" in
     "POST /functions") function_body l5-other ;;
     "PUT /functions/{id}") echo '{"name": "l5-taken-over"}' ;;
-    "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}}' ;;
+    "POST /functions/{id}/invoke") echo '{"input": {"name": "B"}, "qualifier": "live"}' ;; # A's alias
+    "POST /functions/{id}/aliases") echo '{"name": "l5-b", "functionVersion": "1"}' ;;
+    "PUT /functions/{id}/aliases/{name}") echo '{"functionVersion": "$LATEST"}' ;;
     "PUT /functions/{id}/scaling-config") echo '{"maxInstances": 1}' ;;
     "PUT /functions/{id}/event-invoke-config") echo '{"maximumRetryAttempts": 0}' ;;
     "POST /functions/{id}/event-sources") echo "{\"eventSourceArn\": \"arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a\"}" ;;
@@ -372,6 +378,7 @@ transfer() { jq -cn --arg reference "$typed" --arg received "$1" --arg withheld 
 
 section_stack() {
 section "the stack: its database and object storage, Keycloak and Mailpit, the cluster, customers' database, cache and mail servers"
+e2e_within_one_month 8
 e2e_dependencies keycloak mailpit
 e2e_cluster
 # Customers' databases (ADR 0008): the suite's own server, on 10.199.2.0/24, which no other run uses.
@@ -418,7 +425,8 @@ e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" \
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port" \
-  FF_SES_PORT="$ses_port" FF_SES_BASE="http://127.0.0.1:$ses_port"
+  FF_SES_PORT="$ses_port" FF_SES_BASE="http://127.0.0.1:$ses_port" \
+  FF_LAMBDA_PORT="$lambda_port" FF_LAMBDA_BASE="http://127.0.0.1:$lambda_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
@@ -446,6 +454,28 @@ check "A's usage counts the call (P-22)" "1" \
 url_a="$(as_a POST "/functions/$id/url" '{"authType": "NONE"}' | jq -r .functionUrl)"
 check "A gives its function a URL" "201 true" "$(status) $([[ $url_a =~ ^http://[a-z0-9]{32}\.fn\.localhost:$url_port/$ ]] && echo true || echo false)"
 check "which anyone may call: its host reaches A's function" '200 {"message":"Hello world"}' "$(call_url "$url_a") $(cat "$work/url-body")"
+version_a="$(as_a POST "/functions/$id/versions" '{"description": "l5"}')"
+check "A publishes a version of it, as Lambda's PublishVersion" "201 1 arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:1" \
+  "$(status) $(jq -r '"\(.version) \(.functionArn)"' <<<"$version_a")"
+alias_a="$(as_a POST "/functions/$id/aliases" '{"name": "live", "functionVersion": "1"}')"
+check "A points its alias live at it, as Lambda's CreateAlias" "201 arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:live 1" \
+  "$(status) $(jq -r '"\(.aliasArn) \(.functionVersion)"' <<<"$alias_a")"
+called_live="$(as_a POST "/functions/$id/invoke" '{"input": {}, "qualifier": "live"}')"
+check "A calls it through live: version 1 runs, in pods of its own" "201 COMPLETED 1 live" \
+  "$(status) $(jq -r '"\(.status) \(.version) \(.alias)"' <<<"$called_live")"
+history_live="$(as_a GET "/functions/$id/invocations?resource=live")"
+check "  ... which its history through live keeps alone, as CloudWatch's Resource picks" "200 1 $(jq -r .id <<<"$called_live") 1" \
+  "$(status) $(jq -r '"\(.total) \(.invocations[0].id) \(.invocations[0].version)"' <<<"$history_live")"
+metrics_live="$(as_a GET "/functions/$id/metrics?resource=live&executedVersion=1")"
+check "  ... and its metrics through live of version 1 count, with no instances, which no call's record names" "200 1 false" \
+  "$(status) $(jq -r '"\([.metrics.Invocations[]] | add) \(.metrics | has("Instances"))"' <<<"$metrics_live")"
+as_a POST "/functions/$id/invoke" '{"input": {}, "qualifier": "live", "invocationType": "DryRun"}' >/dev/null
+dry_live="$(status)"
+as_a POST "/functions/$id/invoke" '{"input": {}, "qualifier": "9", "invocationType": "DryRun"}' >/dev/null
+check "  ... which a call that doesn't wait names too: a DryRun through live passes, one of a version A hasn't is 404" "204 404" "$dry_live $(status)"
+live_url_a="$(as_a POST "/functions/$id/url?qualifier=live" '{"authType": "NONE"}' | jq -r .functionUrl)"
+check "  ... and a URL of its own, as Lambda's, which runs the version" '201 true 200 {"message":"Hello world"}' \
+  "$(status) $([ "$live_url_a" != "$url_a" ] && echo true || echo false) $(call_url "$live_url_a") $(cat "$work/url-body")"
 before="$(snapshot as_a "$id")"
 database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
 check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"
@@ -588,6 +618,13 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       usage_b="$(as_b GET /usage)"
       check "$route: B reads its own usage, which never counts A's function" "200 0" \
         "$(status) $(jq --arg id "$id" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_b")"
+      ;;
+    "GET /usage/aws-estimate")
+      # A's function was called this month; B called nothing.
+      estimate_b="$(as_b GET /usage/aws-estimate)"
+      estimate_status="$(status)"
+      check "$route: B's estimate at AWS's prices never counts A's calls" "200 0 true" \
+        "$estimate_status $(jq '[.months[].requests] | add' <<<"$estimate_b") $(as_a GET /usage/aws-estimate | jq '.months[-1].requests > 0')"
       ;;
     "GET /metrics")
       # A's function was called in the last hour; B called nothing.
@@ -836,6 +873,25 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       alarm_now="$(as_a GET "/alarms/$alarm_a")"
       check "  ... which A still has, unchanged" "200 l5 Errors $id" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
       ;;
+    "GET /functions/{id}/versions" | "POST /functions/{id}/versions" | "GET /functions/{id}/versions/{version}" | "DELETE /functions/{id}/versions/{version}" | \
+      "GET /functions/{id}/aliases" | "POST /functions/{id}/aliases" | "GET /functions/{id}/aliases/{name}" | "PUT /functions/{id}/aliases/{name}" | \
+      "DELETE /functions/{id}/aliases/{name}")
+      as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
+      check "$route: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
+      versions_now="$(as_a GET "/functions/$id/versions")"
+      aliases_now="$(as_a GET "/functions/$id/aliases")"
+      check "  ... A's versions and aliases as they were" "1 l5 live:1" \
+        "$(jq -r '"\(map(.version) | join(",")) \(.[0].description)"' <<<"$versions_now") $(jq -r 'map("\(.name):\(.functionVersion)") | join(",")' <<<"$aliases_now")"
+      ;;
+    "GET /functions/{id}/urls")
+      as_b GET "/functions/$id/urls" >/dev/null
+      check "$route: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
+      as_b PUT "/functions/$id/url?qualifier=live" '{"authType": "AWS_IAM"}' >/dev/null
+      check "  ... and for the URL of A's alias" "404 Function with ID $id not found" "$(status) $(message)"
+      urls_now="$(as_a GET "/functions/$id/urls")"
+      check "  ... A's URLs as they were, \$LATEST's first, then live's, both open to anyone" "200 \$LATEST:NONE,live:NONE $live_url_a" \
+        "$(status) $(jq -r '"\(map("\(.alias // "$LATEST"):\(.authType)") | join(",")) \(.[1].functionUrl)"' <<<"$urls_now")"
+      ;;
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
@@ -901,6 +957,9 @@ check "  ... and nothing of B's waits in A's function's queue" 0 "$(waiting_for 
 as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
 check "B can't name A's function as the destination of its own function's calls" \
   "400 destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_b:function:l5-a" "$(status) $(message)"
+as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:live" '{destinationConfig: {onSuccess: {destination: $arn}}}')" >/dev/null
+check "  ... nor A's alias live, by its qualified ARN" \
+  "400 destinationConfig.onSuccess.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_b:function:l5-a:live" "$(status) $(message)"
 # A's queue, as the SQS endpoint makes one: a row of FF's database.
 sql "INSERT INTO queues (account_id, name, kind) VALUES ('$account_a', 'l5-records', 'customer')"
 as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
@@ -919,6 +978,9 @@ check "  ... and A's message is still there, not received" "l5-orders-a 1 200" "
 as_b PUT /buckets/l5-photos-b/notifications "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" '{queueConfigurations: [{queueArn: $arn, events: ["s3:ObjectCreated:*"]}]}')" >/dev/null
 check "B's bucket can't send its events to A's queue" \
   "400 InvalidArgument: A destination must be a queue of the bucket's account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" "$(status) $(message)"
+as_b PUT /buckets/l5-photos-b/notifications "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:live" '{lambdaFunctionConfigurations: [{lambdaFunctionArn: $arn, events: ["s3:ObjectCreated:*"]}]}')" >/dev/null
+check "  ... nor run A's alias live, by its qualified ARN" \
+  "400 InvalidArgument: A destination must be a function of the bucket's account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:live" "$(status) $(message)"
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
 as_b DELETE "/functions/$own" >/dev/null
 check "B deletes its own function" 200 "$(status)"
@@ -1017,6 +1079,38 @@ $([[ "$(ses_with "$key_a_id" "$key_a_secret" send-email --from-email-address ord
 $(as_b GET /email/messages | jq '.messages | length')"
 }
 section_def ses_keys section_ses_keys s3_keys budget=15
+
+section_lambda_keys() {
+section "functions through Lambda's endpoint: each account's key finds its own account's functions alone"
+# lambda_with <key ID> <secret> <aws lambda arguments…>: the answer's text, or refused with the error's name, as the CLI prints it.
+lambda_with() {
+  local id=$1 secret=$2
+  shift 2
+  AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+    "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$lambda_port" lambda "$@" --output text 2>"$work/lambda.err" ||
+    echo "refused $(grep -oE 'An error occurred \([A-Za-z]+\)' "$work/lambda.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"
+}
+# A key of each account that may change all its functions, which the API's own keys don't.
+lambda_key_a="$(as_a POST /storage-keys '{"name": "l5-lambda-a", "functions": ["*"], "functionAccess": "write"}')"
+lambda_key_b="$(as_b POST /storage-keys '{"name": "l5-lambda-b", "functions": ["*"], "functionAccess": "write"}')"
+lambda_a=("$(jq -r .id <<<"$lambda_key_a")" "$(jq -r .secretAccessKey <<<"$lambda_key_a")")
+lambda_b=("$(jq -r .id <<<"$lambda_key_b")" "$(jq -r .secretAccessKey <<<"$lambda_key_b")")
+arn_a="arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a"
+check "B's key doesn't find A's function, by its name or by its ARN: each account's functions are its own" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException" \
+  "$(lambda_with "${lambda_b[@]}" get-function --function-name l5-a) $(lambda_with "${lambda_b[@]}" get-function --function-name "$arn_a")"
+check "  ... nor its alias, nor deletes it, nor invokes it" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
+  "$(lambda_with "${lambda_b[@]}" get-alias --function-name l5-a --name live) $(lambda_with "${lambda_b[@]}" delete-function --function-name "$arn_a") \
+$(lambda_with "${lambda_b[@]}" invoke --function-name l5-a /dev/null)"
+# A's own key finds it: what answers then is the operation, which FF doesn't offer yet.
+check "A's key finds it, by its name and by its ARN" "refused UnknownOperationException refused UnknownOperationException" \
+  "$(lambda_with "${lambda_a[@]}" get-function --function-name l5-a) $(lambda_with "${lambda_a[@]}" get-function --function-name "$arn_a")"
+check "  ... and a key that reaches no function, such as the one each account's buckets are reached with, none" "refused AccessDeniedException refused AccessDeniedException" \
+  "$(lambda_with "$key_a_id" "$key_a_secret" list-functions) $(lambda_with "$key_b_id" "$key_b_secret" get-function --function-name l5-a)"
+as_a DELETE "/storage-keys/${lambda_a[0]}" >/dev/null
+as_b DELETE "/storage-keys/${lambda_b[0]}" >/dev/null
+}
+section_def lambda_keys section_lambda_keys s3_keys budget=10
 
 section_anonymous() {
 section "nobody authenticated, through the guard, on every route (${#routes[@]})"
@@ -1225,6 +1319,12 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       usage_2="$(as_user_2 GET /usage)"
       check "$route: account 2's usage never counts account 1's function" "200 0" \
         "$(status) $(jq --arg id "$fn_1" '[.functions[] | select(.functionId == $id)] | length' <<<"$usage_2")"
+      ;;
+    "GET /usage/aws-estimate")
+      estimate_2="$(as_user_2 GET /usage/aws-estimate)"
+      estimate_status="$(status)"
+      check "$route: account 2's estimate at AWS's prices never counts account 1's calls" "200 0 true" \
+        "$estimate_status $(jq '[.months[].requests] | add' <<<"$estimate_2") $(as_user_1 GET /usage/aws-estimate | jq '.months[-1].requests > 0')"
       ;;
     "GET /metrics")
       metrics_2="$(as_user_2 GET /metrics)"
@@ -1600,6 +1700,13 @@ with_token "$key_1" GET /buckets >/dev/null
 check "a key without storage:read can't list the account's buckets" "403 This API key lacks the scope storage:read" "$(status) $(message)"
 with_token "$key_1" POST /buckets '{"name": "l5-by-key"}' >/dev/null
 check "nor make one without storage:write" "403 This API key lacks the scope storage:write" "$(status) $(message)"
+key_storage="$(as_user_1 POST /api-keys '{"name": "l5 storage", "scopes": ["storage:write", "functions:invoke"]}' | jq -r .key)"
+with_token "$key_storage" POST /storage-keys '{"functions": ["*"], "functionAccess": "write"}' >/dev/null
+check "a key with storage:write makes an access key to functions at a level its scopes have alone" \
+  "403 This API key lacks the scope functions:write, which a key that may write functions needs" "$(status) $(message)"
+invoker_key="$(with_token "$key_storage" POST /storage-keys '{"functions": ["*"], "functionAccess": "invoke"}')"
+check "  ... functions:invoke, then, for one that invokes them" "201 invoke" "$(status) $(jq -r .functionAccess <<<"$invoker_key")"
+as_user_1 DELETE "/storage-keys/$(jq -r .id <<<"$invoker_key")" >/dev/null
 with_token "$key_1" GET /queues >/dev/null
 check "a key without queues:read can't list the account's queues" "403 This API key lacks the scope queues:read" "$(status) $(message)"
 with_token "$key_1" POST /queues/l5-orders-1/messages '{"body": "by key"}' >/dev/null
@@ -1633,12 +1740,24 @@ section_def api_keys section_api_keys isolation budget=10
 section_url_credentials() {
 section "a function URL that takes the account's credentials"
 url_1="$(as_user_1 POST "/functions/$fn_1/url" '{"authType": "AWS_IAM"}' | jq -r .functionUrl)"
-check "account 1 gives its function a URL that takes its account's API keys" "201 AWS_IAM" "$(status) $(as_user_1 GET "/functions/$fn_1/url" | jq -r .authType)"
+check "account 1 gives its function a URL that takes its account's credentials" "201 AWS_IAM" "$(status) $(as_user_1 GET "/functions/$fn_1/url" | jq -r .authType)"
 check "account 1's key with functions:invoke calls it" '200 {"message":"Hello world"}' "$(call_url "$url_1" -H "Authorization: Bearer $key_1") $(cat "$work/url-body")"
 check "account 2's key, which may invoke account 2's functions, can't" '403 {"Message":"Forbidden"}' \
   "$(call_url "$url_1" -H "Authorization: Bearer $key_2") $(cat "$work/url-body")"
 check "nor a key without functions:invoke, nor a user's token, nor nobody" "403 403 403" \
   "$(call_url "$url_1" -H "Authorization: Bearer $key_usage") $(call_url "$url_1" -H "Authorization: Bearer $token_1") $(call_url "$url_1")"
+# signed_call <URL> <access key JSON>: a request to the URL signed for lambda with the access key, as AWS's tools sign one.
+signed_call() { call_url "$1" --aws-sigv4 "aws:amz:tn-tunis-1:lambda" --user "$(jq -r '"\(.id):\(.secretAccessKey)"' <<<"$2")"; }
+access_1="$(as_user_1 POST /storage-keys '{"name": "l5-url-invoker", "functions": ["*"], "functionAccess": "invoke"}')"
+access_2="$(as_user_2 POST /storage-keys '{"name": "l5-url-invoker", "functions": ["*"], "functionAccess": "write"}')"
+check "each account makes an access key that reaches all its functions, of the same name" "l5-url-invoker l5-url-invoker" \
+  "$(jq -r .name <<<"$access_1") $(jq -r .name <<<"$access_2")"
+check "account 1's access key, signing for lambda, calls it" '200 {"message":"Hello world"}' "$(signed_call "$url_1" "$access_1") $(cat "$work/url-body")"
+check "account 2's, which may do all with account 2's functions, can't, rightly signed: as good as none" '403 {"Message":"Forbidden"}' \
+  "$(signed_call "$url_1" "$access_2") $(cat "$work/url-body")"
+as_user_1 DELETE "/storage-keys/$(jq -r .id <<<"$access_1")" >/dev/null
+check "account 1 revokes its access key, which stops calling at once" "204 403" "$(status) $(signed_call "$url_1" "$access_1")"
+as_user_2 DELETE "/storage-keys/$(jq -r .id <<<"$access_2")" >/dev/null
 check "the call is in account 1's history as its URL's, and account 2's key reaches none of it" "url 404" \
   "$(as_user_1 GET "/functions/$fn_1/invocations?limit=1" | jq -r '.invocations[0].source') $(with_token "$key_2" GET "/functions/$fn_1/url" >/dev/null; status)"
 as_user_1 DELETE "/api-keys/$key_1_id" >/dev/null
@@ -1648,8 +1767,8 @@ check "which stops working at once" "401 The API key was revoked" "$(status) $(m
 check "on the URL too" 403 "$(call_url "$url_1" -H "Authorization: Bearer $key_1")"
 as_user_1 DELETE "/functions/$fn_1/url" >/dev/null
 check "account 1 deletes the URL" 204 "$(status)"
-check "account 1's function was invoked twice more by its key, through the API and its URL, and is otherwise unchanged" \
-  "$(jq -c '.invocations += 2' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
+check "account 1's function was invoked three times more by its keys, through the API and its URL, and is otherwise unchanged" \
+  "$(jq -c '.invocations += 3' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
 }
 section_def url_credentials section_url_credentials api_keys budget=5
 
@@ -1708,7 +1827,7 @@ section_audit() {
 section "the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create email.identity.create email.suppression.put bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add storage_key.create function_url.create api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create email.identity.create email.suppression.put bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add storage_key.create api_key.create storage_key.create storage_key.delete function_url.create storage_key.create storage_key.delete api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"
@@ -1978,9 +2097,21 @@ check "the operator finds a call by its request ID: its function and account, in
   "$(status) $(jq -r '.calls[0] | "\(.functionId) \(.accountId) \(.inHistory)"' <<<"$found")"
 found="$(with_token "$operator_token" GET "/admin/search?q=$user_1")"
 check "and an account by its owner's e-mail" "200 $account_1" "$(status) $(jq -r '[.accounts[].id] | join(" ")' <<<"$found")"
+as_user_1 POST "/functions/$fn_1/versions" '{"description": "l5: for support"}' >/dev/null
+published="$(status)"
+as_user_1 POST "/functions/$fn_1/aliases" '{"name": "live", "functionVersion": "1"}' >/dev/null
+check "its owner publishes a version, and points the alias live at it" "201 201" "$published $(status)"
 page="$(with_token "$operator_token" GET "/admin/functions/$fn_1")"
 check "the function's page: its account and its recent calls, none of what went in or out" "200 $account_1 true false" \
   "$(status) $(jq -r --arg id "$logged_id" '"\(.account.id) \([.recentCalls[].id] | index($id) != null) \(tostring | contains("\"logs\""))"' <<<"$page")"
+check "  ... its versions and aliases: what a version froze, never its code or its variables" \
+  "1 l5: for support live:1 version,description,runtime,memory,timeout,codeSha256,codeSize,createdAt" \
+  "$(jq -r '"\(.versions[0].version) \(.versions[0].description) \(.aliases[0].name):\(.aliases[0].functionVersion) \(.versions[0] | keys_unsorted | join(","))"' <<<"$page")"
+account_page="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
+account_status="$(status)"
+code_room="$(as_user_1 GET /me | jq -r --arg a "$account_1" '.accounts[] | select(.id == $a) | .plan.limits.codeStorageMb')"
+check "  ... and the account's page what its functions' code holds, against its plan's code storage" "200 true $code_room" \
+  "$account_status $(jq -r '"\(.codeStorage.bytes > 0) \(.codeStorage.limitMb)"' <<<"$account_page")"
 with_token "$operator_token" POST "/admin/functions/$fn_1/invocations/$logged_id" '{}' >/dev/null
 check "a call's data needs a reason" 400 "$(status)"
 look="$(with_token "$operator_token" POST "/admin/functions/$fn_1/invocations/$logged_id" '{"reason": "l5: the customer asked about this call"}')"
@@ -2006,8 +2137,9 @@ first_book="$(jq -c '.[0].document' <<<"$books")"
 latest_book="$(jq -c '.[-1].document' <<<"$books")"
 starts="$(( $(date -u +%Y) + 1 ))-01-01T00:00:00Z"
 with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$first_book" '{validFrom: $from, document: $doc, reason: "l5 tries"}')" >/dev/null
-check "a book after one with databases', buckets', queues', caches' and mail's prices is refused without them, each named" \
-  "400 14 prices.databaseStorageGbMonth: the book before this one has it, so this one must too" "$(status) $(jq -r '"\(.message | length) \(.message[0])"' "$work/body")"
+check "a book after one with databases', buckets', queues', caches' and mail's prices, and what AWS bills that FF doesn't, is refused without them, each named" \
+  "400 25 prices.databaseStorageGbMonth: the book before this one has it, so this one must too source.usdPrices.publicIpv4Hour: the book before this one has it, so this one must too" \
+  "$(status) $(jq -r '"\(.message | length) \(.message[0]) \(.message[-1])"' "$work/body")"
 created="$(with_token "$operator_token" POST /admin/price-books "$(jq -cn --arg from "$starts" --argjson doc "$latest_book" '{validFrom: $from, document: $doc, reason: "l5: next year"}')")"
 check "the operator adds a book for next year from the latest: scheduled, made by the operator" "201 scheduled true" \
   "$(status) $(jq -r '"\(.status) \(.createdBy | startswith("operator:"))"' <<<"$created")"
@@ -2030,7 +2162,8 @@ found="$(with_token "$operator_token" GET "/admin/payments?reference=$typed")"
 check "the operator finds account 1's pro-forma by its reference, typed from the statement without dashes" "200 $pf_1 pending 59.500 $account_1" \
   "$(status) $(jq -r '[.payments[] | "\(.id) \(.status) \(.total) \(.accountId)"] | join(",")' <<<"$found")"
 before_transfer="$(as_user_1 GET /billing/balance | jq -r .balance)"
-today="$(date -u +%F)"
+# The bank statement's day, in Tunisia, as the backend dates transfers and invoices.
+today="$(TZ=Africa/Tunis date +%F)"
 with_token "$operator_token" POST /admin/bank-transfers "$(transfer 58.000 0.892)" >/dev/null
 check "a transfer that doesn't make the total is refused, naming the amounts" \
   "400 received 58.000 TND and withheld 0.892 TND make 58.892 TND, not the pro-forma's 59.500 TND" "$(status) $(message)"
@@ -2081,8 +2214,10 @@ section_def transfers section_transfers admin signup budget=5
 
 section_invoices() {
 section "invoices (P-36)"
-last_month="$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%Y-%m)"
-last_day="$(date -u -d "$(date -u +%Y-%m-01) -1 day" +%F)"
+# Last month as the backend's drafts take it, in Tunisia: in the hour before UTC's midnight at a month's end, the next
+# month has begun there.
+last_month="$(TZ=Africa/Tunis date -d "$(TZ=Africa/Tunis date +%Y-%m-01) -1 day" +%Y-%m)"
+last_day="$(TZ=Africa/Tunis date -d "$(TZ=Africa/Tunis date +%Y-%m-01) -1 day" +%F)"
 late="$(as_user_1 POST /billing/pro-formas '{"credit": "20"}')"
 with_token "$operator_token" POST /admin/bank-transfers \
   "$(jq -cn --arg reference "$(jq -r .reference <<<"$late")" --arg on "$last_day" '{reference: $reference, received: "23.800", withheld: "0", receivedOn: $on, reason: "l5: the statement of last month"}')" >/dev/null
@@ -2247,8 +2382,9 @@ check "today's calls, as the usage records count them" \
 check "the credit FF owes, as the wallets hold it, to the millime" \
   "$(sql_value "SELECT to_char(coalesce(sum(greatest(balance, 0)), 0) / 1000.0, 'FM999999990.000') FROM (SELECT sum(e.amount_minor) AS balance FROM ledger_accounts a LEFT JOIN ledger_entries e ON e.ledger_account_id = a.id WHERE a.type = 'wallet' AND a.currency = 'TND' GROUP BY a.id) w")" \
   "$(jq -r '.money[] | select(.currency == "TND") | .balances.owedByFF' <<<"$overview")"
-check "the invoices issued this month, the one above among them" \
-  "$(sql_value "SELECT count(*) FROM invoices WHERE kind = 'invoice' AND issued_on >= date_trunc('month', now() AT TIME ZONE 'UTC')::date")" "$(jq .invoices.issued <<<"$overview")"
+check "the invoices issued this month in Tunisia, where they are dated, the one above among them" \
+  "$(sql_value "SELECT count(*) FROM invoices WHERE kind = 'invoice' AND issued_on >= date_trunc('month', now() AT TIME ZONE 'Africa/Tunis')::date") $(TZ=Africa/Tunis date +%Y-%m)" \
+  "$(jq -r '"\(.invoices.issued) \(.invoices.month)"' <<<"$overview")"
 check "and the last 7 days of capacity against billing" 7 "$(jq '.capacity | length' <<<"$overview")"
 }
 section_def overview section_overview admin budget=5

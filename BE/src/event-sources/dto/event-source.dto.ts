@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, ValidateIf, ValidateNested } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateIf, ValidateNested } from 'class-validator';
+import { QUALIFIER } from '../../functions/qualifier';
 
 /** Lambda's one function response type for SQS: the call's answer names the messages that failed. */
 export const REPORT_BATCH_ITEM_FAILURES = 'ReportBatchItemFailures';
@@ -54,6 +55,15 @@ export class EventSourceSettingsDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  @ApiPropertyOptional({
+    example: 'live',
+    description: "The version or the alias that reads the queue, as Lambda's mapping of a qualified function: $LATEST, the function as it is, when left out at first",
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(QUALIFIER, { message: "qualifier is $LATEST, a version's number or an alias's name, as Lambda's" })
+  qualifier?: string;
 }
 
 /** POST /functions/:id/event-sources: as Lambda's CreateEventSourceMapping, for a queue of the account. */
@@ -79,7 +89,7 @@ export class EventSourceView {
   @ApiProperty({ example: 'arn:aws:sqs:tn-tunis-1:000000000001:orders' })
   eventSourceArn: string;
 
-  @ApiProperty({ example: 'arn:aws:lambda:tn-tunis-1:000000000001:function:orders-worker' })
+  @ApiProperty({ example: 'arn:aws:lambda:tn-tunis-1:000000000001:function:orders-worker', description: "Qualified by the version or the alias that reads it, as Lambda's" })
   functionArn: string;
 
   @ApiProperty({ example: 10 })

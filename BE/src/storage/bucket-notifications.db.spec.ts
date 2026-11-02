@@ -4,8 +4,8 @@
  * them, and through FF's API, checked as S3 checks them, each change in the
  * audit log, S3's test event in each queue named; then the events of uploads
  * and deletions delivered, S3's records, to a function's queue of calls that
- * don't wait and to a customer's queue, a configuration whose destination is
- * gone dropping its events. Each run works in a scratch database, dropped
+ * don't wait, of the alias its ARN names, and to a customer's queue, a
+ * configuration whose destination is gone dropping its events. Each run works in a scratch database, dropped
  * afterwards, and buckets of its own in the store.
  *   docker compose up -d --wait postgres && npm run test:db
  */
@@ -32,6 +32,7 @@ import { CreditService } from '../billing/credit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
+import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { onePlan } from '../plans/test-fixtures';
 import { BucketEventDelivery } from '../queues/bucket-event-delivery';
@@ -50,6 +51,8 @@ import { StorageKey } from './storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey, newStoreName } from './storage-names';
 import { StorageRequestCount } from './storage-request-count.entity';
 import { StorageRequestCountsService } from './storage-request-counts.service';
+import { testObjectStore, testStoreClient } from '../object-store/test-fixtures';
+import { notedUses } from './test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '720000000001';
@@ -57,21 +60,8 @@ const OTHER = '720000000002';
 const REGION = 'tn-tunis-1';
 
 run("buckets' notifications, as S3's, through the S3 front door and FF's API (L2)", () => {
-  // The store's settings as the backend reads them, FF_OBJECT_STORE_*, alone: BE/.env's development SeaweedFS, or the CI's own.
-  const objectStore = {
-    endPoint: process.env.FF_OBJECT_STORE_ENDPOINT ?? 'localhost',
-    port: Number(process.env.FF_OBJECT_STORE_PORT ?? 9003),
-    useSSL: process.env.FF_OBJECT_STORE_USE_SSL === 'true',
-    accessKey: process.env.FF_OBJECT_STORE_ACCESS_KEY ?? 'ffdevaccesskey',
-    secretKey: process.env.FF_OBJECT_STORE_SECRET_KEY ?? 'ffdevsecretkey-local-only',
-  };
-  const store = new S3Client({
-    endpoint: `${objectStore.useSSL ? 'https' : 'http'}://${objectStore.endPoint}:${objectStore.port}`,
-    region: 'us-east-1',
-    forcePathStyle: true,
-    credentials: { accessKeyId: objectStore.accessKey, secretAccessKey: objectStore.secretKey },
-    requestChecksumCalculation: 'WHEN_REQUIRED',
-  });
+  const objectStore = testObjectStore();
+  const store = testStoreClient();
   const encryption = new EncryptionService({ getOrThrow: () => [{ id: 'test', key: randomBytes(32) }] } as unknown as ConfigService);
   let db: ScratchDatabase;
   let frontDoor: S3FrontDoor;
@@ -158,8 +148,9 @@ run("buckets' notifications, as S3's, through the S3 front door and FF's API (L2
       { increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 }) },
       notifications,
       events,
-      // The bucket is no site: sites have their own suite.
+      // The bucket is no site: sites have their own suite; nor are its keys' uses this suite's.
       {} as BucketWebsitesService,
+      notedUses(),
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
     client = new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: key.secret }, maxAttempts: 1 });
@@ -210,7 +201,7 @@ run("buckets' notifications, as S3's, through the S3 front door and FF's API (L2
         }),
       );
 
-    expect(await refused(put(missing))).toBe(`InvalidArgument: Unable to validate the following destination configurations: ${missing}: the account has no such function or queue`);
+    expect(await refused(put(missing))).toBe(`InvalidArgument: Unable to validate the following destination configurations: ${missing}: the account has no such function, version, alias or queue`);
     expect(await refused(put(missing, true))).toBe('accepted');
     expect(await refused(put(`arn:aws:lambda:${REGION}:${OTHER}:function:thumbnails`, true))).toBe(
       `InvalidArgument: A destination must be a function of the bucket's account, in ${REGION}: arn:aws:lambda:${REGION}:${OTHER}:function:thumbnails`,
@@ -267,6 +258,22 @@ run("buckets' notifications, as S3's, through the S3 front door and FF's API (L2
     );
     await expect(notifications.get(OTHER, photos.name)).rejects.toThrow(`The account has no bucket named "${photos.name}"`);
     expect(await notifications.put(ACCOUNT, photos.name, {})).toEqual({ lambdaFunctionConfigurations: [], queueConfigurations: [] });
+  });
+
+  it("calls the alias a function's ARN names, kept beside the event for its worker, and refuses an alias the function hasn't", async () => {
+    await db.dataSource.getRepository(FunctionAlias).insert({ functionId: thumbnails.id, accountId: ACCOUNT, name: 'live', version: null });
+    const put = (arn: string) => notifications.put(ACCOUNT, photos.name, { lambdaFunctionConfigurations: [{ id: 'live', lambdaFunctionArn: arn, events: ['s3:ObjectCreated:*'] }] });
+
+    await expect(put(`${FUNCTION_ARN}:canary`)).rejects.toThrow(`${FUNCTION_ARN}:canary: the account has no such function, version, alias or queue`);
+    await expect(put(`${FUNCTION_ARN}:3`)).rejects.toThrow(`${FUNCTION_ARN}:3: the account has no such function, version, alias or queue`);
+    // By its name too, the alias after a colon, kept as its ARN.
+    expect((await put('thumbnails:live')).lambdaFunctionConfigurations[0].lambdaFunctionArn).toBe(`${FUNCTION_ARN}:live`);
+    await clear();
+    await client.send(new PutObjectCommand({ Bucket: photos.name, Key: 'live.txt', Body: 'x' }));
+    await frontDoor.notified();
+
+    expect(await db.dataSource.query(`SELECT attributes FROM queue_messages WHERE function_id = $1`, [thumbnails.id])).toEqual([{ attributes: { qualifier: 'live' } }]);
+    await notifications.put(ACCOUNT, photos.name, {});
   });
 
   it("drops the events of a configuration whose destination is gone since, saying so", async () => {

@@ -22,9 +22,9 @@ pub fn size(bytes: u64) -> String {
 /// A folder's name, its path's links and dots resolved: `.` is the folder it names.
 pub fn folder_name(folder: &Path) -> Result<String, Error> {
     let resolved = std::fs::canonicalize(folder)
-        .map_err(|error| Error::new(Kind::Usage, format!("Couldn't read {}: {error}", folder.display())))?;
+        .map_err(|error| Error::usage(format!("Couldn't read {}: {error}", folder.display())))?;
     if !resolved.is_dir() {
-        return Err(Error::new(Kind::Usage, format!("{} isn't a folder", folder.display())));
+        return Err(Error::usage(format!("{} isn't a folder", folder.display())));
     }
     Ok(resolved.file_name().and_then(|name| name.to_str()).unwrap_or("function").to_owned())
 }
@@ -33,7 +33,7 @@ pub fn folder_name(folder: &Path) -> Result<String, Error> {
 pub fn handler_of(package: &Package, named: Option<&str>) -> Result<Option<String>, Error> {
     match named {
         Some(handler) => match package::handler_problem(&package.files, handler, package.runtime) {
-            Some(problem) => Err(Error::new(Kind::Usage, format!("{problem}: name another with --handler"))),
+            Some(problem) => Err(Error::usage(format!("{problem}: name another with --handler"))),
             None => Ok(Some(handler.to_owned())),
         },
         None => Ok(package::default_handler(&package.files, package.runtime)),

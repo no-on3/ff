@@ -4,14 +4,27 @@ import { In, Not, Repository } from 'typeorm';
 import { AuditEvent, AuditService } from '../audit/audit.service';
 import { likeLiteral } from '../common/like';
 import { FunctionLogsQuery, FunctionLogsView } from '../functions/dto/function-logs.dto';
+import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
+import { FunctionVersion } from '../functions/entities/function-version.entity';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { FunctionUrlsService } from '../function-urls/function-urls.service';
 import { CustomDomainsService } from '../function-urls/custom-domains.service';
+import { FunctionUrlView } from '../function-urls/dto/function-url.dto';
+import { LATEST } from '../functions/qualifier';
 import { Schedule } from '../schedules/schedule.entity';
 import { AdminAccountsService } from './admin-accounts.service';
-import { AdminCallDataView, AdminCallHitView, AdminCallView, AdminCodeView, AdminFunctionHitView, AdminFunctionPageView, AdminSearchView } from './admin-support.dto';
+import {
+  AdminCallDataView,
+  AdminCallHitView,
+  AdminCallView,
+  AdminCodeView,
+  AdminFunctionHitView,
+  AdminFunctionPageView,
+  AdminFunctionUrlView,
+  AdminSearchView,
+} from './admin-support.dto';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FAILED = [InvocationStatus.ERROR, InvocationStatus.TIMEOUT, InvocationStatus.THROTTLED, InvocationStatus.LOST];
@@ -50,6 +63,15 @@ const callView = (invocation: FunctionInvocation): AdminCallView => ({
   errorType: errorType(invocation.error),
 });
 
+/** A URL as support sees it: its address, who may call it, whether it has CORS, and its domains. */
+const supportUrl = (url: FunctionUrlView, domains: AdminFunctionUrlView['domains']): AdminFunctionUrlView => ({
+  functionUrl: url.functionUrl,
+  authType: url.authType,
+  cors: url.cors !== null,
+  createdAt: url.createdAt,
+  domains,
+});
+
 /**
  * Support for FF's operators: finding what a customer asks about, and a
  * function's page. What the customer's users sent and got back, the code and
@@ -68,6 +90,8 @@ export class AdminSupportService {
     private readonly urls: FunctionUrlsService,
     private readonly domains: CustomDomainsService,
     @InjectRepository(Schedule) private readonly schedules: Repository<Schedule>,
+    @InjectRepository(FunctionVersion) private readonly versions: Repository<FunctionVersion>,
+    @InjectRepository(FunctionAlias) private readonly aliases: Repository<FunctionAlias>,
   ) {}
 
   /**
@@ -136,29 +160,64 @@ export class AdminSupportService {
     }));
   }
 
-  /** A function's page: its settings and state, its account, and its recent calls and failures, without their data. */
+  /**
+   * A function's page: its settings and state, its URLs with their domains,
+   * its versions and aliases, what its schedules run, its account, and its
+   * recent calls and failures, without their data.
+   */
   async functionPage(id: string): Promise<AdminFunctionPageView> {
     const fn = await this.findFunction(id);
-    const [recent, failed, url, names, domains, schedules] = await Promise.all([
+    const [recent, failed, urls, names, domains, schedules, versions, aliases] = await Promise.all([
       this.invocations.find({ where: { functionId: id }, order: { createdAt: 'DESC' }, take: 20 }),
       this.invocations.find({ where: { functionId: id, status: In(FAILED) }, order: { createdAt: 'DESC' }, take: 10 }),
-      this.urls.find(id),
+      this.urls.ofFunction(id),
       this.functionsService.environmentNames(id),
-      this.domains.forFunction(id),
+      this.domains.forFunctionUrls(id),
       this.schedules.find({ where: { functionId: id }, order: { name: 'ASC' } }),
+      // Its columns the page shows: a version keeps inline code too, the customer's.
+      this.versions.find({
+        select: { version: true, description: true, runtime: true, memory: true, timeout: true, codeSha256: true, codeSize: true, createdAt: true },
+        where: { functionId: id },
+        order: { version: 'DESC' },
+      }),
+      this.aliases.find({ where: { functionId: id }, order: { name: 'ASC' } }),
     ]);
+    const urlOf = (alias: string | null): AdminFunctionUrlView | null => {
+      const url = urls.find((each) => each.alias === alias);
+      return url ? supportUrl(url, (domains.get(alias) ?? []).map(({ domain, status, checkError }) => ({ domain, status, checkError }))) : null;
+    };
     const { name, runtime, memory, timeout, minInstances, maxInstances, status, eventFormat, createdAt, updatedAt } = fn;
     return {
       function: { id, name, runtime, memory, timeout, minInstances, maxInstances, status, eventFormat, error: fn.error ?? null, createdAt, updatedAt },
-      url: url && {
-        functionUrl: url.functionUrl,
-        authType: url.authType,
-        cors: url.cors !== null,
-        createdAt: url.createdAt,
-        domains: domains.map(({ domain, status, checkError }) => ({ domain, status, checkError })),
-      },
+      url: urlOf(null),
+      versions: versions.map((v) => ({
+        version: String(v.version),
+        description: v.description,
+        runtime: v.runtime,
+        memory: v.memory,
+        timeout: v.timeout,
+        codeSha256: v.codeSha256,
+        codeSize: v.codeSize,
+        createdAt: v.createdAt,
+      })),
+      aliases: aliases.map((alias) => ({
+        name: alias.name,
+        functionVersion: alias.version === null ? LATEST : String(alias.version),
+        additionalVersion: alias.additionalVersion === null ? null : String(alias.additionalVersion),
+        additionalWeight: alias.additionalWeight,
+        description: alias.description,
+        url: urlOf(alias.name),
+      })),
       ...names,
-      schedules: schedules.map(({ name, expression, enabled, nextRunAt, lastRunAt, lastOutcome }) => ({ name, expression, enabled, nextRunAt, lastRunAt, lastOutcome })),
+      schedules: schedules.map(({ name, expression, qualifier, enabled, nextRunAt, lastRunAt, lastOutcome }) => ({
+        name,
+        expression,
+        qualifier: qualifier ?? LATEST,
+        enabled,
+        nextRunAt,
+        lastRunAt,
+        lastOutcome,
+      })),
       account: await this.accounts.summaryOf(fn.accountId),
       recentCalls: recent.map(callView),
       recentErrors: failed.map(callView),

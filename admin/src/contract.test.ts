@@ -17,6 +17,7 @@ import invoiceEntitySource from '../../BE/src/billing/invoices/invoice.entity.ts
 import adminAccountsDtoSource from '../../BE/src/admin/admin-accounts.dto.ts?raw';
 import adminEmailDtoSource from '../../BE/src/admin/admin-email.dto.ts?raw';
 import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
+import storageDtoSource from '../../BE/src/storage/dto/storage.dto.ts?raw';
 import adminCreditsDtoSource from '../../BE/src/admin/admin-credits.dto.ts?raw';
 import adminSupportDtoSource from '../../BE/src/admin/admin-support.dto.ts?raw';
 import adminStatsDtoSource from '../../BE/src/admin/admin-stats.dto.ts?raw';
@@ -25,16 +26,16 @@ import ledgerTransactionSource from '../../BE/src/billing/ledger/ledger-transact
 import realmSource from '../../deploy/keycloak/ff-realm.json?raw';
 import viteConfigSource from '../vite.config.ts?raw';
 import { DEFAULT_OIDC_CLIENT_ID } from './config';
-import { ACCOUNT_STATUSES, BUCKET_FIELDS, CACHE_FIELDS, DATABASE_FIELDS, QUEUE_FIELDS, QUEUE_MESSAGES_FIELDS, QUEUE_STORAGE_FIELDS, STATUS_CHANGES } from './lib/accounts';
+import { ACCESS_KEY_FIELDS, ACCOUNT_STATUSES, BUCKET_FIELDS, CACHE_FIELDS, DATABASE_FIELDS, QUEUE_FIELDS, QUEUE_MESSAGES_FIELDS, STATUS_CHANGES, STORAGE_FIELDS } from './lib/accounts';
 import { FF_ACTIONS, OPERATOR_ACTIONS } from './lib/audit';
-import { CALL_FIELDS, CALL_HIT_FIELDS, DOMAIN_FIELDS, FUNCTION_HIT_FIELDS, FUNCTION_PAGE_FIELDS, FUNCTION_URL_FIELDS, SCHEDULE_FIELDS } from './lib/support';
+import { ALIAS_FIELDS, CALL_FIELDS, CALL_HIT_FIELDS, DOMAIN_FIELDS, FUNCTION_HIT_FIELDS, FUNCTION_PAGE_FIELDS, FUNCTION_URL_FIELDS, SCHEDULE_FIELDS, VERSION_FIELDS } from './lib/support';
 import { ADMIN_CREDIT_FIELDS, GRANT_FIELDS, GRANT_KINDS, GRANT_REQUEST_FIELDS } from './lib/credits';
 import { ACCOUNT_EMAIL_FIELDS, EMAIL_CHANGE_FIELDS, ENFORCEMENT } from './lib/email';
 import { ADMIN_INVOICE_FIELDS, INVOICE_KINDS } from './lib/invoices';
-import { OVERVIEW_FIELDS } from './lib/overview';
+import { OVERVIEW_FIELDS, OVERVIEW_INVOICE_FIELDS } from './lib/overview';
 import { ADMIN_PAYMENT_FIELDS, CERTIFICATE_MAX_MB, CERTIFICATE_TYPES, PAYMENT_STATUSES } from './lib/payments';
 import { LIMIT_FIELDS } from './lib/plans';
-import { SKUS, multiplyDecimals } from './lib/prices';
+import { ESTIMATE_SKUS, SKUS, multiplyDecimals } from './lib/prices';
 import { REASON_HEADER, REASON_LENGTH } from './lib/reason';
 import { SETTINGS } from './lib/settings';
 
@@ -171,6 +172,13 @@ describe("the plans' limits and the price books' SKUs (P-73)", () => {
     expect(skus).toEqual([...SKUS]);
   });
 
+  it("are the backend's, for what AWS bills that FF doesn't, in its order: the US$ prices after SES's", () => {
+    const usd = priceBookSource.slice(priceBookSource.indexOf('const usdPricesSchema = z.strictObject({'));
+    const keys = [...usd.slice(0, usd.indexOf('\n});')).matchAll(/^ {2}(\w+): /gm)].map((match) => match[1]);
+
+    expect(keys.slice(keys.indexOf('emailAttachmentsGb') + 1)).toEqual([...ESTIMATE_SKUS]);
+  });
+
   it("price the first book's TND as the migration has them: its US$ prices times its rate", () => {
     const usd = priceBooksMigration.slice(priceBooksMigration.indexOf('usdPrices: {'), priceBooksMigration.indexOf("usdRate: '"));
     const tnd = priceBooksMigration.slice(priceBooksMigration.indexOf('  prices: {'), priceBooksMigration.indexOf('minimumBilledMs'));
@@ -223,6 +231,7 @@ describe('credit grants and the account page\'s credit (P-74)', () => {
 
   it("have the API's overview fields, the accounts' statuses among them", () => {
     expect(fieldsOf(adminStatsDtoSource, 'export class OverviewView {')).toEqual([...OVERVIEW_FIELDS]);
+    expect(fieldsOf(adminStatsDtoSource, 'export class OverviewInvoices {')).toEqual([...OVERVIEW_INVOICE_FIELDS]);
     expect(fieldsOf(adminStatsDtoSource, 'export class OverviewCapacityDay {')).toEqual(['day', 'reservedGbS', 'provisionedGbS', 'billedGbS', 'requests']);
     expect(adminStatsDtoSource).toContain('byStatus: Record<AccountStatus, number>;');
   });
@@ -251,9 +260,18 @@ describe('credit grants and the account page\'s credit (P-74)', () => {
   it("have the API's fields of the account's queues, their messages counted, and what they hold together against the plan's room", () => {
     expect(fieldsOf(adminAccountsDtoSource, 'export class AdminQueueView {')).toEqual([...QUEUE_FIELDS]);
     expect(fieldsOf(queueDtoSource, 'export class QueueMessagesView {')).toEqual([...QUEUE_MESSAGES_FIELDS]);
-    expect(fieldsOf(adminAccountsDtoSource, 'export class AdminQueueStorageView {')).toEqual([...QUEUE_STORAGE_FIELDS]);
+    expect(fieldsOf(adminAccountsDtoSource, 'export class AdminStorageView {')).toEqual([...STORAGE_FIELDS]);
     expect(adminAccountsDtoSource).toContain("@ApiProperty({ type: [AdminQueueView], description: 'Its queues, by name' }) queues: AdminQueueView[];");
-    expect(adminAccountsDtoSource).toContain('@ApiProperty({ type: AdminQueueStorageView }) queueStorage: AdminQueueStorageView;');
+    expect(adminAccountsDtoSource).toContain('queueStorage: AdminStorageView;');
+  });
+
+  it("have the API's fields of the account's access keys, as its owners see them", () => {
+    expect(fieldsOf(storageDtoSource, 'export class StorageKeyView {')).toEqual([...ACCESS_KEY_FIELDS]);
+    expect(adminAccountsDtoSource).toContain('accessKeys: StorageKeyView[];');
+  });
+
+  it("have what the packages its functions and their versions name hold, against the plan's code storage", () => {
+    expect(adminAccountsDtoSource).toContain('codeStorage: AdminStorageView;');
   });
 
   it("have the API's credit fields on the account page", () => {
@@ -296,10 +314,12 @@ describe('support', () => {
     expect(fieldsOf(adminSupportDtoSource, 'export class AdminCallView {')).toEqual([...CALL_FIELDS]);
   });
 
-  it("has the API's fields for a function's page and its URL", () => {
+  it("has the API's fields for a function's page, its URL, its versions and its aliases", () => {
     expect(fieldsOf(adminSupportDtoSource, 'export class AdminFunctionPageView {')).toEqual([...FUNCTION_PAGE_FIELDS]);
     expect(fieldsOf(adminSupportDtoSource, 'export class AdminFunctionUrlView {')).toEqual([...FUNCTION_URL_FIELDS]);
     expect(fieldsOf(adminSupportDtoSource, 'export class AdminDomainView {')).toEqual([...DOMAIN_FIELDS]);
     expect(fieldsOf(adminSupportDtoSource, 'export class AdminScheduleView {')).toEqual([...SCHEDULE_FIELDS]);
+    expect(fieldsOf(adminSupportDtoSource, 'export class AdminVersionView {')).toEqual([...VERSION_FIELDS]);
+    expect(fieldsOf(adminSupportDtoSource, 'export class AdminAliasView {')).toEqual([...ALIAS_FIELDS]);
   });
 });

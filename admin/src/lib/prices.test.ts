@@ -1,5 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { PriceDocument, bookRows, draftDocument, earliestStart, formFrom, multiplyDecimals, pricesCaches, pricesEmail, pricesQueues, pricesStorage, queueTierLabel, sourceLabel, storageTierLabel, tierLabel } from './prices';
+import {
+  PriceDocument,
+  bookRows,
+  draftDocument,
+  earliestStart,
+  formFrom,
+  gbTierLabel,
+  multiplyDecimals,
+  pricesCaches,
+  pricesEmail,
+  pricesEstimate,
+  pricesQueues,
+  pricesStorage,
+  queueTierLabel,
+  sourceLabel,
+  storageTierLabel,
+  tierLabel,
+} from './prices';
 
 /** The first price book, as the backend's migration loads it (P-30). */
 const FIRST: PriceDocument = {
@@ -369,5 +386,107 @@ describe("a new price book from one with customers' mail's prices", () => {
       ['E-mail attachments, per GB', '0.36096', '0.12'],
     ]);
     expect(bookRows(WITH_CACHES).filter(([label]) => label.startsWith('E-mail'))).toEqual([]);
+  });
+});
+
+/** The book after those, as the backend's migration adds it: what AWS bills that FF doesn't, in US$ alone, with AWS's free tier and the price lists. */
+const DATA_OUT = [
+  { upToGb: 10_240, price: '0.09' },
+  { upToGb: 51_200, price: '0.085' },
+  { upToGb: 153_600, price: '0.07' },
+  { upToGb: null, price: '0.05' },
+];
+const WITH_ESTIMATE: PriceDocument = {
+  ...WITH_EMAIL,
+  source: {
+    ...WITH_EMAIL.source,
+    usdPrices: {
+      ...WITH_EMAIL.source.usdPrices!,
+      databaseInstanceHour: '0.016',
+      cacheNodeHour: '0.0128',
+      dataOutGb: DATA_OUT,
+      logsIngestedGb: [
+        { upToGb: 10_240, price: '0.50' },
+        { upToGb: null, price: '0.05' },
+      ],
+      logsStorageGbMonth: '0.03',
+      cloudFrontDataOutGb: [
+        { upToGb: 10_240, price: '0.085' },
+        { upToGb: null, price: '0.020' },
+      ],
+      cloudFrontRequestsPerTenThousand: '0.0120',
+      cloudFrontFunctionsPerMillion: '0.10',
+      natGatewayHour: '0.045',
+      natGatewayGb: '0.045',
+      publicIpv4Hour: '0.005',
+    },
+    awsFreeTier: { requests: 1_000_000, gbSeconds: 400_000, queueRequests: 1_000_000, dataOutGb: 100, cloudFrontDataOutGb: 1_024, cloudFrontRequests: 10_000_000, cloudFrontFunctions: 2_000_000 },
+    estimatePriceLists: [{ priceList: 'https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonRDS/current/us-east-1/index.json', readOn: '2026-10-31' }],
+  },
+};
+
+describe("a new price book from one with what AWS bills that FF doesn't, for the estimate at AWS's prices", () => {
+  it("gives it back unchanged, AWS's free tier and the price lists with it, and no TND price beside it", () => {
+    const draft = draftDocument(formFrom(WITH_ESTIMATE, NOW), WITH_ESTIMATE, NOW);
+
+    expect(draft).toEqual({ validFrom: '2026-10-17T11:00:00Z', document: { ...WITH_ESTIMATE, source: { ...WITH_ESTIMATE.source, readOn: '2026-10-17' } } });
+    expect('document' in draft && Object.keys(draft.document.prices).filter((sku) => sku.startsWith('nat') || sku.startsWith('cloudFront'))).toEqual([]);
+  });
+
+  it('takes a US$ price as set, whatever the rate, and keeps its tiers where it is tiered', () => {
+    const form = formFrom(WITH_ESTIMATE, NOW);
+    const changed = { ...form, rate: '3.1', estimate: { ...form.estimate, natGatewayHour: '0.05', dataOutTiers: ['0.1', ...form.estimate.dataOutTiers.slice(1)] } };
+
+    expect(draftDocument(changed, WITH_ESTIMATE, NOW)).toMatchObject({
+      document: { source: { usdRate: '3.1', usdPrices: { natGatewayHour: '0.05', dataOutGb: [{ upToGb: 10_240, price: '0.1' }, ...DATA_OUT.slice(1)], publicIpv4Hour: '0.005' } } },
+    });
+  });
+
+  it("names one left empty, by its tier where it is tiered, and leaves them out of a book of the operator's own prices", () => {
+    const form = formFrom(WITH_ESTIMATE, NOW);
+    const empty = { ...form, estimate: { ...form.estimate, cacheNodeHour: '', dataOutTiers: ['0.09', ''] } };
+
+    expect(draftDocument(empty, WITH_ESTIMATE, NOW)).toEqual({
+      problems: [
+        'An ElastiCache cache.t4g.micro for each cache, an hour (US$): must be a decimal number, such as 0.0000166667',
+        'Data out, up to 51,200 GB, per GB (US$): must be a decimal number, such as 0.0000166667',
+        'Data out, up to 153,600 GB, per GB (US$): must be a decimal number, such as 0.0000166667',
+        'Data out, past 153,600 GB, per GB (US$): must be a decimal number, such as 0.0000166667',
+      ],
+    });
+    expect(draftDocument({ ...form, mode: 'manual' }, WITH_ESTIMATE, NOW)).toMatchObject({ document: { source: { kind: 'manual' } } });
+  });
+
+  it('adds them to no book drafted from one without them', () => {
+    const draft = draftDocument(formFrom(WITH_EMAIL, NOW), WITH_EMAIL, NOW);
+
+    expect([pricesEstimate(WITH_EMAIL), pricesEstimate(WITH_ESTIMATE), 'document' in draft && pricesEstimate(draft.document)]).toEqual([false, true, false]);
+  });
+
+  it("lists them in US$ alone, last, each tier by where it ends, and AWS's free tier", () => {
+    const rows = bookRows(WITH_ESTIMATE);
+
+    expect(rows.slice(-17, -13)).toEqual([
+      ['Estimate: An RDS db.t4g.micro for each database, an hour', '', '0.016'],
+      ['Estimate: An ElastiCache cache.t4g.micro for each cache, an hour', '', '0.0128'],
+      ['Estimate: Data out, first 10,240 GB, per GB', '', '0.09'],
+      ['Estimate: Data out, up to 51,200 GB, per GB', '', '0.085'],
+    ]);
+    expect(rows.slice(-5)).toEqual([
+      ['Estimate: CloudFront Functions, per million', '', '0.10'],
+      ['Estimate: A NAT gateway, an hour', '', '0.045'],
+      ['Estimate: A NAT gateway, per GB through it', '', '0.045'],
+      ["Estimate: The NAT gateway's public IPv4 address, an hour", '', '0.005'],
+      [
+        "Estimate: AWS's free tier, a month",
+        '',
+        "1,000,000 requests and 400,000 GB-s of Lambda, 1,000,000 SQS requests, 100 GB out, CloudFront's 1,024 GB, 10,000,000 requests and 2,000,000 functions",
+      ],
+    ]);
+    expect(bookRows(WITH_EMAIL).filter(([label]) => label.startsWith('Estimate'))).toEqual([]);
+  });
+
+  it('names the tiers of data out, logs and CloudFront by where they end', () => {
+    expect(DATA_OUT.map((_tier, index) => gbTierLabel(DATA_OUT, index))).toEqual(['first 10,240 GB', 'up to 51,200 GB', 'up to 153,600 GB', 'past 153,600 GB']);
   });
 });

@@ -2,8 +2,8 @@
  * L1: GET /functions/:id/metrics, GET /metrics, GET /databases/:id/metrics, GET /buckets/:name/metrics,
  * GET /buckets/:name/website/metrics, GET /queues/:name/metrics, GET /caches/:name/metrics and GET /email/metrics
  * through HTTP, with the validation main.ts sets up: who may read them, the
- * account and the window they pass on, and what they refuse before asking the
- * database. Their SQL runs against PostgreSQL in customer-metrics.db.spec.ts.
+ * account, the window and a function's calls they pass on, and what they
+ * refuse before asking the database. Their SQL runs against PostgreSQL in customer-metrics.db.spec.ts.
  */
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -23,6 +23,7 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
   let app: INestApplication;
   let baseUrl: string;
   const forFunction = jest.fn(async (_accountId: string, _id: string, _window: MetricsWindow) => ({ metrics: {} }));
+  const forCalls = jest.fn(async (_accountId: string, _id: string, _window: MetricsWindow, _filter: object) => ({ metrics: {} }));
   const forAccount = jest.fn(async (_accountId: string, _window: MetricsWindow) => ({ metrics: {} }));
   const forDatabase = jest.fn(async (_accountId: string, _id: string, _window: MetricsWindow) => ({ metrics: {} }));
   const forBucket = jest.fn(async (_accountId: string, _name: string, _window: MetricsWindow) => ({ metrics: {} }));
@@ -40,7 +41,7 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
       controllers: [MetricsController],
-      providers: [{ provide: CustomerMetricsService, useValue: { forFunction, forAccount, forDatabase, forBucket, forQueue, forSite, forCache, emailMetrics } }],
+      providers: [{ provide: CustomerMetricsService, useValue: { forFunction, forCalls, forAccount, forDatabase, forBucket, forQueue, forSite, forCache, emailMetrics } }],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     app.use((req: { principal?: Principal }, _res: unknown, next: () => void) => {
@@ -168,5 +169,34 @@ describe('GET /functions/:id/metrics and GET /metrics (L1)', () => {
   it("refuses a function's ID that isn't one", async () => {
     expect(await refusal('/functions/hello/metrics')).toEqual([400, 'Validation failed (uuid is expected)']);
     expect(forFunction).not.toHaveBeenCalled();
+  });
+
+  it("asks for a function's calls by what they named and what ran them, as CloudWatch's Resource and ExecutedVersion dimensions", async () => {
+    const window = { start: new Date('2026-10-19T09:00:00Z'), end: new Date('2026-10-19T10:00:00Z'), period: 300 };
+    const query = 'period=300&start=2026-10-19T09:00:00Z&end=2026-10-19T10:00:00Z';
+    for (const [filter, passed] of [
+      ['resource=live', { resource: 'live' }],
+      ['resource=3', { resource: '3' }],
+      ['resource=$LATEST', { resource: '$LATEST' }],
+      ['executedVersion=2', { executedVersion: '2' }],
+      ['executedVersion=%24LATEST', { executedVersion: '$LATEST' }],
+      ['resource=live&executedVersion=2', { resource: 'live', executedVersion: '2' }],
+    ] as const) {
+      expect((await get(`/functions/${FN}/metrics?${query}&${filter}`)).status).toBe(200);
+      expect(forCalls).toHaveBeenLastCalledWith(ACCOUNT, FN, window, expect.objectContaining(passed));
+    }
+    expect(forCalls).toHaveBeenCalledTimes(6);
+    expect(forFunction).not.toHaveBeenCalled();
+  });
+
+  it('refuses a resource that is no qualifier, and an executed version that is no version, before asking for anything', async () => {
+    for (const resource of ['0', '01', 'latest$', 'a.b', 'x'.repeat(129), '1234567890']) {
+      expect(await refusal(`/functions/${FN}/metrics?resource=${resource}`)).toEqual([400, ['resource must be $LATEST, a version number or an alias name']]);
+    }
+    for (const executedVersion of ['live', '0', '$latest', '1.5']) {
+      expect(await refusal(`/functions/${FN}/metrics?executedVersion=${executedVersion}`)).toEqual([400, ['executedVersion must be $LATEST or a version number']]);
+    }
+    expect(await refusal('/metrics?resource=live')).toEqual([400, ['property resource should not exist']]);
+    expect([forCalls, forFunction, forAccount].map((mock) => mock.mock.calls.length)).toEqual([0, 0, 0]);
   });
 });

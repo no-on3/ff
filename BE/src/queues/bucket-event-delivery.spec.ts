@@ -19,7 +19,7 @@ const record = (target: 'queue' | 'function', arn: string): BucketEvent => ({
 describe("the delivery of buckets' events", () => {
   let queues: { find: jest.Mock; send: jest.Mock };
   let store: { accountBytes: jest.Mock; sendEvent: jest.Mock };
-  let functions: { findOne: jest.Mock };
+  let functions: { findOne: jest.Mock; manager: { existsBy: jest.Mock } };
   let counts: { count: jest.Mock };
   let events: BucketEvents;
   let delivery: BucketEventDelivery;
@@ -28,7 +28,8 @@ describe("the delivery of buckets' events", () => {
   beforeEach(() => {
     queues = { find: jest.fn(async () => uploads), send: jest.fn(async () => undefined) };
     store = { accountBytes: jest.fn(async () => 0), sendEvent: jest.fn(async () => undefined) };
-    functions = { findOne: jest.fn(async () => ({ id: 'fn-1', accountId: ACCOUNT })) };
+    // thumbnails has the alias live, and no other.
+    functions = { findOne: jest.fn(async () => ({ id: 'fn-1', accountId: ACCOUNT })), manager: { existsBy: jest.fn(async (_entity, where: { name?: string }) => where.name === 'live') } };
     counts = { count: jest.fn() };
     events = new BucketEvents();
     delivery = new BucketEventDelivery(events, queues as never, store as never, onePlan(plan()), functions as never, counts as never);
@@ -61,6 +62,14 @@ describe("the delivery of buckets' events", () => {
     expect([fn, requestId, JSON.parse(body)]).toEqual([{ id: 'fn-1', accountId: ACCOUNT }, expect.stringMatching(/^[0-9a-f-]{36}$/), { Records: [expect.objectContaining({ eventName: 'ObjectCreated:Put' })] }]);
     // Kept for Lambda's six hours, and the grace after them.
     expect(expiresAt.getTime() - Date.now()).toBeGreaterThan(6 * 3600 * 1000);
+  });
+
+  it("calls the version or the alias the function's ARN names, kept beside the event for the worker; drops it once that is gone", async () => {
+    await events.publish(record('function', `${FUNCTION_ARN}:live`));
+    await events.publish(record('function', `${FUNCTION_ARN}:gone`));
+
+    expect(store.sendEvent.mock.calls.map((call) => call[4])).toEqual([{ attributes: { qualifier: 'live' } }]);
+    expect(warnings).toHaveBeenCalledWith(`An event of bucket photos was not delivered to ${FUNCTION_ARN}:gone: the function has no alias gone any more`);
   });
 
   it("sends S3's test event to a queue a configuration names, as its body alone", async () => {

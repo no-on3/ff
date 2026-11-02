@@ -198,6 +198,7 @@ jobs:
         if: steps.wanted.outputs.run == 'true'
         with:
           cargo: ${{ matrix.stage == 'cli' && 'cli' || '' }}
+          aws-tools: ${{ matrix.stage == 'cli' }}
           room: true
       - if: steps.wanted.outputs.run == 'true'
         run: hack/ci.sh deps ${{ matrix.stage }}

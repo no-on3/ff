@@ -21,11 +21,16 @@ import { withStoragePrices } from '../migrations/1792727200566-DatabaseBilling';
 import { withQueuePrices } from '../migrations/1792816013937-QueueBilling';
 import { withCachePrices } from '../migrations/1793333328301-CacheMeasures';
 import { withEmailPrices } from '../migrations/1793345460517-EmailBilling';
+import { withEstimatePrices } from '../migrations/1793486079752-AwsEstimatePrices';
 import { BETA_LIMITS } from '../plans/test-fixtures';
 import { PendingMigrationsError, assertSchemaUpToDate, pendingMigrations, schemaDrift } from './schema-check';
 import { ScratchDatabase, createScratchDatabase, withScratchDatabase } from './scratch-database';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
+// A test of a migration runs every migration up on a scratch database, then back down to its own: more steps with
+// each migration added. The suite takes 90 s on GitHub's runners and 500 s on a loaded machine, where four of its
+// tests took more than the 20 s the backend's tests are given each.
+jest.setTimeout(120_000);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const migrationNames = MIGRATIONS.map((migration) => (new migration() as { name: string }).name);
 /** A development account: functions belong to accounts since P-12. */
@@ -76,6 +81,17 @@ const CACHES = migrationNames.find((name) => name.startsWith('Caches1')) as stri
 const CACHE_MEASURES = migrationNames.find((name) => name.startsWith('CacheMeasures')) as string;
 const EMAIL_IDENTITIES = migrationNames.find((name) => name.startsWith('EmailIdentities')) as string;
 const EMAIL_MESSAGES = migrationNames.find((name) => name.startsWith('EmailMessages')) as string;
+const KEY_USES = migrationNames.find((name) => name.startsWith('KeyUses')) as string;
+const AWS_ESTIMATE_PRICES = migrationNames.find((name) => name.startsWith('AwsEstimatePrices')) as string;
+const FUNCTION_VERSIONS = migrationNames.find((name) => name.startsWith('FunctionVersions')) as string;
+const FUNCTION_ALIASES = migrationNames.find((name) => name.startsWith('FunctionAliases')) as string;
+const CODE_STORAGE = migrationNames.find((name) => name.startsWith('CodeStorage')) as string;
+const INVOCATION_VERSIONS = migrationNames.find((name) => name.startsWith('InvocationVersions')) as string;
+const CAPACITY_VERSIONS = migrationNames.find((name) => name.startsWith('CapacityVersions')) as string;
+const URL_ALIASES = migrationNames.find((name) => name.startsWith('UrlAliases')) as string;
+const TRIGGER_QUALIFIERS = migrationNames.find((name) => name.startsWith('TriggerQualifiers')) as string;
+const ALARM_DIMENSIONS = migrationNames.find((name) => name.startsWith('AlarmDimensions')) as string;
+const FUNCTION_KEY_RENEWAL = migrationNames.find((name) => name.startsWith('FunctionKeyRenewal')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -597,10 +613,14 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
 
-      // The caches' and mail's migrations after it give both ElastiCache's SKU and SES's too.
+      // The caches', mail's and the estimate's migrations after it give both ElastiCache's SKU, SES's and what AWS bills that FF doesn't too.
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        { valid_from: next, prices: withEmailPrices(withCachePrices(withQueuePrices(current))), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'test' },
+        { valid_from: next, prices: withEstimatePrices(withEmailPrices(withCachePrices(withQueuePrices(current)))), created_by: 'system' },
+        {
+          valid_from: new Date('2099-01-01T00:00:00Z'),
+          prices: withEstimatePrices(withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))))),
+          created_by: 'test',
+        },
       ]);
       const minute = `date_trunc('minute', now())`;
       await dataSource.query(
@@ -744,9 +764,10 @@ run('database schema (L2, real PostgreSQL)', () => {
 
       await dataSource.runMigrations({ transaction: 'each' });
 
+      // The estimate's migration after it gives both what AWS bills that FF doesn't too.
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        { valid_from: next, prices: withEmailPrices(current), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(cached), created_by: 'test' },
+        { valid_from: next, prices: withEstimatePrices(withEmailPrices(current)), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEstimatePrices(withEmailPrices(cached)), created_by: 'test' },
       ]);
       await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
       await dataSource.query(
@@ -787,6 +808,392 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the estimate prices' migration gives books of AWS's prices not started yet what AWS bills that FF doesn't, with AWS's free tier and the price lists, adds its own from next month's first hour, leaves a book of other prices and every price of FF's as they were, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, KEY_USES);
+      // As after the key-uses migration, in a month later than its own: no book starts next month yet.
+      const now = new Date();
+      const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+      await dataSource.query(`DELETE FROM price_books WHERE valid_from > now()`);
+      const emailed = withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))));
+      const manual = { ...emailed, source: { kind: 'manual' } };
+      const book = async (validFrom: string, prices: unknown) =>
+        (await dataSource.query(`INSERT INTO price_books (currency, valid_from, prices, created_by) VALUES ('TND', $1, $2, 'test') RETURNING id`, [validFrom, JSON.stringify(prices)]))[0].id as string;
+      const future = await book('2099-01-01T00:00:00Z', emailed);
+      const own = await book('2099-02-01T00:00:00Z', manual);
+      const [{ prices: current }] = await dataSource.query(`SELECT prices FROM price_books WHERE valid_from <= now() ORDER BY valid_from DESC LIMIT 1`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      const books = await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
+      expect(books).toEqual([
+        { valid_from: next, prices: withEstimatePrices(current), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEstimatePrices(emailed), created_by: 'test' },
+        { valid_from: new Date('2099-02-01T00:00:00Z'), prices: manual, created_by: 'test' },
+      ]);
+      expect(books.map((row: { prices: { prices: unknown; freeTier: unknown } }) => [row.prices.prices, row.prices.freeTier])).toEqual([
+        [current.prices, current.freeTier],
+        [emailed.prices, emailed.freeTier],
+        [manual.prices, manual.freeTier],
+      ]);
+
+      // Reverted: the book it made goes, the other loses what it gained.
+      await migrateDownTo(dataSource, KEY_USES);
+
+      expect(await dataSource.query(`SELECT id, prices FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
+        { id: future, prices: emailed },
+        { id: own, prices: manual },
+      ]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the function-versions migration gives each function there a revision of its own and no version, a version going with its function, and reverts with versions present", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, AWS_ESTIMATE_PRICES);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      for (const name of ['a', 'b']) {
+        await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ($1, $2, 'nodejs', 'v1', 128, 5)`, [name, ACCOUNT]);
+      }
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      const functions = await dataSource.query<Array<{ id: string; revision_id: string; last_version: number }>>(`SELECT id, revision_id, last_version FROM functions ORDER BY name`);
+      expect(functions.map((row) => row.last_version)).toEqual([0, 0]);
+      expect(new Set(functions.map((row) => row.revision_id)).size).toBe(2);
+      const version = `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+        VALUES ($1, $2, $3, 'nodejs', 'function.handler', 'inline', 'v1', 'x', 2, 'y', 128, 5, 'lambda', '{}')`;
+      await dataSource.query(version, [functions[0].id, 1, ACCOUNT]);
+      await expect(dataSource.query(version, [functions[0].id, 1, ACCOUNT])).rejects.toThrow(/duplicate key/);
+      await dataSource.query(version, [functions[1].id, 1, ACCOUNT]);
+      await dataSource.query(`DELETE FROM functions WHERE id = $1`, [functions[1].id]);
+      expect(await dataSource.query(`SELECT function_id, revision_id IS NOT NULL AS revised FROM function_versions`)).toEqual([{ function_id: functions[0].id, revised: true }]);
+
+      await migrateDownTo(dataSource, AWS_ESTIMATE_PRICES);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM functions`)).toEqual([{ n: 1 }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it('the function-aliases migration keeps an alias its function\'s once, going with it, and reverts with aliases present, the versions they named kept', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, FUNCTION_VERSIONS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('f', $1, 'nodejs', 'v1', 128, 5) RETURNING id`, [ACCOUNT]);
+      await dataSource.query(
+        `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+         VALUES ($1, 1, $2, 'nodejs', 'function.handler', 'inline', 'v1', 'x', 2, 'y', 128, 5, 'lambda', '{}')`,
+        [id, ACCOUNT],
+      );
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      const alias = `INSERT INTO function_aliases (function_id, name, account_id, version) VALUES ($1, $2, $3, 1)`;
+      await dataSource.query(alias, [id, 'live', ACCOUNT]);
+      await expect(dataSource.query(alias, [id, 'live', ACCOUNT])).rejects.toThrow(/duplicate key/);
+      await dataSource.query(alias, [id, 'dev', ACCOUNT]);
+      expect(await dataSource.query(`SELECT name, revision_id IS NOT NULL AS revised FROM function_aliases ORDER BY name`)).toEqual([
+        { name: 'dev', revised: true },
+        { name: 'live', revised: true },
+      ]);
+
+      await migrateDownTo(dataSource, FUNCTION_VERSIONS);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM function_versions`)).toEqual([{ n: 1 }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(alias, [id, 'live', ACCOUNT]);
+      await dataSource.query(`DELETE FROM functions WHERE id = $1`, [id]);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM function_aliases`)).toEqual([{ n: 0 }]);
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the code-storage migration gives every plan the beta plan's 5 GB, keeps a plan's own, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, FUNCTION_ALIASES);
+      await dataSource.query(`INSERT INTO plans (id, name, limits) SELECT 'shop', 'Shop', limits || '{"codeStorageMb": 20480}'::jsonb FROM plans WHERE id = 'beta'`);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const storage = () => dataSource.query<unknown[]>(`SELECT id, limits->'codeStorageMb' AS mb FROM plans WHERE id IN ('beta', 'shop') ORDER BY id`);
+      expect(await storage()).toEqual([
+        { id: 'beta', mb: 5120 },
+        { id: 'shop', mb: 20480 },
+      ]);
+
+      await migrateDownTo(dataSource, FUNCTION_ALIASES);
+      expect(await storage()).toEqual([
+        { id: 'beta', mb: null },
+        { id: 'shop', mb: null },
+      ]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the invocation-versions migration says what ran each call, $LATEST and no alias for the calls before, a usage record still never changed, and reverts", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, CODE_STORAGE);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('before', $1, 'nodejs', 'x', 128, 5) RETURNING id`, [
+        ACCOUNT,
+      ]);
+      const [{ request_id: requestId }] = await dataSource.query(
+        `INSERT INTO function_invocations (function_id, input, status) VALUES ($1, '{}', 'COMPLETED') RETURNING request_id`,
+        [id],
+      );
+      await dataSource.query(
+        `INSERT INTO usage_records (request_id, started_at, ended_at, account_id, function_id, function_name, runtime, memory_mb, duration_ms, billed_ms, status)
+         VALUES ($1, now(), now(), $2, $3, 'before', 'nodejs', 128, 2, 2, 'success')`,
+        [requestId, ACCOUNT, id],
+      );
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const ran = () =>
+        dataSource.query(
+          `SELECT i.version AS "called", i.alias AS "calledThrough", u.version AS "billed", u.alias AS "billedThrough"
+             FROM function_invocations i JOIN usage_records u USING (request_id) WHERE i.function_id = $1`,
+          [id],
+        );
+      expect(await ran()).toEqual([{ called: null, calledThrough: null, billed: null, billedThrough: null }]);
+      await expect(dataSource.query(`UPDATE usage_records SET version = 1 WHERE request_id = $1`, [requestId])).rejects.toThrow('append-only: UPDATE refused');
+
+      await migrateDownTo(dataSource, CODE_STORAGE);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM usage_records WHERE request_id = $1`, [requestId])).toEqual([{ n: 1 }]);
+      await expect(ran()).rejects.toThrow('column i.version does not exist');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the capacity-versions migration keeps the samples before as $LATEST's, samples a version's Deployment beside them, and refuses to revert once one was", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, INVOCATION_VERSIONS);
+      const fn = '6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b'; // a sample has no foreign key: it outlives its function
+      const sampleOf = (version: number, instances: number, memoryMb: number) =>
+        dataSource.query(
+          `INSERT INTO capacity_samples (function_id, version, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, $2, date_trunc('minute', now()), $3, $4, 0, $5)`,
+          [fn, version, ACCOUNT, instances, memoryMb],
+        );
+      await dataSource.query(
+        `INSERT INTO capacity_samples (function_id, minute, account_id, instances, min_instances, memory_mb) VALUES ($1, date_trunc('minute', now()), $2, 2, 1, 256)`,
+        [fn, ACCOUNT],
+      );
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const samples = () => dataSource.query(`SELECT version, instances, memory_mb FROM capacity_samples WHERE function_id = $1 ORDER BY version`, [fn]);
+      expect(await samples()).toEqual([{ version: 0, instances: 2, memory_mb: 256 }]);
+      // While only $LATEST's Deployments were sampled, it reverts.
+      await migrateDownTo(dataSource, INVOCATION_VERSIONS);
+      await expect(samples()).rejects.toThrow('column "version" does not exist');
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      // A version's Deployment the same minute: a row of its own, at its memory, append-only as the others.
+      await sampleOf(1, 3, 1024);
+      await expect(sampleOf(1, 4, 1024)).rejects.toThrow('duplicate key value violates unique constraint "capacity_samples_');
+      expect(await samples()).toEqual([
+        { version: 0, instances: 2, memory_mb: 256 },
+        { version: 1, instances: 3, memory_mb: 1024 },
+      ]);
+      await expect(dataSource.query(`UPDATE capacity_samples SET instances = 1 WHERE function_id = $1 AND version = 1`, [fn])).rejects.toThrow('append-only: UPDATE refused');
+      await migrateDownTo(dataSource, CAPACITY_VERSIONS);
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow(
+        "1 capacity sample(s) of versions were taken: reverting would lose them, or count them at $LATEST's memory",
+      );
+      expect(await samples()).toHaveLength(2);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the URL-aliases migration keeps a function's URL as $LATEST's, its domains on it, gives an alias a URL of its own, gone with it, and refuses to revert once one has", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, CAPACITY_VERSIONS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('before', $1, 'nodejs', 'x', 128, 5) RETURNING id`, [
+        ACCOUNT,
+      ]);
+      const urlOf = (urlId: string, alias: string | null) =>
+        dataSource.query(`INSERT INTO function_urls (function_id, account_id, url_id, auth_type${alias ? ', alias' : ''}) VALUES ($1, $2, $3, 'NONE'${alias ? ', $4' : ''})`, [
+          id,
+          ACCOUNT,
+          urlId,
+          ...(alias ? [alias] : []),
+        ]);
+      await urlOf('a'.repeat(32), null);
+      await dataSource.query(`INSERT INTO custom_domains (domain, account_id, function_id, token) VALUES ('shop.example.tn', $1, $2, $3)`, [ACCOUNT, id, 't'.repeat(32)]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const urls = () => dataSource.query(`SELECT url_id, alias FROM function_urls WHERE function_id = $1 ORDER BY alias NULLS FIRST`, [id]);
+      expect(await urls()).toEqual([{ url_id: 'a'.repeat(32), alias: null }]);
+      expect(await dataSource.query(`SELECT url_id FROM custom_domains WHERE domain = 'shop.example.tn'`)).toEqual([{ url_id: 'a'.repeat(32) }]);
+      // $LATEST's once, as before; an alias's once, and only the function's own aliases.
+      await expect(urlOf('b'.repeat(32), null)).rejects.toThrow('duplicate key value violates unique constraint "UQ_function_urls_latest"');
+      await expect(urlOf('b'.repeat(32), 'live')).rejects.toThrow('violates foreign key constraint');
+      await dataSource.query(`INSERT INTO function_aliases (function_id, account_id, name) VALUES ($1, $2, 'live')`, [id, ACCOUNT]);
+      await urlOf('b'.repeat(32), 'live');
+      await expect(urlOf('c'.repeat(32), 'live')).rejects.toThrow('duplicate key value violates unique constraint');
+      await dataSource.query(`INSERT INTO custom_domains (domain, account_id, function_id, url_id, token) VALUES ('live.example.tn', $1, $2, $3, $4)`, [
+        ACCOUNT,
+        id,
+        'b'.repeat(32),
+        't'.repeat(32),
+      ]);
+      await migrateDownTo(dataSource, URL_ALIASES);
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow(
+        '1 alias(es) have a URL: reverting would delete them, as a function has one URL at most before',
+      );
+
+      // The alias goes, and its URL with it, and that URL's domain; then it reverts, $LATEST's URL and its domain kept.
+      await dataSource.query(`DELETE FROM function_aliases WHERE function_id = $1`, [id]);
+      expect(await urls()).toEqual([{ url_id: 'a'.repeat(32), alias: null }]);
+      expect(await dataSource.query(`SELECT domain FROM custom_domains ORDER BY domain`)).toEqual([{ domain: 'shop.example.tn' }]);
+      await migrateDownTo(dataSource, CAPACITY_VERSIONS);
+      await expect(urls()).rejects.toThrow('column "alias" does not exist');
+      expect(await dataSource.query(`SELECT domain FROM custom_domains WHERE function_id = $1`, [id])).toEqual([{ domain: 'shop.example.tn' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it('the trigger-qualifiers migration lets a schedule and a mapping name a version or an alias, those before running $LATEST, and refuses to revert once one does', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, URL_ALIASES);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('before', $1, 'nodejs', 'x', 128, 5) RETURNING id`, [
+        ACCOUNT,
+      ]);
+      const [{ id: queue }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders', 'customer') RETURNING id`, [ACCOUNT]);
+      await dataSource.query(`INSERT INTO schedules (account_id, function_id, name, expression) VALUES ($1, $2, 'nightly', 'rate(1 day)')`, [ACCOUNT, id]);
+      await dataSource.query(`INSERT INTO event_source_mappings (account_id, function_id, queue_id, batch_size, maximum_batching_window_in_seconds) VALUES ($1, $2, $3, 10, 0)`, [
+        ACCOUNT,
+        id,
+        queue,
+      ]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const qualifiers = async () => [...(await dataSource.query(`SELECT qualifier FROM schedules`)), ...(await dataSource.query(`SELECT qualifier FROM event_source_mappings`))];
+      expect(await qualifiers()).toEqual([{ qualifier: null }, { qualifier: null }]);
+      await dataSource.query(`UPDATE schedules SET qualifier = 'live'`);
+      await dataSource.query(`UPDATE event_source_mappings SET qualifier = '2'`);
+      await migrateDownTo(dataSource, TRIGGER_QUALIFIERS);
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow(
+        '2 schedule(s) and mapping(s) name a version or an alias: reverting would have them run $LATEST instead',
+      );
+
+      // Back on $LATEST, both revert.
+      await dataSource.query(`UPDATE schedules SET qualifier = NULL`);
+      await dataSource.query(`UPDATE event_source_mappings SET qualifier = NULL`);
+      await migrateDownTo(dataSource, URL_ALIASES);
+      await expect(qualifiers()).rejects.toThrow('column "qualifier" does not exist');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the access-key-functions migration names each of an account's own keys its ID, a deploy's none, gives no key a function, every plan 10 keys but one with its own, and reverts revoking a key that named functions alone", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, ALARM_DIMENSIONS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      await dataSource.query(`INSERT INTO plans (id, name, limits) SELECT 'shop', 'Shop', limits || '{"accessKeys": 3}'::jsonb FROM plans WHERE id = 'beta'`);
+      const key = (id: string, more = '') => dataSource.query(`INSERT INTO storage_keys (id, account_id, secret${more ? ', expires_at' : ''}) VALUES ($1, $2, '{}'${more})`, [id, ACCOUNT]);
+      await key('AKFFAAAAAAAAAAAAAAAA');
+      await key('AKFFBBBBBBBBBBBBBBBB', ", now() + interval '1 hour'");
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const keys = () => dataSource.query(`SELECT id, name, functions, function_access AS "functionAccess", revoked_at IS NOT NULL AS revoked FROM storage_keys ORDER BY id`);
+      expect(await keys()).toEqual([
+        { id: 'AKFFAAAAAAAAAAAAAAAA', name: 'AKFFAAAAAAAAAAAAAAAA', functions: null, functionAccess: null, revoked: false },
+        { id: 'AKFFBBBBBBBBBBBBBBBB', name: null, functions: null, functionAccess: null, revoked: false },
+      ]);
+      const plans = () => dataSource.query(`SELECT id, limits->'accessKeys' AS keys FROM plans WHERE id IN ('beta', 'shop') ORDER BY id`);
+      expect(await plans()).toEqual([
+        { id: 'beta', keys: 10 },
+        { id: 'shop', keys: 3 },
+      ]);
+      // A name once among the account's working keys; functions with their level, and a level with functions, alone.
+      const named = (id: string, columns: string, values: string) => dataSource.query(`INSERT INTO storage_keys (id, account_id, secret, ${columns}) VALUES ($1, $2, '{}', ${values})`, [id, ACCOUNT]);
+      await expect(named('AKFFCCCCCCCCCCCCCCCC', 'name', `'AKFFAAAAAAAAAAAAAAAA'`)).rejects.toThrow('UQ_storage_keys_name');
+      await expect(named('AKFFCCCCCCCCCCCCCCCC', 'name, functions', `'c', '{orders}'`)).rejects.toThrow('violates check constraint');
+      await expect(named('AKFFCCCCCCCCCCCCCCCC', 'name, function_access', `'c', 'invoke'`)).rejects.toThrow('violates check constraint');
+      await expect(named('AKFFCCCCCCCCCCCCCCCC', 'name, functions, function_access', `'c', '{orders}', 'run'`)).rejects.toThrow('violates check constraint');
+      await named('AKFFCCCCCCCCCCCCCCCC', 'name, functions, function_access', `'functions', '{*}', 'write'`);
+      await named('AKFFDDDDDDDDDDDDDDDD', 'name, buckets, functions, function_access', `'photos', '{photos}', '{orders}', 'invoke'`);
+
+      await migrateDownTo(dataSource, ALARM_DIMENSIONS);
+      expect((await dataSource.query(`SELECT id, revoked_at IS NOT NULL AS revoked FROM storage_keys ORDER BY id`)).map(({ id, revoked }: { id: string; revoked: boolean }) => `${id} ${revoked}`)).toEqual([
+        'AKFFAAAAAAAAAAAAAAAA false',
+        'AKFFBBBBBBBBBBBBBBBB false',
+        'AKFFCCCCCCCCCCCCCCCC true',
+        'AKFFDDDDDDDDDDDDDDDD false',
+      ]);
+      expect(await plans()).toEqual([
+        { id: 'beta', keys: null },
+        { id: 'shop', keys: null },
+      ]);
+      await expect(keys()).rejects.toThrow('column "name" does not exist');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the Lambda-endpoint migration gives a function and a version that took every endpoint Lambda's too, leaves one that sends a service to AWS as it was, and reverts with Lambda's in a list and a key's use of it", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, FUNCTION_KEY_RENEWAL);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const fn = async (name: string, endpoints?: string): Promise<string> => {
+        const columns = endpoints === undefined ? '' : ', aws_endpoints';
+        const values = endpoints === undefined ? [name, ACCOUNT] : [name, ACCOUNT, endpoints];
+        const [{ id }] = await dataSource.query(
+          `INSERT INTO functions (name, account_id, runtime, code, memory, timeout${columns}) VALUES ($1, $2, 'nodejs', 'v1', 128, 5${endpoints === undefined ? '' : ', $3'}) RETURNING id`,
+          values,
+        );
+        return id;
+      };
+      const every = await fn('every');
+      await fn('mail-at-aws', '{s3,sqs}');
+      const version = (number: number, endpoints: string) =>
+        dataSource.query(
+          `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+           VALUES ($1, $2, $3, 'nodejs', 'index.handler', 'inline', 'v1', 'sha', 2, 'sha', 128, 5, 'lambda', $4)`,
+          [every, number, ACCOUNT, endpoints],
+        );
+      await version(1, '{s3,sqs,sesv2}');
+      await version(2, '{sqs}');
+      const use = (service: string) =>
+        dataSource.query(`INSERT INTO key_uses (holder, service, resource, operation, account_id, first_day, last_day) VALUES ('AKFFAAAAAAAAAAAAAAAA', $1, 'orders', 'Get', $2, current_date, current_date)`, [service, ACCOUNT]);
+      await use('s3');
+      const lists = async () => [
+        ...(await dataSource.query(`SELECT name, aws_endpoints::text AS endpoints FROM functions ORDER BY name`)).map((row: { name: string; endpoints: string }) => `${row.name} ${row.endpoints}`),
+        ...(await dataSource.query(`SELECT version, aws_endpoints::text AS endpoints FROM function_versions ORDER BY version`)).map((row: { version: number; endpoints: string }) => `${row.version} ${row.endpoints}`),
+      ];
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await lists()).toEqual(['every {s3,sqs,sesv2,lambda}', 'mail-at-aws {s3,sqs}', '1 {s3,sqs,sesv2,lambda}', '2 {sqs}']);
+      await fn('made-now');
+      await fn('lambda-alone', '{lambda}');
+      await use('lambda');
+      expect((await lists()).filter((row) => /^(made-now|lambda-alone) /.test(row))).toEqual(['lambda-alone {lambda}', 'made-now {s3,sqs,sesv2,lambda}']);
+
+      await migrateDownTo(dataSource, FUNCTION_KEY_RENEWAL);
+      expect(await lists()).toEqual(['every {s3,sqs,sesv2}', 'lambda-alone {}', 'made-now {s3,sqs,sesv2}', 'mail-at-aws {s3,sqs}', '1 {s3,sqs,sesv2}', '2 {sqs}']);
+      expect(await dataSource.query(`SELECT service::text FROM key_uses`)).toEqual([{ service: 's3' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it("the cache-measures migration samples caches by month, append-only, rates their hours beside the others', lets an alarm watch a cache and go with it, gives books not started yet ElastiCache's SKU, adds its own from next month's first hour, and reverts unless a cache's hour is rated", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -804,9 +1211,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       await dataSource.runMigrations({ transaction: 'each' });
 
       expect(await dataSource.query(`SELECT valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`)).toEqual([
-        // The mail's migration after it gives both SES's SKUs too.
-        { valid_from: next, prices: withEmailPrices(withCachePrices(current)), created_by: 'system' },
-        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(queued)), created_by: 'test' },
+        // The mail's and the estimate's migrations after it give both SES's SKUs and what AWS bills that FF doesn't too.
+        { valid_from: next, prices: withEstimatePrices(withEmailPrices(withCachePrices(current))), created_by: 'system' },
+        { valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEstimatePrices(withEmailPrices(withCachePrices(queued))), created_by: 'test' },
       ]);
       await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
       const cache = async (name: string, port: number) =>
@@ -1270,9 +1677,9 @@ run('database schema (L2, real PostgreSQL)', () => {
       const next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
       const books = await dataSource.query(`SELECT id, valid_from, prices, created_by FROM price_books WHERE valid_from > now() ORDER BY valid_from`);
       expect(books).toEqual([
-        // The queues', the caches' and mail's migrations after it give both SQS's SKU, ElastiCache's and SES's too.
-        { id: expect.any(String), valid_from: next, prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'system' },
-        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK)))), created_by: 'test' },
+        // The queues', the caches', mail's and the estimate's migrations after it give both SQS's SKU, ElastiCache's, SES's and what AWS bills that FF doesn't too.
+        { id: expect.any(String), valid_from: next, prices: withEstimatePrices(withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))))), created_by: 'system' },
+        { id: future, valid_from: new Date('2099-01-01T00:00:00Z'), prices: withEstimatePrices(withEmailPrices(withCachePrices(withQueuePrices(withStoragePrices(FIRST_PRICE_BOOK))))), created_by: 'test' },
       ]);
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
@@ -1415,17 +1822,20 @@ run('database schema (L2, real PostgreSQL)', () => {
         'email_sends',
         'email_suppressions',
         'event_source_mappings',
+        'function_aliases',
         'function_environments',
         'function_event_invoke_configs',
         'function_invocations',
         'function_metrics',
         'function_urls',
+        'function_versions',
         'functions',
         'invitations',
         'invoice_counters',
         'invoice_lines',
         'invoice_notices',
         'invoices',
+        'key_uses',
         'ledger_accounts',
         'ledger_entries',
         'ledger_transactions',

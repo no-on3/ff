@@ -18,8 +18,9 @@
 # platform's own registry (Zot) and pulled by the node as the node is told to, which no tenant's code reaches;
 # a function with AWS's SDK and no setting writing to its account's bucket with its own key, at the fixed address
 # of the Service ff-storage; a queue made and read through the edge with AWS's SDK, and a function sending to it with
-# its own key at the same address; the bucket a site, at its host under the sites' domain over HTTPS through the edge,
-# and at a customer's own domain proved the same way; who reaches whom inside the cluster; and deploy.sh again, which
+# its own key at the same address; the bucket's function carried across its key's renewal, every call answered; the
+# bucket a site, at its host under the sites' domain over HTTPS through the edge, and at a customer's own domain
+# proved the same way; who reaches whom inside the cluster; and deploy.sh again, which
 # changes nothing.
 #   hack/e2e-platform.sh                  (about 15 minutes; removes its cluster and containers on exit)
 set -euo pipefail
@@ -203,7 +204,7 @@ check "the backend's token for the cluster's API, read in its pod, lasts an hour
 section "the edge"
 kubectl -n ff-edge exec deploy/ff-edge -- cat /data/caddy/pki/authorities/local/root.crt >"$work/root.crt"
 resolve=()
-for host in api console admin login; do resolve+=(--resolve "$host.ff.test:$https_port:127.0.0.1"); done
+for host in api console admin login lambda; do resolve+=(--resolve "$host.ff.test:$https_port:127.0.0.1"); done
 # https <host> <path> [curl option...]: the body; the status in $work/status, the headers in $work/headers.
 https() {
   local host=$1 path=$2
@@ -222,6 +223,9 @@ https api /readyz >/dev/null
 check "the API: ready, its database and the cluster answering" '200 {"database":"ok","kubernetes":"ok"}' "$(status) $(jq -c .checks "$work/body")"
 check "the login: the realm's issuer is the public address" "https://login.ff.test:$https_port/realms/ff" \
   "$(https login /realms/ff/.well-known/openid-configuration | jq -r .issuer)"
+https lambda /2015-03-31/functions/ >/dev/null
+check "Lambda's endpoint, its host the backend's port for it, refuses a request with no signature as Lambda does" "403 MissingAuthenticationTokenException" \
+  "$(status) $(header x-amzn-errortype)"
 https admin / >/dev/null
 check "the admin app refuses an address not allowed" 403 "$(status)"
 https login /admin/master/console/ >/dev/null
@@ -364,6 +368,39 @@ check "it reached the SQS endpoint at the Service's fixed address, inside the cl
 check "the customer receives its messages through the edge, then deletes the queue" \
   '["sent by a Node.js function","sent by a Node.js function, to the URL from outside","sent through the edge"]' "$(through_edge receive | jq -c .bodies)"
 
+section "a function carried across its key's renewal: a new key at half the old one's life, its pod replaced in gVisor, every call answered"
+# db <sql>: FF's database, as its operator reads it.
+db() { docker exec "$prefix-postgres" psql -U postgres -d ff -tA -c "$1"; }
+s3_key_now() {
+  kubectl -n "$tenant" get secret "$(kubectl -n "$tenant" get deployment "fn-$s3_fn" -o jsonpath='{.spec.template.spec.containers[0].envFrom[0].secretRef.name}')" \
+    -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d
+}
+s3_call() { as "$token" "/functions/$s3_fn/invoke" -d '{"input": {"bucket": "e2e-platform-files", "other": "e2e-platform-nobody"}}' >/dev/null; echo "$(status) $(jq -c .output "$work/body")"; }
+s3_answer='201 {"read":"written by a Node.js function","other":"NoSuchBucket"}'
+check "the function runs, warm, with a key of 12 hours" "$s3_answer 12" \
+  "$(s3_call) $(db "SELECT round(extract(epoch FROM expires_at - created_at) / 3600) FROM storage_keys WHERE id = '$(s3_key_now)'")"
+old_s3_key="$(s3_key_now)"
+# Six hours and a minute on, as the hours would move them: past half its life, which the renewal finds within 5 s here.
+db "UPDATE storage_keys SET created_at = created_at - interval '6 hours 1 minute', expires_at = expires_at - interval '6 hours 1 minute' WHERE id = '$old_s3_key'" >/dev/null
+# A call lost is named with its times and its answer.
+calls=0 lost=0 lost_calls=""
+for _ in $(seq 90); do
+  calls=$((calls + 1))
+  sent="$(date +%T)"
+  answer="$(s3_call)"
+  if [ "$answer" != "$s3_answer" ]; then
+    lost=$((lost + 1))
+    lost_calls+=", sent at $sent and answered at $(date +%T): $answer"
+  fi
+  [ "$(db "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$old_s3_key'")" = t ] && break
+  sleep 1
+done
+new_s3_key="$(s3_key_now)"
+check "past half its life, its key is renewed, its pod replaced, and the old key revoked once no pod holds it" "true t" \
+  "$([[ $new_s3_key =~ ^AKFF && $new_s3_key != "$old_s3_key" ]] && echo true || echo false) $(db "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$old_s3_key'")"
+check "  ... every call answered meanwhile, each writing and reading its bucket; and with the new key after" "0 true $s3_answer" \
+  "$lost $([ "$calls" -gt 3 ] && echo true || echo false) $(s3_call)$lost_calls"
+
 section "a function's URL, through the edge"
 url="$(as "$token" "/functions/$fn/url" -d '{"authType": "NONE"}' | jq -r .functionUrl)"
 check "the customer gives the function a URL, under the function domain" "201 true" \
@@ -399,6 +436,8 @@ zone 1
 printf 'e2e-customer.tn:53 {\n  file /zones/e2e-customer.tn.db {\n    reload 1s\n  }\n}\n' >"$work/zones/Corefile"
 chmod 755 "$work/zones"
 docker run -d --name "$prefix-dns" --network "$network" -v "$work/zones:/zones:ro" rancher/mirrored-coredns-coredns:1.14.7 -conf /zones/Corefile >/dev/null
+# The backend's log so far, which its replacement takes with it: what a failure leaves behind keeps it.
+kubectl -n ff-system logs deployment/ff-backend --tail=-1 >"$work/backend-before-domains.log" 2>&1 || true
 kubectl -n ff-system set env deployment/ff-backend FF_DOMAIN_RESOLVERS="$(address "$prefix-dns"):53" >/dev/null
 kubectl -n ff-system rollout status deployment/ff-backend --timeout=300s >/dev/null
 added="$(as "$token" "/functions/$fn/url/domains" -d '{"domain": "shop.e2e-customer.tn"}')"
@@ -448,6 +487,7 @@ kubectl -n e2e-probe run probe --image=ff-runtime-nodejs:24-v3 --image-pull-poli
 const net = require("node:net");
 const targets = { edge: ["ff-edge.ff-edge.svc", 443], backend: ["ff-backend.ff-system.svc", 80], urls: ["ff-backend.ff-system.svc", 3001], keycloak: ["keycloak.ff-system.svc", 8080],
   console: ["ff-console.ff-system.svc", 80], registry: ["ff-code-registry.ff-system.svc", 5000], buckets: ["10.43.0.251", 3002], queues: ["10.43.0.251", 3003],
+  lambda: ["ff-backend.ff-system.svc", 3006],
   function: [process.argv[1], 8080] };
 Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((resolve) => {
   const socket = net.connect({ host, port });
@@ -457,8 +497,8 @@ Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((r
   socket.once("error", () => done("refused"));
 }))).then((states) => console.log(states.join(" ")));' "fn-$fn.ff-t-$(printf %s "$account" | sha256sum | cut -c1-12).svc" >/dev/null
 kubectl -n e2e-probe wait --for=jsonpath='{.status.phase}'=Succeeded pod/probe --timeout=120s >/dev/null || true
-check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console, the code registry, buckets' and queues' address for functions nor a function" \
-  "edge=open backend=refused urls=refused keycloak=refused console=refused registry=refused buckets=refused queues=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
+check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console, the code registry, buckets' and queues' address for functions, the backend's port for Lambda's API nor a function" \
+  "edge=open backend=refused urls=refused keycloak=refused console=refused registry=refused buckets=refused queues=refused lambda=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
 
 section "deploy.sh again"
 "$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$FF_REPO_ROOT/hack/k8s/platform-e2e" >"$work/redeploy.log" 2>&1 || { tail -20 "$work/redeploy.log" >&2; fail "deploy.sh failed the second time"; }

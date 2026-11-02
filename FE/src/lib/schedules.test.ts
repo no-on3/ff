@@ -4,15 +4,17 @@ import { Schedule, emptyForm, formOf, lastRunText, nextRunText, scheduleOf } fro
 const when = (iso: string) => iso.slice(0, 16).replace('T', ' ');
 
 describe("a schedule's form", () => {
-  it("gives the API SAM's fields: the name, the expression, the input as JSON, the description, enabled", () => {
-    expect(scheduleOf({ name: ' nightly ', expression: ' cron(0 2 * * ? *) ', description: ' The report ', input: '{"report": "daily"}', enabled: false })).toEqual({
-      body: { name: 'nightly', expression: 'cron(0 2 * * ? *)', description: 'The report', input: { report: 'daily' }, enabled: false },
+  it("gives the API SAM's fields: the name, what it runs, the expression, the input as JSON, the description, enabled", () => {
+    expect(
+      scheduleOf({ name: ' nightly ', qualifier: 'live', expression: ' cron(0 2 * * ? *) ', description: ' The report ', input: '{"report": "daily"}', enabled: false }),
+    ).toEqual({
+      body: { name: 'nightly', qualifier: 'live', expression: 'cron(0 2 * * ? *)', description: 'The report', input: { report: 'daily' }, enabled: false },
     });
   });
 
-  it('sends no input and no description when they are left empty: the Scheduled Event', () => {
+  it('sends no input and no description when they are left empty: the Scheduled Event; $LATEST when it names no version', () => {
     expect(scheduleOf({ ...emptyForm(), name: 'hourly' })).toEqual({
-      body: { name: 'hourly', expression: 'rate(1 hour)', description: null, input: null, enabled: true },
+      body: { name: 'hourly', qualifier: '$LATEST', expression: 'rate(1 hour)', description: null, input: null, enabled: true },
     });
   });
 
@@ -25,10 +27,13 @@ describe("a schedule's form", () => {
     expect(scheduleOf({ ...emptyForm(), ...fields })).toEqual({ problem });
   });
 
-  it('fills the form from a schedule, and back to the same body', () => {
-    const schedule = { name: 'n', expression: 'rate(5 minutes)', description: null, input: [1, 'two'], enabled: true } as Schedule;
+  it('fills the form from a schedule, and back to the same body, what it runs kept', () => {
+    const schedule = { name: 'n', qualifier: '3', expression: 'rate(5 minutes)', description: null, input: [1, 'two'], enabled: true } as Schedule;
 
-    expect(scheduleOf(formOf(schedule))).toEqual({ body: { name: 'n', expression: 'rate(5 minutes)', description: null, input: [1, 'two'], enabled: true } });
+    expect(scheduleOf(formOf(schedule))).toEqual({
+      body: { name: 'n', qualifier: '3', expression: 'rate(5 minutes)', description: null, input: [1, 'two'], enabled: true },
+    });
+    expect(formOf({ ...schedule, qualifier: null }).qualifier).toBe('');
   });
 });
 

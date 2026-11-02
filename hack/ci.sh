@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # FF's pipeline, one stage per job, the same here as on the CI server (.github/workflows/ci.yml calls it):
 #   deps      what the stages after it use: npm ci in the backend, the console, the admin app and the Node.js
-#             runtime, and the ff command's Rust (hack/install-tools.sh), each for the stages that need it; alone,
-#             all of them (CI only: locally, the installed dependencies are used as they are)
+#             runtime, the ff command's Rust, and the SAM CLI, OpenTofu and AWS's provider the ff suite checks an
+#             export with (hack/install-tools.sh), each for the stages that need it; alone, all of them (CI only:
+#             locally, the installed dependencies are used as they are)
 #   static    linters and type checks, the builds, the ff command's formatting and lints, the docs' links and
 #             tables, npm audit's checker, the nightly run's issue, the docs-only rule and the suites' checks against
 #             stand-ins, how-it-works.html's script, every shell script parsed, the CI workflow linted, and secrets
@@ -21,7 +22,7 @@
 #     l3      the Kubernetes driver (L3)
 #     l4      the stack through the API (L4)
 #     l5      every route as another account (L5)
-#     cli     the ff command on the stack and in Docker
+#     cli     the ff command on the stack and in Docker, its export checked by the SAM CLI and OpenTofu
 #     images  the platform's images, run as the cluster runs them, and its manifests, without deploying them
 #   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last push's) and the lockfiles,
 #             checked again with the day's advisories, for an image or a package unchanged since its push: nightly
@@ -40,7 +41,9 @@
 # Heavy steps run one at a time. FF_CI_JOBS=<n> caps the test runners' and Rust's parallelism at n, for a machine
 # others share; unset, each tool takes its own default, but the backend's L1, which takes half the cores, or every one
 # on GitHub. On a machine others share, one stage at a time too, with FF_CI_JOBS=2, each heavy one checking the
-# resources first (hack/check-resources.sh): suggest prints the commands in that order.
+# resources first (hack/check-resources.sh): suggest prints the commands in that order. FF_CI_DB_SUITES=<pattern>
+# runs only L2's suites whose path it matches, Jest's way, a suite fixed after a whole run having failed it; a run
+# whole gives the counts.
 #   hack/ci.sh <stage> [<stage> ...]
 #   FF_CI_JOBS=2 hack/ci.sh unit
 set -euo pipefail
@@ -79,11 +82,12 @@ if [ -x "$repo/hack/.rust/cargo/bin/cargo" ]; then
 fi
 
 in_dir() { (cd "$1" && shift && "$@"); } # <directory> <command...>
-# The first of <n> ports in a row that nothing on this machine answers on.
+# The first of <n> ports in a row that nothing on this machine answers on, from 10000 to 19999: under Linux's range for
+# outgoing connections, 32768 to 60999, where a connection can take a port between this check and Docker's bind.
 free_ports() {
   local n=$1 first port
   for _ in $(seq 1 50); do
-    first=$((40000 + RANDOM % 20000))
+    first=$((10000 + RANDOM % (10000 - n + 1)))
     for port in $(seq "$first" $((first + n - 1))); do
       (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && continue 2
     done
@@ -94,11 +98,12 @@ free_ports() {
   return 1
 }
 
-# What each stage uses that deps installs: the directories npm ci runs in, and the ff command's Rust. A stage that runs
-# the backend here needs its packages; the images build in Docker with their own, and npm audit reads the lockfiles.
+# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, and the AWS tools the
+# ff suite checks an export with. A stage that runs the backend here needs its packages; the images build in Docker
+# with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
   [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust" [db]=BE [security]=''
-  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
+  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [images]=BE [platform]='' [advisories]='' [tools]=''
 )
 stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[images]}"
 stage_uses[all]="${stage_uses[static]} ${stage_uses[unit]} ${stage_uses[db]} ${stage_uses[security]} ${stage_uses[cluster]}"
@@ -111,6 +116,7 @@ stage_deps() {
     case "$uses" in *" $dir "*) prepare "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund ;; esac
   done
   case "$uses" in *" rust "*) prepare "Rust for the ff command" hack/install-tools.sh rust ;; esac
+  case "$uses" in *" aws "*) prepare "the SAM CLI, OpenTofu and AWS's provider, pinned and checked" hack/install-tools.sh tofu aws-provider sam ;; esac
 }
 
 # The page's one script, which a syntax error stops entirely (and with it every scenario).
@@ -126,11 +132,12 @@ PY
 # The scanners run as this user: what they write here stays this user's.
 as_me=(--user "$(id -u):$(id -g)")
 
-# Every commit HEAD holds, with gitleaks' own rules; .gitleaksignore lists the findings that aren't secrets. HEAD's
-# history alone, what a push sends: by default gitleaks reads every ref, a laptop's own branches too.
+# Every commit HEAD holds, with gitleaks' own rules and .gitleaks.toml's one file of AWS's published examples;
+# .gitleaksignore lists the other findings that aren't secrets. HEAD's history alone, what a push sends: by default
+# gitleaks reads every ref, a laptop's own branches too.
 gitleaks_history() {
   docker run --rm "${as_me[@]}" -v "$repo:/repo:ro" "$GITLEAKS_IMAGE" git /repo --log-opts='--full-history --diff-filter=tuxdb HEAD' \
-    --gitleaks-ignore-path /repo/.gitleaksignore --redact --no-banner --log-level warn
+    --config /repo/.gitleaks.toml --gitleaks-ignore-path /repo/.gitleaksignore --redact --no-banner --log-level warn
 }
 
 workflow_lints() { # the CI server's workflow, its run: steps shellchecked
@@ -200,7 +207,7 @@ stage_unit() {
 stage_db() {
   "$repo/hack/check-resources.sh"
   local name="ff-ci-postgres-$$" data="ff-ci-data-db-$$" s3="ff-ci-s3-$$" cache="ff-ci-cache-$$" password port admin data_port s3_key s3_port \
-    cache_port first caches
+    cache_port first caches servers
   password="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   admin="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   s3_key="ci$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -235,14 +242,17 @@ stage_db() {
   docker cp -q "$data:/var/lib/postgresql/tls/ca.crt" "$ci_dir/data-db-ca.crt"
   for _ in $(seq 1 60); do curl -sfk -o /dev/null -H "authorization: Bearer $admin" "https://127.0.0.1:$cache_port/health" && break; sleep 1; done
   docker cp -q "$cache:/var/lib/ff-cache/tls/ca.crt" "$ci_dir/cache-ca.crt"
-  # The variables win over BE/.env, which dotenv never overrides.
-  export DB_HOST=127.0.0.1 DB_PORT="$port" DB_USERNAME=postgres DB_PASSWORD="$password" DB_NAME=postgres DB_SSL=false
-  export FF_DATA_DB_HOST=127.0.0.1 FF_DATA_DB_PORT="$data_port" FF_DATA_DB_ADMIN_PASSWORD="$admin" FF_DATA_DB_CA_FILE="$ci_dir/data-db-ca.crt"
-  export FF_CACHE_HOST=127.0.0.1 FF_CACHE_PORTS="$caches" FF_CACHE_AGENT_URL="https://127.0.0.1:$cache_port" FF_CACHE_AGENT_TOKEN="$admin" \
+  # The variables win over BE/.env, which dotenv never overrides. They are this stage's servers' and go to its two
+  # steps alone: exported, they reached the stages after it, whose backends took these servers' ports for theirs.
+  servers=(DB_HOST=127.0.0.1 DB_PORT="$port" DB_USERNAME=postgres DB_PASSWORD="$password" DB_NAME=postgres DB_SSL=false
+    FF_DATA_DB_HOST=127.0.0.1 FF_DATA_DB_PORT="$data_port" FF_DATA_DB_ADMIN_PASSWORD="$admin" FF_DATA_DB_CA_FILE="$ci_dir/data-db-ca.crt"
+    FF_CACHE_HOST=127.0.0.1 FF_CACHE_PORTS="$caches" FF_CACHE_AGENT_URL="https://127.0.0.1:$cache_port" FF_CACHE_AGENT_TOKEN="$admin"
     FF_CACHE_CA_FILE="$ci_dir/cache-ca.crt"
-  export FF_OBJECT_STORE_ENDPOINT=127.0.0.1 FF_OBJECT_STORE_PORT="$s3_port" FF_OBJECT_STORE_USE_SSL=false FF_OBJECT_STORE_ACCESS_KEY="$s3_key" FF_OBJECT_STORE_SECRET_KEY="$password"
-  step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18, buckets on SeaweedFS ${SEAWEEDFS_IMAGE#*:}" in_dir BE npm run test:db
-  step "migrations: exactly the entities' schema" in_dir BE npm run migration:check
+    FF_OBJECT_STORE_ENDPOINT=127.0.0.1 FF_OBJECT_STORE_PORT="$s3_port" FF_OBJECT_STORE_USE_SSL=false FF_OBJECT_STORE_ACCESS_KEY="$s3_key"
+    FF_OBJECT_STORE_SECRET_KEY="$password")
+  step "backend: L2 on PostgreSQL ${POSTGRES_IMAGE#postgres:}, customers' databases on 18, buckets on SeaweedFS ${SEAWEEDFS_IMAGE#*:}" \
+    in_dir BE env "${servers[@]}" npm run test:db -- ${FF_CI_DB_SUITES:+"$FF_CI_DB_SUITES"}
+  step "migrations: exactly the entities' schema" in_dir BE env "${servers[@]}" npm run migration:check
   docker rm -f -v "$name" "$data" "$s3" "$cache" >/dev/null
 }
 

@@ -36,10 +36,14 @@ export class SchedulesController {
     summary: 'Run the function on a schedule',
     description:
       `${EXPRESSIONS} Each run calls the function with EventBridge's Scheduled Event, or the schedule's input, as a call like any other: it counts ` +
-      "against the plan's invocations per second, needs credit, and is in the history as the schedule's. A run happens at most once, and isn't retried.",
+      "against the plan's invocations per second, needs credit, and is in the history as the schedule's. A run happens at most once, and isn't retried. " +
+      "A qualifier runs a version or an alias of the function, as an EventBridge rule's qualified target; one deleted since skips the runs.",
   })
   @ApiResponse({ status: 201, type: ScheduleView })
-  @ApiResponse({ status: 400, description: "An expression EventBridge wouldn't take, the plan's limit, or a function that takes FF's original wrapped event" })
+  @ApiResponse({
+    status: 400,
+    description: "An expression EventBridge wouldn't take, the plan's limit, a version or an alias the function hasn't, or what takes FF's original wrapped event",
+  })
   @ApiResponse({ status: 409, description: 'Another of the function\'s schedules has the name' })
   create(@Param('id', ParseUUIDPipe) id: string, @Body() dto: CreateScheduleDto, @Principal() principal: Principal): Promise<ScheduleView> {
     return this.schedules.create(principal.accountId, id, dto);
@@ -62,6 +66,7 @@ export class SchedulesController {
     description: 'What is left out stays. A new expression, or being enabled again, starts its runs anew from now; disabled, it has none.',
   })
   @ApiResponse({ status: 200, type: ScheduleView })
+  @ApiResponse({ status: 400, description: "As for a new schedule: a qualifier is checked when it changes" })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('scheduleId', ParseUUIDPipe) scheduleId: string,

@@ -8,3 +8,4 @@ Une page par service, pour les clients de FF ; la documentation de référence, 
 - [Sites statiques](sites.md), comme S3 et CloudFront.
 - [Le courrier de vos applications](courrier.md), comme Amazon SES.
 - [Des caches](caches.md), comme Amazon ElastiCache.
+- [Partir vers AWS](partir-vers-aws.md), avec `ff export` : le modèle SAM, Terraform, le code et le déroulé du départ.

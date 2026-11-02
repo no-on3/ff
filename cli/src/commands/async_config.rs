@@ -5,33 +5,27 @@
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::function_named;
+use crate::api::types::{function_named, qualified_name_in_arn};
 use crate::api::{Call, Client};
 use crate::cli::AsyncConfigArgs;
-use crate::error::{Error, Kind};
-
-fn usage(message: impl Into<String>) -> Error {
-    Error::new(Kind::Usage, message)
-}
+use crate::error::Error;
 
 /// `--max-age 30m`: whole seconds, from a minute to 6 hours, as Lambda keeps a call.
 pub fn max_age_seconds(text: &str) -> Result<u64, Error> {
     let duration = humantime::parse_duration(text)
-        .map_err(|error| usage(format!("--max-age takes a duration such as 90s, 30m or 6h: {error}")))?;
+        .map_err(|error| Error::usage(format!("--max-age takes a duration such as 90s, 30m or 6h: {error}")))?;
     let seconds = duration.as_secs();
     if duration.subsec_nanos() != 0 || !(60..=21_600).contains(&seconds) {
-        return Err(usage("--max-age must be whole seconds from 1m to 6h, as AWS Lambda keeps a call"));
+        return Err(Error::usage("--max-age must be whole seconds from 1m to 6h, as AWS Lambda keeps a call"));
     }
     Ok(seconds)
 }
 
-/// A destination as people read it: a function by the name its Lambda ARN ends with, `$LATEST` or not; a queue's ARN,
-/// `arn:aws:sqs:<region>:<account>:<name>`, as "the queue <name>".
-fn name_of(arn: &str) -> String {
-    if let Some(rest) = arn.strip_prefix("arn:aws:sqs:") {
-        return format!("the queue {}", rest.rsplit(':').next().unwrap_or(rest));
-    }
-    arn.split_once(":function:").map(|(_, rest)| rest.split(':').next().unwrap_or(rest)).unwrap_or(arn).to_string()
+/// A destination as people read it: a function by its name, with the version or the alias its Lambda ARN names
+/// (`failed-orders:live`), `$LATEST` as none; a queue's ARN, `arn:aws:sqs:<region>:<account>:<name>`, as "the queue <name>".
+fn destination_in_words(arn: &str) -> String {
+    let name = qualified_name_in_arn(arn);
+    if arn.starts_with("arn:aws:sqs:") { format!("the queue {name}") } else { name.to_owned() }
 }
 
 /// How long a call is kept, in words: hours when it is whole hours, else minutes, else seconds.
@@ -61,8 +55,8 @@ pub fn text(name: &str, config: Option<&Value>) -> String {
         kept(number("maximumEventAgeInSeconds").unwrap_or(21_600))
     );
     let destinations: Vec<String> = [
-        destination("onSuccess").map(|arn| format!("a call that succeeds goes on to {}", name_of(arn))),
-        destination("onFailure").map(|arn| format!("one that fails for good to {}", name_of(arn))),
+        destination("onSuccess").map(|arn| format!("a call that succeeds goes on to {}", destination_in_words(arn))),
+        destination("onFailure").map(|arn| format!("one that fails for good to {}", destination_in_words(arn))),
     ]
     .into_iter()
     .flatten()
@@ -80,11 +74,7 @@ pub fn text(name: &str, config: Option<&Value>) -> String {
 
 /// The settings there are, or none: a 404 is a function following Lambda's defaults.
 fn current(client: &Client, id: &str) -> Result<Option<Value>, Error> {
-    match client.json::<Value>(&Call::get(format!("/functions/{id}/event-invoke-config"))) {
-        Ok(config) => Ok(Some(config)),
-        Err(error) if error.status == Some(404) => Ok(None),
-        Err(error) => Err(error),
-    }
+    client.json_if_any(&Call::get(format!("/functions/{id}/event-invoke-config")))
 }
 
 /// What the flags change, over the settings there are: the body of the API's PUT, which replaces them whole.
@@ -208,6 +198,11 @@ mod tests {
         assert_eq!(
             text("orders", Some(&queued)),
             "orders: a call that fails is retried twice, and kept 6 hours at most; one that fails for good to the queue failed-orders"
+        );
+        let aliased = json!({ "destinationConfig": { "onSuccess": { "destination": format!("{ARN}:live") }, "onFailure": { "destination": format!("{ARN}:$LATEST") } } });
+        assert_eq!(
+            text("orders", Some(&aliased)),
+            "orders: a call that fails is retried twice, and kept 6 hours at most; a call that succeeds goes on to failed-orders:live, one that fails for good to failed-orders"
         );
     }
 }

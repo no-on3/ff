@@ -23,15 +23,17 @@ Dans la console, la page « Buckets » ; ou avec l'outil `ff` :
 
 ```bash
 ff buckets create photos
-eval "$(ff buckets keys create --bucket photos | grep '^export ')"
+eval "$(ff keys create --bucket photos | grep '^export ')"
 aws s3 cp ./chat.jpg s3://photos/2026/chat.jpg
 ```
 
-`ff buckets keys create` n'affiche le secret de la clé qu'à ce moment-là, sous la forme des six variables que lisent les outils d'AWS : `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, et les adresses de FF pour S3, SQS et SES, `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL_SQS` et `AWS_ENDPOINT_URL_SESV2`. Avec elles, la CLI et les SDK d'AWS n'ont besoin d'aucune autre option. Seuls les propriétaires du compte voient, créent et révoquent les clés ; une clé révoquée est refusée aussitôt : `ff buckets keys revoke AKFF…`.
+`ff keys create` n'affiche le secret de la clé qu'à ce moment-là, sous la forme des sept variables que lisent les outils d'AWS : `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, et les adresses de FF pour S3, SQS, SES et Lambda, `AWS_ENDPOINT_URL_S3`, `AWS_ENDPOINT_URL_SQS`, `AWS_ENDPOINT_URL_SESV2` et `AWS_ENDPOINT_URL_LAMBDA`. Avec elles, la CLI et les SDK d'AWS n'ont besoin d'aucune autre option. Seuls les propriétaires du compte voient, créent et révoquent les clés ; une clé révoquée est refusée aussitôt : `ff buckets keys revoke AKFF…`.
 
 ## Depuis une fonction
 
 Rien à régler : à son premier déploiement, une fonction reçoit sa propre clé, qui atteint tous les compartiments du compte, avec la région et l'adresse de FF dans son environnement. `new S3Client({})` en Node.js (`@aws-sdk/client-s3` dans le paquet de la fonction) et `boto3.client("s3")` en Python marchent tels quels, comme sur AWS Lambda avec un rôle. La clé est révoquée quand la fonction est supprimée.
+
+Pour passer à AWS un service à la fois, une fonction peut se passer de l'adresse de FF pour S3 : `awsEndpoints` sans `s3` (`{"awsEndpoints": ["sqs", "sesv2"]}`), et `AWS_ENDPOINT_URL_S3` disparaît de son environnement au déploiement que ce changement entraîne. Elle garde la clé et la région de FF pour ses files d'attente et son courrier : son code donne alors au client S3 une clé d'AWS, gardée en secret, et une région d'AWS.
 
 ## Sa vie
 
@@ -49,4 +51,4 @@ FF ne garde aucune copie de vos compartiments ailleurs : la redondance du stocka
 
 ## Partir vers AWS S3
 
-`aws s3 sync` de FF vers un dossier, puis du dossier vers un compartiment S3 : le script [`cli/templates/export/data/s3-sync.sh`](../../cli/templates/export/data/s3-sync.sh), que `ff export` mettra dans son kit de sortie, fait les deux, avec une clé de FF pour la première moitié et vos identifiants AWS pour la seconde. Relancé, il ne copie que ce qui a changé ; avec `--delete-gone`, ce qui a disparu de FF disparaît aussi du dossier et de S3. Le code pointe alors vers S3 (sur AWS Lambda, un rôle et aucune adresse), et le compartiment se supprime sur FF.
+`aws s3 sync` de FF vers un dossier, puis du dossier vers un compartiment S3 : le script [`cli/templates/export/data/s3-sync.sh`](../../cli/templates/export/data/s3-sync.sh), que `ff export` met dans son kit de sortie ([Partir vers AWS](partir-vers-aws.md)), fait les deux, avec une clé de FF pour la première moitié et vos identifiants AWS pour la seconde. Relancé, il ne copie que ce qui a changé ; avec `--delete-gone`, ce qui a disparu de FF disparaît aussi du dossier et de S3. Le code pointe alors vers S3 (sur AWS Lambda, un rôle et aucune adresse), et le compartiment se supprime sur FF.

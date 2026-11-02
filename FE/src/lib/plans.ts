@@ -6,6 +6,7 @@ export const PLAN_LIMIT_KEYS = [
   'memoryMb',
   'timeoutSeconds',
   'instancesPerFunction',
+  'codeStorageMb',
   'quota',
   'writesPerMinute',
   'invokesPerSecond',
@@ -32,6 +33,7 @@ export const PLAN_LIMIT_KEYS = [
   'emailIdentities',
   'emailsPerDay',
   'emailsPerSecond',
+  'accessKeys',
 ] as const satisfies ReadonlyArray<keyof PlanLimits>;
 
 // A limit missing from the list above stops the build.
@@ -60,6 +62,7 @@ export function planLimitRows({ limits }: Pick<Plan, 'limits'>): Array<[label: s
     ['Memory per function', `up to ${limits.memoryMb} MB`],
     ['Timeout per function', `up to ${limits.timeoutSeconds} s`],
     ['Instances per function', `up to ${limits.instancesPerFunction}`],
+    ['Code of the functions', `${formatMegabytes(limits.codeStorageMb)} together, their versions' included`],
     ['All functions together', `${limits.quota.pods} instances, ${limits.quota.cpu} CPU, ${limits.quota.memory} of memory`],
     ['Changes', `${limits.writesPerMinute} per minute`],
     ['Invocations', `${limits.invokesPerSecond} per second`],
@@ -86,5 +89,6 @@ export function planLimitRows({ limits }: Pick<Plan, 'limits'>): Array<[label: s
     ['Memory of a cache', `${formatMegabytes(limits.cacheMb)}; past it, the least recently used keys go`],
     ['Domains to send mail from', String(limits.emailIdentities)],
     ['E-mails', `${limits.emailsPerDay} a day, ${limits.emailsPerSecond} a second; each recipient one`],
+    ["Access keys for AWS's SDKs and CLI", String(limits.accessKeys)],
   ];
 }

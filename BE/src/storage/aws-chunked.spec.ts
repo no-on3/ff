@@ -3,7 +3,8 @@ import { pipeline } from 'node:stream/promises';
 import { crc32 } from 'node:zlib';
 import { ChunkedBodyReader, PlainBodyChecker } from './aws-chunked';
 import { S3Error } from './s3-error';
-import { RequestSignature, SignedRequest, SigningChain, checkSignature, readSignature, sha256Hex, signingKey } from './sigv4';
+import { SignedRequest, SigningChain, sha256Hex, signingKey } from '../common/signature-v4';
+import { RequestSignature, checkSignature, readSignature } from './s3-signature';
 
 // AWS's documented aws-chunked uploads (the S3 API reference, "Signature Calculations for the Authorization Header:
 // Transferring Payload in Multiple Chunks", with and without a trailer): 66,560 bytes of "a" in a chunk of 64 KB and
@@ -11,7 +12,7 @@ import { RequestSignature, SignedRequest, SigningChain, checkSignature, readSign
 const SECRET = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
 const DATA = Buffer.alloc(66_560, 'a');
 const chain = (seed: string): SigningChain => ({
-  key: signingKey(SECRET, '20130524', 'us-east-1'),
+  key: signingKey(SECRET, '20130524', 'us-east-1', 's3'),
   scope: '20130524/us-east-1/s3/aws4_request',
   amzDate: '20130524T000000Z',
   seed,

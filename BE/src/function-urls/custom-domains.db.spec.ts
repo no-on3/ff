@@ -1,7 +1,8 @@
 /**
  * L2: customers' own domains on a real PostgreSQL: a domain in an account once,
- * for a URL or a site, verified in one account at most however many add it,
- * gone with its URL and its function, or with its bucket; and every plan with
+ * for a URL, an alias's too, or a site, verified in one account at most
+ * however many add it, gone with its URL, its alias and its function, or with
+ * its bucket; and every plan with
  * its limit on them. Each run works in a scratch database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
@@ -12,6 +13,8 @@ import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { Plan } from '../accounts/entities/plan.entity';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { IsNull } from 'typeorm';
+import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { FunctionUrl, UrlAuthType } from '../functions/entities/function-url.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { parsePlanLimits } from '../plans/plan-limits';
@@ -66,8 +69,10 @@ run("customers' domains, in the database (L2)", () => {
       { id: TWO, name: 'Two', planId: 'beta', status: AccountStatus.ACTIVE },
     ]);
     const urlRows = db.dataSource.getRepository(FunctionUrl);
-    // Only what the domains need of the URLs: their account's URL, else 404.
-    const urls = { urlOf: async (accountId: string, functionId: string) => urlRows.findOneByOrFail({ accountId, functionId }) } as unknown as FunctionUrlsService;
+    // Only what the domains need of the URLs: their account's URL, $LATEST's or the alias's, else 404.
+    const urls = {
+      urlOf: async (accountId: string, functionId: string, alias?: string) => urlRows.findOneByOrFail({ accountId, functionId, alias: alias ?? IsNull() }),
+    } as unknown as FunctionUrlsService;
     domains = new CustomDomainsService(
       db.dataSource.getRepository(CustomDomain),
       urls,
@@ -135,6 +140,37 @@ run("customers' domains, in the database (L2)", () => {
     await db.dataSource.getRepository(Bucket).delete({ name: site.name });
 
     expect(await db.dataSource.getRepository(CustomDomain).countBy({ domain: 'gone.example.tn' })).toBe(0);
+  });
+
+  it("serves an alias's URL at its own domains, $LATEST's at others, and deletes them with the alias", async () => {
+    // In the other account, which has room for three under the plan's limit.
+    const fn = await withUrl(TWO, 'aliased-fn', 'h'.repeat(32));
+    await db.dataSource.getRepository(FunctionAlias).insert({ functionId: fn.id, accountId: TWO, name: 'live', version: null });
+    await db.dataSource.getRepository(FunctionUrl).insert({ functionId: fn.id, accountId: TWO, urlId: 'i'.repeat(32), alias: 'live', authType: UrlAuthType.NONE });
+    cnames['live.example.tn'] = 'i'.repeat(32) + '.fn.example.tn';
+    cnames['latest.example.tn'] = fn.host;
+
+    expect(await domains.add(TWO, fn.id, 'live.example.tn', 'live')).toMatchObject({ alias: 'live', status: DomainStatus.VERIFIED });
+    expect(await domains.add(TWO, fn.id, 'latest.example.tn')).toMatchObject({ alias: null, status: DomainStatus.VERIFIED });
+    // A CNAME to $LATEST's host doesn't prove a domain for the alias's.
+    cnames['wrong.example.tn'] = fn.host;
+    expect((await domains.add(TWO, fn.id, 'wrong.example.tn', 'live')).status).toBe(DomainStatus.PENDING);
+
+    expect((await domains.list(TWO, fn.id, 'live')).map((domain) => domain.domain)).toEqual(['live.example.tn', 'wrong.example.tn']);
+    expect((await domains.list(TWO, fn.id)).map((domain) => domain.domain)).toEqual(['latest.example.tn']);
+    expect((await domains.forHost('live.example.tn'))?.urlId).toBe('i'.repeat(32));
+    // The platform's support page shows each URL with its own domains.
+    const byUrl = await domains.forFunctionUrls(fn.id);
+    expect([...byUrl].map(([alias, of]) => [alias, of.map((domain) => domain.domain)])).toEqual([
+      ['live', ['live.example.tn', 'wrong.example.tn']],
+      [null, ['latest.example.tn']],
+    ]);
+    // A row naming a function without its URL, or a URL without its function, is refused by the database itself.
+    const row = { domain: 'half.example.tn', accountId: TWO, token: 'x'.repeat(32), status: DomainStatus.PENDING, bucketId: null };
+    await expect(db.dataSource.getRepository(CustomDomain).insert({ ...row, functionId: fn.id, urlId: null })).rejects.toThrow(/check constraint/);
+
+    await db.dataSource.getRepository(FunctionAlias).delete({ functionId: fn.id, name: 'live' });
+    expect((await db.dataSource.getRepository(CustomDomain).find({ where: { functionId: fn.id } })).map((domain) => domain.domain)).toEqual(['latest.example.tn']);
   });
 
   it('deletes the domains with their URL, and with their function', async () => {

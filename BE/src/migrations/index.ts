@@ -57,6 +57,20 @@ import { CacheMeasures1793333328301 } from './1793333328301-CacheMeasures';
 import { EmailIdentities1793336364006 } from './1793336364006-EmailIdentities';
 import { EmailMessages1793340758436 } from './1793340758436-EmailMessages';
 import { EmailBilling1793345460517 } from './1793345460517-EmailBilling';
+import { AwsEndpoints1793470802242 } from './1793470802242-AwsEndpoints';
+import { KeyUses1793472304822 } from './1793472304822-KeyUses';
+import { AwsEstimatePrices1793486079752 } from './1793486079752-AwsEstimatePrices';
+import { FunctionVersions1793535703682 } from './1793535703682-FunctionVersions';
+import { FunctionAliases1793538712036 } from './1793538712036-FunctionAliases';
+import { CodeStorage1793540275197 } from './1793540275197-CodeStorage';
+import { InvocationVersions1793560000000 } from './1793560000000-InvocationVersions';
+import { CapacityVersions1793570000000 } from './1793570000000-CapacityVersions';
+import { UrlAliases1793580000000 } from './1793580000000-UrlAliases';
+import { TriggerQualifiers1793590000000 } from './1793590000000-TriggerQualifiers';
+import { AlarmDimensions1793600000000 } from './1793600000000-AlarmDimensions';
+import { AccessKeyFunctions1793610000000 } from './1793610000000-AccessKeyFunctions';
+import { FunctionKeyRenewal1793620000000 } from './1793620000000-FunctionKeyRenewal';
+import { LambdaEndpoint1793630000000 } from './1793630000000-LambdaEndpoint';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -123,4 +137,18 @@ export const MIGRATIONS: Array<new () => object> = [
   EmailIdentities1793336364006,
   EmailMessages1793340758436,
   EmailBilling1793345460517,
+  AwsEndpoints1793470802242,
+  KeyUses1793472304822,
+  AwsEstimatePrices1793486079752,
+  FunctionVersions1793535703682,
+  FunctionAliases1793538712036,
+  CodeStorage1793540275197,
+  InvocationVersions1793560000000,
+  CapacityVersions1793570000000,
+  UrlAliases1793580000000,
+  TriggerQualifiers1793590000000,
+  AlarmDimensions1793600000000,
+  AccessKeyFunctions1793610000000,
+  FunctionKeyRenewal1793620000000,
+  LambdaEndpoint1793630000000,
 ];

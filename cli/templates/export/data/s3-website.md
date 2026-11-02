@@ -4,7 +4,7 @@ An FF site is a bucket with S3's website configuration, served over HTTPS at `<b
 
 ## What you need
 
-- **The built folder you deploy,** such as `./dist`: uploading it again is simpler than copying the bucket, and gives each file its cache header. Without it, the first half of [`s3-sync.sh`](s3-sync.sh) copies the bucket's files to a folder, with a read-only key of FF's (`ff buckets keys create --bucket <bucket> --read-only`).
+- **The built folder you deploy,** such as `./dist`: uploading it again is simpler than copying the bucket, and gives each file its cache header. Without it, the first half of [`s3-sync.sh`](s3-sync.sh) copies the bucket's files to a folder, with a read-only key of FF's (`ff keys create --bucket <bucket> --read-only`).
 - **What the site is on FF:** `ff sites get <bucket> --output json`, its index document, its error document and whether it is a single-page app; `ff sites domains list <bucket>`, your domains.
 - **An AWS account and the AWS CLI,** and for your domains a certificate of AWS Certificate Manager in `us-east-1`, CloudFront's region, that names them.
 

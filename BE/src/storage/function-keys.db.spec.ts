@@ -7,9 +7,11 @@ import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
+import { onePlan, plan } from '../plans/test-fixtures';
+import { AwsEndpoint, awsEndpointsOf } from '../common/aws-endpoint';
 import { Bucket } from './bucket.entity';
-import { FunctionKeys } from './function-keys.service';
-import { StorageDirectory } from './storage-directory.service';
+import { FUNCTION_KEY_LIFE_MS, FunctionCredentials, FunctionKeys } from './function-keys.service';
+import { EXPIRED, StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { StorageKeysService } from './storage-keys.service';
 
@@ -18,19 +20,27 @@ const ACCOUNT = '720000000001';
 const ENDPOINT = 'http://10.43.0.251:3002';
 const SQS_ENDPOINT = 'http://10.43.0.251:3003';
 const SES_ENDPOINT = 'http://10.43.0.251:3005';
+const LAMBDA_ENDPOINT = 'http://10.43.0.251:3006';
+/** Where functions reach each endpoint, as the backend's settings give them: all four. */
+const EVERY_ENDPOINT = { s3: ENDPOINT, sqs: SQS_ENDPOINT, ses: SES_ENDPOINT, lambda: LAMBDA_ENDPOINT };
 
-run("functions' own keys to their account's buckets, queues and mail, in FF's database (L2)", () => {
-  const config = (functionEndpoint = ENDPOINT, sqsEndpoint = SQS_ENDPOINT, sesEndpoint = SES_ENDPOINT) =>
+run("functions' own keys to their account's buckets, queues, mail and functions, in FF's database (L2)", () => {
+  /** The backend's settings, functions given the endpoints named alone. */
+  const config = (given: Partial<typeof EVERY_ENDPOINT> = EVERY_ENDPOINT) =>
     new ConfigService({
-      storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1', functionEndpoint },
-      sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1', functionEndpoint: sqsEndpoint },
-      ses: { base: 'https://email.example.tn', region: 'tn-tunis-1', functionEndpoint: sesEndpoint },
+      storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1', functionEndpoint: given.s3 ?? '' },
+      sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1', functionEndpoint: given.sqs ?? '' },
+      ses: { base: 'https://email.example.tn', region: 'tn-tunis-1', functionEndpoint: given.ses ?? '' },
+      lambda: { base: 'https://lambda.example.tn', region: 'tn-tunis-1', functionEndpoint: given.lambda ?? '' },
     });
   let db: ScratchDatabase;
   let directory: StorageDirectory;
   let keys: FunctionKeys;
   const rowsOf = (functionId: string) => db.dataSource.getRepository(StorageKey).find({ where: { functionId }, order: { createdAt: 'ASC' } });
-  const fn = () => ({ id: randomUUID(), accountId: ACCOUNT });
+  const fn = () => ({ id: randomUUID(), accountId: ACCOUNT, awsEndpoints: awsEndpointsOf() });
+  /** The key's ID, as the pods get it. */
+  const keyOf = (credentials: FunctionCredentials | undefined) => credentials!.variables.AWS_ACCESS_KEY_ID;
+  const endpoints = (variables: Record<string, string>) => Object.keys(variables).filter((name) => name.startsWith('AWS_ENDPOINT_URL'));
 
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
@@ -52,23 +62,24 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
     const again = await keys.credentialsFor(function_);
 
     expect(first).toEqual({
-      keyId: expect.stringMatching(/^AKFF[A-Z2-7]{16}$/),
+      revision: keyOf(first),
       variables: {
-        AWS_ACCESS_KEY_ID: first!.keyId,
+        AWS_ACCESS_KEY_ID: expect.stringMatching(/^AKFF[A-Z2-7]{16}$/),
         AWS_SECRET_ACCESS_KEY: expect.stringMatching(/^[A-Za-z0-9+/]{40}$/),
         AWS_REGION: 'tn-tunis-1',
         AWS_DEFAULT_REGION: 'tn-tunis-1',
         AWS_ENDPOINT_URL_S3: ENDPOINT,
         AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT,
         AWS_ENDPOINT_URL_SESV2: SES_ENDPOINT,
+        AWS_ENDPOINT_URL_LAMBDA: LAMBDA_ENDPOINT,
       },
     });
     expect(again).toEqual(first);
     const [row] = await rowsOf(function_.id);
-    expect(row).toMatchObject({ id: first!.keyId, accountId: ACCOUNT, functionId: function_.id, buckets: null, readOnly: false, revokedAt: null });
+    expect(row).toMatchObject({ id: keyOf(first), accountId: ACCOUNT, functionId: function_.id, buckets: null, readOnly: false, revokedAt: null });
     expect(JSON.stringify(row.secret)).not.toContain(first!.variables.AWS_SECRET_ACCESS_KEY);
     // The front door finds it as any key, and checks its signatures with that secret.
-    expect(await directory.key(first!.keyId)).toMatchObject({ accountId: ACCOUNT, functionId: function_.id, buckets: null, readOnly: false, secret: first!.variables.AWS_SECRET_ACCESS_KEY });
+    expect(await directory.key(keyOf(first))).toMatchObject({ accountId: ACCOUNT, functionId: function_.id, buckets: null, readOnly: false, secret: first!.variables.AWS_SECRET_ACCESS_KEY });
   });
 
   it('makes one key when two deploys of the function ask at once: the index keeps one that works', async () => {
@@ -76,7 +87,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
 
     const answers = await Promise.all([keys.credentialsFor(function_), keys.credentialsFor(function_), keys.credentialsFor(function_)]);
 
-    expect(new Set(answers.map((answer) => answer!.keyId)).size).toBe(1);
+    expect(new Set(answers.map(keyOf)).size).toBe(1);
     expect(new Set(answers.map((answer) => answer!.variables.AWS_SECRET_ACCESS_KEY)).size).toBe(1);
     expect(await rowsOf(function_.id)).toHaveLength(1);
     await expect(
@@ -91,17 +102,118 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
     await keys.revoke(function_.id);
     await keys.revoke(function_.id);
 
-    expect(await directory.key(made!.keyId)).toBeNull();
-    expect(await rowsOf(function_.id)).toEqual([expect.objectContaining({ id: made!.keyId, revokedAt: expect.any(Date) })]);
+    expect(await directory.key(keyOf(made))).toBeNull();
+    expect(await rowsOf(function_.id)).toEqual([expect.objectContaining({ id: keyOf(made), revokedAt: expect.any(Date) })]);
     // A function whose record outlived its removal gets a key of its own again at its next deploy.
     const next = await keys.credentialsFor(function_);
-    expect(next!.keyId).not.toBe(made!.keyId);
+    expect(keyOf(next)).not.toBe(keyOf(made));
     expect((await rowsOf(function_.id)).map((row) => row.revokedAt === null)).toEqual([false, true]);
   });
 
-  it("is never one of the account's own keys: not listed with them, nor counted against their two", async () => {
+  describe('its life: 12 hours, renewed at half of it, the old key working on until the renewal revokes it', () => {
+    const HALF = FUNCTION_KEY_LIFE_MS / 2;
+    const at = (start: Date, ms: number) => new Date(start.getTime() + ms);
+    const toRenewOf = async (functionId: string, now: Date) => (await keys.toRenew(now)).filter((pending) => pending.functionId === functionId);
+
+    it('ends 12 hours after it is made; is due at half its life, when the next workload gets a new key, the old one replaced and still working', async () => {
+      const function_ = fn();
+      const made = new Date();
+      const first = await keys.credentialsFor(function_, made);
+
+      expect((await rowsOf(function_.id))[0].expiresAt).toEqual(at(made, FUNCTION_KEY_LIFE_MS));
+      expect([await keys.isDue(function_.id, at(made, HALF - 1000)), await keys.isDue(function_.id, at(made, HALF))]).toEqual([false, true]);
+      expect(keyOf(await keys.credentialsFor(function_, at(made, HALF - 1000)))).toBe(keyOf(first));
+      expect(await toRenewOf(function_.id, at(made, HALF - 1000))).toEqual([]);
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, accountId: ACCOUNT, due: true, lasting: false, replaced: false }]);
+
+      const renewed = await keys.credentialsFor(function_, at(made, HALF));
+
+      expect(keyOf(renewed)).not.toBe(keyOf(first));
+      expect(renewed!.revision).toBe(keyOf(renewed));
+      expect(await rowsOf(function_.id)).toEqual([
+        expect.objectContaining({ id: keyOf(first), replacedAt: at(made, HALF), revokedAt: null }),
+        expect.objectContaining({ id: keyOf(renewed), replacedAt: null, revokedAt: null, expiresAt: at(made, HALF + FUNCTION_KEY_LIFE_MS) }),
+      ]);
+      // The pods that hold the old one go on reaching the account's buckets until the renewal finds none holding it.
+      expect(await directory.key(keyOf(first))).toMatchObject({ functionId: function_.id });
+      expect(keyOf(await keys.credentialsFor(function_, at(made, HALF)))).toBe(keyOf(renewed));
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, accountId: ACCOUNT, due: false, lasting: false, replaced: true }]);
+
+      expect(await keys.revokeReplaced(function_.id)).toBe(1);
+
+      expect(await directory.key(keyOf(first))).toBeNull();
+      expect(await directory.key(keyOf(renewed))).toMatchObject({ functionId: function_.id });
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([]);
+      expect(await keys.revokeReplaced(function_.id)).toBe(0);
+    });
+
+    it('makes one new key when two workloads renew it at once: the second finds it replaced, and takes the one the first made', async () => {
+      const function_ = fn();
+      const made = new Date();
+      await keys.credentialsFor(function_, made);
+
+      const answers = await Promise.all([1, 2, 3].map(() => keys.credentialsFor(function_, at(made, HALF))));
+
+      expect(new Set(answers.map(keyOf)).size).toBe(1);
+      expect((await rowsOf(function_.id)).map((row) => row.replacedAt === null)).toEqual([false, true]);
+    });
+
+    it('says a key past its end expired, and renews it at the next workload, as a function at zero starts', async () => {
+      const function_ = fn();
+      const made = new Date(Date.now() - FUNCTION_KEY_LIFE_MS - 1000);
+      const old = await keys.credentialsFor(function_, made);
+
+      expect(await directory.key(keyOf(old))).toBe(EXPIRED);
+      expect(await keys.isDue(function_.id)).toBe(true);
+      expect(keyOf(await keys.credentialsFor(function_))).not.toBe(keyOf(old));
+    });
+
+    it('takes a lasting key, made before keys ended, as due at once: listed for the renewal, and replaced at the next workload by one that ends', async () => {
+      const function_ = fn();
+      const id = 'AKFFLASTINGLASTINGLA';
+      await db.dataSource.getRepository(StorageKey).insert({ id, accountId: ACCOUNT, functionId: function_.id, secret: directory.sealSecret(id, 's'.repeat(40)) });
+      const now = new Date();
+
+      expect(await keys.isDue(function_.id, now)).toBe(true);
+      expect(await toRenewOf(function_.id, now)).toEqual([{ functionId: function_.id, accountId: ACCOUNT, due: true, lasting: true, replaced: false }]);
+
+      const renewed = await keys.credentialsFor(function_, now);
+
+      expect(keyOf(renewed)).not.toBe(id);
+      expect(await rowsOf(function_.id)).toEqual([
+        expect.objectContaining({ id, replacedAt: now, revokedAt: null, expiresAt: null }),
+        expect.objectContaining({ id: keyOf(renewed), replacedAt: null, expiresAt: at(now, FUNCTION_KEY_LIFE_MS) }),
+      ]);
+      expect(await toRenewOf(function_.id, now)).toEqual([{ functionId: function_.id, accountId: ACCOUNT, due: false, lasting: false, replaced: true }]);
+    });
+
+    it('revokes a lasting key alone when asked to, a current key that ends left working', async () => {
+      const function_ = fn();
+      const id = 'AKFFLASTINGREVOKEDLA';
+      await db.dataSource.getRepository(StorageKey).insert({ id, accountId: ACCOUNT, functionId: function_.id, secret: directory.sealSecret(id, 's'.repeat(40)) });
+
+      expect(await keys.revokeLasting(function_.id)).toBe(1);
+      expect(await directory.key(id)).toBeNull();
+      const made = await keys.credentialsFor(function_);
+      expect(await keys.revokeLasting(function_.id)).toBe(0);
+      expect(await directory.key(keyOf(made))).toMatchObject({ functionId: function_.id });
+    });
+
+    it('revokes the current key and those replaced when the function goes', async () => {
+      const function_ = fn();
+      const made = new Date();
+      const first = await keys.credentialsFor(function_, made);
+      const renewed = await keys.credentialsFor(function_, at(made, HALF));
+
+      await keys.revoke(function_.id);
+
+      expect([await directory.key(keyOf(first)), await directory.key(keyOf(renewed))]).toEqual([null, null]);
+    });
+  });
+
+  it("is never one of the account's own keys: not listed with them, nor counted against the plan's access keys", async () => {
     const audit = new AuditService(db.dataSource.getRepository(AuditEntry));
-    const own = new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, audit, config());
+    const own = new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, audit, onePlan(plan({ accessKeys: 2 })), config());
     const function_ = fn();
     await keys.credentialsFor(function_);
 
@@ -113,22 +225,53 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
 
   it('makes none where FF gives functions no endpoint: none has an address for them', async () => {
     const function_ = fn();
-    const none = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', '', ''));
+    const none = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({}));
 
     expect(await none.credentialsFor(function_)).toBeUndefined();
     expect(await rowsOf(function_.id)).toEqual([]);
   });
 
-  it('gives the endpoints there are an address for, each alone: buckets, queues or mail without the others', async () => {
-    const buckets = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config(ENDPOINT, '', '')).credentialsFor(fn());
-    const queues = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', SQS_ENDPOINT, '')).credentialsFor(fn());
-    const mail = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', '', SES_ENDPOINT)).credentialsFor(fn());
-    const endpoints = (variables: Record<string, string>) => Object.keys(variables).filter((name) => name.startsWith('AWS_ENDPOINT_URL'));
+  it('gives the endpoints there are an address for, each alone: buckets, queues, mail or functions without the others', async () => {
+    const buckets = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ s3: ENDPOINT })).credentialsFor(fn());
+    const queues = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ sqs: SQS_ENDPOINT })).credentialsFor(fn());
+    const mail = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ ses: SES_ENDPOINT })).credentialsFor(fn());
+    const functions = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ lambda: LAMBDA_ENDPOINT })).credentialsFor(fn());
 
     expect(endpoints(buckets!.variables)).toEqual(['AWS_ENDPOINT_URL_S3']);
-    expect(queues!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: queues!.keyId, AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT });
+    expect(queues!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(queues), AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT });
     expect(endpoints(queues!.variables)).toEqual(['AWS_ENDPOINT_URL_SQS']);
-    expect(mail!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: mail!.keyId, AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SESV2: SES_ENDPOINT });
+    expect(mail!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(mail), AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SESV2: SES_ENDPOINT });
     expect(endpoints(mail!.variables)).toEqual(['AWS_ENDPOINT_URL_SESV2']);
+    expect(functions!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(functions), AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_LAMBDA: LAMBDA_ENDPOINT });
+    expect(endpoints(functions!.variables)).toEqual(['AWS_ENDPOINT_URL_LAMBDA']);
+    // Every endpoint there is, for a function that takes them all: no new version, as before endpoints could be left out.
+    expect([buckets!.revision, queues!.revision, mail!.revision, functions!.revision]).toEqual([keyOf(buckets), keyOf(queues), keyOf(mail), keyOf(functions)]);
+  });
+
+  it('gives only the endpoints the function takes, with its key and region still, each change of them a new version of the same key', async () => {
+    const function_ = fn();
+
+    const every = await keys.credentialsFor(function_);
+    const queuesAndMail = await keys.credentialsFor({ ...function_, awsEndpoints: [AwsEndpoint.SQS, AwsEndpoint.SESV2] });
+    const none = await keys.credentialsFor({ ...function_, awsEndpoints: [] });
+
+    expect(endpoints(queuesAndMail!.variables)).toEqual(['AWS_ENDPOINT_URL_SQS', 'AWS_ENDPOINT_URL_SESV2']);
+    expect(queuesAndMail!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(every), AWS_SECRET_ACCESS_KEY: every!.variables.AWS_SECRET_ACCESS_KEY, AWS_REGION: 'tn-tunis-1' });
+    expect(endpoints(none!.variables)).toEqual([]);
+    expect(none!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(every), AWS_REGION: 'tn-tunis-1', AWS_DEFAULT_REGION: 'tn-tunis-1' });
+    expect([every!.revision, queuesAndMail!.revision, none!.revision]).toEqual([keyOf(every), `${keyOf(every)}:sqs,sesv2`, `${keyOf(every)}:`]);
+    expect(await rowsOf(function_.id)).toHaveLength(1);
+  });
+
+  it("counts only the endpoints FF has an address for: where it has the queues' alone, a function that takes them takes every one there is", async () => {
+    const queuesOnly = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ sqs: SQS_ENDPOINT }));
+    const function_ = fn();
+
+    const every = await queuesOnly.credentialsFor(function_);
+    const buckets = await queuesOnly.credentialsFor({ ...function_, awsEndpoints: [AwsEndpoint.S3, AwsEndpoint.SQS] });
+    const bucketsAlone = await queuesOnly.credentialsFor({ ...function_, awsEndpoints: [AwsEndpoint.S3] });
+
+    expect([every!.revision, buckets!.revision, bucketsAlone!.revision]).toEqual([keyOf(every), keyOf(every), `${keyOf(every)}:`]);
+    expect(endpoints(bucketsAlone!.variables)).toEqual([]);
   });
 });

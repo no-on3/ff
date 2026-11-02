@@ -5,6 +5,7 @@ import type { AuthType, FunctionUrl, UrlCors } from '../lib/function-url';
 import type { CustomDomain } from '../lib/custom-domains';
 import type { SiteDomain, SiteMetrics, Website, WebsiteBody } from '../lib/sites';
 import type { Schedule } from '../lib/schedules';
+import type { FunctionAlias, FunctionVersion } from '../lib/versions';
 
 const api = axios.create({
   baseURL: config.apiUrl,
@@ -35,7 +36,7 @@ export function setApiAccount(id: string | undefined): void {
   accountId = id;
 }
 
-// Each request carries the user's token and the account it acts for (D4).
+// Each request carries the user's token and the account it acts for.
 api.interceptors.request.use(async (request) => {
   for (const [name, value] of Object.entries(requestHeaders(await auth.accessToken(), accountId))) {
     request.headers.set(name, value);
@@ -61,7 +62,7 @@ export type PackageType = (typeof PACKAGE_TYPES)[number];
 export interface Function {
   id: string;
   name: string;
-  /** The account that owns the function (D1). */
+  /** The account that owns the function. */
   accountId: string;
   runtime: Runtime;
   /** Inline code; empty for a package, which the console doesn't edit. */
@@ -113,8 +114,8 @@ export type FunctionUpdate = Partial<Pick<Function, 'name' | 'runtime' | 'code' 
 
 /**
  * Every status an invocation can have: the API's, which contract.test.ts checks.
- * THROTTLED: no instance could take the call in time (P-15). LOST: the backend
- * stopped during the call, so its answer is unknown (P-20). Neither is billed.
+ * THROTTLED: no instance could take the call in time. LOST: the backend
+ * stopped during the call, so its answer is unknown. Neither is billed.
  * SUCCESS has been in the database's list from the start, but nothing writes it.
  */
 export const INVOCATION_STATUSES = ['SUCCESS', 'ERROR', 'TIMEOUT', 'RUNNING', 'COMPLETED', 'THROTTLED', 'LOST'] as const;
@@ -134,6 +135,8 @@ export const INVOCATION_FIELDS = [
   'output',
   'status',
   'source',
+  'version',
+  'alias',
   'duration',
   'memoryUsed',
   'error',
@@ -159,6 +162,10 @@ export interface FunctionInvocation {
   status: InvocationStatus;
   /** What brought it: the API, the function's URL, a schedule, or an asynchronous call. */
   source: InvocationSource;
+  /** The version that ran it: null for $LATEST, the function as it is. */
+  version: number | null;
+  /** The alias the call named, which chose its version: null for none. */
+  alias: string | null;
   /** Milliseconds, as the runtime measured it. */
   duration: number;
   /** MB: the runtime's peak memory. */
@@ -217,6 +224,8 @@ export const functionUrlApi = {
   update: (functionId: string, configuration: { authType?: AuthType; cors?: UrlCors | null }) =>
     api.put<FunctionUrl>(`/functions/${functionId}/url`, configuration),
   remove: (functionId: string) => api.delete(`/functions/${functionId}/url`),
+  /** Every URL of the function, $LATEST's first, then each alias's. */
+  list: (functionId: string) => api.get<FunctionUrl[]>(`/functions/${functionId}/urls`),
 };
 
 /** A function URL's own domains: listed, added, checked again, removed. */
@@ -262,6 +271,26 @@ export const schedulesApi = {
   nextRuns: (expression: string) => api.get<{ runs: string[] }>('/schedules/next-runs', { params: { expression } }),
 };
 
+/** A function's versions, as AWS Lambda's: every member reads them; owners and developers publish and delete them. */
+export const versionsApi = {
+  /** Oldest first. */
+  list: (functionId: string) => api.get<FunctionVersion[]>(`/functions/${functionId}/versions`),
+  /** The function as it is now, frozen; the last version again when nothing but the description changed since. */
+  publish: (functionId: string, description: string) => api.post<FunctionVersion>(`/functions/${functionId}/versions`, { description }),
+  /** Refused with 409 while an alias names it. */
+  remove: (functionId: string, version: string) => api.delete(`/functions/${functionId}/versions/${version}`),
+};
+
+/** A function's aliases, as AWS Lambda's: every member reads them; owners and developers make, change and delete them. */
+export const aliasesApi = {
+  list: (functionId: string) => api.get<FunctionAlias[]>(`/functions/${functionId}/aliases`),
+  create: (functionId: string, body: Record<string, unknown>) => api.post<FunctionAlias>(`/functions/${functionId}/aliases`, body),
+  /** What is sent changes, what is left out stays; a revisionId other than the alias's is refused with 412. */
+  update: (functionId: string, name: string, changes: Record<string, unknown>) => api.put<FunctionAlias>(`/functions/${functionId}/aliases/${encodeURIComponent(name)}`, changes),
+  /** Its URL and the URL's domains go with it; the versions it named stay. */
+  remove: (functionId: string, name: string) => api.delete(`/functions/${functionId}/aliases/${encodeURIComponent(name)}`),
+};
+
 /** GET and PUT /functions/:id/scaling-config. Each instance serves one call at a time. */
 export interface ScalingConfig {
   /** Instances kept running even when idle. */
@@ -297,7 +326,7 @@ export const functionsApi = {
     api.get<InvocationPage>(`/functions/${id}/invocations`, { params: { limit } }),
 };
 
-/** A line of a function's log (P-43). contract.test.ts checks these names against the API's. */
+/** A line of a function's log. contract.test.ts checks these names against the API's. */
 export const LOG_LINE_FIELDS = ['time', 'instance', 'requestId', 'stream', 'message'] as const;
 export interface FunctionLogLine {
   /** RFC 3339, UTC, nine decimals. */
@@ -318,7 +347,7 @@ export interface FunctionLogsPage {
   next: string | null;
 }
 
-/** What GET /functions/:id/logs accepts that the console sends (P-43). */
+/** What GET /functions/:id/logs accepts that the console sends. */
 export const LOGS_QUERY_PARAMS = ['limit', 'sinceSeconds', 'q', 'requestId', 'cursor'] as const;
 export type LogsQuery = Partial<Record<'limit' | 'sinceSeconds', number> & Record<'q' | 'requestId' | 'cursor', string>>;
 
@@ -336,7 +365,7 @@ export const logsApi = {
   page: (functionId: string, query: LogsQuery) => api.get<FunctionLogsPage>(`/functions/${functionId}/logs`, { params: query }),
 
   /**
-   * The live tail (P-43): Server-Sent Events, read with fetch, since a browser's
+   * The live tail: Server-Sent Events, read with fetch, since a browser's
    * EventSource can't send the token. Gives each chunk of text as it comes, until
    * the stream ends or `signal` aborts it; rejects with LogStreamError when the API
    * refuses it, as 404 for a function that isn't the account's.
@@ -361,7 +390,7 @@ export const logsApi = {
 };
 
 /**
- * What GET /usage counts for a function and for the account (P-22), as D7 bills
+ * What GET /usage counts for a function and for the account, as FF bills
  * it: requests billed (successes, errors and timeouts), billed duration in ms,
  * GB-seconds, and the calls not billed: throttled, platform errors, lost.
  * contract.test.ts checks these names against the API's.
@@ -376,12 +405,12 @@ export interface FunctionUsage extends UsageAmounts {
   functionName: string;
   /** Deleted since: its usage stays. */
   deleted: boolean;
-  /** Its estimated cost before the free tier, rounded to the minor unit (P-30); null without a price book. */
+  /** Its estimated cost before the free tier, rounded to the minor unit; null without a price book. */
   cost: string | null;
 }
 
 /**
- * The month's estimated cost at FF's prices (P-30, D8): AWS Lambda's, in TND.
+ * The month's estimated cost at FF's prices, AWS Lambda's in TND.
  * Each amount is rounded to the minor unit once, from the exact ones.
  * contract.test.ts checks these names against the API's.
  */
@@ -533,6 +562,63 @@ export interface MonthlyUsage {
   estimate: UsageEstimate | null;
 }
 
+/** What AWS bills that FF doesn't, as GET /usage/aws-estimate names its lines, which `without` leaves out: contract.test.ts checks them against the backend's. */
+export const AWS_EXTRA_LINES = ['coldStarts', 'databaseInstances', 'cacheNodes', 'dataOut', 'logs', 'cloudFront', 'natGateway'] as const;
+export type AwsExtraLine = (typeof AWS_EXTRA_LINES)[number];
+
+/** A line of a month at AWS's prices, as the API's AwsEstimateLineView names its fields: contract.test.ts checks them. */
+export const AWS_ESTIMATE_LINE_FIELDS = ['line', 'label', 'usd', 'amount', 'extra', 'leftOut', 'assumption'] as const satisfies ReadonlyArray<keyof AwsEstimateLine>;
+export interface AwsEstimateLine {
+  /** One of FF's counts (functions, databaseStorage, buckets, queues, mail) or of what AWS bills that FF doesn't. */
+  line: string;
+  /** What it is, as AWS bills it. */
+  label: string;
+  /** In US$, to the cent. */
+  usd: string;
+  /** In the price book's currency, at its US$ rate. */
+  amount: string;
+  /** Of what AWS bills that FF doesn't: `without` can leave it out. */
+  extra: boolean;
+  leftOut: boolean;
+  /** What a line of what AWS bills that FF doesn't assumes; null for FF's own counts. */
+  assumption: string | null;
+}
+
+/** A month at AWS's prices, as the API's AwsEstimateMonthView names its fields: contract.test.ts checks them. */
+export const AWS_ESTIMATE_MONTH_FIELDS = ['month', 'until', 'requests', 'lines', 'totalUsd', 'total', 'ffTotal'] as const satisfies ReadonlyArray<keyof AwsEstimateMonth>;
+export interface AwsEstimateMonth {
+  month: string;
+  /** This month's: up to when; null for a month that is over. */
+  until: string | null;
+  /** The calls billed, as AWS Lambda bills them. */
+  requests: number;
+  /** FF's counts at AWS's prices, then what AWS bills that FF doesn't. */
+  lines: AwsEstimateLine[];
+  /** Every line not left out, in US$. */
+  totalUsd: string;
+  /** The same in the price book's currency. */
+  total: string;
+  /** The same month at FF's prices; null without a price book for it. */
+  ffTotal: string | null;
+}
+
+/** GET /usage/aws-estimate: the last months at AWS's prices, an estimate, as the API's AwsEstimateView names its fields: contract.test.ts checks them. */
+export const AWS_ESTIMATE_FIELDS = ['currency', 'usdRate', 'usdRateDate', 'region', 'pricesReadOn', 'priceBook', 'months'] as const satisfies ReadonlyArray<keyof AwsEstimate>;
+export interface AwsEstimate {
+  /** The currency of every amount but the US$ ones: the price book's. */
+  currency: string;
+  /** The book's US$ rate: the currency's units per US$. */
+  usdRate: string;
+  usdRateDate: string | null;
+  /** AWS's region whose prices these are. */
+  region: string;
+  /** The first and the last day FF read AWS's prices on. */
+  pricesReadOn: string[];
+  priceBook: string;
+  /** Oldest first; this month, so far, last. */
+  months: AwsEstimateMonth[];
+}
+
 export const usageApi = {
   /** `month`: YYYY-MM, by the UTC calendar. */
   getMonth: (month: string) => api.get<MonthlyUsage>('/usage', { params: { month } }),
@@ -540,15 +626,19 @@ export const usageApi = {
   /** The same month as CSV, for a spreadsheet. */
   getMonthCsv: (month: string) =>
     api.get<string>('/usage', { params: { month }, headers: { Accept: 'text/csv' }, responseType: 'text' }),
+
+  /** The last three months at AWS's prices, an estimate, the lines of what AWS bills that FF doesn't in `without` left out of the totals. */
+  getAwsEstimate: (without: readonly AwsExtraLine[]) =>
+    api.get<AwsEstimate>('/usage/aws-estimate', { params: without.length > 0 ? { without: without.join(',') } : {} }),
 };
 
 /**
- * GET /billing/balance (P-32): the account's balance and this month's charges.
+ * GET /billing/balance: the account's balance and this month's charges.
  * Money is a string with every decimal of its currency, never a JSON number.
  * contract.test.ts checks these names against the API's.
  */
 export const BALANCE_FIELDS = ['currency', 'balance', 'shadowMode', 'month', 'charged', 'ratedUntil', 'credit'] as const;
-/** D9's balance check (P-33): whether invokes go on. contract.test.ts checks these names against the API's. */
+/** The balance check: whether invokes go on. contract.test.ts checks these names against the API's. */
 export const CREDIT_STATE_FIELDS = ['state', 'buffer', 'belowBufferSince', 'invokesStopAt'] as const;
 export interface CreditState {
   /** ok: above the buffer, or the billing trial; grace: below it, invokes still go; stopped: invokes answer 402. */
@@ -563,7 +653,7 @@ export interface Balance {
   currency: string;
   /** The credit left; below zero, usage the credit didn't cover. */
   balance: string;
-  /** D9's billing trial: usage is rated each hour and shown, not debited. */
+  /** The billing trial: usage is rated each hour and shown, not debited. */
   shadowMode: boolean;
   /** This month, YYYY-MM, UTC. */
   month: string;
@@ -574,7 +664,7 @@ export interface Balance {
   credit: CreditState;
 }
 
-/** What moved the balance (P-32): a usage debit's hour, a credit. */
+/** What moved the balance: a usage debit's hour, a credit. */
 export interface BillingTransaction {
   id: string;
   kind: string;
@@ -585,20 +675,20 @@ export interface BillingTransaction {
   currency: string;
 }
 
-/** When the owners get a low-balance e-mail (P-33): the account's shares of the last credit, or FF's. */
+/** When the owners get a low-balance e-mail: the account's shares of the last credit, or FF's. */
 export interface Alerts {
   lowBalancePercents: number[] | null;
   defaultPercents: number[];
 }
 
 /**
- * A pro-forma for a bank transfer (P-35, D9): the credit, the VAT on top, the
+ * A pro-forma for a bank transfer: the credit, the VAT on top, the
  * reference for the transfer's label, and the transfer once FF recorded it.
  * contract.test.ts checks these names against the API's.
  */
 export const PRO_FORMA_FIELDS = ['id', 'reference', 'status', 'currency', 'credit', 'vatPercent', 'vat', 'total', 'createdAt', 'buyer', 'seller', 'bank', 'transfer', 'cancelledAt'] as const;
 export const TRANSFER_FIELDS = ['received', 'withheld', 'receivedOn', 'recordedAt', 'credited', 'withheldCreditedAt'] as const;
-/** GET /billing/pro-formas: the account's pro-formas, and the VAT rate one asked for now gets (P-36: rates are dated data). */
+/** GET /billing/pro-formas: the account's pro-formas, and the VAT rate one asked for now gets, since rates are dated. */
 export const PRO_FORMAS_PAGE_FIELDS = ['proFormas', 'vatPercent'] as const;
 export interface ProFormasPage {
   proFormas: ProForma[];
@@ -606,7 +696,7 @@ export interface ProFormasPage {
   vatPercent: number;
 }
 
-/** An issued invoice or credit note (P-36). contract.test.ts checks these names against the API's. */
+/** An issued invoice or credit note. contract.test.ts checks these names against the API's. */
 export const INVOICE_FIELDS = ['id', 'kind', 'number', 'month', 'issuedOn', 'currency', 'subtotal', 'vat', 'stampDuty', 'total', 'corrects', 'reason'] as const;
 export interface Invoice {
   id: string;
@@ -648,7 +738,7 @@ export interface ProForma {
   id: string;
   /** FF-XXXX-XXXX: what the buyer writes in the transfer's label. */
   reference: string;
-  /** pending: waiting for the transfer; paid: FF recorded it; cancelled: an owner or FF cancelled it before any transfer (P-74). */
+  /** pending: waiting for the transfer; paid: FF recorded it; cancelled: an owner or FF cancelled it before any transfer. */
   status: 'pending' | 'paid' | 'cancelled';
   currency: string;
   credit: string;
@@ -679,9 +769,9 @@ export const billingApi = {
   /** The account's last 100, newest first, with the VAT rate a new one gets. */
   getProFormas: () => api.get<ProFormasPage>('/billing/pro-formas'),
   getProForma: (id: string) => api.get<ProForma>(`/billing/pro-formas/${encodeURIComponent(id)}`),
-  /** An owner's, of a pending one (P-74): nobody should pay it any more. */
+  /** An owner's, of a pending one: nobody should pay it any more. */
   cancelProForma: (id: string) => api.post<ProForma>(`/billing/pro-formas/${encodeURIComponent(id)}/cancel`),
-  /** The account's issued invoices and credit notes, newest first (P-36). */
+  /** The account's issued invoices and credit notes, newest first. */
   getInvoices: () => api.get<{ invoices: Invoice[] }>('/billing/invoices'),
   /** An invoice or credit note's PDF, as it was issued. */
   getInvoicePdf: (id: string) => api.get<Blob>(`/billing/invoices/${encodeURIComponent(id)}/pdf`, { responseType: 'blob' }),
@@ -731,15 +821,29 @@ export interface Metrics {
   };
 }
 
+/**
+ * GET /functions/:id/metrics with resource or executedVersion: some of the
+ * function's calls, as CloudWatch's Resource and ExecutedVersion dimensions
+ * pick Lambda's. No series of calls that don't wait, counted by function
+ * alone; Instances by executedVersion alone, as a version's instances run the
+ * calls of every alias that names it.
+ */
+export interface CallMetrics extends Omit<Metrics, 'metrics'> {
+  metrics: Pick<Metrics['metrics'], 'Invocations' | 'Errors' | 'Throttles' | 'ColdStarts' | 'Duration'> & Partial<Pick<Metrics['metrics'], 'Instances'>>;
+}
+
 export const metricsApi = {
   forFunction: (id: string, params: { period: number; start?: string; end?: string }) => api.get<Metrics>(`/functions/${id}/metrics`, { params }),
+  /** Some of its calls: those naming an alias or a version (resource), or those a version ran (executedVersion). */
+  forCalls: (id: string, params: { period: number; start?: string; end?: string; resource?: string; executedVersion?: string }) =>
+    api.get<CallMetrics>(`/functions/${id}/metrics`, { params }),
   forAccount: (params: { period: number; start?: string; end?: string }) => api.get<Metrics>('/metrics', { params }),
 };
 
 export type AccountStatus = 'pending' | 'active' | 'rejected' | 'suspended' | 'closed';
 export type Role = 'owner' | 'developer' | 'viewer';
 
-/** What a plan allows (D5): GET /me gives each account's. */
+/** What a plan allows: GET /me gives each account's. */
 export interface PlanLimits {
   functions: number;
   /** The most memory one function may have, in MB. */
@@ -747,6 +851,8 @@ export interface PlanLimits {
   /** The longest timeout one function may have, in seconds. */
   timeoutSeconds: number;
   instancesPerFunction: number;
+  /** What the packages the account's functions and versions name may hold together, in MB, as Lambda's code storage. */
+  codeStorageMb: number;
   /** All the account's functions together. */
   quota: { pods: number; cpu: string; memory: string };
   writesPerMinute: number;
@@ -793,6 +899,8 @@ export interface PlanLimits {
   emailsPerDay: number;
   /** Messages a second, as SES's MaxSendRate. */
   emailsPerSecond: number;
+  /** The account's own access keys, each named, for AWS's SDKs and CLI. */
+  accessKeys: number;
 }
 
 export interface Plan {
@@ -934,7 +1042,7 @@ export interface NewApiKey {
   expiresAt?: string;
 }
 
-/** A member of the account (P-16): GET /members, owners only. */
+/** A member of the account: GET /members, owners only. */
 export interface Member {
   userId: string;
   email: string;
@@ -1069,6 +1177,10 @@ export interface AlarmBody {
   queueName?: string | null;
   /** The cache watched, by its name, for its memory, connections, hits, misses and evictions, an hour at a time; null otherwise. */
   cacheName?: string | null;
+  /** The function's calls watched by what they named, as CloudWatch's Resource dimension: an alias, a version, or $LATEST for those naming neither; null for all of them. */
+  resource?: string | null;
+  /** The function's calls watched by what ran them, as CloudWatch's ExecutedVersion dimension: a version, or $LATEST; null for all of them. */
+  executedVersion?: string | null;
   metric: string;
   statistic: string;
   /** Seconds per datapoint: 60, 300 or 3600. */
@@ -1091,6 +1203,8 @@ export const ALARM_FIELDS = [
   'bucketName',
   'queueName',
   'cacheName',
+  'resource',
+  'executedVersion',
   'metric',
   'statistic',
   'period',
@@ -1406,7 +1520,14 @@ export interface CacheMetrics {
 export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'siteUrl', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
 
 /** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
-export const STORAGE_KEY_FIELDS = ['id', 'buckets', 'queues', 'readOnly', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
+export const STORAGE_KEY_FIELDS = ['id', 'name', 'buckets', 'queues', 'readOnly', 'functions', 'functionAccess', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
+
+/** What a key may do with the functions it names, as IAM groups Lambda's actions. */
+export const FUNCTION_ACCESS = ['read', 'invoke', 'write'] as const;
+export type FunctionAccess = (typeof FUNCTION_ACCESS)[number];
+
+/** A key's functions: every one of the account's. */
+export const ALL_FUNCTIONS = '*';
 
 /** A bucket, as AWS S3 gives one, behind FF's S3 front door (ADR 0009). */
 export interface Bucket {
@@ -1441,15 +1562,22 @@ export interface BucketMetrics {
   metrics: { BucketSizeBytes: { Average: Array<number | null> }; NumberOfObjects: { Average: Array<number | null> } } & Record<BucketRequestMetric, { Sum: number[] }>;
 }
 
-/** An access key to the account's buckets: never its secret. */
+/** An access key to the account's buckets, queues, mail and functions: never its secret. */
 export interface StorageKey {
   /** AWS_ACCESS_KEY_ID: AKFF and 16 characters. */
   id: string;
-  /** The buckets it names; null for none named. Naming neither buckets nor queues, it reaches all the account's. */
+  /** Its name, as an IAM user's; a key made before keys had names has its ID. */
+  name: string;
+  /** The buckets it names; null for none named. Naming nothing, it reaches all the account's buckets, queues and mail. */
   buckets: string[] | null;
   /** The queues it names; null for none named. */
   queues: string[] | null;
+  /** Its buckets, queues and mail read and listed only. */
   readOnly: boolean;
+  /** The functions it names, or [ALL_FUNCTIONS]; null for none. */
+  functions: string[] | null;
+  /** What it may do with them; null while it names none. */
+  functionAccess: FunctionAccess | null;
   createdAt: string;
   lastUsedAt: string | null;
 }
@@ -1462,6 +1590,8 @@ export interface CreatedStorageKey extends StorageKey {
   sqsEndpoint: string;
   /** The SES endpoint, AWS_ENDPOINT_URL_SESV2, for the account's mail. */
   sesEndpoint: string;
+  /** Lambda's endpoint, AWS_ENDPOINT_URL_LAMBDA, for the account's functions. */
+  lambdaEndpoint: string;
   region: string;
 }
 
@@ -1533,7 +1663,8 @@ export interface NotificationConfigurationBody {
 export const storageKeysApi = {
   list: () => api.get<StorageKey[]>('/storage-keys'),
   /** Naming neither buckets nor queues, it reaches all the account's; naming some, those alone. */
-  create: (body: { buckets?: string[]; queues?: string[]; readOnly?: boolean }) => api.post<CreatedStorageKey>('/storage-keys', body),
+  create: (body: { name?: string; buckets?: string[]; queues?: string[]; readOnly?: boolean; functions?: string[]; functionAccess?: FunctionAccess }) =>
+    api.post<CreatedStorageKey>('/storage-keys', body),
   revoke: (id: string) => api.delete(`/storage-keys/${id}`),
 };
 
@@ -1701,6 +1832,8 @@ export const EVENT_SOURCE_FIELDS = [
 
 /** What a mapping is made or changed with, by Lambda's names: each left as it is when not given; a scalingConfig of null removes the maximum. */
 export interface EventSourceSettings {
+  /** The version or the alias that reads the queue; $LATEST: the function as it is. */
+  qualifier?: string;
   batchSize?: number;
   maximumBatchingWindowInSeconds?: number;
   functionResponseTypes?: string[];

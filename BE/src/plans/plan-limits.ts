@@ -29,6 +29,8 @@ export const planLimitsSchema = z.strictObject({
   timeoutSeconds: z.number().int().min(1).max(PLATFORM_LIMITS.timeoutSeconds),
   /** The most instances one function may run (its maxInstances, and so its minInstances). */
   instancesPerFunction: z.number().int().min(1).max(PLATFORM_LIMITS.instancesPerFunction),
+  /** What the packages the account's functions and versions name may hold together, in MB, each once: Lambda's code storage, 75 GB a region on AWS. */
+  codeStorageMb: positive,
   /** The account namespace's ResourceQuota: all its functions together. */
   quota: z.strictObject({ pods: positive, cpu: quantity, memory: quantity }),
   /** Control-plane changes per minute: creating, changing and deleting functions, keys and accounts. */
@@ -81,6 +83,8 @@ export const planLimitsSchema = z.strictObject({
   emailsPerDay: z.number().int().min(0),
   /** Messages a second, as SES's MaxSendRate. */
   emailsPerSecond: positive,
+  /** The account's own access keys, each named: IAM gives a user two, and an account has many users. */
+  accessKeys: positive,
 });
 
 export type PlanLimits = z.infer<typeof planLimitsSchema>;
