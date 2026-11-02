@@ -67,7 +67,7 @@ fn callers(auth_type: &str) -> &'static str {
     if auth_type == "NONE" {
         "anyone may call it"
     } else {
-        "callers need an API key of the account with functions:invoke"
+        "callers need an access key of the account that may invoke it, signing for lambda, or an API key of it with functions:invoke"
     }
 }
 
@@ -189,7 +189,10 @@ pub fn enable(
     let (url, action) = match target.url()? {
         None => {
             let auth = auth.ok_or_else(|| {
-                Error::usage("Say who may call the new address: --auth none (anyone), or --auth key (the account's API keys with functions:invoke)")
+                Error::usage(
+                    "Say who may call the new address: --auth none (anyone), or --auth key (the account's access keys that may invoke it, \
+                     and its API keys with functions:invoke)",
+                )
             })?;
             let mut body = json!({ "authType": auth_type(auth) });
             if let Some(cors) = cors {

@@ -1,4 +1,4 @@
-import { KeyNames, reachesBucket, reachesMail, reachesQueue } from './key-reach';
+import { FunctionReach, KeyNames, functionAccessOf, mayInvoke, reachesBucket, reachesMail, reachesQueue } from './key-reach';
 
 const naming = (names: Partial<KeyNames>): KeyNames => ({ buckets: null, queues: null, functions: null, ...names });
 
@@ -29,5 +29,28 @@ describe("what an access key reaches of its account's buckets, queues and mail",
       expect([reachesBucket(key, 'photos'), reachesQueue(key, 'orders'), reachesMail(key)]).toEqual([false, false, false]);
     }
     expect(reachesBucket(naming({ buckets: ['photos'], functions: ['thumbnails'] }), 'photos')).toBe(true);
+  });
+});
+
+describe("what an access key may do with its account's functions", () => {
+  const reach = (names: Partial<FunctionReach>): FunctionReach => ({ functionId: null, functions: null, functionAccess: null, ...names });
+
+  it('reaches none when it names none, as a key made before it could, nor a site deploy\'s', () => {
+    expect([functionAccessOf(reach({}), 'orders'), functionAccessOf(reach({}), '*')]).toEqual([null, null]);
+  });
+
+  it('works at its level with the functions it names alone, or with every one when it names all', () => {
+    const named = reach({ functions: ['orders', 'thumbs'], functionAccess: 'read' });
+    expect([functionAccessOf(named, 'orders'), functionAccessOf(named, 'thumbs'), functionAccessOf(named, 'billing')]).toEqual(['read', 'read', null]);
+    const all = reach({ functions: ['*'], functionAccess: 'write' });
+    expect([functionAccessOf(all, 'orders'), functionAccessOf(all, 'billing')]).toEqual(['write', 'write']);
+  });
+
+  it("invokes every function of its account when it is a function's own key, which names none", () => {
+    expect(['orders', 'billing'].map((name) => functionAccessOf(reach({ functionId: 'f-1' }), name))).toEqual(['invoke', 'invoke']);
+  });
+
+  it('invokes at invoke and write, never at read nor without reaching the function', () => {
+    expect([mayInvoke('invoke'), mayInvoke('write'), mayInvoke('read'), mayInvoke(null)]).toEqual([true, true, false, false]);
   });
 });

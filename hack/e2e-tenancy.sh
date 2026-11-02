@@ -1705,12 +1705,24 @@ section_def api_keys section_api_keys isolation budget=10
 section_url_credentials() {
 section "a function URL that takes the account's credentials"
 url_1="$(as_user_1 POST "/functions/$fn_1/url" '{"authType": "AWS_IAM"}' | jq -r .functionUrl)"
-check "account 1 gives its function a URL that takes its account's API keys" "201 AWS_IAM" "$(status) $(as_user_1 GET "/functions/$fn_1/url" | jq -r .authType)"
+check "account 1 gives its function a URL that takes its account's credentials" "201 AWS_IAM" "$(status) $(as_user_1 GET "/functions/$fn_1/url" | jq -r .authType)"
 check "account 1's key with functions:invoke calls it" '200 {"message":"Hello world"}' "$(call_url "$url_1" -H "Authorization: Bearer $key_1") $(cat "$work/url-body")"
 check "account 2's key, which may invoke account 2's functions, can't" '403 {"Message":"Forbidden"}' \
   "$(call_url "$url_1" -H "Authorization: Bearer $key_2") $(cat "$work/url-body")"
 check "nor a key without functions:invoke, nor a user's token, nor nobody" "403 403 403" \
   "$(call_url "$url_1" -H "Authorization: Bearer $key_usage") $(call_url "$url_1" -H "Authorization: Bearer $token_1") $(call_url "$url_1")"
+# signed_call <URL> <access key JSON>: a request to the URL signed for lambda with the access key, as AWS's tools sign one.
+signed_call() { call_url "$1" --aws-sigv4 "aws:amz:tn-tunis-1:lambda" --user "$(jq -r '"\(.id):\(.secretAccessKey)"' <<<"$2")"; }
+access_1="$(as_user_1 POST /storage-keys '{"name": "l5-url-invoker", "functions": ["*"], "functionAccess": "invoke"}')"
+access_2="$(as_user_2 POST /storage-keys '{"name": "l5-url-invoker", "functions": ["*"], "functionAccess": "write"}')"
+check "each account makes an access key that reaches all its functions, of the same name" "l5-url-invoker l5-url-invoker" \
+  "$(jq -r .name <<<"$access_1") $(jq -r .name <<<"$access_2")"
+check "account 1's access key, signing for lambda, calls it" '200 {"message":"Hello world"}' "$(signed_call "$url_1" "$access_1") $(cat "$work/url-body")"
+check "account 2's, which may do all with account 2's functions, can't, rightly signed: as good as none" '403 {"Message":"Forbidden"}' \
+  "$(signed_call "$url_1" "$access_2") $(cat "$work/url-body")"
+as_user_1 DELETE "/storage-keys/$(jq -r .id <<<"$access_1")" >/dev/null
+check "account 1 revokes its access key, which stops calling at once" "204 403" "$(status) $(signed_call "$url_1" "$access_1")"
+as_user_2 DELETE "/storage-keys/$(jq -r .id <<<"$access_2")" >/dev/null
 check "the call is in account 1's history as its URL's, and account 2's key reaches none of it" "url 404" \
   "$(as_user_1 GET "/functions/$fn_1/invocations?limit=1" | jq -r '.invocations[0].source') $(with_token "$key_2" GET "/functions/$fn_1/url" >/dev/null; status)"
 as_user_1 DELETE "/api-keys/$key_1_id" >/dev/null
@@ -1720,8 +1732,8 @@ check "which stops working at once" "401 The API key was revoked" "$(status) $(m
 check "on the URL too" 403 "$(call_url "$url_1" -H "Authorization: Bearer $key_1")"
 as_user_1 DELETE "/functions/$fn_1/url" >/dev/null
 check "account 1 deletes the URL" 204 "$(status)"
-check "account 1's function was invoked twice more by its key, through the API and its URL, and is otherwise unchanged" \
-  "$(jq -c '.invocations += 2' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
+check "account 1's function was invoked three times more by its keys, through the API and its URL, and is otherwise unchanged" \
+  "$(jq -c '.invocations += 3' <<<"$before_1")" "$(snapshot as_user_1 "$fn_1")"
 }
 section_def url_credentials section_url_credentials api_keys budget=5
 

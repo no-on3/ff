@@ -58,7 +58,7 @@ fn enable_makes_a_url_who_may_call_it_said_and_needed() {
         .assert()
         .success()
         .stdout(
-            "hello has a URL: https://abc.fn.ff.tn/\ncallers need an API key of the account with functions:invoke\n",
+            "hello has a URL: https://abc.fn.ff.tn/\ncallers need an access key of the account that may invoke it, signing for lambda, or an API key of it with functions:invoke\n",
         );
     assert_eq!(
         body(&api.requests()[2]),

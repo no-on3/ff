@@ -6,7 +6,7 @@ import { Account } from '../accounts/entities/account.entity';
 import { Sealed } from '../encryption/envelope';
 import { EncryptionService } from '../encryption/encryption.service';
 import { Bucket, BucketStatus } from './bucket.entity';
-import { StorageKey } from './storage-key.entity';
+import { FunctionAccess, StorageKey } from './storage-key.entity';
 
 /** What an access key's secret is sealed for: that key alone. */
 export const sealedFor = (accessKeyId: string): string => `storage-key/${accessKeyId}`;
@@ -15,6 +15,8 @@ export const sealedFor = (accessKeyId: string): string => `storage-key/${accessK
 export interface ActiveKey {
   id: string;
   accountId: string;
+  /** Its name; null for a function's or a deploy's key, and one made before keys had names. */
+  name: string | null;
   functionId: string | null;
   /** The buckets it names; null for none named (key-reach.ts says what it reaches). */
   buckets: string[] | null;
@@ -22,6 +24,8 @@ export interface ActiveKey {
   queues: string[] | null;
   /** The functions it names; null for none. */
   functions: string[] | null;
+  /** What it may do with them; null while it names none (key-reach.ts's functionAccessOf). */
+  functionAccess: FunctionAccess | null;
   readOnly: boolean;
   secret: string;
 }
@@ -58,10 +62,12 @@ export class StorageDirectory {
     return {
       id: key.id,
       accountId: key.accountId,
+      name: key.name,
       functionId: key.functionId,
       buckets: key.buckets,
       queues: key.queues,
       functions: key.functions,
+      functionAccess: key.functionAccess,
       readOnly: key.readOnly,
       secret: this.secretOf(key),
     };

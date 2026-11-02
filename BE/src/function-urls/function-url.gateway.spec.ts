@@ -1,6 +1,7 @@
 /**
  * L1: the function URL gateway through real HTTP, as callers reach it: the
- * request's host finds its URL, the caller and the account are checked, the
+ * request's host finds its URL, the caller and the account are checked (an
+ * API key, or a signature by an access key, made by AWS's own signer), the
  * call counts against the plan's rate, the function gets AWS Lambda's event,
  * and its return value is the answer; a site's own domain goes to the website
  * server. The services behind it are stand-ins; the rate's count is the
@@ -9,10 +10,12 @@
 import { Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ThrottlerStorageService } from '@nestjs/throttler';
+import { SignatureV4 } from '@smithy/signature-v4';
 import { IncomingHttpHeaders, ServerResponse, request as httpRequest } from 'node:http';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { Principal } from '../auth/principal';
 import { InsufficientCreditException } from '../billing/credit-policy';
+import { Sha256 } from '../common/test-fixtures';
 import { InvocationSource } from '../functions/entities/function-invocation.entity';
 import { FunctionUrl, UrlAuthType, UrlCors, UrlInvokeMode } from '../functions/entities/function-url.entity';
 import { EventFormat, Function, FunctionStatus } from '../functions/entities/function.entity';
@@ -22,6 +25,7 @@ import { FunctionRuntimeError, FunctionThrottledError } from '../orchestrator/or
 import { countInvocation } from '../plans/rate-limits';
 import { plan } from '../plans/test-fixtures';
 import { CallTarget } from '../functions/functions.service';
+import { ActiveKey } from '../storage/storage-directory.service';
 import { FunctionUrlGateway, URL_PAYLOAD_LIMIT } from './function-url.gateway';
 import { FunctionUrlEvent } from './url-event';
 
@@ -50,6 +54,33 @@ const KEY: Principal = {
   scopes: ['functions:invoke'],
 };
 
+/** An access key of the account that invokes all its functions, as AWS's tools sign with one. */
+const ACCESS: ActiveKey = {
+  id: 'AKFFAAAAAAAAAAAAAAAA',
+  accountId: ACCOUNT,
+  name: 'ci-invoker',
+  functionId: null,
+  buckets: null,
+  queues: null,
+  functions: ['*'],
+  functionAccess: 'invoke',
+  readOnly: false,
+  secret: 'a'.repeat(40),
+};
+
+/** The headers AWS's signer sends a request to a URL with, signed for `service` by the key: its host, its time, its signature. */
+async function signedHeaders(
+  urlId: string,
+  path = '/',
+  { method = 'GET', body = '', key = ACCESS, secret = key.secret, service = 'lambda', at = new Date() }: { method?: string; body?: string; key?: ActiveKey; secret?: string; service?: string; at?: Date } = {},
+): Promise<Record<string, string>> {
+  const [rawPath, rawQuery = ''] = path.split('?');
+  const signer = new SignatureV4({ service, region: 'tn-tunis-1', credentials: { accessKeyId: key.id, secretAccessKey: secret }, sha256: Sha256, uriEscapePath: true });
+  const query = Object.fromEntries(new URLSearchParams(rawQuery));
+  const request = { method, protocol: 'http:', hostname: host(urlId).split(':')[0], path: rawPath, query, headers: { host: host(urlId) }, body };
+  return (await signer.sign(request, { signingDate: at })).headers;
+}
+
 interface Answer {
   status: number;
   headers: IncomingHttpHeaders;
@@ -74,6 +105,9 @@ describe('the function URL gateway (L1)', () => {
   const plans = { get: jest.fn() };
   const refused = { count: jest.fn() };
   const accounts = { findOne: jest.fn() };
+  /** The access keys FF knows, by ID, and the accounts' state, as the front doors look them up. */
+  const directory = { key: jest.fn(), account: jest.fn(), touch: jest.fn() };
+  let accessKeys: ActiveKey[];
   const config = {
     getOrThrow: (key: string) => ({ 'functionUrls.base': 'http://fn.localhost:3001', 'http.trustProxy': ['loopback'] })[key],
   } as unknown as ConfigService;
@@ -126,6 +160,7 @@ describe('the function URL gateway (L1)', () => {
     functions.findOne.mockImplementation(async (accountId: string, id: string) => ({
       id,
       accountId,
+      name: `name-of-${id}`,
       status: FunctionStatus.ACTIVE,
       eventFormat: EventFormat.LAMBDA,
     }));
@@ -138,6 +173,9 @@ describe('the function URL gateway (L1)', () => {
     plans.get.mockImplementation(async () => plan({ invokesPerSecond: 100 }));
     accounts.findOne.mockImplementation(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE, planId: 'beta' }));
     apiKeys.authenticate.mockImplementation(async () => KEY);
+    accessKeys = [ACCESS];
+    directory.key.mockImplementation(async (id: string) => accessKeys.find((key) => key.id === id) ?? null);
+    directory.account.mockImplementation(async (id: string) => ({ id, status: AccountStatus.ACTIVE, planId: 'beta' }));
     throttler = new ThrottlerStorageService();
     gateway = new FunctionUrlGateway(
       config,
@@ -159,6 +197,7 @@ describe('the function URL gateway (L1)', () => {
       throttler,
       { allowsCertificate: async (domain: string) => ['s3.localhost', 'photos.s3.localhost'].includes(domain.toLowerCase()) } as never,
       websites as never,
+      directory as never,
     );
     port = (await gateway.listen(0, '127.0.0.1')).port;
   });
@@ -293,8 +332,8 @@ describe('the function URL gateway (L1)', () => {
     });
 
     it.each<[string, Record<string, string>, (() => void) | undefined, string]>([
-      ['no key', {}, undefined, 'Forbidden: this URL takes an API key of its account, as "Authorization: Bearer ffk_…"'],
-      ['a token that is no API key', { authorization: 'Bearer eyJhbGciOi' }, undefined, 'Forbidden: this URL takes an API key of its account, as "Authorization: Bearer ffk_…"'],
+      ['no key', {}, undefined, 'Forbidden: this URL takes a request signed for lambda by an access key of its account, or an API key of it, as "Authorization: Bearer ffk_…"'],
+      ['a token that is no API key', { authorization: 'Bearer eyJhbGciOi' }, undefined, 'Forbidden: this URL takes a request signed for lambda by an access key of its account, or an API key of it, as "Authorization: Bearer ffk_…"'],
       ['a key that is invalid, revoked or expired', { authorization: 'Bearer ffk_x' }, () => apiKeys.authenticate.mockRejectedValue(new UnauthorizedException('The API key was revoked')), 'Forbidden'],
       ["another account's key", { authorization: 'Bearer ffk_x' }, () => apiKeys.authenticate.mockResolvedValue({ ...KEY, accountId: '999999999999' }), 'Forbidden'],
       ['a key without functions:invoke', { authorization: 'Bearer ffk_x' }, () => apiKeys.authenticate.mockResolvedValue({ ...KEY, scopes: ['functions:read'] }), 'Forbidden: the API key lacks the scope functions:invoke'],
@@ -305,6 +344,91 @@ describe('the function URL gateway (L1)', () => {
       const answer = await send(PRIVATE, '/', { headers });
 
       expect([answer.status, answer.message]).toEqual([403, message]);
+      expect(functions.call).not.toHaveBeenCalled();
+    });
+
+    it("calls with a request signed for lambda by an access key of the account that may invoke, its body and query as signed, the signature never the function's", async () => {
+      const body = '{"item":"قهوة"}';
+      const headers = await signedHeaders(PRIVATE, '/orders?tag=b&size=2', { method: 'POST', body });
+
+      // A header it didn't sign reaches the function all the same.
+      const answer = await send(PRIVATE, '/orders?tag=b&size=2', { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body });
+
+      expect(answer.status).toBe(200);
+      expect(directory.key).toHaveBeenCalledWith(ACCESS.id);
+      expect(apiKeys.authenticate).not.toHaveBeenCalled();
+      expect([lastEvent().body, lastEvent().rawQueryString]).toEqual([body, 'tag=b&size=2']);
+      expect(lastEvent().headers).not.toHaveProperty('authorization');
+      // The key's name says who called, as an IAM user's would.
+      expect(lastEvent().requestContext.authorizer?.iam).toMatchObject({ accessKey: ACCESS.id, accountId: ACCOUNT, userId: 'ci-invoker', callerId: 'ci-invoker' });
+      expect(directory.touch).toHaveBeenCalledWith(ACCESS.id);
+      expect(accounts.findOne).not.toHaveBeenCalled(); // the key's account says its state
+    });
+
+    it("calls with a function's own key, which invokes every function of its account as its function, and a key that names the function, to write", async () => {
+      const own: ActiveKey = { ...ACCESS, id: 'AKFFBBBBBBBBBBBBBBBB', name: null, functionId: 'fn-w', functions: null, functionAccess: null };
+      const writer: ActiveKey = { ...ACCESS, id: 'AKFFDDDDDDDDDDDDDDDD', name: null, functions: ['name-of-fn-k'], functionAccess: 'write' };
+      accessKeys = [own, writer];
+
+      const answers = [await send(PRIVATE, '/', { headers: await signedHeaders(PRIVATE, '/', { key: own }) }), await send(PRIVATE, '/', { headers: await signedHeaders(PRIVATE, '/', { key: writer }) })];
+
+      expect(answers.map((answer) => answer.status)).toEqual([200, 200]);
+      expect(calls().map(([, event]) => event.requestContext.authorizer?.iam.userId)).toEqual(['fn-w', writer.id]);
+    });
+
+    it.each<[string, () => Promise<Record<string, string>>, string | jest.AsymmetricMatcher]>([
+      ['a key FF never made', () => signedHeaders(PRIVATE, '/', { key: { ...ACCESS, id: 'AKFFZZZZZZZZZZZZZZZZ' } }), 'Forbidden: The security token included in the request is invalid.'],
+      [
+        'a signature by another secret',
+        () => signedHeaders(PRIVATE, '/', { secret: 'b'.repeat(40) }),
+        'Forbidden: The request signature we calculated does not match the signature you provided. Check your AWS Secret Access Key and signing method.',
+      ],
+      ['a signature for another service', () => signedHeaders(PRIVATE, '/', { service: 's3' }), "Forbidden: Credential should be scoped to correct service: 'lambda'."],
+      ['a signature made 20 minutes ago', () => signedHeaders(PRIVATE, '/', { at: new Date(Date.now() - 20 * 60_000) }), expect.stringMatching(/^Forbidden: Signature expired: \d{8}T\d{6}Z is more than 15 minutes/)],
+      [
+        'a session token, which FF never issues',
+        async () => ({ ...(await signedHeaders(PRIVATE)), 'x-amz-security-token': 'FwoGZXIvYXdzE' }),
+        'Forbidden: The security token included in the request is invalid.',
+      ],
+      ['an authorization that is no signature', async () => ({ authorization: 'AWS4-HMAC-SHA256 Credential=AKFFAAAAAAAAAAAAAAAA' }), expect.stringContaining('Forbidden: Authorization header requires')],
+    ])('refuses %s with 403, calling nothing', async (_case, signed, message) => {
+      const answer = await send(PRIVATE, '/', { headers: await signed() });
+
+      expect([answer.status, answer.message]).toEqual([403, message]);
+      expect(functions.call).not.toHaveBeenCalled();
+      expect(directory.touch).not.toHaveBeenCalled();
+    });
+
+    it('refuses a body other than the one signed', async () => {
+      const headers = await signedHeaders(PRIVATE, '/', { method: 'POST', body: '{"amount":1}' });
+
+      const answer = await send(PRIVATE, '/', { method: 'POST', headers, body: '{"amount":1000}' });
+
+      expect([answer.status, answer.message]).toEqual([403, expect.stringContaining('The request signature we calculated does not match')]);
+      expect(functions.call).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, Partial<ActiveKey>, string]>([
+      ["another account's key, rightly signed: as good as none, saying nothing of whose the URL is", { accountId: '999999999999' }, 'Forbidden'],
+      ['a key that names other functions', { functions: ['billing'] }, "Forbidden: the access key ci-invoker (AKFFCCCCCCCCCCCCCCCC) doesn't reach this URL's function"],
+      ['a key made before keys reached functions, named by its ID', { name: null, buckets: ['photos'], functions: null, functionAccess: null }, "Forbidden: the access key AKFFCCCCCCCCCCCCCCCC doesn't reach this URL's function"],
+      ['a key that may only read the function', { functionAccess: 'read' }, "Forbidden: the access key ci-invoker (AKFFCCCCCCCCCCCCCCCC) may read this URL's function, not invoke it"],
+    ])('refuses %s with 403, calling nothing', async (_case, changes, message) => {
+      const key: ActiveKey = { ...ACCESS, id: 'AKFFCCCCCCCCCCCCCCCC', ...changes };
+      accessKeys = [key];
+
+      const answer = await send(PRIVATE, '/', { headers: await signedHeaders(PRIVATE, '/', { key }) });
+
+      expect([answer.status, answer.message]).toEqual([403, message]);
+      expect(functions.call).not.toHaveBeenCalled();
+    });
+
+    it("refuses the calls of an access key whose account is not active, its key's own state", async () => {
+      directory.account.mockResolvedValue({ id: ACCOUNT, status: AccountStatus.SUSPENDED, planId: 'beta' });
+
+      const answer = await send(PRIVATE, '/', { headers: await signedHeaders(PRIVATE) });
+
+      expect([answer.status, answer.message]).toEqual([403, 'Forbidden']);
       expect(functions.call).not.toHaveBeenCalled();
     });
   });

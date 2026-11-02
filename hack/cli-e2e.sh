@@ -344,7 +344,7 @@ ff url enable cli-url --auth key
 ff invoke cli-url --http GET /
 check "once it takes API keys, a call without one is refused there" "0 HTTP 403" "$(code) $(out | head -1)"
 ff url show cli-url
-check "ff url show says its address and who may call it" "0 $address callers need an API key of the account with functions:invoke" \
+check "ff url show says its address and who may call it" "0 $address callers need an access key of the account that may invoke it, signing for lambda, or an API key of it with functions:invoke" \
   "$(code) $(out | head -1) $(out | sed -n 2p | cut -d';' -f1)"
 ff domains add cli-url shop.cli-e2e.test
 check "ff domains add says the records that prove it" "0 shop.cli-e2e.test: pending true" \

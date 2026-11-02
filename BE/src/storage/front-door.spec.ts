@@ -43,7 +43,7 @@ import { WebsiteConfiguration } from './website';
 
 const STORE_KEY = 'storekey';
 const STORE_SECRET = 'store-secret';
-const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', functionId: null, buckets: null, queues: null, functions: null, readOnly: false, secret: 'a'.repeat(40) };
+const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', name: null, functionId: null, buckets: null, queues: null, functions: null, functionAccess: null, readOnly: false, secret: 'a'.repeat(40) };
 const READ_ONLY: ActiveKey = { ...KEY, id: 'AKFFBBBBBBBBBBBBBBBB', readOnly: true };
 const OTHERS: ActiveKey = { ...KEY, id: 'AKFFCCCCCCCCCCCCCCCC', accountId: '000000000002' };
 const NARROW: ActiveKey = { ...KEY, id: 'AKFFDDDDDDDDDDDDDDDD', buckets: ['photos'] };

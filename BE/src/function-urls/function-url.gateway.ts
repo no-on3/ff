@@ -15,6 +15,7 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
 import { closeHttp, listenHttp } from '../common/http-server';
+import { ALGORITHM, HeaderSignature, SignedService, checkAuthorization, readAuthorization, serviceWords } from '../common/signature-v4';
 import { withRequestContext } from '../common/request-context';
 import { InvocationSource } from '../functions/entities/function-invocation.entity';
 import { FunctionUrl, UrlAuthType, UrlCors } from '../functions/entities/function-url.entity';
@@ -22,6 +23,8 @@ import { EventFormat, Function, FunctionStatus } from '../functions/entities/fun
 import { CallTarget, FunctionsService } from '../functions/functions.service';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { S3FrontDoor } from '../storage/front-door';
+import { functionAccessOf, mayInvoke } from '../storage/key-reach';
+import { StorageDirectory } from '../storage/storage-directory.service';
 import { WebsiteServer } from '../storage/website-server';
 import { refusals, statusClass, urlResponses } from '../monitoring/operator-metrics';
 import { FunctionThrottledError } from '../orchestrator/orchestrator.errors';
@@ -54,6 +57,29 @@ class Refusal extends Error {
   }
 }
 
+/** A 403 that says why: the caller's own account's to read, or a signature's problem, in the words AWS's services but S3 use. */
+const forbidden = (message: string) => new Refusal(HttpStatus.FORBIDDEN, `Forbidden: ${message}`);
+
+/** Lambda, to the signature check, for a URL that takes the account's credentials: its paths escaped twice, as every service but S3 signs them. */
+const LAMBDA: SignedService = {
+  name: 'lambda',
+  paths: 'twice',
+  refuse: serviceWords('lambda', {
+    incomplete: forbidden,
+    mismatch: (message = 'The request signature we calculated does not match the signature you provided. Check your AWS Secret Access Key and signing method.') =>
+      forbidden(message),
+    token: () => forbidden('The security token included in the request is invalid.'),
+  }),
+};
+
+/** Who called a URL that takes the account's credentials, as the event names them, and the account's state, for the call. */
+interface UrlCaller {
+  account: { status: AccountStatus; planId: string };
+  iam: { accessKey: string; accountId: string; userId: string };
+  /** The request's body, when its signature needed it read. */
+  body?: Buffer;
+}
+
 /** What a request's host names: a function's URL, or a bucket's site, by a customer's own domain. */
 type HostTarget = { url: FunctionUrl } | { site: string };
 
@@ -65,6 +91,16 @@ function jsonAnswer(status: number, message: string, headers: Array<[string, str
 
 /** A header's value, the first when it came more than once. */
 const single = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
+
+/** A lookup's answer; 404 when the function or the alias was deleted meanwhile: its URL went with it. */
+async function notFoundAsRefusal<T>(lookup: Promise<T>): Promise<T> {
+  try {
+    return await lookup;
+  } catch (error) {
+    if (error instanceof NotFoundException) throw new Refusal(HttpStatus.NOT_FOUND, 'Not Found');
+    throw error;
+  }
+}
 
 /** The CORS configuration's headers on an answer, in place of any the function sent. */
 function withCors(answer: UrlAnswer, cors: UrlCors, origin: string | undefined): UrlAnswer {
@@ -153,6 +189,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     @InjectThrottlerStorage() private readonly throttler: ThrottlerStorage,
     private readonly frontDoor: S3FrontDoor,
     private readonly websites: WebsiteServer,
+    private readonly directory: StorageDirectory,
   ) {
     this.domain = functionDomain(config.getOrThrow<string>('functionUrls.base'));
     // Behind the edge, the caller is in X-Forwarded-For, which only the proxies the API trusts may set.
@@ -260,13 +297,13 @@ export class FunctionUrlGateway implements OnModuleDestroy {
   /** One call of the URL's function, as the API's invoke makes it; a Refusal when it can't be made. */
   private async call(url: FunctionUrl, request: IncomingMessage, context: { requestId: string; sourceIp: string; time: Date }): Promise<UrlAnswer> {
     const caller = url.authType === UrlAuthType.AWS_IAM ? await this.callerOf(request, url) : undefined;
-    const account = caller ? { status: caller.accountStatus, planId: caller.planId } : await this.accountOf(url);
+    const account = caller?.account ?? (await this.accountOf(url));
     if (account.status !== AccountStatus.ACTIVE) throw new Refusal(HttpStatus.FORBIDDEN, 'Forbidden');
     await this.count(url, account.planId);
     const { function_, target } = await this.runOf(url);
     await this.admit(url);
 
-    const body = await readBody(request, URL_PAYLOAD_LIMIT);
+    const body = caller?.body ?? (await readBody(request, URL_PAYLOAD_LIMIT));
     // On a customer's domain, the event names it, and its first label, as API Gateway names a custom domain's.
     const domainName = hostName(request.headers.host) as string;
     const event = urlEvent({
@@ -282,8 +319,8 @@ export class FunctionUrlGateway implements OnModuleDestroy {
       requestId: context.requestId,
       time: context.time,
       accountId: caller ? url.accountId : 'anonymous',
-      ...(caller ? { caller: { accessKey: caller.keyId as string, accountId: caller.accountId, userId: caller.userId as string } } : {}),
-      // The API key that let the caller in is the account's secret: never the function's to see.
+      ...(caller ? { caller: caller.iam } : {}),
+      // The credentials that let the caller in are the account's secret, or its key's signature: never the function's to see.
       ...(caller ? { withoutHeaders: ['authorization'] } : {}),
     });
     if (Buffer.byteLength(JSON.stringify(event)) > URL_PAYLOAD_LIMIT) {
@@ -299,10 +336,17 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     return this.answerOf(function_, outcome.output, context.requestId);
   }
 
-  /** The caller of a URL that takes the account's credentials: an API key of the account that may invoke. */
-  private async callerOf(request: IncomingMessage, url: FunctionUrl): Promise<Principal> {
-    const match = /^Bearer\s+(ffk_\S+)$/i.exec(single(request.headers.authorization)?.trim() ?? '');
-    if (!match) throw new Refusal(HttpStatus.FORBIDDEN, 'Forbidden: this URL takes an API key of its account, as "Authorization: Bearer ffk_…"');
+  /**
+   * The caller of a URL that takes the account's credentials, as Lambda's
+   * AWS_IAM: a request signed for lambda by an access key of the account that
+   * may invoke the URL's function, or an API key of the account that may.
+   */
+  private async callerOf(request: IncomingMessage, url: FunctionUrl): Promise<UrlCaller> {
+    const authorization = single(request.headers.authorization)?.trim() ?? '';
+    // Signed as AWS's tools sign: the header is there, so its reading is never null.
+    if (authorization.startsWith(`${ALGORITHM} `)) return this.signedCaller(request, url, readAuthorization(request.headers, LAMBDA) as HeaderSignature);
+    const match = /^Bearer\s+(ffk_\S+)$/i.exec(authorization);
+    if (!match) throw forbidden('this URL takes a request signed for lambda by an access key of its account, or an API key of it, as "Authorization: Bearer ffk_…"');
     let principal: Principal;
     try {
       principal = await this.apiKeys.authenticate(match[1]);
@@ -314,7 +358,38 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     if (principal.accountId !== url.accountId) throw new Refusal(HttpStatus.FORBIDDEN, 'Forbidden');
     if (!principal.scopes?.includes('functions:invoke')) throw new Refusal(HttpStatus.FORBIDDEN, 'Forbidden: the API key lacks the scope functions:invoke');
     if (!WRITERS.includes(principal.role)) throw new Refusal(HttpStatus.FORBIDDEN, `Forbidden: the API key's creator has the ${principal.role} role, which can't invoke`);
-    return principal;
+    return {
+      account: { status: principal.accountStatus, planId: principal.planId },
+      iam: { accessKey: principal.keyId as string, accountId: principal.accountId, userId: principal.userId as string },
+    };
+  }
+
+  /**
+   * The caller of a request signed for lambda, as Lambda checks one: the
+   * signature, over the body, by an access key of the URL's account that may
+   * invoke its function; a function's own key invokes them all. The body is
+   * read first, for its hash.
+   */
+  private async signedCaller(request: IncomingMessage, url: FunctionUrl, signature: HeaderSignature): Promise<UrlCaller> {
+    const body = await readBody(request, URL_PAYLOAD_LIMIT);
+    const key = await this.directory.key(signature.accessKeyId);
+    if (!key) throw forbidden('The security token included in the request is invalid.');
+    const target = originForm(request.url);
+    const at = target.indexOf('?');
+    const rawPath = at < 0 ? target : target.slice(0, at);
+    const rawQuery = at < 0 ? '' : target.slice(at + 1);
+    checkAuthorization({ method: request.method ?? 'GET', rawPath, rawQuery, rawHeaders: request.rawHeaders }, body, signature, key.secret, new Date(), LAMBDA);
+    // Checked after the signature, so that a key's ID alone says nothing of whose the URL is; another account's key is as good as none.
+    if (key.accountId !== url.accountId) throw new Refusal(HttpStatus.FORBIDDEN, 'Forbidden');
+    const label = key.name ? `${key.name} (${key.id})` : key.id;
+    const access = functionAccessOf(key, (await this.functionOf(url)).name);
+    if (!access) throw forbidden(`the access key ${label} doesn't reach this URL's function`);
+    if (!mayInvoke(access)) throw forbidden(`the access key ${label} may read this URL's function, not invoke it`);
+    const account = await this.directory.account(key.accountId);
+    if (!account) throw new Refusal(HttpStatus.FORBIDDEN, 'Forbidden');
+    this.directory.touch(key.id);
+    // A function's own key calls as its function, an account's key by its name, as an IAM user's.
+    return { account, iam: { accessKey: key.id, accountId: key.accountId, userId: key.functionId ?? key.name ?? key.id }, body };
   }
 
   private async accountOf(url: FunctionUrl): Promise<{ status: AccountStatus; planId: string }> {
@@ -339,16 +414,8 @@ export class FunctionUrlGateway implements OnModuleDestroy {
    * share drawn for the call, whatever $LATEST's state, as the API's invoke runs one.
    */
   private async runOf(url: FunctionUrl): Promise<{ function_: Function; target: CallTarget }> {
-    let function_: Function;
-    let target: CallTarget;
-    try {
-      function_ = await this.functions.findOne(url.accountId, url.functionId);
-      target = await this.functions.callTarget(function_, url.alias ?? undefined);
-    } catch (error) {
-      // Deleted meanwhile, the function or the alias: its URL went with it.
-      if (error instanceof NotFoundException) throw new Refusal(HttpStatus.NOT_FOUND, 'Not Found');
-      throw error;
-    }
+    const function_ = await this.functionOf(url);
+    const target = await notFoundAsRefusal(this.functions.callTarget(function_, url.alias ?? undefined));
     if (!target.version && function_.status !== FunctionStatus.ACTIVE) throw new Refusal(HttpStatus.SERVICE_UNAVAILABLE, 'Service Unavailable');
     if ((target.version?.eventFormat ?? function_.eventFormat) !== EventFormat.LAMBDA) {
       // The API refuses a URL to what takes it, and the format, or an alias's move, to what has a URL: only a race gets here.
@@ -356,6 +423,11 @@ export class FunctionUrlGateway implements OnModuleDestroy {
       throw new Refusal(HttpStatus.SERVICE_UNAVAILABLE, 'Service Unavailable');
     }
     return { function_, target };
+  }
+
+  /** The URL's function, as it is now. */
+  private functionOf(url: FunctionUrl): Promise<Function> {
+    return notFoundAsRefusal(this.functions.findOne(url.accountId, url.functionId));
   }
 
   /** The account's credit, as the API's invoke checks it; the caller learns nothing of the account's balance. */

@@ -107,8 +107,8 @@ fn function_findings(record: &FunctionRecord, lambda_name: &str) -> Vec<AccountF
                 resource(),
                 "url-keys",
                 format!(
-                    "{named} takes FF's API keys: on AWS, `AWS_IAM` asks each caller for a request signed with AWS's \
-                     keys (SigV4) instead"
+                    "{named} takes FF's API keys, and requests signed with FF's access keys: on AWS, `AWS_IAM` takes \
+                     a request signed (SigV4) with AWS's keys alone, by an IAM user or role allowed to call it"
                 ),
             ));
         }

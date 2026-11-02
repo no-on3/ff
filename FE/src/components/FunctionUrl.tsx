@@ -124,7 +124,7 @@ export const FunctionUrlTab: React.FC<FunctionUrlProps> = ({ func, mayChange }) 
         <FormControlLabel
           value="AWS_IAM"
           control={<Radio />}
-          label="Only callers with an API key of this account that has functions:invoke, sent as Authorization: Bearer ffk_…"
+          label="Only this account's callers: a request signed for lambda by an access key that may invoke it, as AWS's tools sign one, or an API key with functions:invoke, sent as Authorization: Bearer ffk_…"
         />
       </RadioGroup>
 

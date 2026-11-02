@@ -14,12 +14,13 @@
 import 'dotenv/config';
 import { ConfigService } from '@nestjs/config';
 import { SignatureV4 } from '@smithy/signature-v4';
-import { createHash, createHmac, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { AuditEntry } from '../audit/audit-entry.entity';
 import { AuditService } from '../audit/audit.service';
 import { CreditService } from '../billing/credit.service';
+import { Sha256 } from '../common/test-fixtures';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
@@ -50,20 +51,6 @@ const OTHER = '810000000002';
 const SUSPENDED = '810000000003';
 const REGION = 'tn-tunis-1';
 const MAIL_HOST = 'mail.ff.test';
-
-/** SHA-256 and its HMAC, as AWS's signer takes them. */
-class Sha256 {
-  private readonly hash;
-  constructor(secret?: string | Uint8Array) {
-    this.hash = secret === undefined ? createHash('sha256') : createHmac('sha256', Buffer.from(secret));
-  }
-  update(data: string | Uint8Array): void {
-    this.hash.update(data);
-  }
-  digest(): Promise<Uint8Array> {
-    return Promise.resolve(new Uint8Array(this.hash.digest()));
-  }
-}
 
 run("customers' mail's identities through the SES endpoint, in FF's database (L2)", () => {
   const encryption = new EncryptionService({ getOrThrow: () => [{ id: 'test', key: randomBytes(32) }] } as unknown as ConfigService);

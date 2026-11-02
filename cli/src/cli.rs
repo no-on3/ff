@@ -1465,7 +1465,8 @@ pub enum UrlCommand {
         #[arg(long)]
         alias: Option<String>,
 
-        /// Who may call it: none, anyone; key, the account's API keys with functions:invoke. Needed for a new URL
+        /// Who may call it: none, anyone; key, the account's access keys that may invoke it, signing for lambda, and its API
+        /// keys with functions:invoke. Needed for a new URL
         #[arg(long, value_enum)]
         auth: Option<UrlAuth>,
 

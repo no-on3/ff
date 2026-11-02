@@ -974,7 +974,7 @@ const SCENARIOS = [
         code: 'BE/src/function-urls/function-url.gateway.ts serve() · url-address.ts urlIdOf()',
         msg: { kind: 'http', first: 'GET /hello?name=Amira HTTP/1.1', headers: { host: 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5.fn.localhost:3001', 'user-agent': 'curl/8.22.0', accept: '*/*' } } },
       { from: 'api', to: 'db', kind: 'req', label: 'SELECT function_urls · the account', title: 'The URL, by its ID',
-        text: 'The host\'s first label is the URL\'s ID, unique. Its authType is NONE, so anyone may call it; with AWS_IAM, the caller must send an API key of the account with functions:invoke, created by an owner or a developer, and anyone else gets 403 {"Message":"Forbidden"}. The account must be active, as for any invoke.',
+        text: 'The host\'s first label is the URL\'s ID, unique. Its authType is NONE, so anyone may call it; with AWS_IAM, the caller must sign for lambda with an access key of the account that may invoke the function, as AWS\'s tools sign, or send an API key of the account with functions:invoke, created by an owner or a developer, and anyone else gets 403 {"Message":"Forbidden"}. The account must be active, as for any invoke.',
         code: 'function-urls.service.ts forUrlId() · function-url.gateway.ts callerOf(), accountOf()',
         msg: { kind: 'sql', text: "SELECT … FROM \"function_urls\" WHERE \"url_id\" = 'k7x2m9q4w8e1r5t3y6u0i2o4p8a1s3d5' LIMIT 1;   -- function " + FN + ", NONE, no CORS\nSELECT \"id\", \"status\", \"plan_id\" FROM \"accounts\" WHERE \"id\" = '000000000001';   -- active, beta" } },
       { from: 'api', to: 'api', kind: 'int', label: 'the rate · ACTIVE? · the credit · 6 MB', title: 'The same checks as the API\'s invoke',

@@ -58,10 +58,12 @@ run("deploys' own keys to a bucket, in FF's database (L2)", () => {
     expect(await directory.key(made.accessKeyId)).toEqual({
       id: made.accessKeyId,
       accountId: ACCOUNT,
+      name: null,
       functionId: null,
       buckets: ['deploy-site'],
       queues: null,
       functions: null,
+      functionAccess: null,
       readOnly: false,
       secret: made.secretAccessKey,
     });

@@ -344,9 +344,10 @@ You answered "all as recommended" to the 19 questions explained to you that day.
 - **Changed already:** `2883be7` (U-03): the runtimes' protocol v3 (`ff-runtime-nodejs:24-v3`, `ff-runtime-python:3.13-v3`), `functions.event_format` with the migration `EventFormat`, the console's switch, and [ADR 0007](adr/0007-function-events.md).
 - **Still to change:** nothing. Once no function uses the old event, its code can go.
 
-**16. A protected function URL (`AWS_IAM`) takes an FF API key.** ✅ Confirmed, until FF checks AWS's signatures.
+**16. A protected function URL (`AWS_IAM`) takes an FF API key.** ✅ Confirmed, and AWS's signatures too since step 5.
 - **Changed already:** `7eb725b` and `f8886c5` (U-04): function URLs, `AWS_IAM` checked as an API key of the function's account with `functions:invoke`, sent as `Authorization: Bearer ffk_…`.
-- **Still to change:** later, AWS's signatures (SigV4), with the Lambda API of step 5, or reusing the signature checks step 2 builds for buckets.
+- **Changed already:** step 5 (X-07, part 3): a request signed for `lambda` by an access key of the account that may invoke the function, checked by the one signature module of every front door; the API key still works.
+- **Still to change:** nothing.
 
 **17. Certificates for function URLs: one for all of them if FF's DNS allows it, else one per URL.** ✅ Confirmed. The domain: `ffunc.tn` (20). ⏳ **Waiting for you:** who hosts its DNS, chosen when you register it.
 - **Changed already:** `d13581b` (U-05): the edge built with the standard module for DNS updates (RFC 2136), both ways (`wildcard`, `on-demand`), and `deploy.sh`'s checks; `d0f5604` (U-06): customers' own domains, always one certificate each.

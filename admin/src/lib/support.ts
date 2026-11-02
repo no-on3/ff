@@ -68,7 +68,7 @@ export const FUNCTION_URL_FIELDS = ['functionUrl', 'authType', 'cors', 'createdA
 /** A function's URL: its address, who may call it, and the customer's own domains for it. */
 export interface FunctionUrl {
   functionUrl: string;
-  /** NONE: anyone; AWS_IAM: an API key of the account. */
+  /** NONE: anyone; AWS_IAM: the account's keys, an access key's signature or an API key. */
   authType: 'NONE' | 'AWS_IAM';
   /** Whether it has a CORS configuration. */
   cors: boolean;

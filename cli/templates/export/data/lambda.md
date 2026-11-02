@@ -21,7 +21,7 @@ FF's functions are AWS Lambda's: the same handler, the same events, the same lim
 | An alias naming a version, its share of calls, an alias's own URL | The same on Lambda, once each version's code is deployed and published there: the export has `$LATEST`'s alone. `MIGRATION.md` says each, with the AWS CLI's command that makes it | Not there |
 | `minInstances`, instances kept warm | Provisioned concurrency, on the alias, billed by the hour while it is set | `AutoPublishAlias`, `live` when no alias names `$LATEST`; `ProvisionedConcurrencyConfig` |
 | `maxInstances`, when not FF's 3 | Reserved concurrency, taken from the account's quota | `ReservedConcurrentExecutions` |
-| A URL, open or for FF's API keys | A function URL, `NONE` or `AWS_IAM`. On AWS, `AWS_IAM` takes a request signed by an IAM user or role allowed to call it; FF's API keys don't work there | `FunctionUrlConfig`, with its CORS; its address in `Outputs` |
+| A URL, open or for the account's keys | A function URL, `NONE` or `AWS_IAM`. On AWS, `AWS_IAM` takes a request signed by an IAM user or role allowed to call it; FF's API keys and access keys don't work there | `FunctionUrlConfig`, with its CORS; its address in `Outputs` |
 | Your domains on a URL | A CloudFront distribution in front of the function URL, with a certificate of ACM's | Not there: below |
 | A schedule | An EventBridge rule, the same expression, in UTC, with its input or EventBridge's Scheduled Event | `Events`, `Type: Schedule` |
 | A queue it reads, its calls that don't wait, a bucket's events | As [`sqs.md`](sqs.md) says | `Events` of `Type: SQS` and `S3`, `EventInvokeConfig` |

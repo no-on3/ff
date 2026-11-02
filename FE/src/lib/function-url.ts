@@ -120,7 +120,9 @@ export function corsOf(form: CorsForm): { cors: UrlCors | null } | { problem: st
 
 /** Who may call a URL, in a sentence. */
 export const authTypeText = (authType: AuthType): string =>
-  authType === 'NONE' ? 'Anyone may call it.' : 'Only callers with an API key of this account that has functions:invoke.';
+  authType === 'NONE'
+    ? 'Anyone may call it.'
+    : 'Only callers with an access key of this account that may invoke it, signing for lambda, or an API key of it that has functions:invoke.';
 
 /** A URL's CORS, in a sentence. */
 export function corsText(cors: UrlCors | null): string {

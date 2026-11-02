@@ -60,8 +60,9 @@ export class CorsDto implements UrlCors {
 }
 
 const AUTH_TYPE_DESCRIPTION =
-  'NONE: anyone may call the URL. AWS_IAM: only a caller with an API key of the account with functions:invoke, sent as ' +
-  '"Authorization: Bearer ffk_…", which the function never sees; AWS signs these calls with SigV4 instead.';
+  'NONE: anyone may call the URL. AWS_IAM: only a request signed for lambda (SigV4), as AWS\'s tools sign one, by an access ' +
+  'key of the account that may invoke the function (a function\'s own key may), or one with an API key of the account with ' +
+  'functions:invoke, sent as "Authorization: Bearer ffk_…"; the function sees neither.';
 const CORS_DESCRIPTION =
   'With it, the URL answers browsers\' preflights itself and adds its CORS headers to every answer, in place of any the ' +
   'function sends; without it, the function answers them.';

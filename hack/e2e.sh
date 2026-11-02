@@ -778,6 +778,7 @@ url_code='export async function handler(event: any) {
       method: event.requestContext.http.method, path: event.rawPath, query: event.queryStringParameters ?? null,
       cookies: event.cookies ?? [], body: event.body ?? null, base64: event.isBase64Encoded, auth: event.headers.authorization ?? null,
       account: event.requestContext.accountId, requestId: event.requestContext.requestId, domain: event.requestContext.domainName,
+      caller: event.requestContext.authorizer?.iam ?? null,
     }),
   };
 }'
@@ -882,6 +883,31 @@ check "with CORS set, the URL answers a browser's preflight itself" "200 204 htt
 http PUT "/functions/$url_fn/url" '{"authType": "AWS_IAM"}' >/dev/null
 check "a URL that takes the account's credentials refuses a caller without them" '403 403' \
   "$(at_url GET / >/dev/null; url_status) $(at_url GET / -H 'authorization: Bearer ffk_0123456789ab_not-a-real-secret' >/dev/null; url_status)"
+# signed_url <key JSON> <method> <path> [curl option...]: a request to the URL signed for lambda with the key, as AWS's tools sign one.
+signed_url() {
+  local key=$1 method=$2 path=$3
+  shift 3
+  at_url "$method" "$path" --aws-sigv4 "aws:amz:tn-tunis-1:lambda" --user "$(jq -r '"\(.id):\(.secretAccessKey)"' <<<"$key")" "$@"
+}
+url_invoker="$(http POST /storage-keys '{"name": "e2e-url-invoker", "functions": ["e2e-url"], "functionAccess": "invoke"}')"
+url_reader="$(http POST /storage-keys '{"name": "e2e-url-reader", "functions": ["*"], "functionAccess": "read"}')"
+url_elsewhere="$(http POST /storage-keys '{"name": "e2e-url-elsewhere", "functions": ["e2e-orders"], "functionAccess": "write"}')"
+signed="$(signed_url "$url_invoker" POST /orders -H 'content-type: application/json' --data '{"order":8}')"
+check "a request signed for lambda by an access key that may invoke the function: called with its body, the key its caller, the signature never the function's" \
+  '200 {"body":"{\"order\":8}","auth":null,"caller":"e2e-url-invoker"} true' \
+  "$(url_status) $(jq -c '{body, auth, caller: .caller.userId}' <<<"$signed") $(jq -r --arg id "$(jq -r .id <<<"$url_invoker")" '.caller.accessKey == $id' <<<"$signed")"
+check "a key that may only read the function is refused, saying so" \
+  "403 Forbidden: the access key e2e-url-reader ($(jq -r .id <<<"$url_reader")) may read this URL's function, not invoke it" \
+  "$(signed_url "$url_reader" GET / >/dev/null; url_status) $(jq -r .Message "$work/url-body")"
+check "  ... and one that names other functions" \
+  "403 Forbidden: the access key e2e-url-elsewhere ($(jq -r .id <<<"$url_elsewhere")) doesn't reach this URL's function" \
+  "$(signed_url "$url_elsewhere" GET / >/dev/null; url_status) $(jq -r .Message "$work/url-body")"
+check "  ... and a signature by another secret" "403 true" \
+  "$(signed_url "$(jq '.secretAccessKey = "not-the-secret"' <<<"$url_invoker")" GET / >/dev/null; url_status) \
+$(jq -r '.Message | startswith("Forbidden: The request signature we calculated does not match")' "$work/url-body")"
+check "the invoker's last use is written down, as at every front door" true \
+  "$(http GET /storage-keys | jq -r '.[] | select(.name == "e2e-url-invoker") | .lastUsedAt != null')"
+for url_key in "$url_invoker" "$url_reader" "$url_elsewhere"; do http DELETE "/storage-keys/$(jq -r .id <<<"$url_key")" >/dev/null; done
 http PUT "/functions/$url_fn" '{"eventFormat": "wrapped"}' >/dev/null
 check "a function with a URL keeps AWS Lambda's event" 400 "$(status)"
 http DELETE "/functions/$url_fn/url" >/dev/null

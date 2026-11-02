@@ -355,7 +355,7 @@ impl<'a> Builder<'a> {
             ));
             if url.auth_type == "AWS_IAM" {
                 self.notes.push(format!(
-                    "**{}**'s URL takes FF's API keys on FF: on AWS, `AWS_IAM` takes a request signed by an IAM user or role allowed `lambda:InvokeFunctionUrl`, and no API key.",
+                    "**{}**'s URL takes FF's API keys and FF's access keys' signatures on FF: on AWS, `AWS_IAM` takes a request signed by an IAM user or role allowed `lambda:InvokeFunctionUrl`, and no API key.",
                     function.name
                 ));
             }
@@ -858,7 +858,7 @@ mod tests {
                 "**send-receipts**'s keys used the bucket `archive`, which the account no longer has",
                 "**send-receipts**'s keys used the site `www`, whose bucket on AWS `data/s3-website.md`'s stack makes",
                 "**send-receipts**'s keys used the queue `invoices`, which the account no longer has",
-                "**send-receipts**'s URL takes FF's API keys on FF",
+                "**send-receipts**'s URL takes FF's API keys and FF's access keys' signatures on FF",
                 "**send-receipts**'s URL answers at `api.shop.tn` on FF",
                 "**send-receipts** sends its calls' records to the function `audit`, which this export doesn't hold",
                 "**send-receipts**'s alias `live` names `$LATEST` on FF",

@@ -6,7 +6,6 @@
  * service's as the case says, and its signed request read and checked whole.
  */
 import { SignatureV4 } from '@smithy/signature-v4';
-import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { IncomingHttpHeaders } from 'node:http';
 import { join } from 'node:path';
@@ -29,6 +28,7 @@ import {
   stringToSign,
   uriEncode,
 } from './signature-v4';
+import { Sha256 } from './test-fixtures';
 
 interface SuiteForm {
   signedRequest: string;
@@ -179,20 +179,6 @@ describe('the canonical request', () => {
     expect(canonicalQuery('X-Amz-Signature=00&X-Amz-Date=1', 'X-Amz-Signature')).toBe('X-Amz-Date=1');
   });
 });
-
-/** SHA-256 and its HMAC, as AWS's signer takes them: from node's crypto. */
-class Sha256 {
-  private readonly hash;
-  constructor(secret?: string | Uint8Array) {
-    this.hash = secret === undefined ? createHash('sha256') : createHmac('sha256', Buffer.from(secret));
-  }
-  update(data: string | Uint8Array): void {
-    this.hash.update(data);
-  }
-  digest(): Promise<Uint8Array> {
-    return Promise.resolve(new Uint8Array(this.hash.digest()));
-  }
-}
 
 describe("every service's path but S3's, as Lambda's carry ARNs", () => {
   const ARN_PATH = '/2015-03-31/functions/arn%3Aaws%3Alambda%3Atn-tunis-1%3A000000000001%3Afunction%3Aorders/invocations';
