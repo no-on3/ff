@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Actor } from '../common/request-context';
-import { decodeEscapes } from '../storage/sigv4';
+import { decodeEscapes } from '../common/signature-v4';
 import { EmailAccountService } from './email-account.service';
 import { EmailIdentitiesService, IdentityRefusal } from './email-identities.service';
 import { EmailIdentity, EmailIdentityStatus, EmailIdentityType } from './email-identity.entity';

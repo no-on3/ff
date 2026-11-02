@@ -1,7 +1,7 @@
 import { GetQueueUrlCommand, SQSClient } from '@aws-sdk/client-sqs';
 import { IncomingHttpHeaders, Server, createServer } from 'node:http';
 import { AddressInfo } from 'node:net';
-import { SignedRequest } from '../storage/sigv4';
+import { SignedRequest } from '../common/signature-v4';
 import { SqsError } from './sqs-error';
 import { SqsSignature, checkSqsSignature, readSqsSignature } from './sqs-signature';
 

@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { Transform, TransformCallback } from 'node:stream';
+import { EMPTY_SHA256, SigningChain, hmac, sha256Hex } from '../common/signature-v4';
 import { ChecksumAlgorithm, RunningChecksum, runningChecksum } from './checksums';
 import { S3Error, badDigest, incompleteBody, invalidRequest, signatureMismatch } from './s3-error';
-import { EMPTY_SHA256, SigningChain, hmac, sha256Hex } from './sigv4';
 
 /** The payloads of aws-chunked bodies, as x-amz-content-sha256 names them: signed chunk by chunk or not, with a trailer or not. */
 export const STREAMING_SIGNED = 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD';

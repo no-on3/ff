@@ -93,4 +93,5 @@ docker-compose.yml                      static db l4 l5 cli
 .trivyignore.yaml                       security
 .npmauditignore                         static security
 .gitleaksignore                         static
+.gitleaks.toml                           static
 .gitignore                              static

@@ -11,7 +11,7 @@ import { closeHttp, listenHttp } from '../common/http-server';
 import { PlansService } from '../plans/plans.service';
 import { Bucket } from './bucket.entity';
 import { servedContentType } from './content-types';
-import { uriEncode } from './sigv4';
+import { uriEncode } from '../common/signature-v4';
 import { SiteTransfer } from './site-transfer.service';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageRequestCountsService } from './storage-request-counts.service';

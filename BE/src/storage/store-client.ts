@@ -1,6 +1,6 @@
 import { Agent as HttpAgent, ClientRequest, IncomingMessage, request as httpRequest } from 'node:http';
 import { Agent as HttpsAgent, request as httpsRequest } from 'node:https';
-import { signedForStore } from './sigv4';
+import { signedForStore } from './s3-signature';
 
 /** The store behind the front door, and FF's credentials there: the only ones it knows. */
 export interface StoreSettings {

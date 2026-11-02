@@ -1,4 +1,4 @@
-# gitleaks findings that are not secrets (hack/ci.sh, the security stage). Each line is one finding:
+# gitleaks findings that are not secrets (hack/ci.sh, the static stage). Each line is one finding:
 # commit:file:rule:line. Anything else in these files is still reported.
 
 # An old doc's curl examples: "Authorization: Bearer YOUR_TOKEN", a placeholder.

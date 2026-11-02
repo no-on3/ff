@@ -7,8 +7,9 @@
  */
 import { SignatureV4 } from '@smithy/signature-v4';
 import { createHash, createHmac } from 'node:crypto';
+import { canonicalUriTwice } from '../common/signature-v4';
 import { SesError } from './ses-error';
-import { SesSignature, canonicalUriTwice, checkSesSignature, readSesSignature } from './ses-signature';
+import { SesSignature, checkSesSignature, readSesSignature } from './ses-signature';
 
 const KEY = { accessKeyId: 'AKFFAAAAAAAAAAAAAAAA', secretAccessKey: 'a'.repeat(40) };
 

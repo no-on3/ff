@@ -132,11 +132,12 @@ PY
 # The scanners run as this user: what they write here stays this user's.
 as_me=(--user "$(id -u):$(id -g)")
 
-# Every commit HEAD holds, with gitleaks' own rules; .gitleaksignore lists the findings that aren't secrets. HEAD's
-# history alone, what a push sends: by default gitleaks reads every ref, a laptop's own branches too.
+# Every commit HEAD holds, with gitleaks' own rules and .gitleaks.toml's one file of AWS's published examples;
+# .gitleaksignore lists the other findings that aren't secrets. HEAD's history alone, what a push sends: by default
+# gitleaks reads every ref, a laptop's own branches too.
 gitleaks_history() {
   docker run --rm "${as_me[@]}" -v "$repo:/repo:ro" "$GITLEAKS_IMAGE" git /repo --log-opts='--full-history --diff-filter=tuxdb HEAD' \
-    --gitleaks-ignore-path /repo/.gitleaksignore --redact --no-banner --log-level warn
+    --config /repo/.gitleaks.toml --gitleaks-ignore-path /repo/.gitleaksignore --redact --no-banner --log-level warn
 }
 
 workflow_lints() { # the CI server's workflow, its run: steps shellchecked

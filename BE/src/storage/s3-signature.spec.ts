@@ -1,15 +1,6 @@
+import { EMPTY_SHA256, SignedRequest } from '../common/signature-v4';
 import { S3Error } from './s3-error';
-import {
-  EMPTY_SHA256,
-  RequestSignature,
-  SignedRequest,
-  canonicalQuery,
-  canonicalUri,
-  checkSignature,
-  readSignature,
-  signedForStore,
-  uriEncode,
-} from './sigv4';
+import { RequestSignature, checkSignature, readSignature, signedForStore } from './s3-signature';
 
 // AWS's documented examples of Signature Version 4 for S3 (the S3 API reference, "Examples: Signature
 // Calculations"), made with this key and secret on 2013-05-24 at midnight, UTC, for the bucket examplebucket.
@@ -200,24 +191,6 @@ describe('Signature Version 4: what is refused', () => {
     expect(refusal(presigned({ 'X-Amz-Expires': '604801' }))).toBe('400 AuthorizationQueryParametersError');
     expect(refusal(presigned({ 'X-Amz-Expires': '0' }))).toBe('400 AuthorizationQueryParametersError');
     expect(refusal(presigned({ 'X-Amz-Algorithm': 'AWS4-HMAC-SHA1' }))).toBe('400 AuthorizationQueryParametersError');
-  });
-});
-
-describe('the canonical request', () => {
-  it('encodes each path segment once, as the client meant it, and normalizes nothing', () => {
-    expect(canonicalUri('/photos/2026/a b.jpg')).toBe('/photos/2026/a%20b.jpg');
-    expect(canonicalUri('/photos//a%2ab')).toBe('/photos//a%2Ab');
-    expect(canonicalUri('/photos/./../x')).toBe('/photos/./../x');
-    expect(canonicalUri('/k%C3%A9y%2Fslash')).toBe('/k%C3%A9y%2Fslash');
-    expect(canonicalUri('')).toBe('/');
-    expect(uriEncode('a/b~c', true)).toBe('a/b~c');
-  });
-
-  it('sorts the query by name, then by value, each encoded; "+" is a plus sign, as Signature Version 4 reads it', () => {
-    expect(canonicalQuery('prefix=J&max-keys=2&list-type=2')).toBe('list-type=2&max-keys=2&prefix=J');
-    expect(canonicalQuery('a=2&a=1&b')).toBe('a=1&a=2&b=');
-    expect(canonicalQuery('prefix=a+b&delimiter=%2F')).toBe('delimiter=%2F&prefix=a%2Bb');
-    expect(canonicalQuery('X-Amz-Signature=00&X-Amz-Date=1', 'X-Amz-Signature')).toBe('X-Amz-Date=1');
   });
 });
 

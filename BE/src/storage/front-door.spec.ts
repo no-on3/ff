@@ -35,7 +35,7 @@ import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { S3FrontDoor } from './front-door';
 import { CountedRequest } from './request-tally';
-import { RequestSignature, checkSignature, readSignature, signedForStore } from './sigv4';
+import { RequestSignature, checkSignature, readSignature, signedForStore } from './s3-signature';
 import { ActiveKey, StorageDirectory } from './storage-directory.service';
 import { notedUses, useLine } from './test-fixtures';
 import { StorageRequestCountsService } from './storage-request-counts.service';
