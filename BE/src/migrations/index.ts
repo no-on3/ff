@@ -70,6 +70,7 @@ import { TriggerQualifiers1793590000000 } from './1793590000000-TriggerQualifier
 import { AlarmDimensions1793600000000 } from './1793600000000-AlarmDimensions';
 import { AccessKeyFunctions1793610000000 } from './1793610000000-AccessKeyFunctions';
 import { FunctionKeyRenewal1793620000000 } from './1793620000000-FunctionKeyRenewal';
+import { LambdaEndpoint1793630000000 } from './1793630000000-LambdaEndpoint';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -149,4 +150,5 @@ export const MIGRATIONS: Array<new () => object> = [
   AlarmDimensions1793600000000,
   AccessKeyFunctions1793610000000,
   FunctionKeyRenewal1793620000000,
+  LambdaEndpoint1793630000000,
 ];

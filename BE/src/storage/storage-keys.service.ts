@@ -34,6 +34,7 @@ export class StorageKeysService {
   private readonly endpoint: string;
   private readonly sqsEndpoint: string;
   private readonly sesEndpoint: string;
+  private readonly lambdaEndpoint: string;
   private readonly region: string;
 
   constructor(
@@ -46,6 +47,7 @@ export class StorageKeysService {
     this.endpoint = new URL(config.getOrThrow<string>('storage.base')).origin;
     this.sqsEndpoint = config.get<string>('sqs.base') ?? '';
     this.sesEndpoint = config.get<string>('ses.base') ?? '';
+    this.lambdaEndpoint = config.get<string>('lambda.base') ?? '';
     this.region = config.getOrThrow<string>('storage.region');
   }
 
@@ -84,7 +86,7 @@ export class StorageKeysService {
     });
     const { buckets, queues, functions, functionAccess, readOnly } = row;
     await this.audit.record({ accountId, action: 'storage_key.create', resource: `storage_key:${id}`, details: { name, buckets, queues, functions, functionAccess, readOnly } });
-    return { ...this.view(row), secretAccessKey, endpoint: this.endpoint, sqsEndpoint: this.sqsEndpoint, sesEndpoint: this.sesEndpoint, region: this.region };
+    return { ...this.view(row), secretAccessKey, endpoint: this.endpoint, sqsEndpoint: this.sqsEndpoint, sesEndpoint: this.sesEndpoint, lambdaEndpoint: this.lambdaEndpoint, region: this.region };
   }
 
   /** The key stops working at once: the front door refuses its next request. */

@@ -18,7 +18,8 @@ fn key(id: &str, buckets: Value, read_only: bool) -> Value {
 /// The answer to POST /storage-keys for a key: it, its secret and the endpoints.
 fn made(mut key: Value) -> Value {
     key.as_object_mut().unwrap().extend(
-        json!({ "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "endpoint": "https://s3.example.tn", "sqsEndpoint": "https://sqs.example.tn", "sesEndpoint": "https://email.example.tn", "region": "tn-tunis-1" })
+        json!({ "secretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "endpoint": "https://s3.example.tn", "sqsEndpoint": "https://sqs.example.tn", "sesEndpoint": "https://email.example.tn",
+               "lambdaEndpoint": "https://lambda.example.tn", "region": "tn-tunis-1" })
             .as_object()
             .unwrap()
             .clone(),
@@ -37,7 +38,8 @@ fn create_prints_the_secret_once_as_aws_tools_read_it() {
     ff(&with_key(&api.url)).args(["keys", "create", "--bucket", "photos", "--read-only"]).assert().success().stdout(format!(
         "{KEY_ID} made, reaching the bucket photos, read-only: its secret, shown this once (FF keeps it sealed; `ff keys revoke {KEY_ID}` stops it):\n\
          export AWS_ACCESS_KEY_ID={KEY_ID}\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\n\
-         export AWS_ENDPOINT_URL_S3=https://s3.example.tn\nexport AWS_ENDPOINT_URL_SQS=https://sqs.example.tn\nexport AWS_ENDPOINT_URL_SESV2=https://email.example.tn\n"
+         export AWS_ENDPOINT_URL_S3=https://s3.example.tn\nexport AWS_ENDPOINT_URL_SQS=https://sqs.example.tn\nexport AWS_ENDPOINT_URL_SESV2=https://email.example.tn\n\
+         export AWS_ENDPOINT_URL_LAMBDA=https://lambda.example.tn\n"
     ));
     assert_eq!(body(&api), json!({ "buckets": ["photos"], "readOnly": true }));
 }

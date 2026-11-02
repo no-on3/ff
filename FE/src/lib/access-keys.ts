@@ -37,6 +37,7 @@ export function awsVariables(key: CreatedStorageKey): Array<[name: string, value
     ['AWS_ENDPOINT_URL_S3', key.endpoint],
     ['AWS_ENDPOINT_URL_SQS', key.sqsEndpoint],
     ['AWS_ENDPOINT_URL_SESV2', key.sesEndpoint],
+    ['AWS_ENDPOINT_URL_LAMBDA', key.lambdaEndpoint],
   ];
 }
 

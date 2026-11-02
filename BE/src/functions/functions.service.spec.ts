@@ -2013,16 +2013,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.create('user-1', dto);
       await service.create('user-1', { ...dto, awsEndpoints: [AwsEndpoint.SESV2, AwsEndpoint.SQS] });
 
-      expect(functionsRepo.save.mock.calls.map(([fn]) => (fn as Function).awsEndpoints)).toEqual([
-        [AwsEndpoint.S3, AwsEndpoint.SQS, AwsEndpoint.SESV2],
-        [AwsEndpoint.S3, AwsEndpoint.SQS, AwsEndpoint.SESV2],
-        [AwsEndpoint.SQS, AwsEndpoint.SESV2],
-        [AwsEndpoint.SQS, AwsEndpoint.SESV2],
-      ]);
-      expect(functionKeys.credentialsFor.mock.calls.map(([fn]) => fn.awsEndpoints)).toEqual([
-        [AwsEndpoint.S3, AwsEndpoint.SQS, AwsEndpoint.SESV2],
-        [AwsEndpoint.SQS, AwsEndpoint.SESV2],
-      ]);
+      const every = [AwsEndpoint.S3, AwsEndpoint.SQS, AwsEndpoint.SESV2, AwsEndpoint.LAMBDA];
+      expect(functionsRepo.save.mock.calls.map(([fn]) => (fn as Function).awsEndpoints)).toEqual([every, every, [AwsEndpoint.SQS, AwsEndpoint.SESV2], [AwsEndpoint.SQS, AwsEndpoint.SESV2]]);
+      expect(functionKeys.credentialsFor.mock.calls.map(([fn]) => fn.awsEndpoints)).toEqual([every, [AwsEndpoint.SQS, AwsEndpoint.SESV2]]);
     });
 
     it('rolls out an update that leaves an endpoint out, its record saying so, and changes nothing for the same ones in another order', async () => {
@@ -2030,7 +2023,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       functionsRepo.findOne.mockImplementation(async () => activeFunction());
 
       const left = await service.update('user-1', 'fn-1', { awsEndpoints: [AwsEndpoint.SQS, AwsEndpoint.S3] });
-      await service.update('user-1', 'fn-1', { awsEndpoints: [AwsEndpoint.SESV2, AwsEndpoint.SQS, AwsEndpoint.S3] });
+      await service.update('user-1', 'fn-1', { awsEndpoints: [AwsEndpoint.LAMBDA, AwsEndpoint.SESV2, AwsEndpoint.SQS, AwsEndpoint.S3] });
 
       expect(left.awsEndpoints).toEqual([AwsEndpoint.S3, AwsEndpoint.SQS]);
       expect(orchestrator.update).toHaveBeenCalledTimes(1);

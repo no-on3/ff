@@ -586,7 +586,7 @@ describe('configuration', () => {
 
   describe("Lambda's endpoint", () => {
     it("is served on port 3006, apart from the API, at localhost in development, naming FF's region", () => {
-      expect(configuration(dev).lambda).toEqual({ port: 3006, base: 'http://localhost:3006', region: 'tn-tunis-1' });
+      expect(configuration(dev).lambda).toEqual({ port: 3006, base: 'http://localhost:3006', region: 'tn-tunis-1', functionEndpoint: '' });
     });
 
     it('takes an origin, a trailing slash dropped, and port 0 for none', () => {
@@ -598,6 +598,28 @@ describe('configuration', () => {
 
     it("is reached over TLS in production: its requests carry functions' code and calls", () => {
       expect(problems({ ...production, FF_LAMBDA_BASE: 'http://lambda.example.tn' })).toEqual([expect.stringMatching(/^FF_LAMBDA_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
+    });
+
+    it("is reached by functions at a Service's fixed address, on the endpoint's port, after the others, or at addresses of its own", () => {
+      const config = configuration({ ...production, FF_SES_FUNCTION_ENDPOINT: 'http://10.43.0.251:3005', FF_LAMBDA_FUNCTION_ENDPOINT: 'http://10.43.0.251:3006/' });
+
+      expect(config.lambda.functionEndpoint).toBe('http://10.43.0.251:3006');
+      expect(config.kubernetes.platformEgress).toEqual([
+        { cidrs: [], port: 3005 },
+        { cidrs: [], port: 3006 },
+      ]);
+      const gateway = configuration({ ...dev, FF_LAMBDA_FUNCTION_ENDPOINT: 'http://172.18.0.1:3006', FF_LAMBDA_FUNCTION_CIDRS: '172.18.0.1/32' });
+      expect(gateway.kubernetes.platformEgress).toEqual([{ cidrs: ['172.18.0.1/32'], port: 3006 }]);
+    });
+
+    it("refuses functions' endpoint without Lambda's, and their addresses without functions' endpoint", () => {
+      expect(problems({ ...dev, FF_LAMBDA_PORT: '0', FF_LAMBDA_FUNCTION_ENDPOINT: 'http://10.43.0.251:3006' })).toEqual([
+        "FF_LAMBDA_FUNCTION_ENDPOINT is set, but FF_LAMBDA_PORT is 0: functions' keys reach their account's functions through Lambda's endpoint, which isn't running",
+      ]);
+      expect(problems({ ...dev, FF_LAMBDA_FUNCTION_CIDRS: '172.18.0.1/32' })).toEqual([
+        "FF_LAMBDA_FUNCTION_CIDRS is set, but FF_LAMBDA_FUNCTION_ENDPOINT is not: it names where functions reach Lambda's endpoint",
+      ]);
+      expect(problems({ ...dev, FF_LAMBDA_FUNCTION_ENDPOINT: 'http://10.43.0.251:3006/2015-03-31' })).toEqual([expect.stringMatching(/^FF_LAMBDA_FUNCTION_ENDPOINT must be an origin, such as http:\/\/10.43.0.251:3006/)]);
     });
   });
 

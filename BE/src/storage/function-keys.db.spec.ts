@@ -20,13 +20,18 @@ const ACCOUNT = '720000000001';
 const ENDPOINT = 'http://10.43.0.251:3002';
 const SQS_ENDPOINT = 'http://10.43.0.251:3003';
 const SES_ENDPOINT = 'http://10.43.0.251:3005';
+const LAMBDA_ENDPOINT = 'http://10.43.0.251:3006';
+/** Where functions reach each endpoint, as the backend's settings give them: all four. */
+const EVERY_ENDPOINT = { s3: ENDPOINT, sqs: SQS_ENDPOINT, ses: SES_ENDPOINT, lambda: LAMBDA_ENDPOINT };
 
-run("functions' own keys to their account's buckets, queues and mail, in FF's database (L2)", () => {
-  const config = (functionEndpoint = ENDPOINT, sqsEndpoint = SQS_ENDPOINT, sesEndpoint = SES_ENDPOINT) =>
+run("functions' own keys to their account's buckets, queues, mail and functions, in FF's database (L2)", () => {
+  /** The backend's settings, functions given the endpoints named alone. */
+  const config = (given: Partial<typeof EVERY_ENDPOINT> = EVERY_ENDPOINT) =>
     new ConfigService({
-      storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1', functionEndpoint },
-      sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1', functionEndpoint: sqsEndpoint },
-      ses: { base: 'https://email.example.tn', region: 'tn-tunis-1', functionEndpoint: sesEndpoint },
+      storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1', functionEndpoint: given.s3 ?? '' },
+      sqs: { base: 'https://sqs.example.tn', region: 'tn-tunis-1', functionEndpoint: given.sqs ?? '' },
+      ses: { base: 'https://email.example.tn', region: 'tn-tunis-1', functionEndpoint: given.ses ?? '' },
+      lambda: { base: 'https://lambda.example.tn', region: 'tn-tunis-1', functionEndpoint: given.lambda ?? '' },
     });
   let db: ScratchDatabase;
   let directory: StorageDirectory;
@@ -66,6 +71,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
         AWS_ENDPOINT_URL_S3: ENDPOINT,
         AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT,
         AWS_ENDPOINT_URL_SESV2: SES_ENDPOINT,
+        AWS_ENDPOINT_URL_LAMBDA: LAMBDA_ENDPOINT,
       },
     });
     expect(again).toEqual(first);
@@ -219,24 +225,27 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
 
   it('makes none where FF gives functions no endpoint: none has an address for them', async () => {
     const function_ = fn();
-    const none = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', '', ''));
+    const none = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({}));
 
     expect(await none.credentialsFor(function_)).toBeUndefined();
     expect(await rowsOf(function_.id)).toEqual([]);
   });
 
-  it('gives the endpoints there are an address for, each alone: buckets, queues or mail without the others', async () => {
-    const buckets = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config(ENDPOINT, '', '')).credentialsFor(fn());
-    const queues = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', SQS_ENDPOINT, '')).credentialsFor(fn());
-    const mail = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', '', SES_ENDPOINT)).credentialsFor(fn());
+  it('gives the endpoints there are an address for, each alone: buckets, queues, mail or functions without the others', async () => {
+    const buckets = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ s3: ENDPOINT })).credentialsFor(fn());
+    const queues = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ sqs: SQS_ENDPOINT })).credentialsFor(fn());
+    const mail = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ ses: SES_ENDPOINT })).credentialsFor(fn());
+    const functions = await new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ lambda: LAMBDA_ENDPOINT })).credentialsFor(fn());
 
     expect(endpoints(buckets!.variables)).toEqual(['AWS_ENDPOINT_URL_S3']);
     expect(queues!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(queues), AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SQS: SQS_ENDPOINT });
     expect(endpoints(queues!.variables)).toEqual(['AWS_ENDPOINT_URL_SQS']);
     expect(mail!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(mail), AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_SESV2: SES_ENDPOINT });
     expect(endpoints(mail!.variables)).toEqual(['AWS_ENDPOINT_URL_SESV2']);
+    expect(functions!.variables).toMatchObject({ AWS_ACCESS_KEY_ID: keyOf(functions), AWS_REGION: 'tn-tunis-1', AWS_ENDPOINT_URL_LAMBDA: LAMBDA_ENDPOINT });
+    expect(endpoints(functions!.variables)).toEqual(['AWS_ENDPOINT_URL_LAMBDA']);
     // Every endpoint there is, for a function that takes them all: no new version, as before endpoints could be left out.
-    expect([buckets!.revision, queues!.revision, mail!.revision]).toEqual([keyOf(buckets), keyOf(queues), keyOf(mail)]);
+    expect([buckets!.revision, queues!.revision, mail!.revision, functions!.revision]).toEqual([keyOf(buckets), keyOf(queues), keyOf(mail), keyOf(functions)]);
   });
 
   it('gives only the endpoints the function takes, with its key and region still, each change of them a new version of the same key', async () => {
@@ -255,7 +264,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
   });
 
   it("counts only the endpoints FF has an address for: where it has the queues' alone, a function that takes them takes every one there is", async () => {
-    const queuesOnly = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config('', SQS_ENDPOINT, ''));
+    const queuesOnly = new FunctionKeys(db.dataSource.getRepository(StorageKey), directory, config({ sqs: SQS_ENDPOINT }));
     const function_ = fn();
 
     const every = await queuesOnly.credentialsFor(function_);

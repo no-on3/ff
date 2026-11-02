@@ -713,7 +713,7 @@ check "ff buckets create makes it, and says where AWS's tools reach it" "0 cli-p
 ff buckets list
 check "ff buckets list shows it" "0 cli-photos active" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
 ff keys create --name cli-photos-key --bucket cli-photos
-check "ff keys create prints its secret once, as the six variables AWS's tools read" "0 6" "$(code) $(out | grep -c '^export AWS_')"
+check "ff keys create prints its secret once, as the seven variables AWS's tools read" "0 7" "$(code) $(out | grep -c '^export AWS_')"
 out | grep '^export AWS_' >"$work/s3.env"
 key_id="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/s3.env")"
 printf 'Ahlan from the CLI' >"$work/hello.txt"
@@ -830,7 +830,7 @@ check "  ... with its attributes, its dead-letter queue by the ARN of the queue 
 ff queues send cli-orders '{"order": 1}' --attribute item=bsissa
 check "ff queues send sends a message, an attribute with it" "0 true" "$(code) $(out | grep -E '^sent [0-9a-f-]{36} to cli-orders$' >/dev/null && echo true || echo false)"
 ff keys create --queue cli-orders
-check "a key for that queue alone gives the SQS endpoint among its six variables" "0 6 http://localhost:$sqs_port" \
+check "a key for that queue alone gives the SQS endpoint among its seven variables" "0 7 http://localhost:$sqs_port" \
   "$(code) $(out | grep -c '^export AWS_') $(out | sed -n 's/^export AWS_ENDPOINT_URL_SQS=//p')"
 out | grep '^export AWS_' >"$work/sqs.env"
 queue_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/sqs.env")"

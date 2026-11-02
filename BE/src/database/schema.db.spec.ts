@@ -91,6 +91,7 @@ const CAPACITY_VERSIONS = migrationNames.find((name) => name.startsWith('Capacit
 const URL_ALIASES = migrationNames.find((name) => name.startsWith('UrlAliases')) as string;
 const TRIGGER_QUALIFIERS = migrationNames.find((name) => name.startsWith('TriggerQualifiers')) as string;
 const ALARM_DIMENSIONS = migrationNames.find((name) => name.startsWith('AlarmDimensions')) as string;
+const FUNCTION_KEY_RENEWAL = migrationNames.find((name) => name.startsWith('FunctionKeyRenewal')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -1140,6 +1141,54 @@ run('database schema (L2, real PostgreSQL)', () => {
         { id: 'shop', keys: null },
       ]);
       await expect(keys()).rejects.toThrow('column "name" does not exist');
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the Lambda-endpoint migration gives a function and a version that took every endpoint Lambda's too, leaves one that sends a service to AWS as it was, and reverts with Lambda's in a list and a key's use of it", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, FUNCTION_KEY_RENEWAL);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const fn = async (name: string, endpoints?: string): Promise<string> => {
+        const columns = endpoints === undefined ? '' : ', aws_endpoints';
+        const values = endpoints === undefined ? [name, ACCOUNT] : [name, ACCOUNT, endpoints];
+        const [{ id }] = await dataSource.query(
+          `INSERT INTO functions (name, account_id, runtime, code, memory, timeout${columns}) VALUES ($1, $2, 'nodejs', 'v1', 128, 5${endpoints === undefined ? '' : ', $3'}) RETURNING id`,
+          values,
+        );
+        return id;
+      };
+      const every = await fn('every');
+      await fn('mail-at-aws', '{s3,sqs}');
+      const version = (number: number, endpoints: string) =>
+        dataSource.query(
+          `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+           VALUES ($1, $2, $3, 'nodejs', 'index.handler', 'inline', 'v1', 'sha', 2, 'sha', 128, 5, 'lambda', $4)`,
+          [every, number, ACCOUNT, endpoints],
+        );
+      await version(1, '{s3,sqs,sesv2}');
+      await version(2, '{sqs}');
+      const use = (service: string) =>
+        dataSource.query(`INSERT INTO key_uses (holder, service, resource, operation, account_id, first_day, last_day) VALUES ('AKFFAAAAAAAAAAAAAAAA', $1, 'orders', 'Get', $2, current_date, current_date)`, [service, ACCOUNT]);
+      await use('s3');
+      const lists = async () => [
+        ...(await dataSource.query(`SELECT name, aws_endpoints::text AS endpoints FROM functions ORDER BY name`)).map((row: { name: string; endpoints: string }) => `${row.name} ${row.endpoints}`),
+        ...(await dataSource.query(`SELECT version, aws_endpoints::text AS endpoints FROM function_versions ORDER BY version`)).map((row: { version: number; endpoints: string }) => `${row.version} ${row.endpoints}`),
+      ];
+
+      await dataSource.runMigrations({ transaction: 'each' });
+
+      expect(await lists()).toEqual(['every {s3,sqs,sesv2,lambda}', 'mail-at-aws {s3,sqs}', '1 {s3,sqs,sesv2,lambda}', '2 {sqs}']);
+      await fn('made-now');
+      await fn('lambda-alone', '{lambda}');
+      await use('lambda');
+      expect((await lists()).filter((row) => /^(made-now|lambda-alone) /.test(row))).toEqual(['lambda-alone {lambda}', 'made-now {s3,sqs,sesv2,lambda}']);
+
+      await migrateDownTo(dataSource, FUNCTION_KEY_RENEWAL);
+      expect(await lists()).toEqual(['every {s3,sqs,sesv2}', 'lambda-alone {}', 'made-now {s3,sqs,sesv2}', 'mail-at-aws {s3,sqs}', '1 {s3,sqs,sesv2}', '2 {sqs}']);
+      expect(await dataSource.query(`SELECT service::text FROM key_uses`)).toEqual([{ service: 's3' }]);
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

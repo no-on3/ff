@@ -1590,6 +1590,8 @@ export interface CreatedStorageKey extends StorageKey {
   sqsEndpoint: string;
   /** The SES endpoint, AWS_ENDPOINT_URL_SESV2, for the account's mail. */
   sesEndpoint: string;
+  /** Lambda's endpoint, AWS_ENDPOINT_URL_LAMBDA, for the account's functions. */
+  lambdaEndpoint: string;
   region: string;
 }
 

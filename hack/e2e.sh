@@ -166,7 +166,7 @@ q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -
 # aws_cli: the AWS CLI, this machine's or its image's; each caller gives the key, the region and the endpoint.
 if command -v aws >/dev/null; then aws_cli=(aws); else
   aws_cli=(docker run --rm --network host -v "$work:$work" -w "$work" -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_DEFAULT_REGION
-    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS -e AWS_ENDPOINT_URL_SESV2 amazon/aws-cli:2.34.32)
+    -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_ENDPOINT_URL_SQS -e AWS_ENDPOINT_URL_SESV2 -e AWS_ENDPOINT_URL_LAMBDA amazon/aws-cli:2.34.32)
 fi
 
 # other: a second account, the one development mode's X-FF-Dev-Account header names: neither reaches what the other owns.
@@ -282,6 +282,8 @@ sqs_port="$(free_port)"
 website_port="$(free_port)"
 # Customers' mail's SES endpoint on a fifth, at http://localhost:<port>; functions reach it at the cluster's gateway.
 ses_port="$(free_port)"
+# Lambda's API on a sixth, at http://localhost:<port>; functions reach it at the cluster's gateway.
+lambda_port="$(free_port)"
 # Customers' domains are checked against a DNS server of the test's, its test zone's apex on this machine.
 dns_port="$(free_port)"
 be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID="$tenant"
@@ -294,6 +296,8 @@ be_env=("${e2e_base_env[@]}" PORT="$be_port" FF_AUTH_MODE=dev FF_DEV_ACCOUNT_ID=
   FF_WEBSITE_PORT="$website_port" FF_WEBSITE_BASE="http://site.localhost:$website_port"
   FF_SES_PORT="$ses_port" FF_SES_BASE="http://localhost:$ses_port"
   FF_SES_FUNCTION_ENDPOINT="http://$cluster_gateway:$ses_port" FF_SES_FUNCTION_CIDRS="$cluster_gateway/32"
+  FF_LAMBDA_PORT="$lambda_port" FF_LAMBDA_BASE="http://localhost:$lambda_port"
+  FF_LAMBDA_FUNCTION_ENDPOINT="http://$cluster_gateway:$lambda_port" FF_LAMBDA_FUNCTION_CIDRS="$cluster_gateway/32"
   FF_DOMAIN_RESOLVERS="127.0.0.1:$dns_port" FF_EDGE_ADDRESSES=127.0.0.1 "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}")
 # Production refuses development settings, at boot (the same variables, with NODE_ENV=production).
 refused=0
@@ -1455,6 +1459,7 @@ check "their pods get the SQS endpoint inside the cluster with their own key, th
   "http://$cluster_gateway:$sqs_port $(function_secret "$node_sqs" AWS_ACCESS_KEY_ID)" \
   "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SQS) $(env_q "SELECT id FROM storage_keys WHERE function_id = '$node_sqs' AND revoked_at IS NULL")"
 check "  ... and the SES endpoint for the account's mail, as AWS_ENDPOINT_URL_SESV2" "http://$cluster_gateway:$ses_port" "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_SESV2)"
+check "  ... and Lambda's endpoint for the account's functions, as AWS_ENDPOINT_URL_LAMBDA" "http://$cluster_gateway:$lambda_port" "$(function_secret "$node_sqs" AWS_ENDPOINT_URL_LAMBDA)"
 http PUT "/functions/$python_sqs" '{"environment": {"AWS_ENDPOINT_URL_SQS": "https://sqs.us-east-1.amazonaws.com"}}' >/dev/null
 check "a function can't point it elsewhere: AWS_ENDPOINT_URL_SQS is FF's" "400 AWS_ENDPOINT_URL_SQS is reserved: FF sets it, with the function's own key to its account's queues" \
   "$(status) $(jq -r '.message | join("; ")' "$work/body")"
@@ -1691,6 +1696,7 @@ section "customers' mail (ADR 0012): identities and the suppression list, with A
 ses_endpoint="http://localhost:$ses_port"
 mail_key="$(http POST /storage-keys '{}')"
 check "a new key's answer names the SES endpoint, AWS_ENDPOINT_URL_SESV2" "$ses_endpoint" "$(jq -r .sesEndpoint <<<"$mail_key")"
+check "  ... and Lambda's, AWS_ENDPOINT_URL_LAMBDA, for the account's functions" "http://localhost:$lambda_port" "$(jq -r .lambdaEndpoint <<<"$mail_key")"
 mail_key_id="$(jq -r .id <<<"$mail_key")"
 mail_key_secret="$(jq -r .secretAccessKey <<<"$mail_key")"
 # The AWS CLI, its endpoint from AWS_ENDPOINT_URL_SESV2 alone, as a function's environment gives it, and no setting of
@@ -1807,7 +1813,12 @@ section_def mail_sent section_mail_sent mail budget=20
 section_key_life() {
 section "keys that end (ADR 0014, 5): a function's, copied out of it, refused past its end in each service's words; a fresh one from zero, at half its life, and for one from before keys ended"
 # A function's key lasts 12 hours, which this suite doesn't wait: its times move in SQL, as the hours would move them.
-key_code='export async function handler() { return { key: process.env.AWS_ACCESS_KEY_ID }; }'
+# Asked for Lambda's endpoint, it calls it unsigned from its pod, and answers with the status and the error's name.
+key_code='export async function handler(event) {
+  if (!event.lambda) return { key: process.env.AWS_ACCESS_KEY_ID };
+  const answer = await fetch(`${process.env.AWS_ENDPOINT_URL_LAMBDA}/2015-03-31/functions/`);
+  return { lambda: `${answer.status} ${answer.headers.get("x-amzn-errortype")}` };
+}'
 # key_function <name>: a function that answers with the key its pod runs with.
 key_function() { http POST /functions "$(jq -n --arg name "$1" --arg code "$key_code" '{name: $name, runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id; }
 key_fn="$(key_function e2e-key-life)"
@@ -1833,13 +1844,19 @@ copied_key() { jq -n --arg id "$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)" -
 copied="$(copied_key)"
 first_key="$(jq -r .id <<<"$copied")"
 as_copied() { AWS_KEY="$first_key" AWS_SECRET="$(jq -r .secretAccessKey <<<"$copied")" "$@"; }
+# aws_lambda <arguments…>: the AWS CLI at Lambda's endpoint, from AWS_ENDPOINT_URL_LAMBDA alone, with AWS_KEY's key.
+aws_lambda() { AWS_ACCESS_KEY_ID="$AWS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
+  AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_LAMBDA="http://localhost:$lambda_port" "${aws_cli[@]}" lambda "$@" --output json; }
 check "a function's key lasts 12 hours" "12" "$(key_life "$first_key")"
 check "  ... copied out of it, it opens S3, SQS and SES" "accepted accepted accepted" \
   "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities)"
+check "  ... and at Lambda's endpoint it invokes its account's functions, as a role allowed to invoke them, Invoke not offered there yet; and does nothing else" \
+  "refused UnknownOperationException refused AccessDeniedException" \
+  "$(as_copied outcome aws_lambda invoke --function-name e2e-key-life /dev/null) $(as_copied outcome aws_lambda get-function --function-name e2e-key-life)"
 sql "UPDATE storage_keys SET created_at = now() - interval '12 hours 1 second', expires_at = now() - interval '1 second' WHERE id = '$first_key'"
-check "past its end, each front door refuses it at once, in its service's words: S3's ExpiredToken, SQS's, SES's ExpiredTokenException" \
-  "refused ExpiredToken refused ExpiredToken refused ExpiredTokenException" \
-  "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities)"
+check "past its end, each front door refuses it at once, in its service's words: S3's ExpiredToken, SQS's, SES's and Lambda's ExpiredTokenException" \
+  "refused ExpiredToken refused ExpiredToken refused ExpiredTokenException refused ExpiredTokenException" \
+  "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities) $(as_copied outcome aws_lambda invoke --function-name e2e-key-life /dev/null)"
 check "  ... and the URL, Forbidden, saying so" "403 Forbidden: The security token included in the request is expired." \
   "$(signed_url "$copied" GET / >/dev/null; url_status) $(jq -r .Message "$work/url-body")"
 fresh_key="$(called_key "$key_fn")"
@@ -1849,6 +1866,8 @@ for _ in $(seq 60); do [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_ke
 check "  ... the old one revoked by the renewal's next turn, which finds its pod on the new one" "t t" \
   "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$first_key'" | tr '|' ' ')"
 check "  ... copied out of it, the fresh one opens the function's URL" 200 "$(signed_url "$(copied_key)" GET / >/dev/null; url_status)"
+check "  ... and its pod reaches Lambda's endpoint, AWS_ENDPOINT_URL_LAMBDA, which refuses a call unsigned" "403 MissingAuthenticationTokenException" \
+  "$(http POST "/functions/$key_fn/invoke" '{"input": {"lambda": true}}' | jq -r .output.lambda)"
 
 # Six hours and a minute on: past half its life, which the renewal, every 5 s here, finds.
 sql "UPDATE storage_keys SET created_at = created_at - interval '6 hours 1 minute', expires_at = expires_at - interval '6 hours 1 minute' WHERE id = '$fresh_key'"

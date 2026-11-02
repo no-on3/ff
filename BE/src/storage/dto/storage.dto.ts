@@ -221,6 +221,9 @@ export class CreatedStorageKey extends StorageKeyView {
   @ApiProperty({ example: 'https://email.ffunc.cloud', description: "The SES endpoint to give them, AWS_ENDPOINT_URL_SESV2, for the account's mail: a key that names buckets, queues or functions doesn't reach it" })
   sesEndpoint: string;
 
+  @ApiProperty({ example: 'https://lambda.ffunc.cloud', description: "Lambda's endpoint to give them, AWS_ENDPOINT_URL_LAMBDA, for the account's functions: a key that reaches no function is refused there" })
+  lambdaEndpoint: string;
+
   @ApiProperty({ example: 'tn-tunis-1' })
   region: string;
 }

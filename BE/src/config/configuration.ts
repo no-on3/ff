@@ -326,6 +326,11 @@ const functionSesEndpoint = {
   test: sqsBase.test,
   expected: 'an origin, such as http://10.43.0.251:3005, at which functions reach the SES endpoint inside the cluster',
 };
+/** Where functions reach Lambda's endpoint inside the cluster: a scheme, a host and a port if any; no path. */
+const functionLambdaEndpoint = {
+  test: sqsBase.test,
+  expected: "an origin, such as http://10.43.0.251:3006, at which functions reach Lambda's endpoint inside the cluster",
+};
 /**
  * Where functions reach buckets' S3 front door inside the cluster: a scheme, an IP address, and a port if any; no path.
  * An address rather than a name: AWS's SDKs address buckets path-style at an IP address by themselves, where a name
@@ -509,9 +514,13 @@ const appShape = {
   FF_SES_FUNCTION_ENDPOINT: optionalText(functionSesEndpoint),
   FF_SES_FUNCTION_CIDRS: list(cidr),
   // Lambda's endpoint (ADR 0014): the port of its server, apart from the API's (0: none), and the endpoint customers
-  // give AWS's SDKs, CLI and Terraform's provider.
+  // give AWS's SDKs, CLI and Terraform's provider. Functions reach it with their own keys at the function endpoint,
+  // inside the cluster (unset: their pods get no AWS_ENDPOINT_URL_LAMBDA), their NetworkPolicy opening these addresses
+  // on its port (none: the backend's own pods in ff-system, on FF_LAMBDA_PORT).
   FF_LAMBDA_PORT: integer(3006, 0, 65535),
   FF_LAMBDA_BASE: text(DEV_LAMBDA_BASE, lambdaBase),
+  FF_LAMBDA_FUNCTION_ENDPOINT: optionalText(functionLambdaEndpoint),
+  FF_LAMBDA_FUNCTION_CIDRS: list(cidr),
   // Sites: the port of the server that answers buckets' websites, apart from the API's (0: none), and where they live.
   FF_WEBSITE_PORT: integer(3004, 0, 65535),
   FF_WEBSITE_BASE: text(DEV_WEBSITE_BASE, websiteBase),
@@ -649,28 +658,12 @@ function appRules(env: AppEnv): string[] {
     }
   }
 
-  if (env.FF_STORAGE_FUNCTION_ENDPOINT) {
-    if (env.FF_STORAGE_PORT === 0) {
-      problems.push("FF_STORAGE_FUNCTION_ENDPOINT is set, but FF_STORAGE_PORT is 0: functions' keys reach buckets through the S3 front door, which isn't running");
+  for (const { prefix, uses, server } of FUNCTION_ENDPOINTS) {
+    if (env[`${prefix}_FUNCTION_ENDPOINT`]) {
+      if (env[`${prefix}_PORT`] === 0) problems.push(`${prefix}_FUNCTION_ENDPOINT is set, but ${prefix}_PORT is 0: ${uses}, which isn't running`);
+    } else if (env[`${prefix}_FUNCTION_CIDRS`].length > 0) {
+      problems.push(`${prefix}_FUNCTION_CIDRS is set, but ${prefix}_FUNCTION_ENDPOINT is not: it names where functions reach ${server}`);
     }
-  } else if (env.FF_STORAGE_FUNCTION_CIDRS.length > 0) {
-    problems.push("FF_STORAGE_FUNCTION_CIDRS is set, but FF_STORAGE_FUNCTION_ENDPOINT is not: it names where functions reach buckets' S3 front door");
-  }
-
-  if (env.FF_SQS_FUNCTION_ENDPOINT) {
-    if (env.FF_SQS_PORT === 0) {
-      problems.push("FF_SQS_FUNCTION_ENDPOINT is set, but FF_SQS_PORT is 0: functions' keys reach queues through the SQS endpoint, which isn't running");
-    }
-  } else if (env.FF_SQS_FUNCTION_CIDRS.length > 0) {
-    problems.push("FF_SQS_FUNCTION_CIDRS is set, but FF_SQS_FUNCTION_ENDPOINT is not: it names where functions reach queues' SQS endpoint");
-  }
-
-  if (env.FF_SES_FUNCTION_ENDPOINT) {
-    if (env.FF_SES_PORT === 0) {
-      problems.push("FF_SES_FUNCTION_ENDPOINT is set, but FF_SES_PORT is 0: functions' keys send mail through the SES endpoint, which isn't running");
-    }
-  } else if (env.FF_SES_FUNCTION_CIDRS.length > 0) {
-    problems.push('FF_SES_FUNCTION_CIDRS is set, but FF_SES_FUNCTION_ENDPOINT is not: it names where functions reach the SES endpoint');
   }
 
   if (env.FF_DEV_USER_ID !== undefined) {
@@ -829,9 +822,20 @@ function readCertificate(name: string, path: string): string {
 }
 
 /**
- * How functions reach one of FF's endpoints with their own keys, buckets' S3 front door, queues' SQS endpoint or mail's SES endpoint: at
- * the addresses named, on the endpoint's port; with none named, at the backend's own pods, on the server's port, which
- * the endpoint's Service forwards to. Nothing when functions aren't given the endpoint.
+ * The endpoints functions reach with their own keys, inside the cluster, each at FF_<service>_FUNCTION_ENDPOINT, its
+ * NetworkPolicy opening FF_<service>_FUNCTION_CIDRS: their settings' prefix, what the endpoint is for, and its name.
+ */
+const FUNCTION_ENDPOINTS = [
+  { prefix: 'FF_STORAGE', uses: "functions' keys reach buckets through the S3 front door", server: "buckets' S3 front door" },
+  { prefix: 'FF_SQS', uses: "functions' keys reach queues through the SQS endpoint", server: "queues' SQS endpoint" },
+  { prefix: 'FF_SES', uses: "functions' keys send mail through the SES endpoint", server: 'the SES endpoint' },
+  { prefix: 'FF_LAMBDA', uses: "functions' keys reach their account's functions through Lambda's endpoint", server: "Lambda's endpoint" },
+] as const;
+
+/**
+ * How functions reach one of those endpoints: at the addresses named, on the endpoint's port; with none named, at the
+ * backend's own pods, on the server's port, which the endpoint's Service forwards to. Nothing when functions aren't
+ * given the endpoint.
  */
 function functionEgress(endpoint: string | undefined, cidrs: string[], serverPort: number): Array<{ cidrs: string[]; port: number }> {
   if (!endpoint) return [];
@@ -1104,6 +1108,8 @@ export default function configuration(env: Env = process.env) {
       port: parsed.FF_LAMBDA_PORT,
       base: parsed.FF_LAMBDA_BASE.replace(/\/$/, ''),
       region: parsed.FF_REGION,
+      // Where functions reach it with their own keys, inside the cluster; '': their pods get no AWS_ENDPOINT_URL_LAMBDA.
+      functionEndpoint: parsed.FF_LAMBDA_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
     },
     // Buckets' sites: the server that answers them, and the origin under which each is <bucket>.<host>.
     website: {
@@ -1155,13 +1161,13 @@ export default function configuration(env: Env = process.env) {
       ingressAllowCidrs: parsed.K8S_INGRESS_ALLOW_CIDRS,
       logStoreDeleteKeyFile: parsed.K8S_LOG_STORE_DELETE_KEY_FILE,
       // What functions reach of the platform whatever their account's internet access: customers' database server, the
-      // caches' ports of customers' cache server, buckets' S3 front door, queues' SQS endpoint and mail's SES endpoint.
+      // caches' ports of customers' cache server, and the endpoints they reach with their own keys.
       platformEgress: [
         ...(dataDb ? [{ cidrs: dataDb.cidrs, port: dataDb.port }] : []),
         ...(cache ? [{ cidrs: cache.cidrs, port: cache.ports.first, endPort: cache.ports.last }] : []),
-        ...functionEgress(parsed.FF_STORAGE_FUNCTION_ENDPOINT, parsed.FF_STORAGE_FUNCTION_CIDRS, parsed.FF_STORAGE_PORT),
-        ...functionEgress(parsed.FF_SQS_FUNCTION_ENDPOINT, parsed.FF_SQS_FUNCTION_CIDRS, parsed.FF_SQS_PORT),
-        ...functionEgress(parsed.FF_SES_FUNCTION_ENDPOINT, parsed.FF_SES_FUNCTION_CIDRS, parsed.FF_SES_PORT),
+        ...FUNCTION_ENDPOINTS.flatMap(({ prefix }) =>
+          functionEgress(parsed[`${prefix}_FUNCTION_ENDPOINT`], parsed[`${prefix}_FUNCTION_CIDRS`], parsed[`${prefix}_PORT`]),
+        ),
       ],
       // The CAs of those servers' certificates when they aren't public ones, the database server's and the cache
       // server's together: functions' pods get them (none: '').

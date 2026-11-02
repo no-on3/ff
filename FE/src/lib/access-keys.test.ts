@@ -17,6 +17,7 @@ describe('an access key', () => {
     endpoint: 'https://s3.ffunc.cloud',
     sqsEndpoint: 'https://sqs.ffunc.cloud',
     sesEndpoint: 'https://email.ffunc.cloud',
+    lambdaEndpoint: 'https://lambda.ffunc.cloud',
     region: 'tn-tunis-1',
   };
   const none = { buckets: null, queues: null, readOnly: false, functions: null, functionAccess: null };
@@ -39,10 +40,18 @@ describe('an access key', () => {
     ]);
   });
 
-  it("gives the six variables AWS's SDKs and CLI read, the S3, SQS and SES endpoints among them, as shell lines too", () => {
-    expect(awsVariables(key).map(([name]) => name)).toEqual(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'AWS_ENDPOINT_URL_S3', 'AWS_ENDPOINT_URL_SQS', 'AWS_ENDPOINT_URL_SESV2']);
+  it("gives the seven variables AWS's SDKs and CLI read, the S3, SQS, SES and Lambda endpoints among them, as shell lines too", () => {
+    expect(awsVariables(key).map(([name]) => name)).toEqual([
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_REGION',
+      'AWS_ENDPOINT_URL_S3',
+      'AWS_ENDPOINT_URL_SQS',
+      'AWS_ENDPOINT_URL_SESV2',
+      'AWS_ENDPOINT_URL_LAMBDA',
+    ]);
     expect(exportLines(key)).toBe(
-      'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.cloud\nexport AWS_ENDPOINT_URL_SQS=https://sqs.ffunc.cloud\nexport AWS_ENDPOINT_URL_SESV2=https://email.ffunc.cloud',
+      'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.cloud\nexport AWS_ENDPOINT_URL_SQS=https://sqs.ffunc.cloud\nexport AWS_ENDPOINT_URL_SESV2=https://email.ffunc.cloud\nexport AWS_ENDPOINT_URL_LAMBDA=https://lambda.ffunc.cloud',
     );
   });
 

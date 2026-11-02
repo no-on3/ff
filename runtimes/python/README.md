@@ -103,6 +103,10 @@ boto3 isn't in the image, as it is in Lambda's Python runtimes: name it in the p
 
 With the same key, the pods get `AWS_ENDPOINT_URL_SQS`, FF's SQS endpoint inside the cluster, so `boto3.client("sqs")` reaches the account's queues as it is ([ADR 0010](../../docs/adr/0010-queue.md)). boto3 sends every request to that endpoint, whatever the host of a queue's URL: a URL from outside (`https://sqs.<domain>/…`, as clients outside the cluster get it) works as it is, FF reading a queue's URL by its path.
 
+### Functions, with boto3
+
+With the same key, the pods get `AWS_ENDPOINT_URL_LAMBDA`, FF's Lambda endpoint inside the cluster, so `boto3.client("lambda")` sends there as it is ([ADR 0014](../../docs/adr/0014-lambda-api.md)). A function's own key invokes its account's functions, as a role allowed to invoke them does, and does nothing else; an operation FF doesn't offer yet is refused in Lambda's words (`UnknownOperationException`).
+
 ## Memory
 
 On Kubernetes the container's memory limit equals the function's memory, as on Lambda. A container that reaches it is killed by the kernel, all processes together (`memory.oom.group = 1`, verified on k3s v1.37.1), and repeated kills put the pod into CrashLoopBackOff. So the runtime stops the worker first:

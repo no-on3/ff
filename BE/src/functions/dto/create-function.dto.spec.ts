@@ -264,15 +264,16 @@ describe("the event a function receives, as the API takes it", () => {
 describe('the endpoints FF gives a function, as the API takes them', () => {
   const create = { name: 'hello', runtime: Runtime.NODEJS, code: 'exports.handler = async () => 1;', memory: 128, timeout: 5 };
 
-  it('takes any of s3, sqs and sesv2, on create and on update, none too, which leaves every service to AWS', async () => {
+  it('takes any of s3, sqs, sesv2 and lambda, on create and on update, none too, which leaves every service to AWS', async () => {
     expect(await validated(CreateFunctionDto, { ...create, awsEndpoints: ['sqs', 's3'] })).toMatchObject({ awsEndpoints: [AwsEndpoint.SQS, AwsEndpoint.S3] });
+    expect(await validated(UpdateFunctionDto, { awsEndpoints: ['lambda'] })).toMatchObject({ awsEndpoints: [AwsEndpoint.LAMBDA] });
     expect(await validated(UpdateFunctionDto, { awsEndpoints: [] })).toMatchObject({ awsEndpoints: [] });
     // Left out, the service gives every one.
     expect(await validated(CreateFunctionDto, create)).toMatchObject({ awsEndpoints: undefined });
   });
 
   it('refuses a service FF gives no endpoint of, one named twice, and what is not a list', async () => {
-    expect(await validated(UpdateFunctionDto, { awsEndpoints: ['s3', 'lambda'] })).toEqual(['each value in awsEndpoints must be one of the following values: s3, sqs, sesv2']);
+    expect(await validated(UpdateFunctionDto, { awsEndpoints: ['s3', 'dynamodb'] })).toEqual(['each value in awsEndpoints must be one of the following values: s3, sqs, sesv2, lambda']);
     expect(await validated(UpdateFunctionDto, { awsEndpoints: ['sqs', 'sqs'] })).toEqual(["All awsEndpoints's elements must be unique"]);
     expect(await validated(CreateFunctionDto, { ...create, awsEndpoints: 's3' })).toEqual(expect.arrayContaining(['awsEndpoints must be an array']));
   });

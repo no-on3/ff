@@ -57,12 +57,13 @@ pub const RESERVED: [&str; 27] = [
     "PATH",
 ];
 
-/// The names FF sets with a function's own key to its account's buckets, queues and mail, and why, which the API refuses
-/// too. A test holds this list to the API's.
-pub const ENDPOINTS_RESERVED: [(&str, &str); 3] = [
+/// The names FF sets with a function's own key to its account's buckets, queues, mail and functions, and why, which the
+/// API refuses too. A test holds this list to the API's.
+pub const ENDPOINTS_RESERVED: [(&str, &str); 4] = [
     ("AWS_ENDPOINT_URL_S3", "FF sets it, with the function's own key to its account's buckets"),
     ("AWS_ENDPOINT_URL_SQS", "FF sets it, with the function's own key to its account's queues"),
     ("AWS_ENDPOINT_URL_SESV2", "FF sets it, with the function's own key to its account's mail"),
+    ("AWS_ENDPOINT_URL_LAMBDA", "FF sets it, with the function's own key to its account's functions"),
 ];
 
 /// Why a name can't be a variable's, in the API's words, or none.
@@ -283,6 +284,10 @@ mod tests {
         assert_eq!(
             reserved("AWS_ENDPOINT_URL_SESV2").unwrap(),
             "AWS_ENDPOINT_URL_SESV2 is reserved: FF sets it, with the function's own key to its account's mail"
+        );
+        assert_eq!(
+            reserved("AWS_ENDPOINT_URL_LAMBDA").unwrap(),
+            "AWS_ENDPOINT_URL_LAMBDA is reserved: FF sets it, with the function's own key to its account's functions"
         );
         assert_eq!(reserved("FF_DEBUG").unwrap(), "FF_DEBUG is reserved: names starting with FF_ are FF's own");
         assert_eq!(reserved("TZ"), None);

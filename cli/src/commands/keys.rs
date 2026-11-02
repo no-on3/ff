@@ -85,11 +85,14 @@ struct CreatedKey {
     /// The SES endpoint, AWS_ENDPOINT_URL_SESV2, for the account's mail.
     #[serde(default)]
     ses_endpoint: Option<String>,
+    /// Lambda's endpoint, AWS_ENDPOINT_URL_LAMBDA, for the account's functions.
+    #[serde(default)]
+    lambda_endpoint: Option<String>,
     region: String,
 }
 
 impl CreatedKey {
-    /// The variables AWS's SDKs and CLI read, as shell lines: the SQS and SES endpoints when the API gives them.
+    /// The variables AWS's SDKs and CLI read, as shell lines: the SQS, SES and Lambda endpoints when the API gives them.
     fn export_lines(&self) -> String {
         let mut variables = vec![
             ("AWS_ACCESS_KEY_ID", self.key.id.as_str()),
@@ -97,12 +100,14 @@ impl CreatedKey {
             ("AWS_REGION", self.region.as_str()),
             ("AWS_ENDPOINT_URL_S3", self.endpoint.as_str()),
         ];
-        if let Some(sqs) = &self.sqs_endpoint {
-            variables.push(("AWS_ENDPOINT_URL_SQS", sqs));
-        }
-        if let Some(ses) = self.ses_endpoint.as_deref().filter(|ses| !ses.is_empty()) {
-            variables.push(("AWS_ENDPOINT_URL_SESV2", ses));
-        }
+        let given = [
+            ("AWS_ENDPOINT_URL_SQS", &self.sqs_endpoint),
+            ("AWS_ENDPOINT_URL_SESV2", &self.ses_endpoint),
+            ("AWS_ENDPOINT_URL_LAMBDA", &self.lambda_endpoint),
+        ];
+        variables.extend(given.iter().filter_map(|(name, endpoint)| {
+            Some((*name, endpoint.as_deref().filter(|endpoint| !endpoint.is_empty())?))
+        }));
         variables.iter().map(|(name, value)| format!("export {name}={value}")).collect::<Vec<_>>().join("\n")
     }
 }
@@ -398,6 +403,7 @@ mod tests {
             endpoint: String::new(),
             sqs_endpoint: None,
             ses_endpoint: None,
+            lambda_endpoint: None,
             region: String::new(),
         };
         let view = class_fields(DTO, "StorageKeyView");

@@ -115,8 +115,8 @@ export class CreateFunctionDto {
     isArray: true,
     default: AWS_ENDPOINTS,
     description:
-      "The services whose endpoint FF gives the function with its key to the account's buckets, queues and mail: s3, sqs and sesv2, " +
-      "as AWS_ENDPOINT_URL_S3, _SQS and _SESV2, every one by default. One left out reaches AWS's own, as a move to AWS goes, a service " +
+      "The services whose endpoint FF gives the function with its key to the account's buckets, queues, mail and functions: s3, sqs, " +
+      "sesv2 and lambda, as AWS_ENDPOINT_URL_S3, _SQS, _SESV2 and _LAMBDA, every one by default. One left out reaches AWS's own, as a move to AWS goes, a service " +
       "at a time: the code then gives that service's client an AWS key of its own, kept as a secret, and AWS's region. A change rolls out a new version",
   })
   @ValidateIf((_dto, value) => value !== undefined)
