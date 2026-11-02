@@ -4,7 +4,7 @@ import { EXPRESSION_EXAMPLES, Schedule, ScheduleForm, emptyForm, formOf, lastRun
 import { apiErrorMessage } from '../lib/functions';
 import { runsText } from '../lib/versions';
 import { Function, schedulesApi } from '../services/api';
-import { useQualifierChoices } from './useQualifierChoices';
+import { useQualifierChoices } from './useFunctionRoutes';
 
 interface FunctionSchedulesProps {
   func: Function;

@@ -502,7 +502,7 @@ const FunctionDetail: React.FC = () => {
 
       {tab === 'logs' && <FunctionLogs functionId={id!} filter={logsFilter} onFilterChange={showLogs} />}
 
-      {tab === 'metrics' && <MetricsDashboard functionId={id!} />}
+      {tab === 'metrics' && <MetricsDashboard key={id} functionId={id!} />}
 
       {tab === 'scaling' && <ScalingConfiguration functionId={id!} />}
     </Page>

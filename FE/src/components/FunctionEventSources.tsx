@@ -7,7 +7,7 @@ import { runsText } from '../lib/versions';
 import { EventSource, Function, Queue, eventSourcesApi, queuesApi } from '../services/api';
 import { Callout, Panel } from './Panel';
 import StatusPill from './StatusPill';
-import { useQualifierChoices } from './useQualifierChoices';
+import { useQualifierChoices } from './useFunctionRoutes';
 
 /**
  * The queues a function reads, as AWS Lambda's event source mappings for

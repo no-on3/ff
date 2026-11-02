@@ -28,7 +28,7 @@ import {
 } from '../lib/alarms';
 import { apiErrorMessage } from '../lib/functions';
 import { can } from '../lib/session';
-import { FunctionAlias, FunctionVersion, callsChoices, callsText, pickValue } from '../lib/versions';
+import { callsChoices, callsText, pickValue } from '../lib/versions';
 import {
   Alarm,
   AlarmState,
@@ -38,15 +38,14 @@ import {
   Function,
   Queue,
   alarmsApi,
-  aliasesApi,
   bucketsApi,
   cachesApi,
   databasesApi,
   functionsApi,
   queuesApi,
-  versionsApi,
 } from '../services/api';
 import StatusPill from './StatusPill';
+import { hasRoutes, useFunctionRoutes } from './useFunctionRoutes';
 import { useSession } from '../session/session';
 
 const TONE = { ok: 'ok', alarm: 'failed', unknown: 'idle' } as const;
@@ -93,20 +92,9 @@ const AlarmEditor: React.FC<{
         : null;
   const set = (change: Partial<AlarmForm>) => setForm({ ...form, ...change });
   // The function's versions and aliases, whose calls the alarm may watch alone.
-  const [routes, setRoutes] = useState<{ versions: FunctionVersion[]; aliases: FunctionAlias[] }>({ versions: [], aliases: [] });
-  useEffect(() => {
-    setRoutes({ versions: [], aliases: [] });
-    if (!form.functionId) return;
-    let current = true;
-    Promise.all([versionsApi.list(form.functionId), aliasesApi.list(form.functionId)])
-      .then(([versions, aliases]) => current && setRoutes({ versions: versions.data, aliases: aliases.data }))
-      .catch(() => undefined);
-    return () => {
-      current = false;
-    };
-  }, [form.functionId]);
+  const routes = useFunctionRoutes(form.functionId || undefined);
   const pick = { resource: form.resource, executedVersion: form.executedVersion };
-  const picksCalls = !!form.functionId && (routes.versions.length > 0 || routes.aliases.length > 0 || !!callsText(pick));
+  const picksCalls = !!form.functionId && (hasRoutes(routes) || !!callsText(pick));
 
   const save = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -164,7 +152,7 @@ const AlarmEditor: React.FC<{
         {picksCalls && (
           <Field id="alarm-calls" label="Its calls" hint="By what they named, or the version that ran them, as CloudWatch's Resource and ExecutedVersion">
             <select id="alarm-calls" className="input" value={pickValue(pick)} onChange={(e) => setForm(withCalls(form, e.target.value))}>
-              {callsChoices(routes.versions, routes.aliases, pick).map((choice) => (
+              {callsChoices(routes?.versions ?? [], routes?.aliases ?? [], pick).map((choice) => (
                 <option key={choice.value} value={choice.value}>
                   {choice.label}
                 </option>

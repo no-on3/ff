@@ -821,8 +821,22 @@ export interface Metrics {
   };
 }
 
+/**
+ * GET /functions/:id/metrics with resource or executedVersion: some of the
+ * function's calls, as CloudWatch's Resource and ExecutedVersion dimensions
+ * pick Lambda's. No series of calls that don't wait, counted by function
+ * alone; Instances by executedVersion alone, as a version's instances run the
+ * calls of every alias that names it.
+ */
+export interface CallMetrics extends Omit<Metrics, 'metrics'> {
+  metrics: Pick<Metrics['metrics'], 'Invocations' | 'Errors' | 'Throttles' | 'ColdStarts' | 'Duration'> & Partial<Pick<Metrics['metrics'], 'Instances'>>;
+}
+
 export const metricsApi = {
   forFunction: (id: string, params: { period: number; start?: string; end?: string }) => api.get<Metrics>(`/functions/${id}/metrics`, { params }),
+  /** Some of its calls: those naming an alias or a version (resource), or those a version ran (executedVersion). */
+  forCalls: (id: string, params: { period: number; start?: string; end?: string; resource?: string; executedVersion?: string }) =>
+    api.get<CallMetrics>(`/functions/${id}/metrics`, { params }),
   forAccount: (params: { period: number; start?: string; end?: string }) => api.get<Metrics>('/metrics', { params }),
 };
 

@@ -2,10 +2,12 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, TooltipProps, XAxis, YAxis } from 'recharts';
 import { apiErrorMessage } from '../lib/functions';
 import { METRIC_RANGES, MetricRange, MetricRow, metricRows, metricTotals, milliseconds, pointLabel, rangeQuery } from '../lib/metrics';
-import { Metrics, metricsApi } from '../services/api';
+import { CallsPick, EVERY_CALL, callsChoices, callsText, pickOf, pickQuery, pickValue } from '../lib/versions';
+import { CallMetrics, metricsApi } from '../services/api';
 import { colors, scales } from '../theme/tokens';
 import { KeyNumber, KeyNumbers } from './KeyNumbers';
 import { Callout } from './Panel';
+import { hasRoutes, useFunctionRoutes } from './useFunctionRoutes';
 
 /**
  * Three categorical slots in a fixed order, from the console's tokens: Column's blue, its orange and its green. The
@@ -85,23 +87,29 @@ const Chart: React.FC<{
 /**
  * A function's metrics, as CloudWatch names Lambda's: its calls, errors and
  * throttles, its durations' percentiles and its instances, a point per period
- * of the range, from the usage records the bill is made of. The figures are
- * also a table, for whoever can't tell the lines apart.
+ * of the range, from the usage records the bill is made of; every call's, or
+ * some of them, by what they named or the version that ran them, as
+ * CloudWatch's Resource and ExecutedVersion dimensions. The figures are also
+ * a table, for whoever can't tell the lines apart.
  */
 export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId }) => {
   const [range, setRange] = useState<MetricRange>('1h');
-  const [view, setView] = useState<Metrics | null>(null);
+  const [pick, setPick] = useState<CallsPick>(EVERY_CALL);
+  const [view, setView] = useState<CallMetrics | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [asTable, setAsTable] = useState(false);
+  const routes = useFunctionRoutes(functionId);
+  const some = callsText(pick);
 
   const load = useCallback(async () => {
     try {
-      setView((await metricsApi.forFunction(functionId, rangeQuery(range))).data);
+      const query = rangeQuery(range);
+      setView((await (callsText(pick) ? metricsApi.forCalls(functionId, { ...query, ...pickQuery(pick) }) : metricsApi.forFunction(functionId, query))).data);
       setFailure(null);
     } catch (error) {
       setFailure(apiErrorMessage(error));
     }
-  }, [functionId, range]);
+  }, [functionId, range, pick]);
 
   useEffect(() => {
     setView(null);
@@ -112,6 +120,7 @@ export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId 
 
   const rows = view ? metricRows(view) : [];
   const totals = view ? metricTotals(view) : null;
+  const instances = totals?.peakInstances !== null;
 
   return (
     <div className="space-y-5">
@@ -126,6 +135,18 @@ export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId 
             ))}
           </select>
         </label>
+        {(hasRoutes(routes) || some) && (
+          <label className="min-w-0 text-[13px] font-medium text-gray-700">
+            Its calls
+            <select aria-label="Its calls" className="select mt-1 block max-w-full" value={pickValue(pick)} onChange={(e) => setPick(pickOf(e.target.value))}>
+              {callsChoices(routes?.versions ?? [], routes?.aliases ?? [], pick).map((choice) => (
+                <option key={choice.value} value={choice.value}>
+                  {choice.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <button type="button" className="btn btn-secondary" onClick={() => setAsTable((v) => !v)}>
           {asTable ? 'Show the charts' : 'Show as a table'}
         </button>
@@ -142,10 +163,19 @@ export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId 
           <KeyNumbers label="The range's figures" className="grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
             <KeyNumber label="Invocations" value={totals.invocations.toLocaleString('en')} />
             <KeyNumber label="Errors" value={totals.errors.toLocaleString('en')} note={totals.errorRate === null ? undefined : `${totals.errorRate}% of the calls`} />
-            <KeyNumber label="Throttles" value={totals.throttles.toLocaleString('en')} note="Refused: no instance free, or the rate limit" />
+            <KeyNumber
+              label="Throttles"
+              value={totals.throttles.toLocaleString('en')}
+              // The account's rate limit refuses a call before it chooses what it runs.
+              note={some ? 'Refused: no instance free in time' : 'Refused: no instance free, or the rate limit'}
+            />
             <KeyNumber label="Cold starts" value={totals.coldStarts.toLocaleString('en')} />
             <KeyNumber label="Slowest call" value={milliseconds(totals.slowest)} />
-            <KeyNumber label="Most instances" value={String(totals.peakInstances)} />
+            <KeyNumber
+              label="Most instances"
+              value={totals.peakInstances === null ? '–' : String(totals.peakInstances)}
+              note={totals.peakInstances === null ? "A version's instances run every alias's calls: pick the version that ran them" : undefined}
+            />
           </KeyNumbers>
           {totals.invocations === 0 && totals.throttles === 0 && <p className="text-gray-600">No call in this range.</p>}
           {asTable ? (
@@ -153,7 +183,7 @@ export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId 
               <table className="w-full text-left text-[13px] tabular-nums" aria-label="Metrics per period">
                 <thead className="bg-gray-50/70 text-xs text-gray-500">
                   <tr>
-                    {['Period', 'Invocations', 'Errors', 'Throttles', 'Cold starts', 'p50', 'p95', 'p99', 'Instances'].map((label) => (
+                    {['Period', 'Invocations', 'Errors', 'Throttles', 'Cold starts', 'p50', 'p95', 'p99', ...(instances ? ['Instances'] : [])].map((label) => (
                       <th key={label} className="px-3 py-2.5 font-medium whitespace-nowrap">
                         {label}
                       </th>
@@ -171,7 +201,7 @@ export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId 
                       <td className="px-3 py-1">{milliseconds(row.p50)}</td>
                       <td className="px-3 py-1">{milliseconds(row.p95)}</td>
                       <td className="px-3 py-1">{milliseconds(row.p99)}</td>
-                      <td className="px-3 py-1">{row.Instances}</td>
+                      {instances && <td className="px-3 py-1">{row.Instances}</td>}
                     </tr>
                   ))}
                 </tbody>
@@ -200,7 +230,7 @@ export const MetricsDashboard: React.FC<{ functionId: string }> = ({ functionId 
                   { key: 'p99', name: 'p99' },
                 ]}
               />
-              <Chart title="Most instances ready" rows={rows} period={view.period} series={[{ key: 'Instances', name: 'Instances' }]} />
+              {instances && <Chart title="Most instances ready" rows={rows} period={view.period} series={[{ key: 'Instances', name: 'Instances' }]} />}
             </div>
           )}
         </>

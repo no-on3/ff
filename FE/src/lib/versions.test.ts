@@ -10,6 +10,7 @@ import {
   newestVersion,
   percentText,
   pickOf,
+  pickQuery,
   pickValue,
   qualifierChoices,
   rollbackBody,
@@ -152,5 +153,13 @@ describe("some of a function's calls, as CloudWatch's Resource and ExecutedVersi
       callsText({ resource: '', executedVersion: '' }),
     ]).toEqual(['calls through alias live', 'calls naming version 3, run by version 3', 'calls naming no alias or version', 'calls run by $LATEST', null]);
     expect([pickValue({ resource: 'live', executedVersion: '2' }), pickOf('live|2'), pickOf('|')]).toEqual(['live|2', { resource: 'live', executedVersion: '2' }, { resource: '', executedVersion: '' }]);
+  });
+
+  it("asks the API for the dimensions picked alone, none for every call", () => {
+    expect([pickQuery({ resource: 'live', executedVersion: '' }), pickQuery({ resource: '', executedVersion: '$LATEST' }), pickQuery({ resource: '', executedVersion: '' })]).toEqual([
+      { resource: 'live' },
+      { executedVersion: '$LATEST' },
+      {},
+    ]);
   });
 });

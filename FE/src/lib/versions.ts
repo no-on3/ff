@@ -235,6 +235,11 @@ export function pickOf(value: string): CallsPick {
   return { resource, executedVersion };
 }
 
+/** A pick as the API's query: the dimensions it names, none for every call. */
+export function pickQuery(pick: CallsPick): Partial<CallsPick> {
+  return { ...(pick.resource ? { resource: pick.resource } : {}), ...(pick.executedVersion ? { executedVersion: pick.executedVersion } : {}) };
+}
+
 /** A pick in words: "calls through alias live", "calls naming version 3, run by version 3"; null for every call. */
 export function callsText(pick: CallsPick): string | null {
   const parts: string[] = [];

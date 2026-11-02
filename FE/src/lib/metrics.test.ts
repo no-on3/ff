@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Metrics } from '../services/api';
+import type { CallMetrics, Metrics } from '../services/api';
 import { METRIC_RANGES, metricRows, metricTotals, milliseconds, pointLabel, rangeQuery } from './metrics';
 
 const VIEW: Metrics = {
@@ -57,6 +57,13 @@ describe('metricRows and metricTotals', () => {
       metrics: { ...VIEW.metrics, Invocations: [0], Errors: [0], Throttles: [0], ColdStarts: [0], Duration: { Average: [null], Maximum: [null], p50: [null], p95: [null], p99: [null] }, Instances: { Maximum: [0], Average: [0] } },
     };
     expect(metricTotals(quiet)).toMatchObject({ invocations: 0, errorRate: null, slowest: null, peakInstances: 0 });
+  });
+
+  it("give no instances for a view of the calls an alias or a version named, whose instances run others' too", () => {
+    const { Invocations, Errors, Throttles, ColdStarts, Duration } = VIEW.metrics;
+    const someCalls: CallMetrics = { ...VIEW, metrics: { Invocations, Errors, Throttles, ColdStarts, Duration } };
+    expect(metricRows(someCalls).map((row) => row.Instances)).toEqual([null, null, null]);
+    expect(metricTotals(someCalls)).toMatchObject({ invocations: 8, errors: 4, peakInstances: null });
   });
 });
 

@@ -1,4 +1,4 @@
-import type { Metrics } from '../services/api';
+import type { CallMetrics } from '../services/api';
 
 /** The time ranges the metrics tab offers, each with the period that keeps its chart readable. */
 export const METRIC_RANGES = [
@@ -26,11 +26,12 @@ export interface MetricRow {
   p95: number | null;
   p99: number | null;
   Maximum: number | null;
-  Instances: number;
+  /** Null in a view of some calls without them: those an alias or a version named. */
+  Instances: number | null;
 }
 
-/** The series as rows, one per period, oldest first. */
-export function metricRows(view: Metrics): MetricRow[] {
+/** The series as rows, one per period, oldest first: a function's every call, or some of them. */
+export function metricRows(view: CallMetrics): MetricRow[] {
   const m = view.metrics;
   return view.timestamps.map((time, i) => ({
     time,
@@ -42,7 +43,7 @@ export function metricRows(view: Metrics): MetricRow[] {
     p95: m.Duration.p95[i],
     p99: m.Duration.p99[i],
     Maximum: m.Duration.Maximum[i],
-    Instances: m.Instances.Maximum[i],
+    Instances: m.Instances ? m.Instances.Maximum[i] : null,
   }));
 }
 
@@ -56,13 +57,13 @@ export interface MetricTotals {
   coldStarts: number;
   /** The slowest call of the range, in milliseconds; null without one. */
   slowest: number | null;
-  /** The most instances ready at once. */
-  peakInstances: number;
+  /** The most instances ready at once; null in a view of some calls without them. */
+  peakInstances: number | null;
 }
 
 const sum = (values: number[]) => values.reduce((a, b) => a + b, 0);
 
-export function metricTotals(view: Metrics): MetricTotals {
+export function metricTotals(view: CallMetrics): MetricTotals {
   const m = view.metrics;
   const invocations = sum(m.Invocations);
   const errors = sum(m.Errors);
@@ -74,7 +75,7 @@ export function metricTotals(view: Metrics): MetricTotals {
     throttles: sum(m.Throttles),
     coldStarts: sum(m.ColdStarts),
     slowest: measured.length ? Math.max(...measured) : null,
-    peakInstances: m.Instances.Maximum.length ? Math.max(...m.Instances.Maximum) : 0,
+    peakInstances: m.Instances ? Math.max(0, ...m.Instances.Maximum) : null,
   };
 }
 
