@@ -48,6 +48,8 @@ spec:
           protocol: TCP
         - port: 3005
           protocol: TCP
+        - port: 3006
+          protocol: TCP
     # Functions, in the tenants' namespaces that the backend makes: buckets' S3 front door, queues' SQS endpoint and
     # mail's SES endpoint alone (ff-storage).
     - from:

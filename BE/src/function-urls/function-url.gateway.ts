@@ -14,7 +14,7 @@ import { WRITERS } from '../auth/route-rules';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
-import { BodyRefusals, originForm, readBody, single } from '../common/http-request';
+import { BodyRefusals, originForm, readBody, requestTarget, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { ALGORITHM, HeaderSignature, SignedService, checkAuthorization, readAuthorization, serviceWords } from '../common/signature-v4';
 import { withRequestContext } from '../common/request-context';
@@ -24,7 +24,7 @@ import { EventFormat, Function, FunctionStatus } from '../functions/entities/fun
 import { CallTarget, FunctionsService } from '../functions/functions.service';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { S3FrontDoor } from '../storage/front-door';
-import { functionAccessOf, mayInvoke } from '../storage/key-reach';
+import { functionAccessOf, keyLabel, mayInvoke } from '../storage/key-reach';
 import { EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
 import { WebsiteServer } from '../storage/website-server';
 import { refusals, statusClass, urlResponses } from '../monitoring/operator-metrics';
@@ -118,7 +118,7 @@ const BODY_REFUSALS: BodyRefusals = {
 };
 
 /** The request's path alone. */
-const pathOf = (target: string | undefined): string => originForm(target).split('?')[0];
+const pathOf = (target: string | undefined): string => requestTarget(target).rawPath;
 
 /**
  * The function URL gateway: a server of its own, on FF_FUNCTION_URL_PORT, that
@@ -339,14 +339,10 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     const key = await this.directory.key(signature.accessKeyId);
     if (key === EXPIRED) throw forbidden('The security token included in the request is expired.');
     if (!key) throw forbidden('The security token included in the request is invalid.');
-    const target = originForm(request.url);
-    const at = target.indexOf('?');
-    const rawPath = at < 0 ? target : target.slice(0, at);
-    const rawQuery = at < 0 ? '' : target.slice(at + 1);
-    checkAuthorization({ method: request.method ?? 'GET', rawPath, rawQuery, rawHeaders: request.rawHeaders }, body, signature, key.secret, new Date(), LAMBDA);
+    checkAuthorization({ method: request.method ?? 'GET', ...requestTarget(request.url), rawHeaders: request.rawHeaders }, body, signature, key.secret, new Date(), LAMBDA);
     // Checked after the signature, so that a key's ID alone says nothing of whose the URL is; another account's key is as good as none.
     if (key.accountId !== url.accountId) throw new Refusal(HttpStatus.FORBIDDEN, 'Forbidden');
-    const label = key.name ? `${key.name} (${key.id})` : key.id;
+    const label = keyLabel(key);
     const access = functionAccessOf(key, (await this.functionOf(url)).name);
     if (!access) throw forbidden(`the access key ${label} doesn't reach this URL's function`);
     if (!mayInvoke(access)) throw forbidden(`the access key ${label} may read this URL's function, not invoke it`);

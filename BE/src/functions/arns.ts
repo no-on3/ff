@@ -17,6 +17,30 @@ const FUNCTION_ARN = new RegExp(`^arn:aws:lambda:([a-z]{2}(?:-[a-z]+)+-\\d+):(\\
 /** A function's name, then the version or the alias that qualifies it after a colon, or none: Lambda's FunctionName without its ARN (thumbnails:live). */
 export const QUALIFIED_NAME = new RegExp(`^${unanchored(FUNCTION_NAME)}(?::${unanchored(QUALIFIER)})?$`);
 
+/** A function's name, or its partial ARN (<account>:function:<name>), each qualified or not: the account, the name, the qualifier. */
+const SHORT_NAME = new RegExp(`^(?:(\\d{12}):function:)?(${unanchored(FUNCTION_NAME)})(?::${unanchored(QUALIFIER)})?$`);
+
+/** What a FunctionName names: the function's name, the version or the alias after it, and the account and the region it says, if it does. */
+export interface FunctionNamed {
+  name: string;
+  qualifier?: string;
+  accountId?: string;
+  region?: string;
+}
+
+/**
+ * What a FunctionName names, as Lambda takes one: a function's name
+ * (orders), with a version or an alias after a colon (orders:live), its ARN,
+ * or its partial ARN (000000000001:function:orders), each qualified or not;
+ * $LATEST and none name the function as it is; undefined for any other string.
+ */
+export function parseFunctionName(value: string): FunctionNamed | undefined {
+  if (value.startsWith('arn:')) return parseFunctionArn(value);
+  const match = SHORT_NAME.exec(value);
+  if (!match) return undefined;
+  return { name: match[2], ...(match[1] ? { accountId: match[1] } : {}), ...(match[3] && match[3] !== '$LATEST' ? { qualifier: match[3] } : {}) };
+}
+
 /**
  * What a Lambda function's ARN names: its function, and the version or the alias that qualifies it, none for
  * $LATEST, as Lambda takes either; undefined for any other string.

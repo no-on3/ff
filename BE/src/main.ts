@@ -1,4 +1,4 @@
-import { Logger } from '@nestjs/common';
+import { Logger, Type } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import type { Server } from 'node:http';
@@ -12,9 +12,30 @@ import { logFormat, winstonConfig } from './config/winston.config';
 import { assertSchemaUpToDate } from './database/schema-check';
 import { SesFrontDoor } from './email/ses-front-door';
 import { FunctionUrlGateway } from './function-urls/function-url.gateway';
+import { LambdaFrontDoor } from './lambda/lambda-front-door';
 import { SqsFrontDoor } from './queues/sqs-front-door';
 import { S3FrontDoor } from './storage/front-door';
 import { WebsiteServer } from './storage/website-server';
+
+/**
+ * A server of the backend's on a port of its own, beside the API's: the settings it reads its port and its base
+ * from, what its log line says it answers, and where, when that isn't its base.
+ */
+interface PortServer {
+  setting: string;
+  server: Type<{ listen(port: number): Promise<unknown> }>;
+  answers: string;
+  at?: (base: string) => string;
+}
+
+const PORT_SERVERS: readonly PortServer[] = [
+  { setting: 'functionUrls', server: FunctionUrlGateway, answers: 'Function URLs' },
+  { setting: 'storage', server: S3FrontDoor, answers: "Buckets' S3 requests" },
+  { setting: 'sqs', server: SqsFrontDoor, answers: "Queues' SQS requests" },
+  { setting: 'ses', server: SesFrontDoor, answers: "Customers' mail's SES requests" },
+  { setting: 'lambda', server: LambdaFrontDoor, answers: "Lambda's requests" },
+  { setting: 'website', server: WebsiteServer, answers: "Buckets' sites", at: (base) => `each at <bucket>.${new URL(base).host}` },
+];
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -36,39 +57,15 @@ async function bootstrap() {
   // Through the logger: in production every line of the log is one JSON object.
   new Logger('Bootstrap').log(`Application is running on: ${await app.getUrl()}`);
 
-  // Then functions' URLs, on a port of their own, which only the edge reaches in a cluster (0: none).
-  const urlPort = configService.getOrThrow<number>('functionUrls.port');
-  if (urlPort > 0) {
-    await app.get(FunctionUrlGateway).listen(urlPort);
-    new Logger('Bootstrap').log(`Function URLs are answered on port ${urlPort}, at ${configService.getOrThrow<string>('functionUrls.base')}`);
-  }
-
-  // And buckets' S3 front door, on a port of its own too, which the edge and functions reach (0: none).
-  const storagePort = configService.getOrThrow<number>('storage.port');
-  if (storagePort > 0) {
-    await app.get(S3FrontDoor).listen(storagePort);
-    new Logger('Bootstrap').log(`Buckets' S3 requests are answered on port ${storagePort}, at ${configService.getOrThrow<string>('storage.base')}`);
-  }
-
-  // And queues' SQS endpoint, on a port of its own, which the edge and functions reach (0: none).
-  const sqsPort = configService.getOrThrow<number>('sqs.port');
-  if (sqsPort > 0) {
-    await app.get(SqsFrontDoor).listen(sqsPort);
-    new Logger('Bootstrap').log(`Queues' SQS requests are answered on port ${sqsPort}, at ${configService.getOrThrow<string>('sqs.base')}`);
-  }
-
-  // And customers' mail's SES endpoint, on a port of its own, which the edge and functions reach (0: none).
-  const sesPort = configService.getOrThrow<number>('ses.port');
-  if (sesPort > 0) {
-    await app.get(SesFrontDoor).listen(sesPort);
-    new Logger('Bootstrap').log(`Customers' mail's SES requests are answered on port ${sesPort}, at ${configService.getOrThrow<string>('ses.base')}`);
-  }
-
-  // And buckets' sites, on a port of their own, which the edge reaches (0: none).
-  const websitePort = configService.getOrThrow<number>('website.port');
-  if (websitePort > 0) {
-    await app.get(WebsiteServer).listen(websitePort);
-    new Logger('Bootstrap').log(`Buckets' sites are answered on port ${websitePort}, each at <bucket>.${new URL(configService.getOrThrow<string>('website.base')).host}`);
+  // Then the servers on ports of their own, each 0 for none: functions' URLs, which only the edge reaches in a
+  // cluster; buckets' S3 front door, queues' SQS endpoint, customers' mail's SES endpoint and Lambda's endpoint, which
+  // the edge and functions reach; and buckets' sites, which the edge reaches.
+  for (const { setting, server, answers, at } of PORT_SERVERS) {
+    const serverPort = configService.getOrThrow<number>(`${setting}.port`);
+    if (serverPort === 0) continue;
+    await app.get(server).listen(serverPort);
+    const base = configService.getOrThrow<string>(`${setting}.base`);
+    new Logger('Bootstrap').log(`${answers} are answered on port ${serverPort}, ${at ? at(base) : `at ${base}`}`);
   }
 }
 

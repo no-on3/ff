@@ -1,4 +1,4 @@
-import { FunctionReach, KeyNames, functionAccessOf, mayInvoke, reachesBucket, reachesMail, reachesQueue } from './key-reach';
+import { FunctionReach, KeyNames, functionAccessOf, keyLabel, mayInvoke, mayUse, reachesAnyFunction, reachesBucket, reachesMail, reachesQueue } from './key-reach';
 
 const naming = (names: Partial<KeyNames>): KeyNames => ({ buckets: null, queues: null, functions: null, ...names });
 
@@ -52,5 +52,26 @@ describe("what an access key may do with its account's functions", () => {
 
   it('invokes at invoke and write, never at read nor without reaching the function', () => {
     expect([mayInvoke('invoke'), mayInvoke('write'), mayInvoke('read'), mayInvoke(null)]).toEqual([true, true, false, false]);
+  });
+
+  it("does at Lambda's endpoint what its level does and the levels below it: read, then invoke, then write", () => {
+    const levels = ['read', 'invoke', 'write'] as const;
+    const at = (functionAccess: (typeof levels)[number]) => levels.map((needed) => mayUse(reach({ functions: ['orders'], functionAccess }), 'orders', needed));
+    expect([at('read'), at('invoke'), at('write')]).toEqual([
+      [true, false, false],
+      [true, true, false],
+      [true, true, true],
+    ]);
+    expect(levels.map((needed) => mayUse(reach({ functions: ['orders'], functionAccess: 'write' }), 'billing', needed))).toEqual([false, false, false]);
+  });
+
+  it("invokes alone when it is a function's own key: it reads and changes no function, and makes none of the account's operations", () => {
+    const own = reach({ functionId: 'f-1' });
+    expect((['read', 'invoke', 'write'] as const).map((needed) => mayUse(own, 'orders', needed))).toEqual([false, true, false]);
+    expect([reachesAnyFunction(own), reachesAnyFunction(reach({})), reachesAnyFunction(reach({ functions: ['orders'], functionAccess: 'read' }))]).toEqual([false, false, true]);
+  });
+
+  it('is named in a refusal by its name and its ID, or its ID alone', () => {
+    expect([keyLabel({ id: 'AKFFAAAAAAAAAAAAAAAA', name: 'deploy' }), keyLabel({ id: 'AKFFAAAAAAAAAAAAAAAA', name: null })]).toEqual(['deploy (AKFFAAAAAAAAAAAAAAAA)', 'AKFFAAAAAAAAAAAAAAAA']);
   });
 });

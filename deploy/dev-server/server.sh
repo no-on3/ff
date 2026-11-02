@@ -385,9 +385,9 @@ else
 fi
 
 step "every hostname, through the server's proxy, as from the internet"
-# Let's Encrypt's certificates for the seven fixed names, which the proxy asks for once it has the route: a minute
-# or so the first time. Checked against the system's roots alone.
-for name in api console admin login s3 sqs email; do
+# Let's Encrypt's certificates for the eight fixed names, which the proxy asks for once it has the route: a minute
+# or so the first time. Checked against the system's roots alone. Each name needs its record in the DNS (README.md).
+for name in api console admin login s3 sqs email lambda; do
   for i in $(seq 1 60); do
     curl -s -o /dev/null --cacert /etc/ssl/certs/ca-certificates.crt --resolve "$name.$domain:443:127.0.0.1" "https://$name.$domain/" && break
     [ "$i" -lt 60 ] || fail "no certificate from Let's Encrypt for $name.$domain after 3 minutes: the proxy's log says why (docker compose --project-directory $proxy logs caddy)"
@@ -425,4 +425,6 @@ check "queues' SQS endpoint: SQS's refusal of an unsigned request" "true" \
   "$(code="$(at "sqs.$domain" / -X POST)"; [ "${code:0:1}" = 4 ] && echo true || echo "false ($code)")"
 check "customers' mail's SES endpoint: SES's refusal of an unsigned request" "403 MissingAuthenticationTokenException" \
   "$(at "email.$domain" /v2/email/account) $(header x-amzn-errortype | cut -d: -f1)"
+check "Lambda's endpoint: Lambda's refusal of an unsigned request" "403 MissingAuthenticationTokenException" \
+  "$(at "lambda.$domain" /2015-03-31/functions/) $(header x-amzn-errortype)"
 echo "server.sh: $passed checks passed; FF $version is up at https://console.$domain"

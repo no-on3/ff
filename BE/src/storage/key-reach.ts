@@ -1,4 +1,4 @@
-import { ALL_FUNCTIONS, FunctionAccess } from './storage-key.entity';
+import { ALL_FUNCTIONS, FUNCTION_ACCESS, FunctionAccess } from './storage-key.entity';
 
 /** What an access key names of its account's: its buckets, its queues and its functions, null for none named. */
 export interface KeyNames {
@@ -43,3 +43,21 @@ export function functionAccessOf(key: FunctionReach, name: string): FunctionAcce
 
 /** Whether a level invokes: invoke's, and write's, which does all a key may. */
 export const mayInvoke = (access: FunctionAccess | null): boolean => access === 'invoke' || access === 'write';
+
+/**
+ * Whether a key may do what one of Lambda's operations needs with a function
+ * of its account: an account's key at its level or above, each level doing
+ * all the one before it does (read, then invoke, then write); a function's own
+ * key invokes alone, as a role allowed to invoke and nothing more.
+ */
+export function mayUse(key: FunctionReach, name: string, needed: FunctionAccess): boolean {
+  if (key.functionId !== null) return needed === 'invoke';
+  const access = functionAccessOf(key, name);
+  return access !== null && FUNCTION_ACCESS.indexOf(access) >= FUNCTION_ACCESS.indexOf(needed);
+}
+
+/** Whether a key may make one of Lambda's operations on the account, not on one function (ListFunctions, GetAccountSettings): an account's key that names functions. */
+export const reachesAnyFunction = (key: FunctionReach): boolean => key.functionId === null && key.functions !== null;
+
+/** A key as a refusal names it: its name and its ID, or its ID alone for a key without a name. */
+export const keyLabel = (key: { id: string; name: string | null }): string => (key.name ? `${key.name} (${key.id})` : key.id);

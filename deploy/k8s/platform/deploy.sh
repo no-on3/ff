@@ -109,6 +109,19 @@ if [ "$ses_base_host" != "$ses_host" ]; then
 fi
 echo "mail's SES endpoint at $ses_host, with a certificate of its own"
 
+echo "== Lambda's endpoint"
+# The edge's Lambda host must be the host of the backend's FF_LAMBDA_BASE, which customers give AWS's SDKs, CLI and
+# Terraform's provider, or their requests would reach nothing.
+lambda_base="$(setting FF_LAMBDA_BASE)"
+lambda_host="$(setting FF_LAMBDA_HOST)"
+lambda_base_host="${lambda_base#*://}"
+lambda_base_host="${lambda_base_host%%[:/]*}"
+if [ "$lambda_base_host" != "$lambda_host" ]; then
+  echo "the edge's FF_LAMBDA_HOST ($lambda_host) must be the host of the backend's FF_LAMBDA_BASE ($lambda_base)" >&2
+  exit 1
+fi
+echo "Lambda's endpoint at $lambda_host, with a certificate of its own"
+
 echo "== buckets' sites"
 # The edge's sites' domain must be the host of the backend's FF_WEBSITE_BASE, which each site's address is under, or
 # visitors would reach nothing; a wildcard certificate needs the same TSIG key as function URLs'.

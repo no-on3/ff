@@ -58,6 +58,8 @@ export const DEV_STORAGE_BASE = 'http://s3.localhost:3002';
 export const DEV_SQS_BASE = 'http://localhost:3003';
 /** SES v2's endpoint in development, for customers' mail: AWS's SDKs reach it as AWS_ENDPOINT_URL_SESV2. */
 export const DEV_SES_BASE = 'http://localhost:3005';
+/** Lambda's endpoint in development, for AWS's tools: they reach it as AWS_ENDPOINT_URL_LAMBDA. */
+export const DEV_LAMBDA_BASE = 'http://localhost:3006';
 /** Sites in development: http://<bucket>.site.localhost:3004/, which every browser takes to this machine. */
 export const DEV_WEBSITE_BASE = 'http://site.localhost:3004';
 /** The admin dashboard in development (P-70): its own fixed port, next to the console's. */
@@ -314,6 +316,11 @@ const sesBase = {
   test: sqsBase.test,
   expected: 'an origin, such as https://email.example.tn, which AWS\'s SDKs and CLI are given as AWS_ENDPOINT_URL_SESV2',
 };
+/** Lambda's endpoint: a scheme, a host and a port if any; no path. */
+const lambdaBase = {
+  test: sqsBase.test,
+  expected: "an origin, such as https://lambda.example.tn, which AWS's SDKs, CLI and Terraform are given as AWS_ENDPOINT_URL_LAMBDA",
+};
 /** Where functions reach the SES endpoint inside the cluster: a scheme, a host and a port if any; no path. */
 const functionSesEndpoint = {
   test: sqsBase.test,
@@ -501,6 +508,10 @@ const appShape = {
   FF_SES_BASE: text(DEV_SES_BASE, sesBase),
   FF_SES_FUNCTION_ENDPOINT: optionalText(functionSesEndpoint),
   FF_SES_FUNCTION_CIDRS: list(cidr),
+  // Lambda's endpoint (ADR 0014): the port of its server, apart from the API's (0: none), and the endpoint customers
+  // give AWS's SDKs, CLI and Terraform's provider.
+  FF_LAMBDA_PORT: integer(3006, 0, 65535),
+  FF_LAMBDA_BASE: text(DEV_LAMBDA_BASE, lambdaBase),
   // Sites: the port of the server that answers buckets' websites, apart from the API's (0: none), and where they live.
   FF_WEBSITE_PORT: integer(3004, 0, 65535),
   FF_WEBSITE_BASE: text(DEV_WEBSITE_BASE, websiteBase),
@@ -730,6 +741,9 @@ function appRules(env: AppEnv): string[] {
     }
     if (!env.FF_SES_BASE.startsWith('https://')) {
       problems.push("FF_SES_BASE must be an https:// origin when NODE_ENV=production, such as https://email.example.tn: its requests carry customers' mail");
+    }
+    if (!env.FF_LAMBDA_BASE.startsWith('https://')) {
+      problems.push("FF_LAMBDA_BASE must be an https:// origin when NODE_ENV=production, such as https://lambda.example.tn: its requests carry functions' code and calls");
     }
     for (const name of ['FF_EMAIL_MAIL_HOST', 'FF_EMAIL_BOUNCE_DOMAIN'] as const) {
       if (/(^|\.)localhost$/i.test(env[name])) {
@@ -1084,6 +1098,12 @@ export default function configuration(env: Env = process.env) {
       region: parsed.FF_REGION,
       // Where functions reach it with their own keys, inside the cluster; '': their pods get no AWS_ENDPOINT_URL_SESV2.
       functionEndpoint: parsed.FF_SES_FUNCTION_ENDPOINT?.replace(/\/$/, '') ?? '',
+    },
+    // Lambda's endpoint (ADR 0014): its server, the endpoint customers use, and the region its ARNs name.
+    lambda: {
+      port: parsed.FF_LAMBDA_PORT,
+      base: parsed.FF_LAMBDA_BASE.replace(/\/$/, ''),
+      region: parsed.FF_REGION,
     },
     // Buckets' sites: the server that answers them, and the origin under which each is <bucket>.<host>.
     website: {

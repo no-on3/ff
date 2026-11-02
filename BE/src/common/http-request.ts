@@ -14,6 +14,13 @@ export function originForm(target: string | undefined): string {
   }
 }
 
+/** A request's path and query string, as sent, escapes kept: its target in origin form, split at its "?". */
+export function requestTarget(url: string | undefined): { rawPath: string; rawQuery: string } {
+  const target = originForm(url);
+  const at = target.indexOf('?');
+  return at < 0 ? { rawPath: target, rawQuery: '' } : { rawPath: target.slice(0, at), rawQuery: target.slice(at + 1) };
+}
+
 /** How a server refuses a body it won't read whole, in its own words. */
 export interface BodyRefusals {
   /** A body past the limit, declared or sent. */

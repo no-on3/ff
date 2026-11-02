@@ -204,7 +204,7 @@ check "the backend's token for the cluster's API, read in its pod, lasts an hour
 section "the edge"
 kubectl -n ff-edge exec deploy/ff-edge -- cat /data/caddy/pki/authorities/local/root.crt >"$work/root.crt"
 resolve=()
-for host in api console admin login; do resolve+=(--resolve "$host.ff.test:$https_port:127.0.0.1"); done
+for host in api console admin login lambda; do resolve+=(--resolve "$host.ff.test:$https_port:127.0.0.1"); done
 # https <host> <path> [curl option...]: the body; the status in $work/status, the headers in $work/headers.
 https() {
   local host=$1 path=$2
@@ -223,6 +223,9 @@ https api /readyz >/dev/null
 check "the API: ready, its database and the cluster answering" '200 {"database":"ok","kubernetes":"ok"}' "$(status) $(jq -c .checks "$work/body")"
 check "the login: the realm's issuer is the public address" "https://login.ff.test:$https_port/realms/ff" \
   "$(https login /realms/ff/.well-known/openid-configuration | jq -r .issuer)"
+https lambda /2015-03-31/functions/ >/dev/null
+check "Lambda's endpoint, its host the backend's port for it, refuses a request with no signature as Lambda does" "403 MissingAuthenticationTokenException" \
+  "$(status) $(header x-amzn-errortype)"
 https admin / >/dev/null
 check "the admin app refuses an address not allowed" 403 "$(status)"
 https login /admin/master/console/ >/dev/null
@@ -476,6 +479,7 @@ kubectl -n e2e-probe run probe --image=ff-runtime-nodejs:24-v3 --image-pull-poli
 const net = require("node:net");
 const targets = { edge: ["ff-edge.ff-edge.svc", 443], backend: ["ff-backend.ff-system.svc", 80], urls: ["ff-backend.ff-system.svc", 3001], keycloak: ["keycloak.ff-system.svc", 8080],
   console: ["ff-console.ff-system.svc", 80], registry: ["ff-code-registry.ff-system.svc", 5000], buckets: ["10.43.0.251", 3002], queues: ["10.43.0.251", 3003],
+  lambda: ["ff-backend.ff-system.svc", 3006],
   function: [process.argv[1], 8080] };
 Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((resolve) => {
   const socket = net.connect({ host, port });
@@ -485,8 +489,8 @@ Promise.all(Object.entries(targets).map(([name, [host, port]]) => new Promise((r
   socket.once("error", () => done("refused"));
 }))).then((states) => console.log(states.join(" ")));' "fn-$fn.ff-t-$(printf %s "$account" | sha256sum | cut -c1-12).svc" >/dev/null
 kubectl -n e2e-probe wait --for=jsonpath='{.status.phase}'=Succeeded pod/probe --timeout=120s >/dev/null || true
-check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console, the code registry, buckets' and queues' address for functions nor a function" \
-  "edge=open backend=refused urls=refused keycloak=refused console=refused registry=refused buckets=refused queues=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
+check "an ordinary pod reaches the edge, and neither the backend, its port for function URLs, Keycloak, the console, the code registry, buckets' and queues' address for functions, the backend's port for Lambda's API nor a function" \
+  "edge=open backend=refused urls=refused keycloak=refused console=refused registry=refused buckets=refused queues=refused lambda=refused function=refused" "$(kubectl -n e2e-probe logs probe | tail -1)"
 
 section "deploy.sh again"
 "$FF_REPO_ROOT/deploy/k8s/platform/deploy.sh" "$FF_REPO_ROOT/hack/k8s/platform-e2e" >"$work/redeploy.log" 2>&1 || { tail -20 "$work/redeploy.log" >&2; fail "deploy.sh failed the second time"; }

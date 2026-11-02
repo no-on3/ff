@@ -1,6 +1,6 @@
 import { IncomingMessage, Server, createServer, request as httpRequest } from 'node:http';
 import { AddressInfo } from 'node:net';
-import { BodyRefusals, originForm, readBody, single } from './http-request';
+import { BodyRefusals, originForm, readBody, requestTarget, single } from './http-request';
 
 class Refused extends Error {}
 
@@ -73,6 +73,15 @@ describe('originForm', () => {
     expect(originForm('http://host.example/a%2Fb?c=d')).toBe('/a%2Fb?c=d');
     expect(originForm('*')).toBe('/');
     expect(originForm(undefined)).toBe('/');
+  });
+});
+
+describe('requestTarget', () => {
+  it('splits a target at its "?", escapes kept as sent', () => {
+    expect(requestTarget('/2015-03-31/functions/arn%3Aaws%3Alambda?Qualifier=live&a=%20')).toEqual({ rawPath: '/2015-03-31/functions/arn%3Aaws%3Alambda', rawQuery: 'Qualifier=live&a=%20' });
+    expect(requestTarget('/a?')).toEqual({ rawPath: '/a', rawQuery: '' });
+    expect(requestTarget('http://host.example/a?b')).toEqual({ rawPath: '/a', rawQuery: 'b' });
+    expect(requestTarget(undefined)).toEqual({ rawPath: '/', rawQuery: '' });
   });
 });
 

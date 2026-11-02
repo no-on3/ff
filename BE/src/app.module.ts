@@ -19,6 +19,7 @@ import { DatabasesModule } from './databases/databases.module';
 import { EventSourcesModule } from './event-sources/event-sources.module';
 import { FunctionsModule } from './functions/functions.module';
 import { FunctionUrlsModule } from './function-urls/function-urls.module';
+import { LambdaModule } from './lambda/lambda.module';
 import { HealthController } from './health/health.controller';
 import { MetricsModule } from './metrics/metrics.module';
 import { NotificationsModule } from './notifications/notifications.module';
@@ -61,6 +62,7 @@ import { StorageModule } from './storage/storage.module';
     EventSourcesModule,
     FunctionsModule,
     FunctionUrlsModule,
+    LambdaModule,
     MetricsModule,
     NotificationsModule,
     AlarmsModule,

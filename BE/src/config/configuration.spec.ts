@@ -40,6 +40,7 @@ const production: Env = {
   FF_STORAGE_BASE: 'https://s3.ff.example',
   FF_SQS_BASE: 'https://sqs.ff.example',
   FF_SES_BASE: 'https://email.ff.example',
+  FF_LAMBDA_BASE: 'https://lambda.ff.example',
   FF_EMAIL_MAIL_HOST: 'mail.ff.example',
   FF_EMAIL_BOUNCE_DOMAIN: 'bounces.mail.ff.example',
   FF_WEBSITE_BASE: 'https://site.ff.example',
@@ -580,6 +581,23 @@ describe('configuration', () => {
       expect(problems({ ...dev, FF_SQS_FUNCTION_ENDPOINT: 'http://10.43.0.251:3003/sqs' })).toEqual([
         expect.stringMatching(/^FF_SQS_FUNCTION_ENDPOINT must be an origin, such as http:\/\/10.43.0.251:3003, at which functions reach queues' SQS endpoint/),
       ]);
+    });
+  });
+
+  describe("Lambda's endpoint", () => {
+    it("is served on port 3006, apart from the API, at localhost in development, naming FF's region", () => {
+      expect(configuration(dev).lambda).toEqual({ port: 3006, base: 'http://localhost:3006', region: 'tn-tunis-1' });
+    });
+
+    it('takes an origin, a trailing slash dropped, and port 0 for none', () => {
+      const config = configuration({ ...production, FF_LAMBDA_BASE: 'https://lambda.example.tn/', FF_LAMBDA_PORT: '0' });
+
+      expect([config.lambda.port, config.lambda.base]).toEqual([0, 'https://lambda.example.tn']);
+      expect(problems({ ...dev, FF_LAMBDA_BASE: 'https://lambda.example.tn/2015-03-31' })).toEqual([expect.stringMatching(/^FF_LAMBDA_BASE must be an origin, such as https:\/\/lambda.example.tn/)]);
+    });
+
+    it("is reached over TLS in production: its requests carry functions' code and calls", () => {
+      expect(problems({ ...production, FF_LAMBDA_BASE: 'http://lambda.example.tn' })).toEqual([expect.stringMatching(/^FF_LAMBDA_BASE must be an https:\/\/ origin when NODE_ENV=production/)]);
     });
   });
 

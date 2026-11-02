@@ -126,6 +126,17 @@ http:// {
 	reverse_proxy ff-backend.ff-system.svc.cluster.local:3005
 }
 
+# Lambda's endpoint, to the backend's, as the clients sent it: their signatures cover the host and the body, so
+# nothing is rewritten, added or compressed. One name, and its own certificate.
+{$FF_LAMBDA_HOST} {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+	log
+	reverse_proxy ff-backend.ff-system.svc.cluster.local:3006
+}
+
 # Buckets' sites, <bucket>.<sites' domain>, to the backend's website server: public pages, read-only, compressed as
 # the console's are. Their certificate as FF_WEBSITE_TLS chooses: one for the domain through DNS, or one per site on
 # demand, once the backend says the bucket is one.

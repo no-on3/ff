@@ -3,7 +3,7 @@
  * by a version or an alias, and read back, $LATEST as none; and a function's
  * name, qualified as Lambda's FunctionName takes it.
  */
-import { QUALIFIED_NAME, functionArn, parseFunctionArn, qualifiedFunctionArn } from './arns';
+import { QUALIFIED_NAME, functionArn, parseFunctionArn, parseFunctionName, qualifiedFunctionArn } from './arns';
 
 const BASE = 'arn:aws:lambda:tn-tunis-1:000000000001:function:orders';
 
@@ -39,5 +39,22 @@ describe("functions' ARNs (L1)", () => {
       false,
       false,
     ]);
+  });
+
+  it("reads a FunctionName in each of Lambda's forms: a name, its ARN, its partial ARN, each qualified or not", () => {
+    expect(['orders', 'orders:$LATEST', '000000000001:function:orders', BASE].map(parseFunctionName)).toEqual([
+      { name: 'orders' },
+      { name: 'orders' },
+      { name: 'orders', accountId: '000000000001' },
+      { name: 'orders', accountId: '000000000001', region: 'tn-tunis-1' },
+    ]);
+    expect(['orders:live', '000000000002:function:orders:3', `${BASE}:live`].map(parseFunctionName)).toEqual([
+      { name: 'orders', qualifier: 'live' },
+      { name: 'orders', accountId: '000000000002', qualifier: '3' },
+      { name: 'orders', accountId: '000000000001', region: 'tn-tunis-1', qualifier: 'live' },
+    ]);
+    for (const value of ['', 'or ders', 'orders:0', 'orders:live:2', '1:function:orders', 'arn:aws:sqs:tn-tunis-1:000000000001:orders', `${BASE}:`]) {
+      expect(parseFunctionName(value)).toBeUndefined();
+    }
   });
 });

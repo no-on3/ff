@@ -8,7 +8,8 @@
 # URLs are answered on a port of their own, 3001, buckets' S3 requests on another, 3002, and queues' SQS requests on
 # a third, 3003, which the edge reaches, and functions too, with their own keys, through the Service ff-storage;
 # buckets' sites on a fourth, 3004, which the edge alone reaches; customers' mail's SES requests on a fifth, 3005,
-# which the edge reaches, and functions too, through ff-storage.
+# which the edge reaches, and functions too, through ff-storage; Lambda's API on a sixth, 3006, which the edge
+# reaches.
 apiVersion: v1
 kind: Service
 metadata:
@@ -39,6 +40,9 @@ spec:
     - name: ses
       port: 3005
       targetPort: ses
+    - name: lambda
+      port: 3006
+      targetPort: lambda
 ---
 # Buckets' S3 front door as functions reach it with their own keys (ADR 0009), at the address that the backend's
 # FF_STORAGE_FUNCTION_ENDPOINT names: an IP address, where AWS's SDKs address buckets path-style by themselves, so that
@@ -129,6 +133,9 @@ spec:
             # FF_SES_PORT
             - name: ses
               containerPort: 3005
+            # FF_LAMBDA_PORT
+            - name: lambda
+              containerPort: 3006
             - name: metrics
               containerPort: 9464
           startupProbe:

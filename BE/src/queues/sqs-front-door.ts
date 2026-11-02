@@ -9,7 +9,7 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
-import { BodyRefusals, originForm, readBody, single } from '../common/http-request';
+import { BodyRefusals, readBody, requestTarget, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { PlansService } from '../plans/plans.service';
 import { countQueueRequest } from '../plans/rate-limits';
@@ -131,10 +131,8 @@ export class SqsFrontDoor implements OnModuleDestroy {
     const key = await this.directory.key(signature.accessKeyId);
     if (key === EXPIRED) throw expiredToken();
     if (!key) throw invalidClientTokenId();
-    const url = originForm(request.url);
-    const at = url.indexOf('?');
     checkSqsSignature(
-      { method: 'POST', rawPath: at < 0 ? url : url.slice(0, at), rawQuery: at < 0 ? '' : url.slice(at + 1), rawHeaders: request.rawHeaders },
+      { method: 'POST', ...requestTarget(request.url), rawHeaders: request.rawHeaders },
       body,
       signature,
       key.secret,

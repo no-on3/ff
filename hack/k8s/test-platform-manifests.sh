@@ -16,6 +16,8 @@
 #   - buckets' S3 front door, queues' SQS endpoint and mail's SES endpoint: the edge's host for each the backend's,
 #     the backend's port for each reached by the edge and tenants' functions alone, functions' fixed address for it,
 #     each host sent there; the mail server's names public ones;
+#   - Lambda's endpoint: the edge's host for it the backend's, the backend's port for it reached by the edge alone,
+#     its host sent there;
 #   - the edge's Caddyfile, with its settings, valid for Caddy, in the edge's image, both ways to function URLs' and
 #     buckets' certificates; behind a proxy, its allowlist believing X-Forwarded-For from FF_EDGE_TRUSTED_PROXIES
 #     alone, the edge run and asked on a Docker network of its own;
@@ -290,6 +292,15 @@ check "the edge sends its host there" "1 1" \
   "$(grep -c '^{\$FF_SES_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$ses_port$" "$platform/edge/Caddyfile")"
 check "the mail server and FF's own return path by public names" "mail.example.tn bounces.mail.example.tn" \
   "$(sed -n 's/^FF_EMAIL_MAIL_HOST=//p' "$platform/backend.env") $(sed -n 's/^FF_EMAIL_BOUNCE_DOMAIN=//p' "$platform/backend.env")"
+
+section "Lambda's endpoint"
+# The edge serves the backend's Lambda endpoint, one host, on the backend's port for it, which the edge alone reaches.
+check "the edge's Lambda host is the host of the backend's FF_LAMBDA_BASE" "lambda.example.tn lambda.example.tn" \
+  "$(sed -n 's/^FF_LAMBDA_HOST=//p' "$platform/edge.env") $(sed -n 's#^FF_LAMBDA_BASE=https://##p' "$platform/backend.env")"
+lambda_port="$(sed -n 's/^FF_LAMBDA_PORT=//p' "$platform/backend.env")"
+check "the backend's port for Lambda's API in its Service, reached by the edge alone" "$lambda_port lambda edge" "$(reached_by "$lambda_port")"
+check "the edge sends its host there" "1 1" \
+  "$(grep -c '^{\$FF_LAMBDA_HOST} {$' "$platform/edge/Caddyfile") $(grep -c "reverse_proxy ff-backend.ff-system.svc.cluster.local:$lambda_port$" "$platform/edge/Caddyfile")"
 
 section "buckets' sites"
 # The edge serves every host under the sites' domain on the backend's port for sites, which nothing else reaches; a

@@ -11,7 +11,7 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
 import { AwsEndpoint } from '../common/aws-endpoint';
-import { originForm, single } from '../common/http-request';
+import { requestTarget, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { SigningChain, decodeEscapes } from '../common/signature-v4';
 import { PlanView } from '../plans/plan-limits';
@@ -247,10 +247,7 @@ export class S3FrontDoor implements OnModuleDestroy {
 
   /** Answers one request; never throws, as nothing would catch it. */
   private async serve(request: IncomingMessage, response: ServerResponse, expectsContinue: boolean): Promise<void> {
-    const target = originForm(request.url);
-    const at = target.indexOf('?');
-    const rawPath = at < 0 ? target : target.slice(0, at);
-    const rawQuery = at < 0 ? '' : target.slice(at + 1);
+    const { rawPath, rawQuery } = requestTarget(request.url);
     const exchange: Exchange = {
       id: randomBytes(8).toString('hex').toUpperCase(),
       request,

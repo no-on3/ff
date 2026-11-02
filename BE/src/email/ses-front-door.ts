@@ -5,7 +5,7 @@ import { AddressInfo } from 'node:net';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
-import { BodyRefusals, originForm, readBody } from '../common/http-request';
+import { BodyRefusals, readBody, requestTarget } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { reachesMail } from '../storage/key-reach';
 import { KeyUses } from '../storage/key-uses.service';
@@ -71,10 +71,7 @@ export class SesFrontDoor implements OnModuleDestroy {
   private async serve(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const id = randomUUID();
     try {
-      const target = originForm(request.url);
-      const at = target.indexOf('?');
-      const rawPath = at < 0 ? target : target.slice(0, at);
-      const rawQuery = at < 0 ? '' : target.slice(at + 1);
+      const { rawPath, rawQuery } = requestTarget(request.url);
       if (request.method === 'GET' && rawPath === '/verify') return await this.verify(response, id, new URLSearchParams(rawQuery));
       this.reply(request, response, id, 200, await this.answer(request, rawPath, rawQuery));
     } catch (error) {

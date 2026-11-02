@@ -18,8 +18,8 @@
 	}
 }
 
-# FF's seven fixed names: certificates from Let's Encrypt, which this proxy gets and renews by itself.
-api.@DOMAIN@, console.@DOMAIN@, admin.@DOMAIN@, login.@DOMAIN@, sqs.@DOMAIN@, s3.@DOMAIN@, email.@DOMAIN@ {
+# FF's eight fixed names: certificates from Let's Encrypt, which this proxy gets and renews by itself.
+api.@DOMAIN@, console.@DOMAIN@, admin.@DOMAIN@, login.@DOMAIN@, sqs.@DOMAIN@, s3.@DOMAIN@, email.@DOMAIN@, lambda.@DOMAIN@ {
 	import ff-edge
 }
 

@@ -90,6 +90,8 @@ sqs_port="$(free_port)"
 sqs_port_oidc="$(free_port)"
 # Mail's SES endpoint, on the development backend alone, which the accounts' keys are tried at.
 ses_port="$(free_port)"
+# And Lambda's endpoint, the same way.
+lambda_port="$(free_port)"
 operator=operator@ff.test
 
 as_a() { http_at "$api" "$@"; }
@@ -423,7 +425,8 @@ e2e_start_backend "$work/backend.log" "$api" "${e2e_base_env[@]}" "${e2e_data_db
   FF_FUNCTION_URL_PORT="$url_port" FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port" \
   FF_STORAGE_PORT="$storage_port" FF_STORAGE_BASE="http://s3.localhost:$storage_port" \
   FF_SQS_PORT="$sqs_port" FF_SQS_BASE="http://127.0.0.1:$sqs_port" \
-  FF_SES_PORT="$ses_port" FF_SES_BASE="http://127.0.0.1:$ses_port"
+  FF_SES_PORT="$ses_port" FF_SES_BASE="http://127.0.0.1:$ses_port" \
+  FF_LAMBDA_PORT="$lambda_port" FF_LAMBDA_BASE="http://127.0.0.1:$lambda_port"
 # Its deletion job runs every 5 s instead of every hour, so that the last section sees a closed account's data deleted.
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" "${e2e_data_db_env[@]}" "${e2e_cache_env[@]}" "${e2e_mail_env[@]}" PORT="${api_oidc##*:}" \
   FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
@@ -1076,6 +1079,38 @@ $([[ "$(ses_with "$key_a_id" "$key_a_secret" send-email --from-email-address ord
 $(as_b GET /email/messages | jq '.messages | length')"
 }
 section_def ses_keys section_ses_keys s3_keys budget=15
+
+section_lambda_keys() {
+section "functions through Lambda's endpoint: each account's key finds its own account's functions alone"
+# lambda_with <key ID> <secret> <aws lambda arguments…>: the answer's text, or refused with the error's name, as the CLI prints it.
+lambda_with() {
+  local id=$1 secret=$2
+  shift 2
+  AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+    "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$lambda_port" lambda "$@" --output text 2>"$work/lambda.err" ||
+    echo "refused $(grep -oE 'An error occurred \([A-Za-z]+\)' "$work/lambda.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"
+}
+# A key of each account that may change all its functions, which the API's own keys don't.
+lambda_key_a="$(as_a POST /storage-keys '{"name": "l5-lambda-a", "functions": ["*"], "functionAccess": "write"}')"
+lambda_key_b="$(as_b POST /storage-keys '{"name": "l5-lambda-b", "functions": ["*"], "functionAccess": "write"}')"
+lambda_a=("$(jq -r .id <<<"$lambda_key_a")" "$(jq -r .secretAccessKey <<<"$lambda_key_a")")
+lambda_b=("$(jq -r .id <<<"$lambda_key_b")" "$(jq -r .secretAccessKey <<<"$lambda_key_b")")
+arn_a="arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a"
+check "B's key doesn't find A's function, by its name or by its ARN: each account's functions are its own" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException" \
+  "$(lambda_with "${lambda_b[@]}" get-function --function-name l5-a) $(lambda_with "${lambda_b[@]}" get-function --function-name "$arn_a")"
+check "  ... nor its alias, nor deletes it, nor invokes it" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
+  "$(lambda_with "${lambda_b[@]}" get-alias --function-name l5-a --name live) $(lambda_with "${lambda_b[@]}" delete-function --function-name "$arn_a") \
+$(lambda_with "${lambda_b[@]}" invoke --function-name l5-a /dev/null)"
+# A's own key finds it: what answers then is the operation, which FF doesn't offer yet.
+check "A's key finds it, by its name and by its ARN" "refused UnknownOperationException refused UnknownOperationException" \
+  "$(lambda_with "${lambda_a[@]}" get-function --function-name l5-a) $(lambda_with "${lambda_a[@]}" get-function --function-name "$arn_a")"
+check "  ... and a key that reaches no function, such as the one each account's buckets are reached with, none" "refused AccessDeniedException refused AccessDeniedException" \
+  "$(lambda_with "$key_a_id" "$key_a_secret" list-functions) $(lambda_with "$key_b_id" "$key_b_secret" get-function --function-name l5-a)"
+as_a DELETE "/storage-keys/${lambda_a[0]}" >/dev/null
+as_b DELETE "/storage-keys/${lambda_b[0]}" >/dev/null
+}
+section_def lambda_keys section_lambda_keys s3_keys budget=10
 
 section_anonymous() {
 section "nobody authenticated, through the guard, on every route (${#routes[@]})"
