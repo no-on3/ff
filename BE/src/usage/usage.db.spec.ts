@@ -140,8 +140,8 @@ run('usage records (L2, P-20)', () => {
 
     const invocation = await functions.invoke(ACCOUNT, fn.id, { a: 1 });
 
-    // $LATEST's pods are there: nothing to make at a cold start.
-    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ id: fn.id }), { a: 1 }, invocation.id, undefined);
+    // $LATEST's pods are there: a cold start makes nothing, given a fresh key only when its key is due.
+    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ id: fn.id }), { a: 1 }, invocation.id, expect.any(globalThis.Function));
     const saved = (await invocationOf(invocation.id)) as FunctionInvocation;
     expect(saved).toMatchObject({ status: InvocationStatus.COMPLETED, duration: 12.34, memoryUsed: 50 });
     expect(await recordsOf(invocation.id)).toEqual([
