@@ -202,6 +202,11 @@ export interface Orchestrator {
    */
   workloads(fn?: FunctionRef): Promise<WorkloadInstances[]>;
   /**
+   * The revision of the environment each of the function's pods runs with, $LATEST's and its versions', those told to
+   * stop among them, which answer the call they run first, with the key they have; none for a pod that has ended.
+   */
+  podRevisions(fn: FunctionRef): Promise<string[]>;
+  /**
    * The code image each function's $LATEST pods mount, by function ID, from one
    * call: to find those whose image the registry has lost. None for a function
    * whose pods mount their code from elsewhere, as a code ConfigMap from before.

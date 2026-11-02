@@ -118,7 +118,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
       expect([await keys.isDue(function_.id, at(made, HALF - 1000)), await keys.isDue(function_.id, at(made, HALF))]).toEqual([false, true]);
       expect(keyOf(await keys.credentialsFor(function_, at(made, HALF - 1000)))).toBe(keyOf(first));
       expect(await toRenewOf(function_.id, at(made, HALF - 1000))).toEqual([]);
-      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, due: true, lasting: false, replaced: false }]);
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, accountId: ACCOUNT, due: true, lasting: false, replaced: false }]);
 
       const renewed = await keys.credentialsFor(function_, at(made, HALF));
 
@@ -131,7 +131,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
       // The pods that hold the old one go on reaching the account's buckets until the renewal finds none holding it.
       expect(await directory.key(keyOf(first))).toMatchObject({ functionId: function_.id });
       expect(keyOf(await keys.credentialsFor(function_, at(made, HALF)))).toBe(keyOf(renewed));
-      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, due: false, lasting: false, replaced: true }]);
+      expect(await toRenewOf(function_.id, at(made, HALF))).toEqual([{ functionId: function_.id, accountId: ACCOUNT, due: false, lasting: false, replaced: true }]);
 
       expect(await keys.revokeReplaced(function_.id)).toBe(1);
 
@@ -169,7 +169,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
       const now = new Date();
 
       expect(await keys.isDue(function_.id, now)).toBe(true);
-      expect(await toRenewOf(function_.id, now)).toEqual([{ functionId: function_.id, due: true, lasting: true, replaced: false }]);
+      expect(await toRenewOf(function_.id, now)).toEqual([{ functionId: function_.id, accountId: ACCOUNT, due: true, lasting: true, replaced: false }]);
 
       const renewed = await keys.credentialsFor(function_, now);
 
@@ -178,7 +178,7 @@ run("functions' own keys to their account's buckets, queues and mail, in FF's da
         expect.objectContaining({ id, replacedAt: now, revokedAt: null, expiresAt: null }),
         expect.objectContaining({ id: keyOf(renewed), replacedAt: null, expiresAt: at(now, FUNCTION_KEY_LIFE_MS) }),
       ]);
-      expect(await toRenewOf(function_.id, now)).toEqual([{ functionId: function_.id, due: false, lasting: false, replaced: true }]);
+      expect(await toRenewOf(function_.id, now)).toEqual([{ functionId: function_.id, accountId: ACCOUNT, due: false, lasting: false, replaced: true }]);
     });
 
     it('revokes a lasting key alone when asked to, a current key that ends left working', async () => {

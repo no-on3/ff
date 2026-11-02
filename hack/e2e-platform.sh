@@ -382,10 +382,16 @@ check "the function runs, warm, with a key of 12 hours" "$s3_answer 12" \
 old_s3_key="$(s3_key_now)"
 # Six hours and a minute on, as the hours would move them: past half its life, which the renewal finds within 5 s here.
 db "UPDATE storage_keys SET created_at = created_at - interval '6 hours 1 minute', expires_at = expires_at - interval '6 hours 1 minute' WHERE id = '$old_s3_key'" >/dev/null
-calls=0 lost=0
+# A call lost is named with its times and its answer.
+calls=0 lost=0 lost_calls=""
 for _ in $(seq 90); do
   calls=$((calls + 1))
-  [ "$(s3_call)" = "$s3_answer" ] || lost=$((lost + 1))
+  sent="$(date +%T)"
+  answer="$(s3_call)"
+  if [ "$answer" != "$s3_answer" ]; then
+    lost=$((lost + 1))
+    lost_calls+=", sent at $sent and answered at $(date +%T): $answer"
+  fi
   [ "$(db "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$old_s3_key'")" = t ] && break
   sleep 1
 done
@@ -393,7 +399,7 @@ new_s3_key="$(s3_key_now)"
 check "past half its life, its key is renewed, its pod replaced, and the old key revoked once no pod holds it" "true t" \
   "$([[ $new_s3_key =~ ^AKFF && $new_s3_key != "$old_s3_key" ]] && echo true || echo false) $(db "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$old_s3_key'")"
 check "  ... every call answered meanwhile, each writing and reading its bucket; and with the new key after" "0 true $s3_answer" \
-  "$lost $([ "$calls" -gt 3 ] && echo true || echo false) $(s3_call)"
+  "$lost $([ "$calls" -gt 3 ] && echo true || echo false) $(s3_call)$lost_calls"
 
 section "a function's URL, through the edge"
 url="$(as "$token" "/functions/$fn/url" -d '{"authType": "NONE"}' | jq -r .functionUrl)"
@@ -430,6 +436,8 @@ zone 1
 printf 'e2e-customer.tn:53 {\n  file /zones/e2e-customer.tn.db {\n    reload 1s\n  }\n}\n' >"$work/zones/Corefile"
 chmod 755 "$work/zones"
 docker run -d --name "$prefix-dns" --network "$network" -v "$work/zones:/zones:ro" rancher/mirrored-coredns-coredns:1.14.7 -conf /zones/Corefile >/dev/null
+# The backend's log so far, which its replacement takes with it: what a failure leaves behind keeps it.
+kubectl -n ff-system logs deployment/ff-backend --tail=-1 >"$work/backend-before-domains.log" 2>&1 || true
 kubectl -n ff-system set env deployment/ff-backend FF_DOMAIN_RESOLVERS="$(address "$prefix-dns"):53" >/dev/null
 kubectl -n ff-system rollout status deployment/ff-backend --timeout=300s >/dev/null
 added="$(as "$token" "/functions/$fn/url/domains" -d '{"domain": "shop.e2e-customer.tn"}')"

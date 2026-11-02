@@ -199,7 +199,8 @@ describe('Kubernetes manifests', () => {
       expect(d.spec.template.metadata.annotations['ff.dev/code-sha256']).toBe('hash');
       expect(d.spec.strategy.rollingUpdate).toEqual({ maxUnavailable: 0, maxSurge: 1 });
       expect(d.spec.selector.matchLabels).toEqual({ 'ff.dev/function-id': workload().id });
-      expect(podSpec(d).terminationGracePeriodSeconds).toBe(15);
+      // Out of its Service for 5 s, then the function's timeout of 10 s and 5 more for the runtime to drain.
+      expect([container(d).lifecycle, podSpec(d).terminationGracePeriodSeconds]).toEqual([{ preStop: { sleep: { seconds: 5 } } }, 20]);
     });
 
     it('sets runtimeClassName only when configured', () => {

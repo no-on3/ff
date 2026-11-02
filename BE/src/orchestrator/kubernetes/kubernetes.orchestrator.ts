@@ -644,6 +644,13 @@ export class KubernetesOrchestrator implements Orchestrator {
     return workloads;
   }
 
+  async podRevisions(fn: FunctionRef): Promise<string[]> {
+    const pods = await this.api.list<Pod>(paths.core(this.namespaceOf(fn), 'pods'), `${LABELS.functionId}=${fn.id}`);
+    return pods
+      .filter((pod) => pod.status?.phase !== 'Succeeded' && pod.status?.phase !== 'Failed')
+      .map((pod) => pod.metadata.annotations?.[ANNOTATIONS.environmentRevision] ?? '');
+  }
+
   async codeImagesByFunction(): Promise<Map<string, string>> {
     // The same one list of FF's Deployments in every namespace as above.
     const deployments = await this.api.list<Deployment>(paths.allApps('deployments'), `${LABELS.managedBy}=${MANAGED_BY}`);

@@ -1318,7 +1318,7 @@ describe('KubernetesOrchestrator', () => {
     });
   });
 
-  describe("workloads: each of FF's Deployments with its instances, for the scaler and the capacity samples", () => {
+  describe("workloads: each of FF's Deployments with its instances, for the scaler and the capacity samples; and each pod's environment, for the renewal", () => {
     const deployment = (namespace: string, labels: Record<string, string>, readyReplicas?: number) => ({
       metadata: { name: 'fn-x', namespace, labels },
       status: readyReplicas === undefined ? {} : { readyReplicas },
@@ -1409,6 +1409,23 @@ describe('KubernetesOrchestrator', () => {
         { functionId: 'f-idle', version: 2, desired: 0, ready: 0 },
       ]);
       expect(api.listed).toEqual([{ path: '/apis/apps/v1/deployments', selector: 'app.kubernetes.io/managed-by=ff-controller' }]);
+    });
+
+    it("gives the environment each of the function's pods runs with, those told to stop among them, and none for a pod that has ended", async () => {
+      const pod = (revision: string | undefined, phase: string, deleting = false) => ({
+        metadata: { name: 'fn-x-pod', annotations: revision === undefined ? {} : { 'ff.dev/environment-revision': revision }, ...(deleting ? { deletionTimestamp: '2026-11-02T10:00:00Z' } : {}) },
+        status: { phase },
+      });
+      api.lists.set(`/api/v1/namespaces/${ns}/pods`, [
+        pod('0123456789abcdef.AKFFNEW', 'Running'),
+        pod('0123456789abcdef.AKFFOLD', 'Running', true), // told to stop, answering its call
+        pod('0123456789abcdef.AKFFOLDER', 'Failed'), // evicted
+        pod('0123456789abcdef.AKFFDONE', 'Succeeded'),
+        pod(undefined, 'Pending'), // from before environments
+      ]);
+
+      expect(await orchestrator.podRevisions(fn)).toEqual(['0123456789abcdef.AKFFNEW', '0123456789abcdef.AKFFOLD', '']);
+      expect(api.listed).toEqual([{ path: `/api/v1/namespaces/${ns}/pods`, selector: `ff.dev/function-id=${fn.id}` }]);
     });
   });
 

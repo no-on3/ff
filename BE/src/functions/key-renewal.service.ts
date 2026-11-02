@@ -29,7 +29,8 @@ export interface KeyRenewalReport {
  * before an old one goes, and the next Deployment once the last is done; one at
  * zero has its template written, which its next start reads. The keys it
  * replaced work on until a turn finds every Deployment of the function on the
- * current key, and revokes them: no pod holds a revoked key. An idle
+ * current key and no pod on another, a pod told to stop answering the call it
+ * runs first, and revokes them: no pod holds a revoked key. An idle
  * function's key is renewed as it starts from zero, which its call does; a
  * Deployment an update is rolling out, or one whose update failed, is left to
  * it, its own rollout giving the pods the current key. A lasting key, made
@@ -110,10 +111,23 @@ export class FunctionKeyRenewal implements OnModuleInit, OnModuleDestroy {
       rolled++;
     }
     report.rolled += rolled;
-    // Revoked by a turn that finds every Deployment on the current key: for those rolled now, the next one.
-    if (rolled > 0) return;
+    // Revoked by a turn that finds every Deployment on the current key, for those rolled now a later one, and no pod
+    // on another: a pod told to stop answers the call it runs first, with the key it has.
+    const revoking = keys.replaced || (keys.lasting && deployments.length === 0);
+    if (rolled > 0 || !revoking) return;
+    if (await this.podOnAnotherKey(keys, deployments)) {
+      report.waiting++;
+      return;
+    }
     if (keys.replaced) report.revoked += await this.keys.revokeReplaced(keys.functionId, now);
     if (keys.lasting && deployments.length === 0) report.revoked += await this.keys.revokeLasting(keys.functionId, now);
+  }
+
+  /** Whether a pod of the function runs with another environment than its Deployments' templates: an old pod, with an old key. */
+  private async podOnAnotherKey(keys: KeysToRenew, deployments: WorkloadInstances[]): Promise<boolean> {
+    const current = new Set(deployments.map((deployment) => deployment.revision ?? ''));
+    const pods = await this.orchestrator.podRevisions({ id: keys.functionId, accountId: keys.accountId });
+    return pods.some((revision) => !current.has(revision));
   }
 
   private readyTimeoutMs(): number {

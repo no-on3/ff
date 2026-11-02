@@ -1808,73 +1808,88 @@ section_key_life() {
 section "keys that end (ADR 0014, 5): a function's, copied out of it, refused past its end in each service's words; a fresh one from zero, at half its life, and for one from before keys ended"
 # A function's key lasts 12 hours, which this suite doesn't wait: its times move in SQL, as the hours would move them.
 key_code='export async function handler() { return { key: process.env.AWS_ACCESS_KEY_ID }; }'
-created="$(http POST /functions "$(jq -n --arg code "$key_code" '{name: "e2e-key-life", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"
-key_fn="$(jq -r .id <<<"$created")"
+# key_function <name>: a function that answers with the key its pod runs with.
+key_function() { http POST /functions "$(jq -n --arg name "$1" --arg code "$key_code" '{name: $name, runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id; }
+key_fn="$(key_function e2e-key-life)"
+# The key from before keys ended is another function's, at zero until its key is replaced.
+ended_fn="$(key_function e2e-key-ended)"
 made="$(http POST "/functions/$key_fn/url" '{"authType": "AWS_IAM"}')"
 local url_host
 url_host="$(jq -r .functionUrl <<<"$made" | sed -E 's#^http://([^:/]+).*#\1#')"
+# at_zero <function>: scaled to zero, as the idle sweep leaves a function, no pod holding its key. Before any call: the
+# backend's autoscaler steps a function called in the last minute back up from zero, its pod on the key it had.
+at_zero() {
+  kubectl -n "$tenant_ns" scale deployment "fn-$1" --replicas=0 >/dev/null
+  for _ in $(seq 60); do [ -z "$(kubectl -n "$tenant_ns" get deployment "fn-$1" -o jsonpath='{.status.readyReplicas}')" ] && break; sleep 1; done
+}
+at_zero "$key_fn"
+at_zero "$ended_fn"
 # key_life <key ID>: the hours between a key's making and its end.
 key_life() { env_q "SELECT round(extract(epoch FROM expires_at - created_at) / 3600) FROM storage_keys WHERE id = '$1'"; }
-# called_key: the key the function's pod runs with, as it answers a call.
-called_key() { http POST "/functions/$key_fn/invoke" '{"input": {}}' | jq -r .output.key; }
-first_key="$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)"
-copied="$(jq -n --arg id "$first_key" --arg secret "$(function_secret "$key_fn" AWS_SECRET_ACCESS_KEY)" '{id: $id, secretAccessKey: $secret}')"
+# called_key <function>: the key the function's pod runs with, as it answers a call.
+called_key() { http POST "/functions/$1/invoke" '{"input": {}}' | jq -r .output.key; }
+# copied_key: the function's key and its secret, as code that reads its environment would copy them out.
+copied_key() { jq -n --arg id "$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)" --arg secret "$(function_secret "$key_fn" AWS_SECRET_ACCESS_KEY)" '{id: $id, secretAccessKey: $secret}'; }
+copied="$(copied_key)"
+first_key="$(jq -r .id <<<"$copied")"
 as_copied() { AWS_KEY="$first_key" AWS_SECRET="$(jq -r .secretAccessKey <<<"$copied")" "$@"; }
-check "a function's key lasts 12 hours, and its pod runs with it" "12 $first_key" "$(key_life "$first_key") $(called_key)"
-check "  ... copied out of it, it opens S3, SQS and SES, and the function's URL" "accepted accepted accepted 200" \
-  "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities) $(signed_url "$copied" GET / >/dev/null; url_status)"
-# At zero, as the idle sweep leaves a function, no pod holds its key, which the renewal leaves to its next start.
-kubectl -n "$tenant_ns" scale deployment "fn-$key_fn" --replicas=0 >/dev/null
-for _ in $(seq 60); do [ -z "$(kubectl -n "$tenant_ns" get deployment "fn-$key_fn" -o jsonpath='{.status.readyReplicas}')" ] && break; sleep 1; done
+check "a function's key lasts 12 hours" "12" "$(key_life "$first_key")"
+check "  ... copied out of it, it opens S3, SQS and SES" "accepted accepted accepted" \
+  "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities)"
 sql "UPDATE storage_keys SET created_at = now() - interval '12 hours 1 second', expires_at = now() - interval '1 second' WHERE id = '$first_key'"
 check "past its end, each front door refuses it at once, in its service's words: S3's ExpiredToken, SQS's, SES's ExpiredTokenException" \
   "refused ExpiredToken refused ExpiredToken refused ExpiredTokenException" \
   "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities)"
 check "  ... and the URL, Forbidden, saying so" "403 Forbidden: The security token included in the request is expired." \
   "$(signed_url "$copied" GET / >/dev/null; url_status) $(jq -r .Message "$work/url-body")"
-fresh_key="$(called_key)"
-check "a call starts the function from zero on a fresh key, of 12 hours" "true $fresh_key 12" \
+fresh_key="$(called_key "$key_fn")"
+check "a call starts the function from zero on a fresh key, of 12 hours, which its pod runs with" "true $fresh_key 12" \
   "$([[ $fresh_key =~ ^AKFF && $fresh_key != "$first_key" ]] && echo true || echo false) $(function_secret "$key_fn" AWS_ACCESS_KEY_ID) $(key_life "$fresh_key")"
 for _ in $(seq 60); do [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$first_key'")" = t ] && break; sleep 1; done
 check "  ... the old one revoked by the renewal's next turn, which finds its pod on the new one" "t t" \
   "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$first_key'" | tr '|' ' ')"
+check "  ... copied out of it, the fresh one opens the function's URL" 200 "$(signed_url "$(copied_key)" GET / >/dev/null; url_status)"
 
 # Six hours and a minute on: past half its life, which the renewal, every 5 s here, finds.
 sql "UPDATE storage_keys SET created_at = created_at - interval '6 hours 1 minute', expires_at = expires_at - interval '6 hours 1 minute' WHERE id = '$fresh_key'"
-# Called each second until the old key is revoked, a turn after its pod was replaced: every call answered.
-calls=0 failed=0
+# Called each second until the old key is revoked, once no pod holds it: every call answered. A call lost is named
+# with its times and its answer.
+calls=0 failed=0 lost=""
 for _ in $(seq 120); do
+  sent="$(date +%T)"
   answer="$(http POST "/functions/$key_fn/invoke" '{"input": {}}')"
   calls=$((calls + 1))
-  [ "$(status) $(jq -r .status <<<"$answer")" = "201 COMPLETED" ] || failed=$((failed + 1))
+  if [ "$(status) $(jq -r .status <<<"$answer")" != "201 COMPLETED" ]; then
+    failed=$((failed + 1))
+    lost+=", sent at $sent and answered at $(date +%T): $(status) $(jq -c . <<<"$answer" 2>/dev/null || printf %s "$answer")"
+  fi
   [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$fresh_key'")" = t ] && break
   sleep 1
 done
 renewed_key="$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)"
 check "past half its life, a running function gets a new key, of 12 hours, which its new pod runs with" "true 12 $renewed_key" \
-  "$([[ $renewed_key =~ ^AKFF && $renewed_key != "$fresh_key" ]] && echo true || echo false) $(key_life "$renewed_key") $(called_key)"
+  "$([[ $renewed_key =~ ^AKFF && $renewed_key != "$fresh_key" ]] && echo true || echo false) $(key_life "$renewed_key") $(called_key "$key_fn")"
 check "  ... the old one revoked once no pod holds it, and the function's only key left" "t t 1" \
   "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$fresh_key'" | tr '|' ' ') $(env_q "SELECT count(*) FROM storage_keys WHERE function_id = '$key_fn' AND revoked_at IS NULL")"
-check "  ... every call answered while its pod was replaced" "0 true" "$failed $([ "$calls" -gt 3 ] && echo true || echo false)"
+check "  ... every call answered while its pod was replaced" "0 true" "$failed $([ "$calls" -gt 3 ] && echo true || echo false)$lost"
 check "the renewal is in the backend's log" true \
   "$(grep "Deployment(s) rolled onto a new key" "$work/backend.log" >/dev/null && echo true || echo false)"
 
 # A key made before keys ended has none, and would never end on its own: the renewal's next turn replaces it, a function
 # at zero too, its template written with no pod started, and the turn after revokes it.
-kubectl -n "$tenant_ns" scale deployment "fn-$key_fn" --replicas=0 >/dev/null
-for _ in $(seq 60); do [ -z "$(kubectl -n "$tenant_ns" get deployment "fn-$key_fn" -o jsonpath='{.status.readyReplicas}')" ] && break; sleep 1; done
-sql "UPDATE storage_keys SET expires_at = NULL WHERE id = '$renewed_key'"
-for _ in $(seq 60); do [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$renewed_key'")" = t ] && break; sleep 1; done
-ended_key="$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)"
+lasting_key="$(function_secret "$ended_fn" AWS_ACCESS_KEY_ID)"
+sql "UPDATE storage_keys SET expires_at = NULL WHERE id = '$lasting_key'"
+for _ in $(seq 60); do [ "$(env_q "SELECT revoked_at IS NOT NULL FROM storage_keys WHERE id = '$lasting_key'")" = t ] && break; sleep 1; done
+ended_key="$(function_secret "$ended_fn" AWS_ACCESS_KEY_ID)"
 check "a key from before keys ended is replaced even at zero, no pod started, and revoked the turn after" "t t 0 true 12" \
-  "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$renewed_key'" | tr '|' ' ') \
-$(kubectl -n "$tenant_ns" get deployment "fn-$key_fn" -o jsonpath='{.spec.replicas}') $([[ $ended_key =~ ^AKFF && $ended_key != "$renewed_key" ]] && echo true || echo false) $(key_life "$ended_key")"
-check "  ... the function's next call starts it on the new one" "$ended_key" "$(called_key)"
-http DELETE "/functions/$key_fn" >/dev/null
-check "the function deleted, its key with it" "200 0" \
-  "$(status) $(env_q "SELECT count(*) FROM storage_keys WHERE function_id = '$key_fn' AND revoked_at IS NULL")"
+  "$(env_q "SELECT replaced_at IS NOT NULL, revoked_at IS NOT NULL FROM storage_keys WHERE id = '$lasting_key'" | tr '|' ' ') \
+$(kubectl -n "$tenant_ns" get deployment "fn-$ended_fn" -o jsonpath='{.spec.replicas}') $([[ $ended_key =~ ^AKFF && $ended_key != "$lasting_key" ]] && echo true || echo false) $(key_life "$ended_key")"
+check "  ... the function's next call starts it on the new one" "$ended_key" "$(called_key "$ended_fn")"
+deleted="$(http DELETE "/functions/$key_fn" >/dev/null; status) $(http DELETE "/functions/$ended_fn" >/dev/null; status)"
+check "the functions deleted, their keys with them" "200 200 0" \
+  "$deleted $(env_q "SELECT count(*) FROM storage_keys WHERE function_id IN ('$key_fn', '$ended_fn') AND revoked_at IS NULL")"
 }
-section_def key_life section_key_life queues mail budget=60
+section_def key_life section_key_life queues mail budget=80
 
 section_plans() {
 section "plans and rate limits (P-15)"

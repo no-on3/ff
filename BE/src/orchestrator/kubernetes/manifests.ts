@@ -49,6 +49,11 @@ export const INTERNET_PORTS = [
   { protocol: 'UDP', port: 1, endPort: 65535 },
 ];
 const RUNTIME_UID = 10001;
+/**
+ * How long a pod told to stop goes on answering before its runtime is told: its Service's endpoints drop it at once,
+ * each node's rules a moment later, and until then a new connection may still lead to it.
+ */
+export const STOP_DELAY_SECONDS = 5;
 
 /**
  * How long a call may wait for a free instance before the runtime answers 429:
@@ -311,7 +316,8 @@ export function deploymentManifest(
         spec: {
           automountServiceAccountToken: false,
           enableServiceLinks: false,
-          terminationGracePeriodSeconds: fn.timeout + 5,
+          // The stop's delay, then the runtime's limit: a second past the function's timeout or 5 s, whichever is longer.
+          terminationGracePeriodSeconds: STOP_DELAY_SECONDS + fn.timeout + 5,
           ...(settings.runtimeClass ? { runtimeClassName: settings.runtimeClass } : {}),
           securityContext: {
             runAsNonRoot: true,
@@ -359,6 +365,8 @@ export function deploymentManifest(
                 periodSeconds: 10,
                 failureThreshold: 3,
               },
+              // Out of its Service first, answering what still reaches it, then SIGTERM, which the runtime drains.
+              lifecycle: { preStop: { sleep: { seconds: STOP_DELAY_SECONDS } } },
               volumeMounts: [
                 { name: 'code', mountPath: '/var/task', readOnly: true },
                 { name: 'tmp', mountPath: '/tmp' },

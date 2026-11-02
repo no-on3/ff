@@ -26,6 +26,8 @@ function isDueAt(expiresAt: Date | null, now: Date): boolean {
 /** A function whose keys the renewal is for: its current key is due, or it has keys replaced that aren't revoked yet. */
 export interface KeysToRenew {
   functionId: string;
+  /** Its account, whose namespace has its pods. */
+  accountId: string;
   /** Its current key is past half its life, or past its end, or lasting. */
   due: boolean;
   /** Its current key is lasting, made before keys ended: one that never ends on its own. */
@@ -126,13 +128,13 @@ export class FunctionKeys {
     // Past half its life is ending within the other half; a lasting key, with no end, is due at once.
     const dueBefore = new Date(now.getTime() + FUNCTION_KEY_LIFE_MS / 2);
     return this.keys.query(
-      `SELECT "function_id" AS "functionId",
+      `SELECT "function_id" AS "functionId", "account_id" AS "accountId",
               bool_or("replaced_at" IS NULL AND ("expires_at" IS NULL OR "expires_at" <= $1)) AS "due",
               bool_or("replaced_at" IS NULL AND "expires_at" IS NULL) AS "lasting",
               bool_or("replaced_at" IS NOT NULL) AS "replaced"
          FROM "storage_keys"
         WHERE "function_id" IS NOT NULL AND "revoked_at" IS NULL
-        GROUP BY "function_id"
+        GROUP BY "function_id", "account_id"
        HAVING bool_or("replaced_at" IS NULL AND ("expires_at" IS NULL OR "expires_at" <= $1)) OR bool_or("replaced_at" IS NOT NULL)
         ORDER BY "function_id"`,
       [dueBefore],

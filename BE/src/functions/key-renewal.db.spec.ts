@@ -1,12 +1,13 @@
 /**
  * L2: the renewal of functions' keys (ADR 0014, 5), on a real PostgreSQL, the
- * cluster a stand-in that keeps what each Deployment's template holds: a
- * running function's key renewed at half its life, its Deployments rolled
- * onto the new one in turn, each waited for, and the old one revoked by the
- * turn after; an idle function left to its start from zero; a lasting key,
- * made before keys ended, renewed even at zero; a Deployment an update holds
- * left to it; a failure counted, the others renewed. Each run works in a
- * scratch database, dropped afterwards.
+ * cluster a stand-in that keeps what each Deployment's template holds, and
+ * its pods': a running function's key renewed at half its life, its
+ * Deployments rolled onto the new one in turn, each waited for, and the old
+ * one revoked by the turn after, once no pod told to stop holds it; an idle
+ * function left to its start from zero; a lasting key, made before keys
+ * ended, renewed even at zero; a Deployment an update holds left to it; a
+ * failure counted, the others renewed. Each run works in a scratch database,
+ * dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -18,7 +19,7 @@ import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
-import { FunctionWorkload, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
+import { FunctionRef, FunctionWorkload, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
 import { onePlan } from '../plans/test-fixtures';
 import { Bucket } from '../storage/bucket.entity';
 import { FunctionKeys } from '../storage/function-keys.service';
@@ -37,9 +38,11 @@ import { FunctionVersionsService } from './versions.service';
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '400000000031';
 
-/** The cluster as the renewal reads and writes it: each Deployment's instances, and what its template holds. */
+/** The cluster as the renewal reads and writes it: each Deployment's instances, what its template holds, and its pods'. */
 class StandInCluster {
   readonly deployments = new Map<string, WorkloadInstances>();
+  /** Pods told to stop, by function: the revision each still runs with. */
+  readonly stopping = new Map<string, string[]>();
   /** What was asked, in order: `renew <name>`, `wait <name>`. */
   readonly asked: string[] = [];
   /** A function whose rollout the cluster refuses. */
@@ -73,6 +76,11 @@ class StandInCluster {
       labelLatest: async () => undefined,
       waitUntilReady: async (fn: FunctionWorkload) => void this.asked.push(`wait ${StandInCluster.nameOf(fn)}`),
       workloads: async () => [...this.deployments.values()],
+      // Each Deployment's pods run what its template holds; those told to stop, what they had.
+      podRevisions: async (fn: FunctionRef) => [
+        ...[...this.deployments.values()].filter((held) => held.functionId === fn.id).flatMap((held) => Array<string>(held.desired).fill(held.revision ?? '')),
+        ...(this.stopping.get(fn.id) ?? []),
+      ],
       renewEnvironment: async (fn: FunctionWorkload) => {
         if (fn.id === this.refusing) throw new Error('the API server is down');
         const held = this.of(fn);
@@ -154,6 +162,7 @@ run("the renewal of functions' keys (L2)", () => {
     await query('DELETE FROM functions');
     await query('DELETE FROM storage_keys');
     cluster.deployments.clear();
+    cluster.stopping.clear();
     cluster.asked.length = 0;
     cluster.refusing = undefined;
   });
@@ -185,6 +194,25 @@ run("the renewal of functions' keys (L2)", () => {
       [current.id, false],
     ]);
     expect(await renewal.renewDue()).toEqual({ rolled: 0, revoked: 0, waiting: 0, failures: 0 });
+  });
+
+  it('keeps the old key while a pod told to stop still runs with it, answering its call; and revokes it once that pod has ended', async () => {
+    const fn = await functions.create(ACCOUNT, body('stopping'));
+    const before = cluster.of(fn)!.revision!;
+    await age(fn.id);
+    expect(await renewal.renewDue()).toEqual({ rolled: 1, revoked: 0, waiting: 0, failures: 0 });
+
+    // The pod replaced still finishes its call, with the old key.
+    cluster.stopping.set(fn.id, [before]);
+    expect(await renewal.renewDue()).toEqual({ rolled: 0, revoked: 0, waiting: 1, failures: 0 });
+    expect((await keysOf(fn.id)).map((key) => [key.replaced, key.revoked])).toEqual([
+      [true, false],
+      [false, false],
+    ]);
+
+    cluster.stopping.delete(fn.id);
+    expect(await renewal.renewDue()).toEqual({ rolled: 0, revoked: 1, waiting: 0, failures: 0 });
+    expect((await keysOf(fn.id)).map((key) => key.revoked)).toEqual([true, false]);
   });
 
   it('leaves an idle function to its start from zero, whose workload has a fresh key; then gives its template the key, and revokes the old one', async () => {
