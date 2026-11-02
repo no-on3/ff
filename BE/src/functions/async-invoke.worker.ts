@@ -32,6 +32,7 @@ import {
   keptResponse,
   lastResponseOf,
   onClaim,
+  qualifierAttributes,
   qualifierOf,
 } from './async-invoke';
 import { Schedule } from '../schedules/schedule.entity';
@@ -355,10 +356,11 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       return sent;
     }
     const target = await this.configs.destinationFunction(event.accountId, destination);
-    if (!target) return undelivered(`its destination ${destination} is no function of the account any more`);
+    if (!target) return undelivered(`its destination ${destination} is no function of the account, or no version or alias of it, any more`);
     if (size > MAX_ASYNC_INPUT_BYTES) return undelivered(`its record is ${size} bytes, over an asynchronous call's ${MAX_ASYNC_INPUT_BYTES}`);
     const expiresAt = new Date(context.at.getTime() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
-    return this.queues.deleteEventAndSend(event, target, randomUUID(), body, expiresAt);
+    // The record is a call that doesn't wait of what the destination names, as Lambda's: its version or alias.
+    return this.queues.deleteEventAndSend(event, target.function_, randomUUID(), body, expiresAt, qualifierAttributes(target.qualifier));
   }
 
   /** Why the account's messages have no room for a record of this size, as the plan limits what they hold together; undefined when they have. */

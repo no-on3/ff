@@ -6,7 +6,7 @@
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::name_in_arn;
+use crate::api::types::qualified_name_in_arn;
 use crate::api::{Call, Client};
 use crate::error::{Error, Kind};
 use crate::table::table;
@@ -53,7 +53,7 @@ fn row_of(configuration: &Value, queue: bool) -> Vec<String> {
         text(&configuration["id"]),
         events.join(","),
         if filter.is_empty() { "every key".to_owned() } else { filter.join(", ") },
-        format!("{} {}", if queue { "queue" } else { "function" }, name_in_arn(&arn)),
+        format!("{} {}", if queue { "queue" } else { "function" }, qualified_name_in_arn(&arn)),
     ]
 }
 
@@ -224,7 +224,8 @@ mod tests {
     fn a_configuration_reads_as_rows_its_destination_by_name() {
         let configuration = json!({
             "lambdaFunctionConfigurations": [{ "id": "thumbs", "lambdaFunctionArn": "arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails", "events": ["s3:ObjectCreated:*"],
-                "filter": { "key": { "filterRules": [{ "name": "prefix", "value": "images/" }, { "name": "suffix", "value": ".jpg" }] } } }],
+                "filter": { "key": { "filterRules": [{ "name": "prefix", "value": "images/" }, { "name": "suffix", "value": ".jpg" }] } } },
+                { "id": "live", "lambdaFunctionArn": "arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails:live", "events": ["s3:ObjectCreated:Copy"] }],
             "queueConfigurations": [{ "id": "removals", "queueArn": "arn:aws:sqs:tn-tunis-1:000000000001:removals", "events": ["s3:ObjectRemoved:*"] }]
         });
         assert_eq!(
@@ -235,6 +236,12 @@ mod tests {
                     "s3:ObjectCreated:*".to_owned(),
                     "prefix images/, suffix .jpg".to_owned(),
                     "function thumbnails".to_owned()
+                ],
+                vec![
+                    "live".to_owned(),
+                    "s3:ObjectCreated:Copy".to_owned(),
+                    "every key".to_owned(),
+                    "function thumbnails:live".to_owned()
                 ],
                 vec![
                     "removals".to_owned(),

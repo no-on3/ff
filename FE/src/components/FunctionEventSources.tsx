@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { BATCH_SIZE, BATCHING_WINDOW, EventSourceForm, MAXIMUM_CONCURRENCY, eventSourceBody, eventSourceForm, eventSourceText, nameOfArn } from '../lib/event-sources';
+import { nameOfArn } from '../lib/arns';
+import { BATCH_SIZE, BATCHING_WINDOW, EventSourceForm, MAXIMUM_CONCURRENCY, eventSourceBody, eventSourceForm, eventSourceText } from '../lib/event-sources';
 import { apiErrorMessage } from '../lib/functions';
 import { EventSource, Function, Queue, eventSourcesApi, queuesApi } from '../services/api';
 import { Callout, Panel } from './Panel';

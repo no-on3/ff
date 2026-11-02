@@ -4,7 +4,8 @@
  * calls a view keeps by what they named and what ran them.
  */
 import { ALIAS_NAME } from './dto/aliases.dto';
-import { QUALIFIER, callsKept, drawVersion, isFiltered, parseQualifier } from './qualifier';
+import { FunctionAlias } from './entities/function-alias.entity';
+import { QUALIFIER, callsKept, drawVersion, hasQualifier, isFiltered, parseQualifier, qualifierText } from './qualifier';
 
 describe("a call's qualifier (L1)", () => {
   it("takes $LATEST, a version's number and every alias's name, and nothing else", () => {
@@ -25,6 +26,18 @@ describe("a call's qualifier (L1)", () => {
     expect(parseQualifier('7')).toEqual({ version: 7 });
     expect(parseQualifier('prod')).toEqual({ alias: 'prod' });
     expect(parseQualifier('2a')).toEqual({ alias: '2a' });
+  });
+
+  it('says what it names, as a message does', () => {
+    expect([qualifierText(undefined), qualifierText('$LATEST'), qualifierText('3'), qualifierText('live')]).toEqual(['$LATEST', '$LATEST', 'version 3', 'alias live']);
+  });
+
+  it("finds the version or the alias it names among the function's; $LATEST is always there", async () => {
+    const existsBy = jest.fn(async (entity: unknown, where: { name?: string; version?: number }) => (entity === FunctionAlias ? where.name === 'live' : where.version === 2));
+    const manager = { existsBy } as never;
+
+    expect(await Promise.all(['live', 'gone', '2', '3'].map((qualifier) => hasQualifier(manager, 'fn-1', qualifier)))).toEqual([true, false, true, false]);
+    expect([await hasQualifier(manager, 'fn-1', undefined), await hasQualifier(manager, 'fn-1', '$LATEST'), existsBy.mock.calls.length]).toEqual([true, true, 4]);
   });
 });
 

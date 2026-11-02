@@ -1,4 +1,5 @@
 import type { EventInvokeConfig, Metrics } from '../services/api';
+import { nameOfArn } from './arns';
 
 /** Lambda's defaults for a function's calls that don't wait: two retries after a failure, each call kept 6 hours. */
 export const DEFAULT_RETRIES = 2;
@@ -14,13 +15,13 @@ export interface AsyncSettingsForm {
   onFailure: string;
 }
 
-/** The function name a Lambda ARN ends with: arn:aws:lambda:<region>:<account>:function:<name>, $LATEST or not; any other ARN, a queue's, as it is. */
-export const nameOfArn = (arn: string | undefined): string => (arn ? (/:function:([^:]+)/.exec(arn)?.[1] ?? arn) : '');
+/** A destination as the form holds it: a function by its name, with the version or the alias that qualifies it (failed-orders:live), which the API takes as its ARN; a queue by its ARN, as it is; '' for none. */
+export const destinationName = (arn: string | undefined): string => (!arn ? '' : arn.startsWith('arn:aws:lambda:') ? nameOfArn(arn) : arn);
 
-/** A destination as people read it: a function by its name, a queue's ARN (arn:aws:sqs:<region>:<account>:<name>) as "the queue <name>". */
+/** A destination as people read it: a function by its name, qualified or not, a queue's ARN (arn:aws:sqs:<region>:<account>:<name>) as "the queue <name>". */
 export function destinationText(destination: string): string {
   const queue = /^arn:aws:sqs:[^:]+:\d{12}:(.+)$/.exec(destination);
-  return queue ? `the queue ${queue[1]}` : nameOfArn(destination);
+  return queue ? `the queue ${queue[1]}` : destinationName(destination);
 }
 
 /** The form for the settings there are, or for Lambda's defaults when there are none. */
@@ -28,8 +29,8 @@ export function asyncSettingsForm(config: EventInvokeConfig | null): AsyncSettin
   return {
     retries: config?.maximumRetryAttempts ?? DEFAULT_RETRIES,
     keptMinutes: String(Math.round((config?.maximumEventAgeInSeconds ?? DEFAULT_KEPT_MINUTES * 60) / 60)),
-    onSuccess: nameOfArn(config?.destinationConfig.onSuccess.destination),
-    onFailure: nameOfArn(config?.destinationConfig.onFailure.destination),
+    onSuccess: destinationName(config?.destinationConfig.onSuccess.destination),
+    onFailure: destinationName(config?.destinationConfig.onFailure.destination),
   };
 }
 

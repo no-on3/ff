@@ -954,6 +954,9 @@ check "  ... and nothing of B's waits in A's function's queue" 0 "$(waiting_for 
 as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
 check "B can't name A's function as the destination of its own function's calls" \
   "400 destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_b:function:l5-a" "$(status) $(message)"
+as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:live" '{destinationConfig: {onSuccess: {destination: $arn}}}')" >/dev/null
+check "  ... nor A's alias live, by its qualified ARN" \
+  "400 destinationConfig.onSuccess.destination must be a function of this account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_b:function:l5-a:live" "$(status) $(message)"
 # A's queue, as the SQS endpoint makes one: a row of FF's database.
 sql "INSERT INTO queues (account_id, name, kind) VALUES ('$account_a', 'l5-records', 'customer')"
 as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
@@ -972,6 +975,9 @@ check "  ... and A's message is still there, not received" "l5-orders-a 1 200" "
 as_b PUT /buckets/l5-photos-b/notifications "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" '{queueConfigurations: [{queueArn: $arn, events: ["s3:ObjectCreated:*"]}]}')" >/dev/null
 check "B's bucket can't send its events to A's queue" \
   "400 InvalidArgument: A destination must be a queue of the bucket's account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_a:l5-events-a" "$(status) $(message)"
+as_b PUT /buckets/l5-photos-b/notifications "$(jq -cn --arg arn "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:live" '{lambdaFunctionConfigurations: [{lambdaFunctionArn: $arn, events: ["s3:ObjectCreated:*"]}]}')" >/dev/null
+check "  ... nor run A's alias live, by its qualified ARN" \
+  "400 InvalidArgument: A destination must be a function of the bucket's account, in tn-tunis-1: arn:aws:lambda:tn-tunis-1:$account_a:function:l5-a:live" "$(status) $(message)"
 check "A's function, history and limits are unchanged" "$before" "$(snapshot as_a "$id")"
 as_b DELETE "/functions/$own" >/dev/null
 check "B deletes its own function" 200 "$(status)"

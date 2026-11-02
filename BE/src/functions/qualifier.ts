@@ -1,4 +1,6 @@
+import { EntityManager } from 'typeorm';
 import { FunctionAlias } from './entities/function-alias.entity';
+import { FunctionVersion } from './entities/function-version.entity';
 
 /** What Lambda calls the function as it is, its unpublished code and settings. */
 export const LATEST = '$LATEST';
@@ -17,6 +19,20 @@ export type Named = { version: number } | { alias: string } | null;
 export function parseQualifier(qualifier: string | undefined): Named {
   if (qualifier === undefined || qualifier === LATEST) return null;
   return /^\d+$/.test(qualifier) ? { version: Number(qualifier) } : { alias: qualifier };
+}
+
+/** Whether the function has what `qualifier` names: $LATEST always, else the version or the alias. */
+export async function hasQualifier(manager: EntityManager, functionId: string, qualifier: string | undefined): Promise<boolean> {
+  const named = parseQualifier(qualifier);
+  if (!named) return true;
+  return 'alias' in named ? manager.existsBy(FunctionAlias, { functionId, name: named.alias }) : manager.existsBy(FunctionVersion, { functionId, version: named.version });
+}
+
+/** What a qualifier names, as a message says it: "version 3", "alias live", or $LATEST. */
+export function qualifierText(qualifier: string | undefined): string {
+  const named = parseQualifier(qualifier);
+  if (!named) return LATEST;
+  return 'alias' in named ? `alias ${named.alias}` : `version ${named.version}`;
 }
 
 /**

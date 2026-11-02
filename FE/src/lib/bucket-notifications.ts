@@ -1,4 +1,5 @@
 import type { NotificationConfiguration, NotificationConfigurationBody, NotificationFilter } from '../services/api';
+import { nameOfArn } from './arns';
 
 /** S3's event types a bucket of FF's sends, as the API takes them: contract.test.ts checks them against the API's. */
 export const EVENT_TYPES = [
@@ -37,9 +38,6 @@ export interface NotificationEntry {
   prefix: string;
   suffix: string;
 }
-
-/** The name an ARN ends with: a function's or a queue's. */
-export const nameOfArn = (arn: string): string => arn.slice(arn.lastIndexOf(':') + 1);
 
 const filterValue = (filter: NotificationFilter | undefined, name: string): string =>
   filter?.key.filterRules.find((rule) => rule.name.toLowerCase() === name)?.value ?? '';

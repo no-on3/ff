@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::{function_named, name_in_arn};
+use crate::api::types::{function_named, name_in_arn, qualified_name_in_arn};
 use crate::api::{Call, Client};
 use crate::error::Error;
 use crate::table::{table, time};
@@ -92,7 +92,7 @@ fn text(mapping: &EventSource) -> String {
     let state = if mapping.state == "Enabled" { "reading" } else { "disabled: nothing read" };
     format!(
         "{} reads the queue {}: batches of {} at most, {window}, {failures}, {concurrency}; {state} ({})",
-        name_in_arn(&mapping.function_arn),
+        qualified_name_in_arn(&mapping.function_arn),
         name_in_arn(&mapping.event_source_arn),
         mapping.batch_size,
         mapping.uuid
@@ -106,7 +106,7 @@ fn rows(mappings: &[EventSource]) -> String {
             vec![
                 mapping.uuid.clone(),
                 name_in_arn(&mapping.event_source_arn).to_owned(),
-                name_in_arn(&mapping.function_arn).to_owned(),
+                qualified_name_in_arn(&mapping.function_arn).to_owned(),
                 mapping.batch_size.to_string(),
                 format!("{}s", mapping.maximum_batching_window_in_seconds),
                 if mapping.function_response_types.is_empty() { "batch" } else { "item" }.to_owned(),

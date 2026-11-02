@@ -207,6 +207,15 @@ pub fn name_in_arn(arn: &str) -> &str {
     }
 }
 
+/// The name in an ARN as people read it: a function's, with the version or the alias that qualifies it after a
+/// colon, as Lambda writes a qualified name (`thumbnails:live`), `$LATEST` as none; else its last part.
+pub fn qualified_name_in_arn(arn: &str) -> &str {
+    match arn.split_once(":function:") {
+        Some((_, rest)) => rest.strip_suffix(":$LATEST").unwrap_or(rest),
+        None => name_in_arn(arn),
+    }
+}
+
 /// The account's function of that name: `GET /functions?name=`, compared exactly.
 pub fn find(client: &Client, name: &str) -> Result<Option<Function>, Error> {
     let found: Vec<Function> = client.json(&Call::get("/functions").query("name", name))?;

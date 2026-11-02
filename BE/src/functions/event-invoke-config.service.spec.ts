@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { LAMBDA_RETRY_POLICY } from './async-invoke';
+import { FunctionAlias } from './entities/function-alias.entity';
 import { EventInvokeConfigService } from './event-invoke-config.service';
 
 const ACCOUNT = '000000000001';
@@ -11,7 +12,7 @@ describe('EventInvokeConfigService: a function\'s settings for its asynchronous 
   const orders = { id: 'fn-1', name: 'orders', accountId: ACCOUNT };
   const failed = { id: 'fn-2', name: 'failed-orders', accountId: ACCOUNT };
   let saved: Record<string, unknown> | null;
-  let configs: { findOneBy: jest.Mock; save: jest.Mock; delete: jest.Mock };
+  let configs: { findOneBy: jest.Mock; save: jest.Mock; delete: jest.Mock; manager: { existsBy: jest.Mock } };
   let functions: { findOne: jest.Mock; findAll: jest.Mock };
   let queues: { find: jest.Mock };
   let audit: { record: jest.Mock };
@@ -23,6 +24,12 @@ describe('EventInvokeConfigService: a function\'s settings for its asynchronous 
       findOneBy: jest.fn(async () => saved),
       save: jest.fn(async (row: Record<string, unknown>) => (saved = { ...row, updatedAt: new Date('2026-10-23T10:00:00Z') })),
       delete: jest.fn(async () => ({ affected: saved ? 1 : 0 })),
+      // failed-orders's alias live and its version 2.
+      manager: {
+        existsBy: jest.fn(async (entity: unknown, where: { functionId: string; name?: string; version?: number }) =>
+          where.functionId === 'fn-2' && (entity === FunctionAlias ? where.name === 'live' : where.version === 2),
+        ),
+      },
     };
     functions = {
       findOne: jest.fn(async () => orders),
@@ -68,11 +75,25 @@ describe('EventInvokeConfigService: a function\'s settings for its asynchronous 
     expect(functions.findAll).toHaveBeenCalledWith(ACCOUNT, 'failed-orders');
   });
 
+  it('takes a version or an alias of another function, by its qualified ARN as Lambda, or its name, and keeps the ARN; refuses one the function hasn\'t', async () => {
+    const view = await service.put(ACCOUNT, 'fn-1', { destinationConfig: { onSuccess: { destination: `${arn('failed-orders')}:live` }, onFailure: { destination: `${arn('failed-orders')}:2` } } });
+
+    expect(view.destinationConfig).toEqual({ onSuccess: { destination: `${arn('failed-orders')}:live` }, onFailure: { destination: `${arn('failed-orders')}:2` } });
+    expect(await service.destinationFunction(ACCOUNT, `${arn('failed-orders')}:live`)).toEqual({ function_: failed, qualifier: 'live' });
+    const byName = await service.put(ACCOUNT, 'fn-1', { destinationConfig: { onSuccess: { destination: 'failed-orders:live' } } });
+    expect(byName.destinationConfig.onSuccess).toEqual({ destination: `${arn('failed-orders')}:live` });
+    expect(await refusal('failed-orders:gone')).toBe('destinationConfig.onFailure.destination: the function "failed-orders" has no alias gone');
+    expect(await refusal(`${arn('failed-orders')}:gone`)).toBe('destinationConfig.onFailure.destination: the function "failed-orders" has no alias gone');
+    expect(await refusal(`${arn('failed-orders')}:3`)).toBe('destinationConfig.onFailure.destination: the function "failed-orders" has no version 3');
+    expect(await refusal(`${arn('orders')}:live`)).toBe("destinationConfig.onFailure.destination: a function can't be its own destination, as each record would call it again");
+  });
+
   it("refuses a destination that is no function of the account, saying what it must be", async () => {
     expect(await refusal('failed orders')).toBe(
       `destinationConfig.onFailure.destination must be another function of the account, by its name or its ARN, as Lambda's (${arn('<name>')}), or a queue of the account, by its ARN (${queueArn('<name>')})`,
     );
     expect(await refusal(arn('failed-orders', '000000000002'))).toBe(`destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: ${arn('failed-orders')}`);
+    expect(await refusal(`${arn('failed-orders', '000000000002')}:live`)).toBe(`destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: ${arn('failed-orders')}:live`);
     expect(await refusal(arn('failed-orders', ACCOUNT, 'eu-west-3'))).toBe(`destinationConfig.onFailure.destination must be a function of this account, in tn-tunis-1: ${arn('failed-orders')}`);
     expect(await refusal(arn('orders'))).toBe("destinationConfig.onFailure.destination: a function can't be its own destination, as each record would call it again");
     expect(await refusal(arn('missing'))).toBe('destinationConfig.onFailure.destination: the account has no function named "missing"');
@@ -132,7 +153,7 @@ describe('EventInvokeConfigService: a function\'s settings for its asynchronous 
   });
 
   it("finds a destination's function in the account only", async () => {
-    expect(await service.destinationFunction(ACCOUNT, arn('failed-orders'))).toBe(failed);
+    expect(await service.destinationFunction(ACCOUNT, arn('failed-orders'))).toEqual({ function_: failed });
     expect(await service.destinationFunction('000000000002', arn('failed-orders'))).toBeUndefined();
     expect(await service.destinationFunction(ACCOUNT, 'not an ARN')).toBeUndefined();
   });

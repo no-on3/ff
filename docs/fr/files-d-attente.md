@@ -7,7 +7,7 @@ FF fait le travail qui peut attendre **comme AWS** : une fonction appelée sans 
 | | FF | AWS |
 |---|---|---|
 | Appeler sans attendre | `X-Amz-Invocation-Type: Event`, ou `ff invoke <nom> --async` : la réponse 202 donne tout de suite l'identifiant de la requête ; après un échec, deux nouvelles tentatives, une minute puis deux plus tard, pendant six heures au plus | L'invocation asynchrone de Lambda, aux mêmes règles |
-| Ses réglages | Comme `EventInvokeConfig` : le nombre de nouvelles tentatives (0 à 2), la durée de conservation (60 s à 6 h), une destination pour les appels réussis et une pour ceux qui ont échoué : une fonction ou une file du compte | Les mêmes, plus SNS et EventBridge |
+| Ses réglages | Comme `EventInvokeConfig` : le nombre de nouvelles tentatives (0 à 2), la durée de conservation (60 s à 6 h), une destination pour les appels réussis et une pour ceux qui ont échoué : une fonction du compte, une version ou un alias d'une fonction par son ARN qualifié (`…:function:commandes-ratees:live`), ou une file du compte | Les mêmes, plus SNS et EventBridge |
 | Files d'attente | Les files standard de SQS et leur API, signée avec AWS Signature Version 4 ; les SDK et la CLI d'AWS, l'adresse de FF dans `AWS_ENDPOINT_URL_SQS` | Les files standard et FIFO |
 | Livraison | Au moins une fois : un message reçu est caché pendant son délai de visibilité, et revient s'il n'a pas été supprimé | La même |
 | File de lettres mortes | Un message reçu plus de `maxReceiveCount` fois y passe, comme avec la politique de redirection de SQS | La même, et le renvoi de ses messages vers leur file |

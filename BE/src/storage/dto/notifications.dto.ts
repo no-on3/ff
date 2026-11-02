@@ -54,7 +54,7 @@ class ConfigurationDto {
 }
 
 export class LambdaFunctionConfigurationDto extends ConfigurationDto {
-  @ApiProperty({ example: 'arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails', description: "A function of the account, by its ARN, or its name, kept as its ARN: it is called with S3's event without waiting" })
+  @ApiProperty({ example: 'arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails', description: "A function of the account, by its ARN, a version or an alias of it by its qualified ARN (…:function:thumbnails:live), or its name, with a version or an alias after a colon (thumbnails:live), kept as its ARN: it is called with S3's event without waiting" })
   @IsString()
   @MaxLength(256)
   lambdaFunctionArn: string;

@@ -6,15 +6,13 @@ import { AuditService } from '../audit/audit.service';
 import { CustomerQueues } from '../queues/customer-queues';
 import { Queue } from '../queues/queue.entity';
 import { parseQueueArn, queueArn } from '../queues/sqs-attributes';
-import { functionArn, parseFunctionArn } from './arns';
+import { QUALIFIED_NAME, functionArn, parseFunctionArn, qualifiedFunctionArn } from './arns';
 import { LAMBDA_RETRY_POLICY, RetryPolicy } from './async-invoke';
 import { EventInvokeConfigView, PutEventInvokeConfigDto } from './dto/event-invoke-config.dto';
 import { FunctionEventInvokeConfig } from './entities/function-event-invoke-config.entity';
 import { Function } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
-
-/** A function's name, as AWS Lambda's rule has it: a destination given so is the account's function of that name. */
-const FUNCTION_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+import { hasQualifier, qualifierText } from './qualifier';
 
 /** What the worker follows for a function's asynchronous calls: its retries and maximum age, and its destinations' ARNs. */
 export interface AsyncSettings {
@@ -27,10 +25,10 @@ export interface AsyncSettings {
  * A function's settings for its asynchronous calls, as AWS Lambda's
  * EventInvokeConfig (ADR 0010): put whole, read, deleted, each change in the
  * audit log. A destination is another function of the account, in FF's
- * region, named by its ARN as on Lambda, or by its name, and kept as its ARN;
- * or a queue of the account, by its ARN, as SQS names it. It must exist when
- * it is set. One gone since is a record not delivered, as Lambda's
- * DestinationDeliveryFailures.
+ * region, named by its ARN as on Lambda, a version or an alias of it by its
+ * qualified ARN, or by its name, and kept as its ARN; or a queue of the
+ * account, by its ARN, as SQS names it. It must exist when it is set. One gone
+ * since is a record not delivered, as Lambda's DestinationDeliveryFailures.
  */
 @Injectable()
 export class EventInvokeConfigService {
@@ -99,12 +97,13 @@ export class EventInvokeConfigService {
     };
   }
 
-  /** The account's function a destination's ARN names, if it is there still. */
-  async destinationFunction(accountId: string, arn: string): Promise<Function | undefined> {
+  /** The account's function a destination's ARN names, with the version or the alias that qualifies it, if both are there still. */
+  async destinationFunction(accountId: string, arn: string): Promise<{ function_: Function; qualifier?: string } | undefined> {
     const named = parseFunctionArn(arn);
     if (!named || named.accountId !== accountId) return undefined;
-    const [fn] = await this.functions.findAll(accountId, named.name);
-    return fn;
+    const [function_] = await this.functions.findAll(accountId, named.name);
+    if (!function_ || !(await hasQualifier(this.configs.manager, function_.id, named.qualifier))) return undefined;
+    return { function_, ...(named.qualifier === undefined ? {} : { qualifier: named.qualifier }) };
   }
 
   /** The account's queue a destination's ARN names, if it is there still. */
@@ -119,7 +118,8 @@ export class EventInvokeConfigService {
     if (given === undefined) return null;
     const field = `destinationConfig.${which}.destination`;
     if (given.startsWith('arn:aws:sqs:')) return this.queueDestination(fn, field, given);
-    const arn = FUNCTION_NAME.test(given) ? this.arnOf({ accountId: fn.accountId, name: given }) : given;
+    // By its name, a version or an alias of it after a colon: the account's function of that name.
+    const arn = QUALIFIED_NAME.test(given) ? this.arnOf({ accountId: fn.accountId, name: given }) : given;
     const named = parseFunctionArn(arn);
     if (!named) {
       throw new BadRequestException(
@@ -128,13 +128,18 @@ export class EventInvokeConfigService {
       );
     }
     if (named.region !== this.region || named.accountId !== fn.accountId) {
-      throw new BadRequestException(`${field} must be a function of this account, in ${this.region}: ${this.arnOf({ accountId: fn.accountId, name: named.name })}`);
+      throw new BadRequestException(`${field} must be a function of this account, in ${this.region}: ${qualifiedFunctionArn(this.region, fn.accountId, named.name, named.qualifier)}`);
     }
     if (named.name === fn.name) {
       throw new BadRequestException(`${field}: a function can't be its own destination, as each record would call it again`);
     }
-    if (!(await this.destinationFunction(fn.accountId, arn))) throw new BadRequestException(`${field}: the account has no function named "${named.name}"`);
-    return this.arnOf({ accountId: fn.accountId, name: named.name });
+    if (!(await this.destinationFunction(fn.accountId, arn))) {
+      const [other] = await this.functions.findAll(fn.accountId, named.name);
+      throw new BadRequestException(
+        other ? `${field}: the function "${named.name}" has no ${qualifierText(named.qualifier)}` : `${field}: the account has no function named "${named.name}"`,
+      );
+    }
+    return qualifiedFunctionArn(this.region, fn.accountId, named.name, named.qualifier);
   }
 
   /** A queue's ARN as a destination: the account's, in FF's region, there now. */

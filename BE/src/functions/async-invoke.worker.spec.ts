@@ -98,7 +98,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     configs = {
       settingsFor: jest.fn(async () => ({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: null })),
       arnOf: (f) => `arn:aws:lambda:tn-tunis-1:${f.accountId}:function:${f.name}`,
-      destinationFunction: jest.fn(async () => records),
+      destinationFunction: jest.fn(async () => ({ function_: records })),
       destinationQueue: jest.fn(async () => failedOrders),
     };
     told = undefined;
@@ -373,14 +373,26 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     expect([queues.retryEvent.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 1]);
   });
 
+  it("hands the record to the version or the alias its destination's ARN names, as a call of it that doesn't wait", async () => {
+    configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: `${RECORDS_ARN}:live`, onFailure: null });
+    configs.destinationFunction.mockResolvedValueOnce({ function_: records, qualifier: 'live' });
+    functions.call.mockResolvedValueOnce({ ok: true, output: 'done', invocation: {} });
+
+    await tick(event());
+
+    expect(configs.destinationFunction).toHaveBeenCalledWith(ACCOUNT, `${RECORDS_ARN}:live`);
+    expect(queues.deleteEventAndSend.mock.calls[0][1]).toBe(records);
+    expect(queues.deleteEventAndSend.mock.calls[0][5]).toEqual({ qualifier: 'live' });
+  });
+
   it("hands a call that succeeded to its onSuccess destination, Lambda's record of it, in the transaction that deletes the event", async () => {
     configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: RECORDS_ARN, onFailure: null });
     functions.call.mockResolvedValueOnce({ ok: true, output: { receipt: 'r-42' }, invocation: {} });
 
     await tick(event({ receiveCount: 2, attributes: { failures: 1, throttles: 0, settled: 1 } }));
 
-    const [[ended, target, requestId, , expiresAt]] = queues.deleteEventAndSend.mock.calls;
-    expect([ended.id, target, requestId, queues.deleteEvent.mock.calls.length]).toEqual(['7', records, expect.stringMatching(/^[0-9a-f-]{36}$/), 0]);
+    const [[ended, target, requestId, , expiresAt, attributes]] = queues.deleteEventAndSend.mock.calls;
+    expect([ended.id, target, requestId, attributes, queues.deleteEvent.mock.calls.length]).toEqual(['7', records, expect.stringMatching(/^[0-9a-f-]{36}$/), undefined, 0]);
     expect((expiresAt as Date).getTime() - NOW.getTime()).toBeGreaterThanOrEqual(7 * 3600 * 1000 - 1000);
     expect(configs.destinationFunction).toHaveBeenCalledWith(ACCOUNT, RECORDS_ARN);
     expect(handed()).toEqual({
@@ -443,7 +455,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await tick(event({ id: '8', requestId: 'req-2' }));
 
     expect([queues.deleteEventAndSend.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 2]);
-    expect(warnings).toHaveBeenCalledWith(`The record of asynchronous call req-1 of function fn-1 was not delivered: its destination ${RECORDS_ARN} is no function of the account any more`);
+    expect(warnings).toHaveBeenCalledWith(`The record of asynchronous call req-1 of function fn-1 was not delivered: its destination ${RECORDS_ARN} is no function of the account, or no version or alias of it, any more`);
     expect(warnings).toHaveBeenCalledWith(expect.stringMatching(/^The record of asynchronous call req-2 of function fn-1 was not delivered: its record is \d+ bytes, over an asynchronous call's 1048576$/));
     // As Lambda's DestinationDeliveryFailures: each record its destination didn't take.
     expect(asyncCounts.count.mock.calls.filter(([use]) => use.destinationFailures)).toEqual([

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EventSource } from '../services/api';
-import { eventSourceBody, eventSourceForm, eventSourceText, nameOfArn } from './event-sources';
+import { nameOfArn } from './arns';
+import { eventSourceBody, eventSourceForm, eventSourceText } from './event-sources';
 
 const mapping = (values: Partial<EventSource> = {}): EventSource => ({
   uuid: '1f0e2d3c-4b5a-4968-8776-655443322110',

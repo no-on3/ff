@@ -946,13 +946,15 @@ gone_soon "$aged"
 check "an Event past its maximum age is dropped at its next claim, without another attempt" "0 1" "$(kept_events "$aged") $(attempts_of "$aged" | jq length)"
 records_fn="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-async-records", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
 records_arn="arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async-records"
+# An alias of the destination, naming $LATEST: a record sent through it runs no other pods.
+http POST "/functions/$records_fn/aliases" '{"name": "records", "functionVersion": "$LATEST"}' >/dev/null
 http GET "/functions/$async_fn/event-invoke-config" >/dev/null
 check "a function without settings for its asynchronous calls follows Lambda's defaults, which the 404 says" \
   "404 The function arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async has no event invoke configuration: its asynchronous calls are retried twice and kept 6 hours, AWS Lambda's defaults" \
   "$(status) $(jq -r .message "$work/body")"
-set_config="$(http PUT "/functions/$async_fn/event-invoke-config" "$(jq -cn --arg arn "$records_arn" '{maximumRetryAttempts: 0, destinationConfig: {onSuccess: {destination: $arn}, onFailure: {destination: $arn}}}')")"
-check "its own settings, as Lambda's EventInvokeConfig: no retry, and another function as the destination of each call's record" \
-  "200 arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async:\$LATEST 0 null $records_arn $records_arn" \
+set_config="$(http PUT "/functions/$async_fn/event-invoke-config" "$(jq -cn --arg arn "$records_arn" '{maximumRetryAttempts: 0, destinationConfig: {onSuccess: {destination: "\($arn):records"}, onFailure: {destination: $arn}}}')")"
+check "its own settings, as Lambda's EventInvokeConfig: no retry, and another function as the destination of each call's record, an alias of it for a success" \
+  "200 arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async:\$LATEST 0 null $records_arn:records $records_arn" \
   "$(status) $(jq -r '"\(.functionArn) \(.maximumRetryAttempts) \(.maximumEventAgeInSeconds) \(.destinationConfig.onSuccess.destination) \(.destinationConfig.onFailure.destination)"' <<<"$set_config")"
 # The records come to the destination as asynchronous calls of its own, their event Lambda's record.
 record_of() {
@@ -971,6 +973,9 @@ check "one that fails, with no retry, hands it at once its record: RetriesExhaus
   "RetriesExhausted 1 Unhandled Error asked to fail" \
   "$(record_of "$failed" | jq -r '"\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.responseContext.functionError) \(.responsePayload.errorType) \(.responsePayload.errorMessage)"')"
 check "  ... after its one attempt" 1 "$(attempts_of "$failed" | jq length)"
+check "the success's record ran through the alias its destination names, the failure's as \$LATEST" "records null" \
+  "$(http GET "/functions/$records_fn/invocations?limit=20" | jq -r --arg s "$succeeded" --arg f "$failed" \
+    '[.invocations[] | select(.status == "COMPLETED")] | "\(map(select(.input.requestContext.requestId == $s))[0].alias) \(map(select(.input.requestContext.requestId == $f))[0].alias)"')"
 http DELETE "/functions/$async_fn/event-invoke-config" >/dev/null
 check "its settings deleted, it follows Lambda's defaults again" "204 404" "$(status) $(http GET "/functions/$async_fn/event-invoke-config" >/dev/null; status)"
 }
@@ -1526,10 +1531,12 @@ http POST /buckets '{"name": "e2e-notify"}' >/dev/null
 # As a function written for Lambda reads S3's event: each key form-decoded, a "+" a space.
 upload_code='export const handler = async (event) => ({ keys: event.Records.map((record) => decodeURIComponent(record.s3.object.key.replace(/\+/g, " "))), name: event.Records[0].eventName });'
 upload_fn="$(http POST /functions "$(jq -n --arg code "$upload_code" '{name: "e2e-on-upload", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')" | jq -r .id)"
+# The rule names an alias of it, as S3 calls a qualified ARN; naming $LATEST, it runs no other pods.
+http POST "/functions/$upload_fn/aliases" '{"name": "uploads", "functionVersion": "$LATEST"}' >/dev/null
 aws_sqs create-queue --queue-name e2e-removals >/dev/null
 removals_url="$sqs_endpoint/$tenant/e2e-removals"
 s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn \
-  --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-on-upload" --arg queue "arn:aws:sqs:tn-tunis-1:$tenant:e2e-removals" \
+  --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-on-upload:uploads" --arg queue "arn:aws:sqs:tn-tunis-1:$tenant:e2e-removals" \
   '{LambdaFunctionConfigurations: [{Id: "uploads", LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"], Filter: {Key: {FilterRules: [{Name: "prefix", Value: "uploads/"}]}}}],
     QueueConfigurations: [{Id: "removals", QueueArn: $queue, Events: ["s3:ObjectRemoved:*"]}]}')"
 check "the AWS CLI sets a bucket's notifications, as S3's, and reads them back; FF's API reads the same" "uploads removals uploads removals" \
@@ -1546,15 +1553,17 @@ for _ in $(seq 1 30); do
   [ "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq '[.invocations[] | select(.source == "async" and .status == "COMPLETED")] | length')" -ge 1 ] && break
   sleep 1
 done
-check "an upload its rule names runs the function without waiting, S3's event its input, the key decoded as Lambda's functions decode it; another, nothing" \
-  '1 ["uploads/red cat.jpg"] ObjectCreated:Put 9 e2e-notify' \
-  "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq -r '[.invocations[] | select(.source == "async")] | "\(length) \(.[0].output.keys | tojson) \(.[0].output.name) \(.[0].input.Records[0].s3.object.size) \(.[0].input.Records[0].s3.bucket.name)"')"
+check "an upload its rule names runs the function without waiting, through the alias the rule names, S3's event its input, the key decoded as Lambda's functions decode it; another, nothing" \
+  '1 uploads ["uploads/red cat.jpg"] ObjectCreated:Put 9 e2e-notify' \
+  "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq -r '[.invocations[] | select(.source == "async")] | "\(length) \(.[0].alias) \(.[0].output.keys | tojson) \(.[0].output.name) \(.[0].input.Records[0].s3.object.size) \(.[0].input.Records[0].s3.bucket.name)"')"
 s3n s3 rm "s3://e2e-notify/uploads/red cat.jpg" --only-show-errors
 aws_sqs receive-message --queue-url "$removals_url" --wait-time-seconds 10 --attribute-names SenderId >"$work/s3-removed.json"
 check "a deletion puts S3's event in the queue, as S3 sends it to SQS, from the bucket" "ObjectRemoved:Delete uploads%2Fred+cat.jpg removals arn:aws:s3:::e2e-notify" \
   "$(jq -r '.Messages[0].Body | fromjson | .Records[0] | "\(.eventName) \(.s3.object.key) \(.s3.configurationId)"' "$work/s3-removed.json") $(jq -r '.Messages[0].Attributes.SenderId' "$work/s3-removed.json")"
-check "  ... a destination the account doesn't have refused, as S3 refuses one it can't validate" "refused InvalidArgument" \
-  "$(outcome s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:nowhere" '{LambdaFunctionConfigurations: [{LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"]}]}')")"
+for missing in nowhere e2e-on-upload:gone; do
+  check "  ... a destination the account doesn't have refused, as S3 refuses one it can't validate: $missing" "refused InvalidArgument" \
+    "$(outcome s3n s3api put-bucket-notification-configuration --bucket e2e-notify --notification-configuration "$(jq -cn --arg fn "arn:aws:lambda:tn-tunis-1:$tenant:function:$missing" '{LambdaFunctionConfigurations: [{LambdaFunctionArn: $fn, Events: ["s3:ObjectCreated:*"]}]}')")"
+done
 check "the audit log names the change, under the CLI's key" "bucket.notifications access_key:$queue_key_id" \
   "$(env_q "SELECT action || ' ' || actor FROM audit_log WHERE account_id = '$tenant' AND resource = 'bucket:e2e-notify' AND action = 'bucket.notifications' ORDER BY at DESC LIMIT 1")"
 http DELETE "/functions/$upload_fn" >/dev/null

@@ -5,11 +5,10 @@ import { jsonBytes } from '../common/byte-limits';
 import { currentRequestId } from '../common/request-context';
 import { PlansService } from '../plans/plans.service';
 import { QueueStore } from '../queues/queue-store';
-import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES } from './async-invoke';
+import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES, qualifierAttributes } from './async-invoke';
 import { FunctionStatus } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 import { MAX_INPUT_BYTES } from './limits';
-import { parseQualifier } from './qualifier';
 
 /** A megabyte, as the plans count what messages hold. */
 const MB = 1024 * 1024;
@@ -73,9 +72,8 @@ export class AsyncInvocationsService {
     }
     const requestId = currentRequestId() ?? randomUUID();
     const expiresAt = new Date(Date.now() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
-    // What the call named, which each attempt runs: none for $LATEST.
-    const attributes = parseQualifier(qualifier) ? { qualifier } : undefined;
-    await this.queues.sendEvent(function_, requestId, body, expiresAt, { attributes });
+    // What the call named, which each attempt runs.
+    await this.queues.sendEvent(function_, requestId, body, expiresAt, { attributes: qualifierAttributes(qualifier) });
     return { requestId };
   }
 

@@ -7,6 +7,7 @@ import { AuditService } from '../audit/audit.service';
 import { Actor } from '../common/request-context';
 import { functionArn, parseFunctionArn } from '../functions/arns';
 import { Function } from '../functions/entities/function.entity';
+import { hasQualifier } from '../functions/qualifier';
 import { Queue, QueueKind } from '../queues/queue.entity';
 import { parseQueueArn, queueArn } from '../queues/sqs-attributes';
 import { BucketEvents } from './bucket-events';
@@ -82,10 +83,15 @@ export class BucketNotificationsService {
       if (named.accountId !== bucket.accountId || named.region !== this.region) {
         throw new S3Error(400, 'InvalidArgument', `A destination must be a ${rule.target} of the bucket's account, in ${this.region}: ${rule.arn}`);
       }
-      if (!options.skipDestinationValidation && !(await this.exists(bucket.accountId, rule.target, named.name))) unknown.push(rule.arn);
+      const qualifier = rule.target === 'queue' ? undefined : parseFunctionArn(rule.arn)?.qualifier;
+      if (!options.skipDestinationValidation && !(await this.exists(bucket.accountId, rule.target, named.name, qualifier))) unknown.push(rule.arn);
     }
     if (unknown.length) {
-      throw new S3Error(400, 'InvalidArgument', `Unable to validate the following destination configurations: ${unknown.join(', ')}: the account has no such function or queue`);
+      throw new S3Error(
+        400,
+        'InvalidArgument',
+        `Unable to validate the following destination configurations: ${unknown.join(', ')}: the account has no such function, version, alias or queue`,
+      );
     }
     await this.buckets.update({ id: bucket.id }, { notifications: rules.length ? rules : null });
     const changedBy = options.changedBy ?? {};
@@ -108,8 +114,11 @@ export class BucketNotificationsService {
     return target === 'queue' ? queueArn(this.region, accountId, name) : functionArn(this.region, accountId, name);
   }
 
-  private async exists(accountId: string, target: NotificationRule['target'], name: string): Promise<boolean> {
-    return target === 'queue' ? this.queues.existsBy({ accountId, name, kind: QueueKind.CUSTOMER }) : this.functions.existsBy({ accountId, name });
+  /** Whether the account has the queue, or the function with the version or the alias that qualifies its ARN. */
+  private async exists(accountId: string, target: NotificationRule['target'], name: string, qualifier: string | undefined): Promise<boolean> {
+    if (target === 'queue') return this.queues.existsBy({ accountId, name, kind: QueueKind.CUSTOMER });
+    const fn = await this.functions.findOne({ where: { accountId, name }, select: { id: true } });
+    return fn !== null && hasQualifier(this.functions.manager, fn.id, qualifier);
   }
 
   private async bucketOf(accountId: string, name: string): Promise<Bucket> {

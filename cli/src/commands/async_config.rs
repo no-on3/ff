@@ -5,7 +5,7 @@
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::{function_named, name_in_arn};
+use crate::api::types::{function_named, qualified_name_in_arn};
 use crate::api::{Call, Client};
 use crate::cli::AsyncConfigArgs;
 use crate::error::Error;
@@ -21,10 +21,10 @@ pub fn max_age_seconds(text: &str) -> Result<u64, Error> {
     Ok(seconds)
 }
 
-/// A destination as people read it: a function by the name its Lambda ARN ends with, `$LATEST` or not; a queue's ARN,
-/// `arn:aws:sqs:<region>:<account>:<name>`, as "the queue <name>".
+/// A destination as people read it: a function by its name, with the version or the alias its Lambda ARN names
+/// (`failed-orders:live`), `$LATEST` as none; a queue's ARN, `arn:aws:sqs:<region>:<account>:<name>`, as "the queue <name>".
 fn destination_in_words(arn: &str) -> String {
-    let name = name_in_arn(arn);
+    let name = qualified_name_in_arn(arn);
     if arn.starts_with("arn:aws:sqs:") { format!("the queue {name}") } else { name.to_owned() }
 }
 
@@ -198,6 +198,11 @@ mod tests {
         assert_eq!(
             text("orders", Some(&queued)),
             "orders: a call that fails is retried twice, and kept 6 hours at most; one that fails for good to the queue failed-orders"
+        );
+        let aliased = json!({ "destinationConfig": { "onSuccess": { "destination": format!("{ARN}:live") }, "onFailure": { "destination": format!("{ARN}:$LATEST") } } });
+        assert_eq!(
+            text("orders", Some(&aliased)),
+            "orders: a call that fails is retried twice, and kept 6 hours at most; a call that succeeds goes on to failed-orders:live, one that fails for good to failed-orders"
         );
     }
 }

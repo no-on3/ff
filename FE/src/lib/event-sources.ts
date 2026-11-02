@@ -1,3 +1,4 @@
+import { nameOfArn } from './arns';
 import type { EventSource, EventSourceSettings } from '../services/api';
 
 /** Lambda's bounds for a mapping of an SQS queue, which the API holds them to: contract.test.ts checks them against the API's. */
@@ -15,9 +16,6 @@ export interface EventSourceForm {
   maximumConcurrency: string;
   enabled: boolean;
 }
-
-/** The name an ARN ends with: a queue's, arn:aws:sqs:<region>:<account>:<name>, or a function's. */
-export const nameOfArn = (arn: string): string => arn.slice(arn.lastIndexOf(':') + 1);
 
 /** The form for a mapping there is, or for a new one with Lambda's defaults. */
 export function eventSourceForm(mapping?: EventSource): EventSourceForm {
