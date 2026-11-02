@@ -12,6 +12,7 @@ import { FunctionAliasesService } from '../functions/aliases.service';
 import { FunctionsService } from '../functions/functions.service';
 import { FunctionVersionsService } from '../functions/versions.service';
 import { PackagesService } from '../packages/packages.service';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { plan } from '../plans/test-fixtures';
 import { EncryptionService } from '../encryption/encryption.service';
 import { DEVELOPMENT_KEY } from '../encryption/key-ring';
@@ -72,12 +73,15 @@ describe("Lambda's reads of functions (L1)", () => {
   /** Each function's versions, by its name. */
   let versionsOf: Record<string, FunctionVersionView[]>;
   let aliasesOf: Record<string, Record<string, string>>;
+  /** Each function's tags, by its ID. */
+  let tagsOf: Record<string, Record<string, string>>;
   let reads: LambdaFunctionReads;
 
   beforeEach(() => {
     functions = [fn('orders'), fn('billing', { runtime: Runtime.PYTHON }), fn('archive'), fn('secret-sauce')];
     versionsOf = { orders: [version('orders', 1), version('orders', 3)], billing: [version('billing', 1)] };
     aliasesOf = { orders: { live: '3', edge: '$LATEST' } };
+    tagsOf = { 'f-billing': { team: 'payments', stage: 'prod' } };
     const byId = (id: string) => functions.find((function_) => function_.id === id) as Function;
     const service = {
       findAll: jest.fn(async () => [...functions].reverse()),
@@ -99,7 +103,8 @@ describe("Lambda's reads of functions (L1)", () => {
       }),
     } as unknown as FunctionAliasesService;
     const packages = { namedBytes: jest.fn(async () => 5_000_000) } as unknown as PackagesService;
-    reads = new LambdaFunctionReads(service, versions, aliases, packages, links);
+    const tags = { ofFunction: jest.fn(async (id: string) => tagsOf[id] ?? {}) } as unknown as ResourceTagsService;
+    reads = new LambdaFunctionReads(service, versions, aliases, packages, links, tags);
   });
 
   /** The front door's work for a request: the operation by its path, the function a path names, the key's reach. */
@@ -191,6 +196,13 @@ describe("Lambda's reads of functions (L1)", () => {
       expect(code.RepositoryType).toBe('S3');
       expect(links.open(code.Location.replace('http://lambda.ff.test/code/', ''))).toEqual({ accountId: ACCOUNT, functionId: 'f-orders' });
       expect(await ask('GET', '/2015-03-31/functions/orders/configuration')).toEqual(answer.Configuration);
+      expect(answer).not.toHaveProperty('Tags');
+    });
+
+    it("GetFunction gives the function's tags, whichever version it reads, as Lambda's", async () => {
+      expect((await ask('GET', '/2015-03-31/functions/billing')).Tags).toEqual({ team: 'payments', stage: 'prod' });
+      expect((await ask('GET', '/2015-03-31/functions/billing', { qualifier: '1' })).Tags).toEqual({ team: 'payments', stage: 'prod' });
+      expect(await ask('GET', '/2015-03-31/functions/billing/configuration')).not.toHaveProperty('Tags');
     });
 
     it("give a version's configuration for its number, and an alias's version's for its name, its link to that version's code", async () => {

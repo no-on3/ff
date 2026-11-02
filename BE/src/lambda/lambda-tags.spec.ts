@@ -1,0 +1,87 @@
+/** L1: Lambda's tags on a function (TagResource, UntagResource, ListTags), over FF's tags service. */
+import { Function } from '../functions/entities/function.entity';
+import { ResourceTagsService } from '../tags/resource-tags.service';
+import { plan } from '../plans/test-fixtures';
+import { LambdaError } from './lambda-error';
+import { LambdaCall, LambdaCaller, operationOf } from './lambda-operations';
+import { LambdaTags } from './lambda-tags';
+
+const ACCOUNT = '000000000001';
+const ARN = `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders`;
+
+describe("Lambda's tags on a function (L1)", () => {
+  let tagged: Record<string, Record<string, string>>;
+  let lambdaTags: LambdaTags;
+  const service = {
+    ofFunction: jest.fn(async (id: string) => tagged[id] ?? {}),
+    tagFunction: jest.fn(async (_account: string, id: string, tags: Record<string, string>) => void (tagged[id] = { ...tagged[id], ...tags })),
+    untagFunction: jest.fn(async (_account: string, id: string, keys: string[]) => {
+      for (const key of keys) delete tagged[id]?.[key];
+    }),
+  };
+
+  beforeEach(() => {
+    tagged = { 'f-orders': { team: 'shop' } };
+    jest.clearAllMocks();
+    lambdaTags = new LambdaTags(service as unknown as ResourceTagsService);
+  });
+
+  /** A request as the front door hands it on: its operation, the function its ARN names, found in the account. */
+  function ask(method: string, target: string, input: Record<string, unknown> = {}, qualifier?: string) {
+    const [path, rawQuery = ''] = target.split('?');
+    const route = operationOf(method, path);
+    if (!route) throw new Error(`no operation at ${method} ${path}`);
+    const call: LambdaCall = { operation: route.operation, groups: route.groups, query: new URLSearchParams(rawQuery), input, body: Buffer.alloc(0), headers: {} };
+    const caller: LambdaCaller = {
+      accountId: ACCOUNT,
+      region: 'tn-tunis-1',
+      key: {} as LambdaCaller['key'],
+      plan: plan(),
+      function_: Object.assign(new Function(), { id: 'f-orders', accountId: ACCOUNT, name: 'orders' }),
+      named: { name: 'orders', ...(qualifier ? { qualifier } : {}) },
+      mayUse: () => true,
+      actor: { id: 'access_key:AKFF', label: 'access key AKFF' },
+    };
+    return lambdaTags.handlers[route.operation.name](call, caller);
+  }
+
+  async function refused(answer: Promise<unknown>): Promise<[number, string, string]> {
+    const error = await answer.then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+    if (!(error instanceof LambdaError)) throw new Error(`not refused in Lambda's words: ${String(error)}`);
+    return [error.status, error.type, error.message];
+  }
+
+  const path = `/2017-03-31/tags/${encodeURIComponent(ARN)}`;
+
+  it('TagResource puts the tags on the function, answering 204 as Lambda does; ListTags gives them by key', async () => {
+    expect(await ask('POST', path, { Tags: { stage: 'prod', team: 'orders' } })).toEqual({ status: 204 });
+    expect(service.tagFunction).toHaveBeenCalledWith(ACCOUNT, 'f-orders', { stage: 'prod', team: 'orders' });
+    expect(await ask('GET', path)).toEqual({ status: 200, document: { Tags: { team: 'orders', stage: 'prod' } } });
+  });
+
+  it('UntagResource removes the tags of each key in tagKeys', async () => {
+    tagged['f-orders'] = { team: 'shop', stage: 'prod', owner: 'ops' };
+
+    expect(await ask('DELETE', `${path}?tagKeys=stage&tagKeys=owner`)).toEqual({ status: 204 });
+    expect(service.untagFunction).toHaveBeenCalledWith(ACCOUNT, 'f-orders', ['stage', 'owner']);
+    expect(await ask('GET', path)).toEqual({ status: 200, document: { Tags: { team: 'shop' } } });
+  });
+
+  it("refuses tags that aren't an object of strings, none at all, no key to remove, and a version's or an alias's ARN", async () => {
+    expect(await refused(ask('POST', path, {}))).toEqual([400, 'InvalidParameterValueException', 'Tags is required: the tags to put on the function, each value by its key.']);
+    for (const Tags of [['team'], 'team=shop', { team: 7 }, null]) {
+      expect(await refused(ask('POST', path, { Tags }))).toEqual([400, 'InvalidParameterValueException', "Tags must be an object of strings, each tag's value by its key."]);
+    }
+    expect(await refused(ask('DELETE', path))).toEqual([400, 'InvalidParameterValueException', 'tagKeys is required: the keys of the tags to remove.']);
+    expect(await refused(ask('GET', `/2017-03-31/tags/${encodeURIComponent(`${ARN}:live`)}`, {}, 'live'))).toEqual([
+      400,
+      'InvalidParameterValueException',
+      "Tags are a function's, not its version's or its alias's: name the function's ARN, without :live.",
+    ]);
+    expect(service.tagFunction).not.toHaveBeenCalled();
+    expect(service.untagFunction).not.toHaveBeenCalled();
+  });
+});

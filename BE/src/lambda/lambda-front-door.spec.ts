@@ -8,7 +8,7 @@
  * Terraform sent the spike's endpoint (hack/spikes/lambda/recordings),
  * replayed as they were signed.
  */
-import { Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { SignatureV4 } from '@smithy/signature-v4';
@@ -16,6 +16,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { IncomingHttpHeaders, OutgoingHttpHeaders, request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { AccountStatus } from '../accounts/entities/account.entity';
+import { currentRequest } from '../common/request-context';
 import { Sha256 } from '../common/test-fixtures';
 import { EncryptionService } from '../encryption/encryption.service';
 import { DEVELOPMENT_KEY } from '../encryption/key-ring';
@@ -265,6 +266,24 @@ describe("Lambda's endpoint (L1)", () => {
       expect(logged).toHaveBeenCalledWith(expect.stringContaining('the database went away'), expect.any(String));
       logged.mockRestore();
     });
+
+    it("a refusal of FF's services as FF's API answers it, under Lambda's name for its status, and logs none", async () => {
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      const throwing = (error: Error) => built.set('GetFunction', async () => Promise.reject(error));
+
+      throwing(new BadRequestException(['Send code or codeSha256, not both', 'memory must be a number']));
+      expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([400, 'InvalidParameterValueException', 'Send code or codeSha256, not both; memory must be a number']);
+      throwing(new ConflictException('A function named orders exists'));
+      expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([409, 'ResourceConflictException', 'A function named orders exists']);
+      throwing(new NotFoundException('Function f-orders not found'));
+      expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([404, 'ResourceNotFoundException', 'Function f-orders not found']);
+      throwing(new ServiceUnavailableException("The code registry can't be reached: nothing changed, try again in a moment"));
+      const answer = await send('GET', '/2015-03-31/functions/orders');
+      expect(refusal(answer)).toEqual([503, 'ServiceException', "The code registry can't be reached: nothing changed, try again in a moment"]);
+      expect(answer.body.Type).toBe('Service');
+      expect(logged).not.toHaveBeenCalled();
+      logged.mockRestore();
+    });
   });
 
   describe("a key's level with the function", () => {
@@ -342,6 +361,14 @@ describe("Lambda's endpoint (L1)", () => {
       expect(caller.actor).toEqual({ id: 'access_key:AKFFWRITERAAAAAAAAAA', label: 'access key AKFFWRITERAAAAAAAAAA' });
       expect([caller.accountId, caller.region, caller.plan.id, caller.key.id]).toEqual([ACCOUNT, REGION, 'beta', WRITER.id]);
       expect(touched).toEqual([WRITER.id]);
+    });
+
+    it("runs its operation as FF's API runs a request: what FF's services record of it names the key, its address and the request's ID", async () => {
+      built.set('DeleteFunction', async () => ({ status: 200, document: currentRequest() }));
+
+      const answer = await send('DELETE', '/2015-03-31/functions/orders');
+
+      expect(answer.body).toEqual({ requestId: answer.headers['x-amzn-requestid'], actor: { id: `access_key:${WRITER.id}`, label: `access key ${WRITER.id}` }, ip: '127.0.0.1' });
     });
 
     it("is refused without a signature, with a key FF doesn't know, one past its end, another secret, a path escaped once, or a session token: in Lambda's words", async () => {

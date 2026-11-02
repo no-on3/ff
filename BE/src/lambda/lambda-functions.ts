@@ -9,7 +9,8 @@ import { PACKAGE_LIMITS } from '../packages/package-archive';
 import { PackagesService } from '../packages/packages.service';
 import { invalidParameterValue, resourceNotFound } from './lambda-error';
 import { LambdaCodeLinks } from './lambda-code-links';
-import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler } from './lambda-operations';
+import { ResourceTagsService } from '../tags/resource-tags.service';
+import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, namedFunction, ok } from './lambda-operations';
 
 /** FF's two runtimes under Lambda's names (ADR 0014, 7). */
 export const LAMBDA_RUNTIMES: Record<Runtime, string> = {
@@ -154,6 +155,7 @@ export class LambdaFunctionReads {
     private readonly aliases: FunctionAliasesService,
     private readonly packages: PackagesService,
     private readonly links: LambdaCodeLinks,
+    private readonly tags: ResourceTagsService,
   ) {}
 
   readonly handlers: Record<string, LambdaHandler> = {
@@ -161,20 +163,22 @@ export class LambdaFunctionReads {
     GetFunctionConfiguration: async (_call, caller) => ok((await this.configuration(caller)).configuration),
     ListFunctions: (call, caller) => this.listFunctions(call, caller),
     // FF signs no code: there is no configuration, which Terraform's provider reads as none.
-    GetFunctionCodeSigningConfig: (_call, caller) => Promise.resolve(ok({ CodeSigningConfigArn: '', FunctionName: found(caller).name })),
+    GetFunctionCodeSigningConfig: (_call, caller) => Promise.resolve(ok({ CodeSigningConfigArn: '', FunctionName: namedFunction(caller).name })),
     GetAccountSettings: (_call, caller) => this.accountSettings(caller),
   };
 
   private async getFunction(caller: LambdaCaller): Promise<LambdaAnswer> {
-    const function_ = found(caller);
+    const function_ = namedFunction(caller);
     const { configuration, version } = await this.configuration(caller);
     const location = this.links.linkFor({ accountId: caller.accountId, functionId: function_.id, ...(version !== undefined ? { version } : {}) });
-    return ok({ Configuration: configuration, Code: { RepositoryType: 'S3', Location: location } });
+    // The function's tags, whichever version is read, as Lambda's; none, none said.
+    const tags = await this.tags.ofFunction(function_.id);
+    return ok({ Configuration: configuration, Code: { RepositoryType: 'S3', Location: location }, ...(Object.keys(tags).length > 0 ? { Tags: tags } : {}) });
   }
 
   /** The configuration that the request's qualifier names, and the version it is, none for $LATEST. */
   private async configuration(caller: LambdaCaller): Promise<{ configuration: Record<string, unknown>; version?: number }> {
-    const function_ = found(caller);
+    const function_ = namedFunction(caller);
     const qualifier = caller.named?.qualifier;
     const missing = () => resourceNotFound(`Function not found: ${qualifiedFunctionArn(caller.region, caller.accountId, function_.name, qualifier)}`);
     let version = qualifier === undefined || qualifier === '$LATEST' ? undefined : Number(qualifier);
@@ -250,14 +254,6 @@ export class LambdaFunctionReads {
       },
     });
   }
-}
-
-const ok = (document: unknown): LambdaAnswer => ({ status: 200, document });
-
-/** The function the front door found where the path names one. */
-function found(caller: LambdaCaller): Function {
-  if (!caller.function_) throw new Error('The front door finds the function a path names before its operation runs');
-  return caller.function_;
 }
 
 /** A lookup whose NotFoundException, FF's API's, is Lambda's ResourceNotFoundException instead. */

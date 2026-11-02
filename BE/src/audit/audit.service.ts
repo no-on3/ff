@@ -31,6 +31,9 @@ export type AuditAction =
   | 'function.update'
   | 'function.delete'
   | 'function.scaling'
+  // A function's tags, as AWS's: put (a key there taking its new value), removed by key.
+  | 'function.tag'
+  | 'function.untag'
   // A function's version, as Lambda's: published with its number and code, and deleted.
   | 'function.publish'
   | 'version.delete'

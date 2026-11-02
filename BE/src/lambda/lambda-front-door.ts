@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
+import { HttpException, Injectable, Logger, NotFoundException, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectThrottlerStorage, ThrottlerStorage } from '@nestjs/throttler';
 import { randomUUID } from 'node:crypto';
@@ -8,6 +8,7 @@ import { AccountStatus } from '../accounts/entities/account.entity';
 import { describeError } from '../common/describe-error';
 import { BodyRefusals, readBody, requestTarget } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
+import { withRequestContext } from '../common/request-context';
 import { FunctionNamed, parseFunctionName, qualifiedFunctionArn } from '../functions/arns';
 import { FunctionsService } from '../functions/functions.service';
 import { PlansService } from '../plans/plans.service';
@@ -21,6 +22,7 @@ import {
   expiredToken,
   invalidParameterValue,
   invalidRequestContent,
+  lambdaErrorOf,
   missingAuthenticationToken,
   requestEntityTooLarge,
   resourceNotFound,
@@ -97,10 +99,12 @@ export class LambdaFrontDoor implements OnModuleDestroy {
   private async serve(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const id = randomUUID();
     try {
-      this.reply(request, response, id, await this.answer(request));
+      this.reply(request, response, id, await this.answer(request, id));
     } catch (error) {
-      if (!(error instanceof LambdaError)) this.logger.error(`A Lambda request failed (request ${id}): ${describeError(error)}`, error instanceof Error ? error.stack : undefined);
-      const refusal = error instanceof LambdaError ? error : serviceException();
+      // FF's services refuse as FF's API answers: the same refusal, under Lambda's name.
+      const known = error instanceof LambdaError ? error : error instanceof HttpException ? lambdaErrorOf(error) : undefined;
+      if (!known) this.logger.error(`A Lambda request failed (request ${id}): ${describeError(error)}`, error instanceof Error ? error.stack : undefined);
+      const refusal = known ?? serviceException();
       this.reply(request, response, id, { status: refusal.status, document: refusal.document(), headers: { 'x-amzn-errortype': refusal.type, ...refusal.headers } });
     }
   }
@@ -120,7 +124,7 @@ export class LambdaFrontDoor implements OnModuleDestroy {
   }
 
   /** The operation's answer, once the request is signed by a key that may make it with what it names. */
-  private async answer(request: IncomingMessage): Promise<LambdaAnswer> {
+  private async answer(request: IncomingMessage, requestId: string): Promise<LambdaAnswer> {
     const method = request.method ?? 'GET';
     const { rawPath, rawQuery } = requestTarget(request.url);
     const route = operationOf(method, rawPath);
@@ -159,7 +163,8 @@ export class LambdaFrontDoor implements OnModuleDestroy {
     }
     const handler = this.operations.handler(operation.name);
     if (!handler) throw unknownOperation(`FF doesn't offer ${operation.name} of Lambda's API yet.`);
-    return handler(call, caller);
+    // What FF's services record of the change names the key, its address and the request, as FF's API's do.
+    return withRequestContext({ requestId, actor: caller.actor, ...(caller.ip ? { ip: caller.ip } : {}) }, () => handler(call, caller));
   }
 
   /**

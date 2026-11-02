@@ -92,6 +92,7 @@ const URL_ALIASES = migrationNames.find((name) => name.startsWith('UrlAliases'))
 const TRIGGER_QUALIFIERS = migrationNames.find((name) => name.startsWith('TriggerQualifiers')) as string;
 const ALARM_DIMENSIONS = migrationNames.find((name) => name.startsWith('AlarmDimensions')) as string;
 const FUNCTION_KEY_RENEWAL = migrationNames.find((name) => name.startsWith('FunctionKeyRenewal')) as string;
+const LAMBDA_ENDPOINT = migrationNames.find((name) => name.startsWith('LambdaEndpoint')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -1194,6 +1195,33 @@ run('database schema (L2, real PostgreSQL)', () => {
     });
   });
 
+  it("the resource-tags migration keeps a function's tags, each key once, going with their function; reverted, they go", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, LAMBDA_ENDPOINT);
+      expect(await dataSource.query(`SELECT to_regclass('resource_tags') AS t`)).toEqual([{ t: null }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('tagged', $1, 'nodejs', 'v1', 128, 5) RETURNING id`, [ACCOUNT]);
+      const tag = (key: string, value: string) => dataSource.query(`INSERT INTO resource_tags (account_id, function_id, key, value) VALUES ($1, $2, $3, $4)`, [ACCOUNT, id, key, value]);
+      await tag('team', 'shop');
+      await tag('stage', '');
+
+      await expect(tag('team', 'again')).rejects.toThrow(/duplicate key value violates unique constraint/);
+      expect(await dataSource.query(`SELECT key, value FROM resource_tags ORDER BY key`)).toEqual([
+        { key: 'stage', value: '' },
+        { key: 'team', value: 'shop' },
+      ]);
+      await dataSource.query(`DELETE FROM functions WHERE id = $1`, [id]);
+      expect(await dataSource.query(`SELECT count(*)::int AS n FROM resource_tags`)).toEqual([{ n: 0 }]);
+
+      await migrateDownTo(dataSource, LAMBDA_ENDPOINT);
+      expect(await dataSource.query(`SELECT to_regclass('resource_tags') AS t`)).toEqual([{ t: null }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
   it("the cache-measures migration samples caches by month, append-only, rates their hours beside the others', lets an alarm watch a cache and go with it, gives books not started yet ElastiCache's SKU, adds its own from next month's first hour, and reverts unless a cache's hour is rated", async () => {
     await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
       await dataSource.runMigrations({ transaction: 'each' });
@@ -1854,6 +1882,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'queues',
         'rate_limited_invocations',
         'rating_runs',
+        'resource_tags',
         'resource_usage_hourly',
         'schedules',
         'storage_keys',

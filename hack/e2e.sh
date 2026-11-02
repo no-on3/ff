@@ -510,6 +510,28 @@ check "a function the account hasn't, and a version its function hasn't, are Res
 }
 section_def lambda_reads section_lambda_reads versions budget=25
 
+section_lambda_tags() {
+section "Lambda's tags on a function, with the AWS CLI: put, a key's value changed, read, removed, by a key that may change it, which the audit log names"
+writer="$(as_ver POST /storage-keys '{"name": "e2e-lambda-writer", "functions": ["e2e-versioned"], "functionAccess": "write"}')"
+# as_writer <aws lambda arguments…>: the AWS CLI at Lambda's endpoint with a key that may change the versioned function.
+as_writer() { AWS_KEY="$(jq -r .id <<<"$writer")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$writer")" aws_lambda "$@"; }
+as_writer tag-resource --resource "$versioned_arn" --tags team=shop,stage=dev >/dev/null
+as_writer tag-resource --resource "$versioned_arn" --tags stage=prod >/dev/null
+check "TagResource puts the tags, a key there taking its new value; ListTags and GetFunction give them" \
+  '{"stage":"prod","team":"shop"} {"stage":"prod","team":"shop"}' \
+  "$(as_reader list-tags --resource "$versioned_arn" | jq -c -S .Tags) $(as_reader get-function --function-name e2e-versioned | jq -c -S .Tags)"
+as_writer untag-resource --resource "$versioned_arn" --tag-keys stage >/dev/null
+check "UntagResource removes a tag by its key" '{"team":"shop"}' "$(as_reader list-tags --resource "$versioned_arn" | jq -c .Tags)"
+check "a key that may only read the function can't tag it, and tags go on the function, not on its alias" \
+  "refused AccessDeniedException refused InvalidParameterValueException" \
+  "$(outcome as_reader tag-resource --resource "$versioned_arn" --tags team=x) $(outcome as_writer tag-resource --resource "$versioned_arn:live" --tags team=x)"
+check "the audit log names each change, and the key that made it" \
+  "function.tag function.tag function.untag access_key:$(jq -r .id <<<"$writer")" \
+  "$(as_ver GET /audit-log | jq -r --arg r "function:$versioned_id" \
+    '[.entries[] | select(.resource == $r and (.action == "function.tag" or .action == "function.untag"))] | reverse | "\(map(.action) | join(" ")) \(map(.actor) | unique | join(" "))"')"
+}
+section_def lambda_tags section_lambda_tags lambda_reads budget=15
+
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"
 created="$(http POST /functions "$(jq -n --arg code "$echo_code" '{name: "e2e-scheduled", runtime: "nodejs", code: $code, memory: 128, timeout: 5}')")"

@@ -1,3 +1,5 @@
+import { HttpException } from '@nestjs/common';
+
 /**
  * An error as AWS Lambda answers it, in its REST JSON protocol (ADR 0014): an
  * HTTP status, the error's name in the `x-amzn-ErrorType` header, which AWS's
@@ -43,3 +45,28 @@ export const tooManyRequests = (message: string, retryAfterSeconds: number) =>
 /** An operation FF doesn't offer: 400, which no client tries again. */
 export const unknownOperation = (message: string) => new LambdaError(400, 'UnknownOperationException', message);
 export const serviceException = () => new LambdaError(500, 'ServiceException', 'The AWS Lambda service encountered an internal error.');
+
+/** Lambda's name for each refusal of FF's API that its services give: the same status, the same message. */
+const NAMES: Record<number, string> = {
+  400: 'InvalidParameterValueException',
+  403: 'AccessDeniedException',
+  404: 'ResourceNotFoundException',
+  409: 'ResourceConflictException',
+  412: 'PreconditionFailedException',
+  413: 'RequestEntityTooLargeException',
+  429: 'TooManyRequestsException',
+};
+
+/**
+ * A refusal of FF's services, which FF's API answers, as Lambda's: its status
+ * and its message, under the name Lambda gives that status; a failure of the
+ * platform's, 500 or 503, Lambda's ServiceException, which the SDKs try again.
+ */
+export function lambdaErrorOf(error: HttpException): LambdaError {
+  const status = error.getStatus();
+  const answer = error.getResponse();
+  const said = typeof answer === 'string' ? answer : (answer as { message?: unknown }).message;
+  const message = Array.isArray(said) ? said.join('; ') : typeof said === 'string' ? said : error.message;
+  if (status >= 500) return new LambdaError(status, 'ServiceException', message);
+  return new LambdaError(status, NAMES[status] ?? 'InvalidRequestContentException', message);
+}

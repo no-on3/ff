@@ -161,6 +161,15 @@ export interface LambdaAnswer {
 
 export type LambdaHandler = (call: LambdaCall, caller: LambdaCaller) => Promise<LambdaAnswer>;
 
+/** An operation's answer of 200, its document Lambda's JSON. */
+export const ok = (document: unknown): LambdaAnswer => ({ status: 200, document });
+
+/** The function the front door found where the request's path or its tag's resource names one. */
+export function namedFunction(caller: LambdaCaller): Function {
+  if (!caller.function_) throw new Error('The front door finds the function a path names before its operation runs');
+  return caller.function_;
+}
+
 /** A group of operations built over FF's services: each one's handler, by the operation's name. */
 export interface LambdaHandlers {
   readonly handlers: Record<string, LambdaHandler>;
