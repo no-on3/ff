@@ -6,7 +6,7 @@ import { bytesText, deadLetterText, messagesText, queueNameProblem } from '../li
 import { can } from '../lib/session';
 import { Queue, queuesApi } from '../services/api';
 import { useSession } from '../session/session';
-import AccessKeys from './AccessKeys';
+import { AccessKeysNote } from './AccessKeys';
 import Icon from './Icon';
 import { Page, PageHeader } from './Page';
 import { Callout } from './Panel';
@@ -157,7 +157,7 @@ const Queues: React.FC = () => {
           calls that don&apos;t wait among them.
         </p>
       )}
-      {owner && <AccessKeys queues={queues} open={open} />}
+      <AccessKeysNote owner={owner} what="them" />
     </Page>
   );
 };

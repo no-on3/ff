@@ -1,4 +1,4 @@
-import { ALL_FUNCTIONS, type Bucket, type BucketMetrics, type CreatedStorageKey, type MeAccount, type StorageKey } from '../services/api';
+import type { Bucket, BucketMetrics, MeAccount } from '../services/api';
 
 /** A bucket's name, as the API takes it: AWS's rule without dots. contract.test.ts checks it against the API's. */
 export const BUCKET_NAME = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
@@ -13,37 +13,6 @@ export function bucketNameProblem(name: string): string | null {
   if (RESERVED.some((pattern) => pattern.test(name))) return 'AWS keeps names like this one for itself: a bucket on FF must be able to move to S3';
   return null;
 }
-
-/**
- * What a key reaches, in words: every bucket and queue of the account when it
- * names nothing, else those it names, its read-only theirs, and its functions
- * at their level.
- */
-export function keyReach(key: Pick<StorageKey, 'buckets' | 'queues' | 'readOnly' | 'functions' | 'functionAccess'>): string {
-  const storage = [key.buckets && `buckets ${key.buckets.join(', ')}`, key.queues && `queues ${key.queues.join(', ')}`].filter(Boolean).join('; ');
-  const functions = key.functions && `${key.functions.includes(ALL_FUNCTIONS) ? 'every function' : `functions ${key.functions.join(', ')}`}, to ${key.functionAccess}`;
-  if (!storage && !functions) return key.readOnly ? 'Every bucket and queue, read-only' : 'Every bucket and queue';
-  const reach = [storage && (key.readOnly ? `${storage}, read-only` : storage), functions].filter(Boolean).join('; ');
-  return reach.charAt(0).toUpperCase() + reach.slice(1);
-}
-
-/** The variables AWS's SDKs and CLI read, for a key just made: to export in a shell, or set as a function's secrets. */
-export function awsVariables(key: CreatedStorageKey): Array<[name: string, value: string]> {
-  return [
-    ['AWS_ACCESS_KEY_ID', key.id],
-    ['AWS_SECRET_ACCESS_KEY', key.secretAccessKey],
-    ['AWS_REGION', key.region],
-    ['AWS_ENDPOINT_URL_S3', key.endpoint],
-    ['AWS_ENDPOINT_URL_SQS', key.sqsEndpoint],
-    ['AWS_ENDPOINT_URL_SESV2', key.sesEndpoint],
-  ];
-}
-
-/** Those variables as shell lines. */
-export const exportLines = (key: CreatedStorageKey): string =>
-  awsVariables(key)
-    .map(([name, value]) => `export ${name}=${value}`)
-    .join('\n');
 
 /** What the buckets page says when the account's buckets near or reach the plan's storage, all of them together; null under 80%. */
 export function storageNotice(account: Pick<MeAccount, 'bucketStorageNotice' | 'plan'>): { tone: 'warning' | 'danger'; title: string; text: string } | null {

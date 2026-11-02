@@ -46,6 +46,7 @@ import databaseEntitySource from '../../BE/src/databases/database.entity.ts?raw'
 import databaseNamesSource from '../../BE/src/databases/database-names.ts?raw';
 import storageDtoSource from '../../BE/src/storage/dto/storage.dto.ts?raw';
 import storageNamesSource from '../../BE/src/storage/storage-names.ts?raw';
+import storageKeySource from '../../BE/src/storage/storage-key.entity.ts?raw';
 import queueDtoSource from '../../BE/src/queues/dto/queue.dto.ts?raw';
 import eventSourceDtoSource from '../../BE/src/event-sources/dto/event-source.dto.ts?raw';
 import bucketNotificationsDtoSource from '../../BE/src/storage/dto/notifications.dto.ts?raw';
@@ -64,6 +65,7 @@ import { ALIAS_FIELDS, ALIAS_NAME, VERSION_FIELDS, aliasBody, rollbackBody } fro
 import { CACHE_NAME } from './lib/caches';
 import { EMAIL_ACCOUNT_FIELDS, IDENTITY_FIELDS, IDENTITY_STATUSES, MESSAGE_FIELDS, RECIPIENT_FIELDS, RECIPIENT_STATUSES, SEND_FIELDS, SUPPRESSION_FIELDS } from './lib/email';
 import { DATABASE_NAME } from './lib/databases';
+import { KEY_NAME } from './lib/access-keys';
 import { BUCKET_NAME } from './lib/buckets';
 import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
 import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES, eventSourceBody, eventSourceForm } from './lib/event-sources';
@@ -83,6 +85,8 @@ import {
   CACHE_USAGE_FIELDS,
   EMAIL_USAGE_FIELDS,
   STORAGE_KEY_FIELDS,
+  FUNCTION_ACCESS,
+  ALL_FUNCTIONS,
   CACHE_FIELDS,
   CACHE_STATUSES,
   DATABASE_FIELDS,
@@ -610,6 +614,9 @@ describe("a customer's bucket and its access keys (ADR 0009)", () => {
     expect(dtoFields(storageDtoSource, 'export class StorageKeyView {')).toEqual([...STORAGE_KEY_FIELDS]);
     expect(dtoFields(storageDtoSource, 'export class CreatedStorageKey extends StorageKeyView {')).toEqual(['secretAccessKey', 'endpoint', 'sqsEndpoint', 'sesEndpoint', 'region']);
     expect(/export const BUCKET_NAME = \/(.+)\/;/.exec(storageNamesSource)?.[1]).toBe(BUCKET_NAME.source);
+    expect(/export const KEY_NAME = \/(.+)\/;/.exec(storageDtoSource)?.[1]).toBe(KEY_NAME.source);
+    expect(/export const FUNCTION_ACCESS = \[(.+)\] as const;/.exec(storageKeySource)?.[1].match(/'[^']+'/g)?.map((quoted) => quoted.slice(1, -1))).toEqual([...FUNCTION_ACCESS]);
+    expect(/export const ALL_FUNCTIONS = '(.+)';/.exec(storageKeySource)?.[1]).toBe(ALL_FUNCTIONS);
   });
 
   it("have the API's metrics, as CloudWatch names S3's, and their month on the Usage page", () => {

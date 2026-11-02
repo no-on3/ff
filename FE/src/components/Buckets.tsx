@@ -7,7 +7,7 @@ import { apiErrorMessage } from '../lib/functions';
 import { can } from '../lib/session';
 import { Bucket, bucketsApi } from '../services/api';
 import { useSession } from '../session/session';
-import AccessKeys from './AccessKeys';
+import { AccessKeysNote } from './AccessKeys';
 import Icon from './Icon';
 import { Page, PageHeader } from './Page';
 import { Callout } from './Panel';
@@ -16,8 +16,8 @@ import StatusPill from './StatusPill';
 /**
  * The account's buckets, as AWS S3 gives them (ADR 0009): every member sees
  * them; owners and developers of an active account make and delete them; the
- * owners make the access keys AWS's SDKs and CLI use, and revoke them
- * (AccessKeys, which the Queues page shows too).
+ * owners make the access keys AWS's SDKs and CLI use on a page of their own
+ * (AccessKeys), which this page and the Queues page point to.
  */
 const Buckets: React.FC = () => {
   const { account } = useSession();
@@ -206,7 +206,7 @@ const Buckets: React.FC = () => {
           )
         )}
       </section>
-      {owner && <AccessKeys buckets={buckets} open={open} />}
+      <AccessKeysNote owner={owner} what="them" />
     </Page>
   );
 };
