@@ -77,6 +77,39 @@ fn add_names_the_function_and_the_queue_and_sends_lambdas_settings_the_queue_by_
 }
 
 #[test]
+fn add_reads_the_queue_through_an_alias_named_after_a_colon_or_by_qualifier() {
+    let mut through_live = mapping("Enabled");
+    through_live["functionArn"] = json!(format!("arn:aws:lambda:tn-tunis-1:{ACCOUNT}:function:orders-worker:live"));
+    let api = Server::start(vec![
+        Reply::json(200, json!([function()])),
+        Reply::json(200, queue()),
+        Reply::json(201, through_live.clone()),
+        Reply::json(200, json!([function()])),
+        Reply::json(200, queue()),
+        Reply::json(201, through_live),
+    ]);
+    let dir = with_key(&api.url);
+
+    ff(&dir)
+        .args(["event-sources", "add", "orders", "orders-worker:live"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("orders-worker:live reads the queue orders: "));
+    ff(&dir).args(["event-sources", "add", "orders", "orders-worker", "--qualifier", "live"]).assert().success();
+    for index in [2, 5] {
+        assert_eq!(body(&api, index)["qualifier"], json!("live"), "request {index}");
+    }
+    ff(&dir)
+        .args(["event-sources", "add", "orders", "orders-worker:live", "--qualifier", "3"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "orders-worker:live names its version or alias, and --qualifier another: name it once",
+        ));
+    assert_eq!(api.requests().len(), 6);
+}
+
+#[test]
 fn settings_out_of_lambdas_ranges_and_a_mapping_id_that_isnt_one_are_refused_before_any_call() {
     let api = Server::start(vec![]);
     let dir = with_key(&api.url);

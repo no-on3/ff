@@ -81,6 +81,55 @@ fn deploy_sends_nothing_when_nothing_changed() {
 }
 
 #[test]
+fn deploy_publish_publishes_a_version_and_points_the_alias_at_it() {
+    let version = json!({ "functionId": "f1", "functionArn": "arn:aws:lambda:tn-tunis-1:000000000001:function:hello:2",
+        "version": "2", "description": "", "runtime": "python", "handler": "hello.handler", "packageType": "Zip", "codeSha256": "c2",
+        "codeSize": 99, "memory": 128, "timeout": 5, "eventFormat": "lambda", "awsEndpoints": [], "revisionId": "v-2",
+        "createdAt": "2026-11-02T08:00:00.000Z" });
+    let alias = |number: &str| {
+        json!({ "aliasArn": "arn:aws:lambda:tn-tunis-1:000000000001:function:hello:live", "name": "live", "functionVersion": number,
+                "description": "", "revisionId": format!("r-{number}"), "createdAt": "2026-11-01T08:00:00.000Z",
+                "updatedAt": "2026-11-02T08:00:00.000Z" })
+    };
+    let api = Server::start(vec![
+        Reply::json(200, json!([function(CODE)])),
+        Reply::json(200, json!([])),
+        Reply::json(201, version),
+        Reply::json(200, json!([alias("1")])),
+        Reply::json(200, alias("2")),
+    ]);
+    let code = project(CODE);
+
+    ff(&with_key(&api.url))
+        .args(["deploy", code.path().join("hello.py").to_str().unwrap(), "--publish", "--alias", "live"])
+        .assert()
+        .success()
+        .stdout(
+            "hello: no changes (python, 128 MB, 5 s, ACTIVE)\nversion 2 published\nhello:live: version 1 → version 2\n",
+        );
+    let requests = api.requests();
+    assert_eq!((requests[2].method.as_str(), requests[2].path.as_str()), ("POST", "/functions/f1/versions"));
+    assert_eq!((requests[4].method.as_str(), requests[4].path.as_str()), ("PUT", "/functions/f1/aliases/live"));
+    assert_eq!(
+        body(&requests[4]),
+        json!({ "functionVersion": "2", "routingConfig": { "additionalVersionWeights": {} }, "revisionId": "r-1" })
+    );
+}
+
+#[test]
+fn deploy_alias_needs_publish() {
+    let api = Server::start(vec![]);
+    let code = project(CODE);
+
+    ff(&with_key(&api.url))
+        .args(["deploy", code.path().join("hello.py").to_str().unwrap(), "--alias", "live"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--publish"));
+    assert!(api.requests().is_empty());
+}
+
+#[test]
 fn deploy_updates_the_function_another_deploy_made_meanwhile() {
     let api = Server::start(vec![
         Reply::json(200, json!([])),
@@ -192,6 +241,16 @@ fn invoke_prints_the_answer_and_how_the_call_went() {
     let requests = api.requests();
     assert_eq!((requests[1].method.as_str(), requests[1].path.as_str()), ("POST", "/functions/f1/invoke"));
     assert_eq!(body(&requests[1]), json!({ "input": { "name": "Tunis" } }));
+}
+
+#[test]
+fn invoke_names_a_version_or_an_alias_after_a_colon_as_lambda_does() {
+    let api = Server::start(vec![Reply::json(200, json!([function(CODE)])), Reply::json(201, invocation())]);
+
+    ff(&with_key(&api.url)).args(["invoke", "hello:live", "--data", r#"{"name": "Tunis"}"#]).assert().success();
+    let requests = api.requests();
+    assert_eq!((requests[1].method.as_str(), requests[1].path.as_str()), ("POST", "/functions/f1/invoke"));
+    assert_eq!(body(&requests[1]), json!({ "input": { "name": "Tunis" }, "qualifier": "live" }));
 }
 
 #[test]

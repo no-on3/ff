@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::function_named;
+use crate::api::types::{Function, function_named};
 use crate::api::{Call, Client};
 use crate::cli::{Format, UrlAuth};
+use crate::config::Settings;
 use crate::error::{Error, Kind};
 use crate::table::{table, time};
 
@@ -18,6 +19,9 @@ use crate::table::{table, time};
 #[serde(rename_all = "camelCase")]
 pub struct FunctionUrl {
     pub function_url: String,
+    /// The alias whose calls it makes; none for `$LATEST`'s URL. Absent from an API before aliases.
+    #[serde(default)]
+    pub alias: Option<String>,
     pub auth_type: String,
     pub cors: Option<Value>,
     /// `BUFFERED`, or `RESPONSE_STREAM` for a URL that streams its answer.
@@ -67,13 +71,70 @@ fn callers(auth_type: &str) -> &'static str {
     }
 }
 
-/// The function's URL, or none: a 404 for its URL is the absence of one.
-fn url_of(client: &Client, id: &str) -> Result<Option<FunctionUrl>, Error> {
-    client.json_if_any(&Call::get(format!("/functions/{id}/url")))
+/// The URL a command names: the function's, `$LATEST`'s, or with `--alias` an alias's, which every route of a URL
+/// and of its domains takes as `?qualifier=`, as Lambda's take `Qualifier`.
+struct UrlTarget<'a> {
+    client: Client,
+    function: Function,
+    name: &'a str,
+    alias: Option<&'a str>,
 }
 
-fn no_url(name: &str) -> Error {
-    Error::new(Kind::Failed, format!("{name} has no URL: `ff url enable {name} --auth none|key` gives it one"))
+impl<'a> UrlTarget<'a> {
+    fn open(name: &'a str, alias: Option<&'a str>, context: &Context) -> Result<Self, Error> {
+        Self::open_with(&context.settings()?, name, alias)
+    }
+
+    fn open_with(settings: &Settings, name: &'a str, alias: Option<&'a str>) -> Result<Self, Error> {
+        let client = Client::new(settings)?;
+        let function = function_named(&client, name)?;
+        Ok(UrlTarget { client, function, name, alias })
+    }
+
+    /// `/functions/<id>/url` and what follows, for the alias when there is one.
+    fn call(&self, make: fn(String) -> Call, rest: &str) -> Call {
+        let call = make(format!("/functions/{}/url{rest}", self.function.id));
+        match self.alias {
+            Some(alias) => call.query("qualifier", alias),
+            None => call,
+        }
+    }
+
+    fn call_with(&self, make: fn(String, Value) -> Call, rest: &str, body: Value) -> Call {
+        let call = make(format!("/functions/{}/url{rest}", self.function.id), body);
+        match self.alias {
+            Some(alias) => call.query("qualifier", alias),
+            None => call,
+        }
+    }
+
+    /// `orders`, or `orders:live`, as Lambda writes a qualified name.
+    fn label(&self) -> String {
+        match self.alias {
+            Some(alias) => format!("{}:{alias}", self.name),
+            None => self.name.to_owned(),
+        }
+    }
+
+    /// The flags that name it again in a hint: `orders`, or `orders --alias live`.
+    fn args(&self) -> String {
+        match self.alias {
+            Some(alias) => format!("{} --alias {alias}", self.name),
+            None => self.name.to_owned(),
+        }
+    }
+
+    /// Its URL, or none: a 404 for it is the absence of one.
+    fn url(&self) -> Result<Option<FunctionUrl>, Error> {
+        self.client.json_if_any(&self.call(Call::get, ""))
+    }
+
+    fn no_url(&self) -> Error {
+        Error::new(
+            Kind::Failed,
+            format!("{} has no URL: `ff url enable {} --auth none|key` gives it one", self.label(), self.args()),
+        )
+    }
 }
 
 /// CORS as the API takes it, Lambda's fields, from what the flags say.
@@ -99,11 +160,10 @@ pub fn cors(origins: &[String], methods: &[String], headers: &[String]) -> Optio
     Some(Value::Object(cors))
 }
 
-pub fn show(name: &str, context: &Context) -> Result<(), Error> {
-    let client = Client::new(&context.settings()?)?;
-    let function = function_named(&client, name)?;
-    let url = url_of(&client, &function.id)?.ok_or_else(|| no_url(name))?;
-    let domains: Vec<Domain> = client.json(&Call::get(format!("/functions/{}/url/domains", function.id)))?;
+pub fn show(name: &str, alias: Option<&str>, context: &Context) -> Result<(), Error> {
+    let target = UrlTarget::open(name, alias, context)?;
+    let url = target.url()?.ok_or_else(|| target.no_url())?;
+    let domains: Vec<Domain> = target.client.json(&target.call(Call::get, "/domains"))?;
     let document = json!({ "url": url, "domains": domains });
     context.out.result(&document, || {
         let mut lines =
@@ -118,12 +178,15 @@ pub fn show(name: &str, context: &Context) -> Result<(), Error> {
     })
 }
 
-pub fn enable(name: &str, auth: Option<UrlAuth>, cors: Option<Value>, context: &Context) -> Result<(), Error> {
-    let client = Client::new(&context.settings()?)?;
-    let function = function_named(&client, name)?;
-    let existing = url_of(&client, &function.id)?;
-    let path = format!("/functions/{}/url", function.id);
-    let (url, action) = match existing {
+pub fn enable(
+    name: &str,
+    alias: Option<&str>,
+    auth: Option<UrlAuth>,
+    cors: Option<Value>,
+    context: &Context,
+) -> Result<(), Error> {
+    let target = UrlTarget::open(name, alias, context)?;
+    let (url, action) = match target.url()? {
         None => {
             let auth = auth.ok_or_else(|| {
                 Error::usage("Say who may call the new address: --auth none (anyone), or --auth key (the account's API keys with functions:invoke)")
@@ -132,7 +195,7 @@ pub fn enable(name: &str, auth: Option<UrlAuth>, cors: Option<Value>, context: &
             if let Some(cors) = cors {
                 body["cors"] = cors;
             }
-            (client.json::<FunctionUrl>(&Call::post(path, body))?, "has a URL")
+            (target.client.json::<FunctionUrl>(&target.call_with(Call::post, "", body))?, "has a URL")
         }
         Some(url) => {
             let mut body = Map::new();
@@ -145,17 +208,21 @@ pub fn enable(name: &str, auth: Option<UrlAuth>, cors: Option<Value>, context: &
             if body.is_empty() {
                 (url, "has its URL already")
             } else {
-                (client.json::<FunctionUrl>(&Call::put(path, Value::Object(body)))?, "has its URL changed")
+                (
+                    target.client.json::<FunctionUrl>(&target.call_with(Call::put, "", Value::Object(body)))?,
+                    "has its URL changed",
+                )
             }
         }
     };
-    context.out.result(&url, || format!("{name} {action}: {}\n{}", url.function_url, callers(&url.auth_type)))
+    context
+        .out
+        .result(&url, || format!("{} {action}: {}\n{}", target.label(), url.function_url, callers(&url.auth_type)))
 }
 
-pub fn disable(name: &str, yes: bool, context: &Context) -> Result<(), Error> {
-    let client = Client::new(&context.settings()?)?;
-    let function = function_named(&client, name)?;
-    let url = url_of(&client, &function.id)?.ok_or_else(|| no_url(name))?;
+pub fn disable(name: &str, alias: Option<&str>, yes: bool, context: &Context) -> Result<(), Error> {
+    let target = UrlTarget::open(name, alias, context)?;
+    let url = target.url()?.ok_or_else(|| target.no_url())?;
     if !super::functions::confirmed(
         "ff url disable",
         &format!("Delete {}? It stops answering at once, and a new URL would have another address", url.function_url),
@@ -163,9 +230,9 @@ pub fn disable(name: &str, yes: bool, context: &Context) -> Result<(), Error> {
     )? {
         return context.out.result(&json!({ "deleted": false }), || "Nothing deleted".to_owned());
     }
-    client.done(&Call::delete(format!("/functions/{}/url", function.id)))?;
+    target.client.done(&target.call(Call::delete, ""))?;
     context.out.result(&json!({ "deleted": true, "functionUrl": url.function_url }), || {
-        format!("{name}'s URL deleted: {} answers 404", url.function_url)
+        format!("{}'s URL deleted: {} answers 404", target.label(), url.function_url)
     })
 }
 
@@ -191,13 +258,16 @@ pub fn records_text(domain: &Domain) -> String {
     lines.join("\n")
 }
 
-pub fn domains_list(name: &str, context: &Context) -> Result<(), Error> {
-    let client = Client::new(&context.settings()?)?;
-    let function = function_named(&client, name)?;
-    let domains: Vec<Domain> = client.json(&Call::get(format!("/functions/{}/url/domains", function.id)))?;
+pub fn domains_list(name: &str, alias: Option<&str>, context: &Context) -> Result<(), Error> {
+    let target = UrlTarget::open(name, alias, context)?;
+    let domains: Vec<Domain> = target.client.json(&target.call(Call::get, "/domains"))?;
     context.out.result(&domains, || {
         if domains.is_empty() {
-            return format!("{name}'s URL has no domain of its own: `ff domains add {name} <domain>` adds one");
+            return format!(
+                "{}'s URL has no domain of its own: `ff domains add {} <domain>` adds one",
+                target.label(),
+                target.args()
+            );
         }
         let rows: Vec<Vec<String>> = domains
             .iter()
@@ -214,34 +284,40 @@ pub fn domains_list(name: &str, context: &Context) -> Result<(), Error> {
     })
 }
 
-pub fn domains_add(name: &str, domain: &str, context: &Context) -> Result<(), Error> {
-    let client = Client::new(&context.settings()?)?;
-    let function = function_named(&client, name)?;
-    let added: Domain =
-        client.json(&Call::post(format!("/functions/{}/url/domains", function.id), json!({ "domain": domain })))?;
-    context.out.result(&added, || format!("{}\nthen: ff domains verify {name} {}", records_text(&added), added.domain))
+pub fn domains_add(name: &str, alias: Option<&str>, domain: &str, context: &Context) -> Result<(), Error> {
+    let target = UrlTarget::open(name, alias, context)?;
+    let added: Domain = target.client.json(&target.call_with(Call::post, "/domains", json!({ "domain": domain })))?;
+    context.out.result(&added, || {
+        format!("{}\nthen: ff domains verify {} {}", records_text(&added), target.args(), added.domain)
+    })
 }
 
-pub fn domains_verify(name: &str, domain: &str, context: &Context) -> Result<(), Error> {
-    let client = Client::new(&context.settings()?)?;
-    let function = function_named(&client, name)?;
-    let checked: Domain = client
-        .json(&Call::post(format!("/functions/{}/url/domains/{}/verify", function.id, encode(domain)), json!({})))?;
+pub fn domains_verify(name: &str, alias: Option<&str>, domain: &str, context: &Context) -> Result<(), Error> {
+    let target = UrlTarget::open(name, alias, context)?;
+    let checked: Domain =
+        target.client.json(&target.call_with(Call::post, &format!("/domains/{}/verify", encode(domain)), json!({})))?;
     context.out.result(&checked, || records_text(&checked))
 }
 
-pub fn domains_remove(name: &str, domain: &str, yes: bool, context: &Context) -> Result<(), Error> {
-    let client = Client::new(&context.settings()?)?;
-    let function = function_named(&client, name)?;
+pub fn domains_remove(
+    name: &str,
+    alias: Option<&str>,
+    domain: &str,
+    yes: bool,
+    context: &Context,
+) -> Result<(), Error> {
+    let target = UrlTarget::open(name, alias, context)?;
     if !super::functions::confirmed(
         "ff domains remove",
-        &format!("Remove {domain} from {name}'s URL? It stops answering there"),
+        &format!("Remove {domain} from {}'s URL? It stops answering there", target.label()),
         yes,
     )? {
         return context.out.result(&json!({ "removed": false }), || "Nothing removed".to_owned());
     }
-    client.done(&Call::delete(format!("/functions/{}/url/domains/{}", function.id, encode(domain))))?;
-    context.out.result(&json!({ "removed": true, "domain": domain }), || format!("{domain} removed from {name}'s URL"))
+    target.client.done(&target.call(Call::delete, &format!("/domains/{}", encode(domain))))?;
+    context.out.result(&json!({ "removed": true, "domain": domain }), || {
+        format!("{domain} removed from {}'s URL", target.label())
+    })
 }
 
 /// A domain in a path: its letters, digits, dots and hyphens need no escaping; anything else is
@@ -285,21 +361,23 @@ pub fn http_request(method: &str, target: &str, headers: &[String]) -> Result<Ht
 
 /// A request to the function's URL, as a browser or a webhook would make it, and the answer as it
 /// comes: any status is the function's answer. The account's API key goes with it when the URL
-/// takes one. A host under `localhost` is this machine's, whatever the system's resolver says.
+/// takes one. A host under `localhost` is this machine's, whatever the system's resolver says. An alias's call goes
+/// through the alias's URL.
 pub fn invoke_http(
     name: &str,
+    alias: Option<&str>,
     method: &str,
     target: &str,
     headers: &[String],
     data: Option<&str>,
     context: &Context,
 ) -> Result<(), Error> {
-    let (method, target, headers) = http_request(method, target, headers)?;
+    let (method, path, headers) = http_request(method, target, headers)?;
     let settings = context.settings()?;
-    let client = Client::new(&settings)?;
-    let function = function_named(&client, name)?;
-    let url = url_of(&client, &function.id)?.ok_or_else(|| no_url(name))?;
-    let address = format!("{}{}", url.function_url.trim_end_matches('/'), target);
+    let target = UrlTarget::open_with(&settings, name, alias)?;
+    let function = &target.function;
+    let url = target.url()?.ok_or_else(|| target.no_url())?;
+    let address = format!("{}{}", url.function_url.trim_end_matches('/'), path);
     let uri: ureq::http::Uri =
         address.parse().map_err(|_| Error::new(Kind::Failed, format!("The URL {address} doesn't parse")))?;
     let authority = uri.authority().map(|authority| authority.as_str().to_owned()).unwrap_or_default();

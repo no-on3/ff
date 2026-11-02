@@ -157,6 +157,36 @@ pub enum Command {
         yes: bool,
     },
 
+    /// Publish a version of a function: its code, settings and variables as they are now, which never change, as AWS
+    /// Lambda's PublishVersion
+    Publish {
+        /// The function's name
+        name: String,
+
+        /// What the version is
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// List a function's versions, newest first, with the aliases whose calls reach each; or delete one
+    Versions {
+        /// The function's name
+        name: String,
+
+        /// Delete this version, which no alias may name: its number is never given again
+        #[arg(long, value_name = "VERSION", value_parser = clap::value_parser!(u32).range(1..))]
+        delete: Option<u32>,
+
+        /// With --delete, don't ask first: a script must say it
+        #[arg(long, short, requires = "delete")]
+        yes: bool,
+    },
+
+    /// A function's aliases, as AWS Lambda's: names for a version, or $LATEST, which calls (ff invoke orders:live),
+    /// URLs, schedules and queue readers name
+    #[command(subcommand)]
+    Alias(AliasCommand),
+
     /// Run a function on this machine, in Docker, as production runs it
     #[command(subcommand)]
     Local(LocalCommand),
@@ -326,6 +356,15 @@ pub struct DeployArgs {
     /// Its environment variables, KEY=value, repeated: all of them, as on Lambda, those not named removed
     #[arg(long = "env", value_name = "KEY=value")]
     pub env: Vec<String>,
+
+    /// Publish a version once it is deployed, as SAM's AutoPublishAlias does: the function as it is then, which never
+    /// changes
+    #[arg(long)]
+    pub publish: bool,
+
+    /// With --publish, point this alias at the new version, making it if the function hasn't it
+    #[arg(long, requires = "publish", value_name = "NAME")]
+    pub alias: Option<String>,
 }
 
 /// How a folder's libraries go into its package.
@@ -396,6 +435,52 @@ pub struct PackageArgs {
     pub compile: bool,
 }
 
+#[derive(Subcommand)]
+pub enum AliasCommand {
+    /// Point an alias at a version, or $LATEST, making it if the function hasn't it; with --also, a share of its calls
+    /// to a second version. A rollback is a set to the version before
+    Set {
+        /// The function's name
+        function: String,
+
+        /// The alias's name: letters, digits, - and _, not digits alone
+        alias: String,
+
+        /// The version its calls go to: its number, or $LATEST (latest), the function as it is. Its own name, as clap
+        /// keeps `version` for --version
+        #[arg(id = "to", value_name = "VERSION")]
+        version: String,
+
+        /// A second version and its share of the calls, 10% or 0.1, as Lambda's weighted aliases; without it, every call
+        /// goes to the first
+        #[arg(long, num_args = 2, value_names = ["VERSION", "SHARE"])]
+        also: Option<Vec<String>>,
+
+        /// What it is for
+        #[arg(long)]
+        description: Option<String>,
+    },
+
+    /// List a function's aliases: where each one's calls go, and its URL
+    List {
+        /// The function's name
+        function: String,
+    },
+
+    /// Remove an alias: its URL goes with it, and the versions it named stay
+    Remove {
+        /// The function's name
+        function: String,
+
+        /// The alias's name
+        alias: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
 pub enum Runtime {
     Nodejs,
@@ -413,7 +498,7 @@ impl Runtime {
 
 #[derive(Args)]
 pub struct InvokeArgs {
-    /// The function's name
+    /// The function's name, with a version or an alias after a colon to call it (orders:live, orders:3)
     pub name: String,
 
     /// The event: JSON, @file for a file's, or - for stdin's [default: {}]
@@ -1136,8 +1221,12 @@ pub enum EventSourcesCommand {
         /// The queue's name
         queue: String,
 
-        /// The function's name
+        /// The function's name, with a version or an alias after a colon to have it read the queue (orders-worker:live)
         function: String,
+
+        /// What reads the queue: a version's number, an alias's name, or $LATEST (latest), the function as it is
+        #[arg(long)]
+        qualifier: Option<String>,
 
         #[command(flatten)]
         batches: BatchArgs,
@@ -1173,6 +1262,10 @@ pub enum EventSourcesCommand {
     Update {
         /// The mapping's UUID
         uuid: String,
+
+        /// What reads the queue: a version's number, an alias's name, or $LATEST (latest), the function as it is
+        #[arg(long)]
+        qualifier: Option<String>,
 
         #[command(flatten)]
         batches: BatchArgs,
@@ -1317,12 +1410,20 @@ pub enum UrlCommand {
     Show {
         /// The function's name
         name: String,
+
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
     },
 
     /// Give it a URL, or change who may call it and its CORS
     Enable {
         /// The function's name
         name: String,
+
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
 
         /// Who may call it: none, anyone; key, the account's API keys with functions:invoke. Needed for a new URL
         #[arg(long, value_enum)]
@@ -1346,6 +1447,10 @@ pub enum UrlCommand {
         /// The function's name
         name: String,
 
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
+
         /// Don't ask first: a script must say it
         #[arg(long, short)]
         yes: bool,
@@ -1364,12 +1469,20 @@ pub enum DomainsCommand {
     List {
         /// The function's name
         name: String,
+
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
     },
 
     /// Add a domain of the account's, and show the DNS records that prove it
     Add {
         /// The function's name
         name: String,
+
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
 
         /// The domain, such as shop.example.tn
         domain: String,
@@ -1380,6 +1493,10 @@ pub enum DomainsCommand {
         /// The function's name
         name: String,
 
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
+
         /// The domain
         domain: String,
     },
@@ -1388,6 +1505,10 @@ pub enum DomainsCommand {
     Remove {
         /// The function's name
         name: String,
+
+        /// An alias's URL, rather than $LATEST's: each alias may have one of its own
+        #[arg(long)]
+        alias: Option<String>,
 
         /// The domain
         domain: String,
@@ -1417,6 +1538,11 @@ pub enum ScheduleCommand {
         /// The schedule's name, unique within the function
         #[arg(long = "name", default_value = "schedule")]
         schedule: String,
+
+        /// What it runs: a version's number, an alias's name, or $LATEST (latest), the function as it is [default: what it
+        /// runs already; $LATEST for a new schedule]
+        #[arg(long)]
+        qualifier: Option<String>,
 
         /// The function's event: JSON, @file or - for stdin [default: EventBridge's Scheduled Event]
         #[arg(long)]

@@ -10,8 +10,9 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::package::{folder_name, handler_of, size};
+use super::versions::{AliasRoute, publish_version, set_alias, set_text};
 use super::{Context, env};
-use crate::api::types::{Function, FunctionView, Scaling, StoredPackage, find};
+use crate::api::types::{Function, FunctionAlias, FunctionVersion, FunctionView, Scaling, StoredPackage, find};
 use crate::api::{Call, Client};
 use crate::cli::{DeployArgs, Runtime};
 use crate::config::is_function_name;
@@ -237,6 +238,56 @@ struct Deployed<'a> {
     /// A folder's package, as made.
     #[serde(skip_serializing_if = "Option::is_none")]
     package: Option<PackageSent<'a>>,
+    /// With --publish, the version published, and the alias pointed at it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    published: Option<Published>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Published {
+    version: FunctionVersion,
+    /// False when nothing changed since the last version, which Lambda answers with.
+    new: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alias: Option<FunctionAlias>,
+    /// What the alias was and is, for people.
+    #[serde(skip)]
+    alias_text: Option<String>,
+}
+
+/// With --publish, a version of the function as deployed, and the alias pointed at it.
+fn publish_deployed(client: &Client, function: &Function, args: &DeployArgs) -> Result<Option<Published>, Error> {
+    if !args.publish {
+        return Ok(None);
+    }
+    let (version, new) = publish_version(client, &function.id, None)?;
+    let (alias, alias_text) = match &args.alias {
+        Some(name) => {
+            let route = AliasRoute { version: version.version.clone(), also: None };
+            let (alias, before) = set_alias(client, &function.id, name, &route, None)?;
+            let text = set_text(&function.name, &alias, before.as_ref());
+            (Some(alias), Some(text))
+        }
+        None => (None, None),
+    };
+    Ok(Some(Published { version, new, alias, alias_text }))
+}
+
+/// `version 3 published`, then the alias's line.
+fn published_text(published: &Published) -> String {
+    let mut text = if published.new {
+        format!("\nversion {} published", published.version.version)
+    } else {
+        format!(
+            "\nversion {}, as nothing but the description changed since it was published",
+            published.version.version
+        )
+    };
+    if let Some(alias) = &published.alias_text {
+        text.push_str(&format!("\n{alias}"));
+    }
+    text
 }
 
 /// What one deploy is about: the function's name, what it should be, and its package.
@@ -369,6 +420,7 @@ fn finish(
         function
     };
 
+    let published = publish_deployed(client, &function, args)?;
     let package = deploy.package.map(|package| PackageSent {
         code_sha256: &package.code_sha256,
         code_size: package.zip.len() as u64,
@@ -387,14 +439,15 @@ fn finish(
         ),
         _ => String::new(),
     };
-    let deployed = Deployed { action, changed, seconds, function: function.view(), package };
+    let published_line = published.as_ref().map(published_text).unwrap_or_default();
+    let deployed = Deployed { action, changed, seconds, function: function.view(), package, published };
     context.out.result(&deployed, || match action {
         "unchanged" => format!(
-            "{name}: no changes ({}, {} MB, {} s, {})",
+            "{name}: no changes ({}, {} MB, {} s, {}){published_line}",
             function.runtime, function.memory, function.timeout, function.status
         ),
         _ => format!(
-            "{action} {name} ({}, {} MB, {} s): {} in {seconds} s{}{package_line}",
+            "{action} {name} ({}, {} MB, {} s): {} in {seconds} s{}{package_line}{published_line}",
             function.runtime,
             function.memory,
             function.timeout,

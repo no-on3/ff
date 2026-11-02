@@ -119,6 +119,35 @@ fn show_says_the_address_its_callers_and_domains_or_that_there_is_none() {
 }
 
 #[test]
+fn alias_names_an_aliass_own_url_on_every_route() {
+    let api = Server::start(vec![
+        Reply::json(200, listed()),
+        Reply::json(200, url("https://live.fn.ff.tn/", "NONE")),
+        Reply::json(200, json!([])),
+        Reply::json(200, listed()),
+        not_found(),
+    ]);
+    let dir = with_key(&api.url);
+
+    ff(&dir).args(["url", "show", "hello", "--alias", "live"]).assert().success();
+    ff(&dir)
+        .args(["url", "show", "hello", "--alias", "live"])
+        .assert()
+        .code(3)
+        .stderr("error: hello:live has no URL: `ff url enable hello --alias live --auth none|key` gives it one\n");
+    let paths: Vec<String> = api.requests().iter().map(|request| request.path.clone()).collect();
+    assert_eq!(
+        paths[1..],
+        [
+            "/functions/f1/url?qualifier=live",
+            "/functions/f1/url/domains?qualifier=live",
+            "/functions?name=hello",
+            "/functions/f1/url?qualifier=live"
+        ]
+    );
+}
+
+#[test]
 fn domains_add_says_the_records_to_make_then_verify_and_remove() {
     let api = Server::start(vec![
         Reply::json(200, listed()),

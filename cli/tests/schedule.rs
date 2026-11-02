@@ -28,15 +28,18 @@ fn body(request: &common::Request) -> Value {
 }
 
 #[test]
-fn list_shows_each_schedule_its_next_run_and_last() {
+fn list_shows_each_schedule_what_it_runs_its_next_run_and_last() {
+    let mut through_live = schedule("weekly", "rate(7 days)", false, Value::Null);
+    through_live["qualifier"] = json!("live");
     let api = Server::start(vec![
         Reply::json(200, listed()),
-        Reply::json(200, json!([schedule("nightly", "cron(0 2 * * ? *)", true, Value::Null)])),
+        Reply::json(200, json!([schedule("nightly", "cron(0 2 * * ? *)", true, Value::Null), through_live])),
     ]);
 
     ff(&with_key(&api.url)).args(["schedule", "list", "hello"]).assert().success().stdout(
-        "NAME     EXPRESSION         ENABLED  NEXT RUN (UTC)       LAST RUN (UTC)\n\
-         nightly  cron(0 2 * * ? *)  yes      2026-10-22 02:00:00  success, due 2026-10-21 02:00:00\n",
+        "NAME     RUNS        EXPRESSION         ENABLED  NEXT RUN (UTC)       LAST RUN (UTC)\n\
+         nightly  $LATEST     cron(0 2 * * ? *)  yes      2026-10-22 02:00:00  success, due 2026-10-21 02:00:00\n\
+         weekly   alias live  rate(7 days)       no       -                    success, due 2026-10-21 02:00:00\n",
     );
 }
 
@@ -63,6 +66,25 @@ fn set_makes_a_schedule_with_its_input_and_says_its_next_runs() {
             json!({ "name": "nightly", "expression": "cron(0 2 * * ? *)", "input": { "report": "daily" }, "enabled": true })
         )
     );
+}
+
+#[test]
+fn set_runs_a_version_or_an_alias_named_by_qualifier_and_says_so() {
+    let mut through_live = schedule("nightly", "cron(0 2 * * ? *)", true, Value::Null);
+    through_live["qualifier"] = json!("live");
+    let api = Server::start(vec![
+        Reply::json(200, listed()),
+        Reply::json(200, runs()),
+        Reply::json(200, json!([])),
+        Reply::json(201, through_live),
+    ]);
+
+    ff(&with_key(&api.url))
+        .args(["schedule", "set", "hello", "cron(0 2 * * ? *)", "--name", "nightly", "--qualifier", "live"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("hello's schedule nightly made: cron(0 2 * * ? *), running alias live"));
+    assert_eq!(body(&api.requests()[3])["qualifier"], json!("live"));
 }
 
 #[test]

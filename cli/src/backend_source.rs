@@ -3,7 +3,8 @@
 
 use serde::Serialize;
 
-/// The fields `class` declares in a source, in its order.
+/// The fields `class` declares in a source, in its order: each on a line of its own, or after its decorator on the
+/// decorator's line (`@ApiProperty() name: string;`).
 pub fn class_fields(source: &str, class: &str) -> Vec<String> {
     let start = source.find(&format!("export class {class} ")).unwrap_or_else(|| panic!("no class {class}"));
     let body = &source[start..];
@@ -11,7 +12,12 @@ pub fn class_fields(source: &str, class: &str) -> Vec<String> {
         .lines()
         .skip(1)
         .filter_map(|line| line.strip_prefix("  "))
-        .filter(|line| !line.starts_with(['@', ' ', '}', '/', '*', ')']))
+        .filter_map(|line| match line.strip_prefix('@') {
+            Some(decorated) if line.ends_with(';') => decorated.rsplit_once(") ").map(|(_, field)| field),
+            Some(_) => None,
+            None => Some(line),
+        })
+        .filter(|line| !line.starts_with([' ', '}', '/', '*', ')']))
         .filter_map(|line| line.split([':', '?']).next())
         .map(str::to_owned)
         .collect()
@@ -36,4 +42,16 @@ pub fn sorted_keys(value: &impl Serialize) -> Vec<String> {
 pub fn sorted(mut names: Vec<String>) -> Vec<String> {
     names.sort();
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_classs_fields_are_read_on_their_own_lines_and_after_their_decorators() {
+        let source = "export class View {\n  @ApiProperty({ example: 'a (b) c' }) name: string;\n  @ApiPropertyOptional({\n    \
+                      type: 'object',\n  })\n  environment?: Record<string, string>;\n  @IsOptional()\n  size: number;\n}\n";
+        assert_eq!(class_fields(source, "View"), ["name", "environment", "size"]);
+    }
 }

@@ -7,7 +7,9 @@
 # in ff logs --follow, an asynchronous call and a dry run, deploy again unchanged, scale, update, history, delete. A Python function that raises, and examples/slow.py past its timeout,
 # exit 5 with the call's ID, which the history shows, the Python one's calls that don't wait set
 # by ff async-config to go on to another function; code that fails to load exits 4, and the
-# function is kept, in ERROR, with its error. A second account finds none of the first's. Then
+# function is kept, in ERROR, with its error. A second account finds none of the first's. A function's versions
+# and aliases: published by ff deploy --publish and by ff publish, called as name:alias and name:version, an alias
+# moved with a share of its calls and rolled back, its own URL, a schedule through it, a version it names kept. Then
 # ff init for both runtimes, its folder run locally, deployed and invoked; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
@@ -359,6 +361,64 @@ check "after which ff invoke --http has nowhere to call" "3 error: cli-url has n
 ff delete cli-url --yes
 }
 section_def url section_url backend budget=15
+
+section_versions() {
+section "versions and aliases: ff publish, ff alias, name:alias called, through its URL and a schedule"
+answering() {
+  printf 'export async function handler() {\n  return { statusCode: 200, headers: { "content-type": "text/plain" }, body: "%s" };\n}\n' "$1" >"$work/versioned.ts"
+}
+answering one
+ff deploy "$work/versioned.ts" --name cli-ver --publish --alias live
+check "ff deploy --publish --alias publishes version 1 and points the alias at it" "0 version 1 published cli-ver:live made: version 1" \
+  "$(code) $(out | sed -n 2p) $(out | sed -n 3p)"
+answering two
+ff deploy "$work/versioned.ts" --name cli-ver --publish
+check "changed and published again, version 2, the alias where it was" "0 version 2 published" "$(code) $(out | tail -1)"
+answers=""
+for target in cli-ver cli-ver:live cli-ver:2; do
+  ff invoke "$target" --raw
+  answers+=" $(code) $(out | jq -r .body)"
+done
+check "a call runs \$LATEST, name:alias what the alias names, name:version that version" " 0 two 0 one 0 two" "$answers"
+ff publish cli-ver
+check "ff publish with nothing changed answers the last version, as Lambda does" \
+  "0 cli-ver: nothing but the description changed since version 2, which it is again, as Lambda answers" "$(code) $(out)"
+ff alias set cli-ver live 2 --also 1 10%
+check "ff alias set moves it, a share of its calls to the version before, saying what it was and is" \
+  "0 cli-ver:live: version 1 → version 2, 10% of its calls to version 1" "$(code) $(out)"
+ff versions cli-ver
+check "ff versions lists them newest first, with the aliases whose calls reach each" "0 2 live 90% 1 live 10%" \
+  "$(code) $(out | sed -n '2,3p' | awk '{ print $1, $9, $10 }' | paste -sd' ')"
+ff alias set cli-ver live 1
+check "a rollback is a set to the version before: every call to it, the share gone" \
+  "0 cli-ver:live: version 2, 10% of its calls to version 1 → version 1" "$(code) $(out)"
+ff invoke cli-ver:live --raw
+check "which the alias's calls run at once" "0 one" "$(code) $(out | jq -r .body)"
+ff url enable cli-ver --alias live --auth none
+alias_address="$(out | head -1 | sed 's/^cli-ver:live has a URL: //')"
+ff invoke cli-ver:live --http GET /
+check "the alias's own URL, which ff invoke name:alias --http calls, runs what it names" "0 HTTP 200 one" "$(code) $(out | head -1) $(out | tail -1)"
+ff alias list cli-ver
+check "ff alias list says where its calls go, and its URL" "0 live version 1 $alias_address" "$(code) $(out | sed -n 2p | awk '{ print $1, $2, $3, $4 }')"
+ff schedule set cli-ver "rate(1 hour)" --qualifier live
+check "a schedule runs the alias, which ff schedule set and list say" \
+  "0 cli-ver's schedule schedule made: rate(1 hour), running alias live, with EventBridge's Scheduled Event alias live" \
+  "$(code) $(out | head -1) $(ff schedule list cli-ver; out | sed -n 2p | awk '{ print $2, $3 }')"
+ff versions cli-ver --delete 1 --yes
+check "a version an alias names isn't deleted, in the API's words" \
+  "3 error: Version 1 of the function cli-ver is named by its alias live: point it at another version, or delete it, first" "$(code) $(err | head -1)"
+ff alias remove cli-ver live --yes
+check "ff alias remove removes it" "0 cli-ver:live removed: what names it stops until an alias of that name is made again" "$(code) $(out)"
+ff url show cli-ver --alias live
+check "its URL with it" "3" "$(code)"
+ff invoke cli-ver:live --raw
+check "and a call to it is refused, in the API's words" \
+  "3 error: The function cli-ver has no alias live: GET /functions/{id}/aliases lists them" "$(code) $(err | head -1)"
+ff versions cli-ver --delete 1 --yes
+check "then the version is deleted" "0 cli-ver: version 1 deleted" "$(code) $(out)"
+ff delete cli-ver --yes
+}
+section_def versions section_versions backend budget=40
 
 section_schedules() {
 section "schedules: ff schedule set, its runs read a few sections on"

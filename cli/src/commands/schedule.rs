@@ -15,7 +15,7 @@ use crate::table::{table, time};
 #[serde(rename_all = "camelCase")]
 pub(super) struct Schedule {
     id: String,
-    /// The version or the alias it runs; none: $LATEST. Kept by `ff schedule set`, which never sends it.
+    /// The version or the alias it runs; none: $LATEST. Kept by `ff schedule set` unless `--qualifier` names another.
     #[serde(default)]
     qualifier: Option<String>,
     pub(super) name: String,
@@ -32,6 +32,8 @@ pub(super) struct Schedule {
 /// What a schedule set sends: the expression always, the rest when asked.
 pub struct ScheduleChanges {
     pub expression: String,
+    /// The version or the alias it runs, `$LATEST` for the function as it is; None keeps what it runs.
+    pub qualifier: Option<String>,
     pub input: Option<Value>,
     pub no_input: bool,
     pub description: Option<String>,
@@ -71,6 +73,7 @@ pub fn list(function: &str, context: &Context) -> Result<(), Error> {
             .map(|schedule| {
                 vec![
                     schedule.name.clone(),
+                    super::versions::runs_text(schedule.qualifier.as_deref()),
                     schedule.expression.clone(),
                     if schedule.enabled { "yes" } else { "no" }.to_owned(),
                     schedule.next_run_at.as_deref().map(time).unwrap_or_else(|| "-".to_owned()),
@@ -78,7 +81,7 @@ pub fn list(function: &str, context: &Context) -> Result<(), Error> {
                 ]
             })
             .collect();
-        table(&["NAME", "EXPRESSION", "ENABLED", "NEXT RUN (UTC)", "LAST RUN (UTC)"], &rows)
+        table(&["NAME", "RUNS", "EXPRESSION", "ENABLED", "NEXT RUN (UTC)", "LAST RUN (UTC)"], &rows)
     })
 }
 
@@ -101,6 +104,9 @@ pub fn set(function: &str, name: &str, changes: ScheduleChanges, context: &Conte
     let existing = schedules(&client, &found.id)?.into_iter().find(|schedule| schedule.name == name);
     let mut body = Map::new();
     body.insert("expression".into(), changes.expression.trim().into());
+    if let Some(qualifier) = &changes.qualifier {
+        body.insert("qualifier".into(), super::versions::qualifier_named(qualifier).into());
+    }
     if let Some(input) = changes.input {
         body.insert("input".into(), input);
     } else if changes.no_input {
@@ -131,7 +137,11 @@ pub fn set(function: &str, name: &str, changes: ScheduleChanges, context: &Conte
         } else {
             "disabled: it doesn't run".to_owned()
         };
-        format!("{function}'s schedule {} {action}: {}, with {event}\n{next}", schedule.name, schedule.expression)
+        let runs = match &schedule.qualifier {
+            Some(qualifier) => format!(", running {}", super::versions::runs_text(Some(qualifier))),
+            None => String::new(),
+        };
+        format!("{function}'s schedule {} {action}: {}{runs}, with {event}\n{next}", schedule.name, schedule.expression)
     })
 }
 
