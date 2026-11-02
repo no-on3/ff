@@ -89,6 +89,7 @@ const CODE_STORAGE = migrationNames.find((name) => name.startsWith('CodeStorage'
 const INVOCATION_VERSIONS = migrationNames.find((name) => name.startsWith('InvocationVersions')) as string;
 const CAPACITY_VERSIONS = migrationNames.find((name) => name.startsWith('CapacityVersions')) as string;
 const URL_ALIASES = migrationNames.find((name) => name.startsWith('UrlAliases')) as string;
+const TRIGGER_QUALIFIERS = migrationNames.find((name) => name.startsWith('TriggerQualifiers')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -1055,6 +1056,42 @@ run('database schema (L2, real PostgreSQL)', () => {
       await migrateDownTo(dataSource, CAPACITY_VERSIONS);
       await expect(urls()).rejects.toThrow('column "alias" does not exist');
       expect(await dataSource.query(`SELECT domain FROM custom_domains WHERE function_id = $1`, [id])).toEqual([{ domain: 'shop.example.tn' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it('the trigger-qualifiers migration lets a schedule and a mapping name a version or an alias, those before running $LATEST, and refuses to revert once one does', async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, URL_ALIASES);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('before', $1, 'nodejs', 'x', 128, 5) RETURNING id`, [
+        ACCOUNT,
+      ]);
+      const [{ id: queue }] = await dataSource.query(`INSERT INTO queues (account_id, name, kind) VALUES ($1, 'orders', 'customer') RETURNING id`, [ACCOUNT]);
+      await dataSource.query(`INSERT INTO schedules (account_id, function_id, name, expression) VALUES ($1, $2, 'nightly', 'rate(1 day)')`, [ACCOUNT, id]);
+      await dataSource.query(`INSERT INTO event_source_mappings (account_id, function_id, queue_id, batch_size, maximum_batching_window_in_seconds) VALUES ($1, $2, $3, 10, 0)`, [
+        ACCOUNT,
+        id,
+        queue,
+      ]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const qualifiers = async () => [...(await dataSource.query(`SELECT qualifier FROM schedules`)), ...(await dataSource.query(`SELECT qualifier FROM event_source_mappings`))];
+      expect(await qualifiers()).toEqual([{ qualifier: null }, { qualifier: null }]);
+      await dataSource.query(`UPDATE schedules SET qualifier = 'live'`);
+      await dataSource.query(`UPDATE event_source_mappings SET qualifier = '2'`);
+      await migrateDownTo(dataSource, TRIGGER_QUALIFIERS);
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow(
+        '2 schedule(s) and mapping(s) name a version or an alias: reverting would have them run $LATEST instead',
+      );
+
+      // Back on $LATEST, both revert.
+      await dataSource.query(`UPDATE schedules SET qualifier = NULL`);
+      await dataSource.query(`UPDATE event_source_mappings SET qualifier = NULL`);
+      await migrateDownTo(dataSource, URL_ALIASES);
+      await expect(qualifiers()).rejects.toThrow('column "qualifier" does not exist');
       await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });

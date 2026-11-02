@@ -61,8 +61,8 @@ describe('POST /functions/:id/schedules, validated (L1)', () => {
     return { status: res.status, message: ((await res.json()) as { message?: string[] }).message };
   };
 
-  it("takes SAM's Schedule fields: a name, an expression, an input of any JSON, a description, enabled", async () => {
-    const body = { name: 'nightly.report_v2', expression: 'cron(0 2 * * ? *)', input: [1, 'two'], description: 'The night report', enabled: false };
+  it("takes SAM's Schedule fields: a name, an expression, an input of any JSON, a description, enabled, and the version or the alias it runs", async () => {
+    const body = { name: 'nightly.report_v2', expression: 'cron(0 2 * * ? *)', input: [1, 'two'], description: 'The night report', enabled: false, qualifier: 'live' };
 
     expect((await send(body)).status).toBe(201);
     expect(schedules.create).toHaveBeenLastCalledWith('123456789012', ID, body);
@@ -74,6 +74,7 @@ describe('POST /functions/:id/schedules, validated (L1)', () => {
     ['a name of 65 characters', { name: 'n'.repeat(65), expression: 'rate(1 hour)' }, 'name must be shorter than or equal to 64 characters'],
     ['no expression', { name: 'x' }, 'expression must be a string'],
     ['a field SAM has not', { name: 'x', expression: 'rate(1 hour)', state: 'ENABLED' }, 'property state should not exist'],
+    ["a qualifier Lambda's can't be", { name: 'x', expression: 'rate(1 hour)', qualifier: '0' }, "qualifier is $LATEST, a version's number or an alias's name, as Lambda's"],
   ])('refuses %s', async (_case, body, message) => {
     const answer = await send(body);
 

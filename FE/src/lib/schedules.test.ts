@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Schedule, emptyForm, formOf, lastRunText, nextRunText, scheduleOf } from './schedules';
+import { Schedule, emptyForm, formOf, lastRunText, nextRunText, runsText, scheduleOf } from './schedules';
 
 const when = (iso: string) => iso.slice(0, 16).replace('T', ' ');
 
@@ -33,6 +33,10 @@ describe("a schedule's form", () => {
 });
 
 describe('a schedule, to read', () => {
+  it('says the version or the alias it runs, and nothing for the function as it is', () => {
+    expect([runsText({ qualifier: '3' }), runsText({ qualifier: 'live' }), runsText({ qualifier: null })]).toEqual(['Runs version 3', 'Runs alias live', null]);
+  });
+
   it('says when it runs next, or why not', () => {
     expect(nextRunText({ enabled: true, nextRunAt: '2026-10-22T02:00:00.000Z' }, when)).toBe('2026-10-22 02:00');
     expect(nextRunText({ enabled: false, nextRunAt: null }, when)).toBe('Disabled');

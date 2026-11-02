@@ -9,6 +9,7 @@
 export const SCHEDULE_FIELDS = [
   'id',
   'functionId',
+  'qualifier',
   'name',
   'description',
   'expression',
@@ -25,6 +26,8 @@ export const SCHEDULE_FIELDS = [
 export interface Schedule {
   id: string;
   functionId: string;
+  /** The version or the alias it runs, which a change in the console leaves as it is; null: $LATEST. */
+  qualifier: string | null;
   name: string;
   description: string | null;
   expression: string;
@@ -95,6 +98,12 @@ export function lastRunText(schedule: Pick<Schedule, 'lastRunAt' | 'lastOutcome'
 }
 
 /** When the next run is, in words: off, none left, or its time. */
+/** What a schedule runs, when it names a version or an alias: "Runs version 3", "Runs alias live"; null for $LATEST, the function as it is. */
+export function runsText(schedule: Pick<Schedule, 'qualifier'>): string | null {
+  if (!schedule.qualifier) return null;
+  return /^[1-9][0-9]*$/.test(schedule.qualifier) ? `Runs version ${schedule.qualifier}` : `Runs alias ${schedule.qualifier}`;
+}
+
 export function nextRunText(schedule: Pick<Schedule, 'enabled' | 'nextRunAt'>, when: (iso: string) => string): string {
   if (!schedule.enabled) return 'Disabled';
   return schedule.nextRunAt ? when(schedule.nextRunAt) : 'No run left';

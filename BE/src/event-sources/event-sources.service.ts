@@ -3,9 +3,11 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
-import { functionArn } from '../functions/arns';
+import { longestTimeoutIn } from '../functions/aliases.service';
+import { qualifiedFunctionArn } from '../functions/arns';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
+import { qualifierDetail, qualifierText, routeNamed, storedQualifier } from '../functions/qualifier';
 import { PlansService } from '../plans/plans.service';
 import { CustomerQueues } from '../queues/customer-queues';
 import { Queue } from '../queues/queue.entity';
@@ -15,14 +17,15 @@ import { EventSourceMapping } from './event-source-mapping.entity';
 import { EventSourcePoller } from './event-source-poller';
 
 /** The settings a mapping keeps, as its columns name them. */
-type Settings = Pick<EventSourceMapping, 'batchSize' | 'maximumBatchingWindowInSeconds' | 'reportBatchItemFailures' | 'maximumConcurrency' | 'enabled'>;
+type Settings = Pick<EventSourceMapping, 'qualifier' | 'batchSize' | 'maximumBatchingWindowInSeconds' | 'reportBatchItemFailures' | 'maximumConcurrency' | 'enabled'>;
 
 /** Lambda's defaults for a new mapping of an SQS queue. */
-const DEFAULTS: Settings = { batchSize: 10, maximumBatchingWindowInSeconds: 0, reportBatchItemFailures: false, maximumConcurrency: null, enabled: true };
+const DEFAULTS: Settings = { qualifier: null, batchSize: 10, maximumBatchingWindowInSeconds: 0, reportBatchItemFailures: false, maximumConcurrency: null, enabled: true };
 
-/** The settings a body gives over `current`: what it leaves out stays; a null or empty scalingConfig removes the maximum. */
+/** The settings a body gives over `current`: what it leaves out stays; a null or empty scalingConfig removes the maximum; $LATEST is kept as no qualifier. */
 function settingsOf(dto: EventSourceSettingsDto, current: Settings): Settings {
   return {
+    qualifier: dto.qualifier === undefined ? current.qualifier : storedQualifier(dto.qualifier),
     batchSize: dto.batchSize ?? current.batchSize,
     maximumBatchingWindowInSeconds: dto.maximumBatchingWindowInSeconds ?? current.maximumBatchingWindowInSeconds,
     reportBatchItemFailures: dto.functionResponseTypes ? dto.functionResponseTypes.includes(REPORT_BATCH_ITEM_FAILURES) : current.reportBatchItemFailures,
@@ -50,9 +53,12 @@ function changesOf(before: Settings, after: Settings): Record<string, { from: un
  * mappings for SQS (ADR 0010): made for a queue by its ARN, with Lambda's
  * defaults and limits and in its words, changed and deleted, each change in
  * the audit log; read by the EventSourcePoller, told of each change. A
- * function reads a queue once, and as many queues as its plan allows; the
- * queue must hide a message received for at least the function's timeout, as
- * Lambda requires, or a message would come back during the call that has it.
+ * function reads a queue once, as it is or through a version or an alias of
+ * it, which must be there when it is named (one deleted since leaves the
+ * messages waiting), and as many queues as its plan allows; the queue must
+ * hide a message received for at least the timeout of what reads it, each
+ * version an alias sends calls to, as Lambda requires, or a message would come
+ * back during the call that has it.
  */
 @Injectable()
 export class EventSourcesService {
@@ -113,9 +119,7 @@ export class EventSourcesService {
     const queue = await this.queueOf(accountId, dto.eventSourceArn, 'eventSourceArn');
     const settings = settingsOf(dto, DEFAULTS);
     checkBatch(settings);
-    if (queue.visibilityTimeout < fn.timeout) {
-      throw new BadRequestException(`Invalid parameter: Queue visibility timeout: ${queue.visibilityTimeout} seconds is less than Function timeout: ${fn.timeout} seconds`);
-    }
+    await this.checkReader(fn, settings.qualifier, queue);
     const plan = await this.plans.forAccount(accountId);
     const row = await this.mappings.manager.transaction(async (manager) => {
       await manager.query('SELECT 1 FROM "functions" WHERE "id" = $1 FOR UPDATE', [fn.id]);
@@ -132,11 +136,13 @@ export class EventSourcesService {
       }
       return manager.save(EventSourceMapping, manager.create(EventSourceMapping, { accountId, functionId: fn.id, queueId: queue.id, ...settings }));
     });
+    // The qualifier named only when there is one, as a schedule's.
+    const { qualifier, ...others } = settings;
     await this.audit.record({
       accountId,
       action: 'event_source.create',
       resource: `event_source:${row.id}`,
-      details: { function: fn.name, queue: queue.name, ...settings },
+      details: { function: fn.name, queue: queue.name, ...others, ...qualifierDetail(qualifier) },
     });
     await this.poller.changed();
     return this.view(row, fn, queue);
@@ -148,6 +154,7 @@ export class EventSourcesService {
     const before: Settings = { ...DEFAULTS, ...pickSettings(row) };
     const after = settingsOf(dto, before);
     checkBatch(after);
+    if (after.qualifier !== before.qualifier) await this.checkReader(await this.functions.findOne(accountId, row.functionId), after.qualifier, row.queue as Queue);
     const changes = changesOf(before, after);
     if (Object.keys(changes).length > 0) {
       await this.mappings.update({ id: row.id }, after);
@@ -164,6 +171,19 @@ export class EventSourcesService {
     await this.mappings.delete({ id: row.id });
     await this.audit.record({ accountId, action: 'event_source.delete', resource: `event_source:${row.id}`, details: { function: fn?.name, queue: row.queue?.name } });
     await this.poller.changed();
+  }
+
+  /**
+   * What reads the queue, checked: the version or the alias there, and the queue hiding a received message for the
+   * longest timeout of what it runs, as Lambda refuses a shorter visibility timeout, in its words.
+   */
+  private async checkReader(fn: Function, qualifier: string | null, queue: Queue): Promise<void> {
+    const route = await routeNamed(this.mappings.manager, fn.id, qualifier);
+    if (!route) throw new BadRequestException(`qualifier: the function has no ${qualifierText(qualifier)}`);
+    const timeout = await longestTimeoutIn(this.mappings.manager, fn, route);
+    if (queue.visibilityTimeout < timeout) {
+      throw new BadRequestException(`Invalid parameter: Queue visibility timeout: ${queue.visibilityTimeout} seconds is less than Function timeout: ${timeout} seconds`);
+    }
   }
 
   private async find(accountId: string, uuid: string): Promise<EventSourceMapping> {
@@ -199,7 +219,7 @@ export class EventSourcesService {
     return {
       uuid: row.id,
       eventSourceArn: this.arnOfQueue(queue),
-      functionArn: functionArn(this.region, fn.accountId, fn.name),
+      functionArn: qualifiedFunctionArn(this.region, fn.accountId, fn.name, row.qualifier ?? undefined),
       batchSize: row.batchSize,
       maximumBatchingWindowInSeconds: row.maximumBatchingWindowInSeconds,
       functionResponseTypes: row.reportBatchItemFailures ? [REPORT_BATCH_ITEM_FAILURES] : [],
@@ -213,6 +233,6 @@ export class EventSourcesService {
 
 /** A mapping's settings alone, as the audit log compares them. */
 function pickSettings(row: EventSourceMapping): Settings {
-  const { batchSize, maximumBatchingWindowInSeconds, reportBatchItemFailures, maximumConcurrency, enabled } = row;
-  return { batchSize, maximumBatchingWindowInSeconds, reportBatchItemFailures, maximumConcurrency, enabled };
+  const { qualifier, batchSize, maximumBatchingWindowInSeconds, reportBatchItemFailures, maximumConcurrency, enabled } = row;
+  return { qualifier, batchSize, maximumBatchingWindowInSeconds, reportBatchItemFailures, maximumConcurrency, enabled };
 }

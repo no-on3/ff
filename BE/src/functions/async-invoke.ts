@@ -2,7 +2,7 @@
  * Asynchronous calls, as AWS Lambda makes them (ADR 0010): what is kept of an
  * event's attempts, and when its next attempt comes, or why it has none.
  */
-import { LATEST, parseQualifier } from './qualifier';
+import { LATEST, storedQualifier } from './qualifier';
 
 /** Lambda's limit on an asynchronous call's event, once serialized: 1 MB. */
 export const MAX_ASYNC_INPUT_BYTES = 1024 * 1024;
@@ -73,8 +73,9 @@ export function qualifierOf(attributes: Record<string, unknown> | null): string 
 }
 
 /** What its queue keeps beside a call naming `qualifier`, which `qualifierOf` reads: none for $LATEST. */
-export function qualifierAttributes(qualifier: string | undefined): { qualifier: string } | undefined {
-  return parseQualifier(qualifier) ? { qualifier: qualifier as string } : undefined;
+export function qualifierAttributes(qualifier: string | null | undefined): { qualifier: string } | undefined {
+  const kept = storedQualifier(qualifier);
+  return kept === null ? undefined : { qualifier: kept };
 }
 
 /** How an attempt answered, as a destination's record gives it: Lambda's status, and the function's output or the error. */

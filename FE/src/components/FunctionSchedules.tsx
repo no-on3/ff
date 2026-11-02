@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, Box, Button, Card, CardContent, Checkbox, Chip, FormControlLabel, TextField, Typography } from '@mui/material';
-import { EXPRESSION_EXAMPLES, Schedule, ScheduleForm, emptyForm, formOf, lastRunText, nextRunText, scheduleOf } from '../lib/schedules';
+import { EXPRESSION_EXAMPLES, Schedule, ScheduleForm, emptyForm, formOf, lastRunText, nextRunText, runsText, scheduleOf } from '../lib/schedules';
 import { apiErrorMessage } from '../lib/functions';
 import { Function, schedulesApi } from '../services/api';
 
@@ -209,6 +209,7 @@ export const FunctionSchedules: React.FC<FunctionSchedulesProps> = ({ func, mayC
                   <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
                     <Typography sx={{ fontWeight: 500 }}>{schedule.name}</Typography>
                     <Typography sx={{ fontFamily: 'monospace' }}>{schedule.expression}</Typography>
+                    {runsText(schedule) && <Chip size="small" variant="outlined" label={runsText(schedule)} />}
                     <Chip size="small" label={schedule.enabled ? 'Enabled' : 'Disabled'} color={schedule.enabled ? 'success' : 'default'} />
                     {mayChange && (
                       <Box sx={{ ml: 'auto', display: 'flex', gap: 1 }}>

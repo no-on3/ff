@@ -14,7 +14,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { Observable } from 'rxjs';
-import { EntityManager, FindOptionsWhere, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
+import { EntityManager, FindOptionsWhere, In, IsNull, Not, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import { jsonBytes } from '../common/byte-limits';
@@ -587,8 +587,8 @@ export class FunctionsService {
 
   /**
    * A function URL and a schedule send AWS's events: their function can't go
-   * back to FF's original wrapped one while either calls it, a URL of an alias
-   * naming $LATEST included; an alias's URL that runs a version doesn't call it.
+   * back to FF's original wrapped one while either calls it, through an alias
+   * naming $LATEST included; one that runs a version doesn't call it.
    */
   private async refuseWrappedWhileSent(id: string): Promise<void> {
     const manager = this.functionsRepository.manager;
@@ -604,9 +604,17 @@ export class FunctionsService {
           `point the alias at a version, or delete its URL (DELETE /functions/${id}/url?qualifier=${aliased.alias}), first, or keep eventFormat lambda`,
       );
     }
-    if (await manager.existsBy(Schedule, { functionId: id })) {
+    if (await manager.existsBy(Schedule, { functionId: id, qualifier: IsNull() })) {
       throw new BadRequestException(
         `The function has schedules, which send EventBridge's Scheduled Event, and the wrapped format can't take it: delete them (DELETE /functions/${id}/schedules/{scheduleId}) first, or keep eventFormat lambda`,
+      );
+    }
+    const onLatest = (await manager.find(FunctionAlias, { where: { functionId: id, version: IsNull() }, select: { name: true } })).map((alias) => alias.name);
+    const scheduled = onLatest.length ? await manager.findOne(Schedule, { where: { functionId: id, qualifier: In(onLatest) } }) : null;
+    if (scheduled) {
+      throw new BadRequestException(
+        `The alias ${scheduled.qualifier} names $LATEST and the schedule ${scheduled.name} runs it, which sends EventBridge's Scheduled Event, and the wrapped format can't take it: ` +
+          'point the alias at a version, or delete the schedule, first, or keep eventFormat lambda',
       );
     }
   }

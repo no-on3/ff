@@ -5,7 +5,7 @@
  * PublishVersion refuses. Aliases naming versions that are there, which can't
  * be deleted while one names them; refused as Lambda's CreateAlias and
  * UpdateAlias refuse, and kept from a version taking the wrapped event while
- * they have a URL. Both gone with their function. A version's pods, as the
+ * they have a URL or a schedule. Both gone with their function. A version's pods, as the
  * service asks the cluster for them: $LATEST's label at a publish, a version's
  * objects deleted with it. Each run works in a scratch database, dropped
  * afterwards.
@@ -24,6 +24,7 @@ import { EncryptionService } from '../encryption/encryption.service';
 import { UnsealError } from '../encryption/envelope';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { onePlan } from '../plans/test-fixtures';
+import { Schedule } from '../schedules/schedule.entity';
 import { FunctionEnvironment } from './entities/function-environment.entity';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { FunctionAliasesService } from './aliases.service';
@@ -380,6 +381,26 @@ run("functions' versions and aliases (L2)", () => {
       // The alias's URL goes with it.
       await aliases.remove(ACCOUNT, fn.id, 'live');
       expect(await query(`SELECT * FROM function_urls WHERE function_id = $1`, [fn.id])).toEqual([]);
+    });
+
+    it("keeps an alias with schedules off a version that takes the wrapped event, which a schedule can't send; and $LATEST off it while a schedule runs it through an alias", async () => {
+      const fn = await withVersions('scheduled');
+      await query(`UPDATE function_versions SET event_format = $1 WHERE function_id = $2 AND version = 3`, [EventFormat.WRAPPED, fn.id]);
+      await aliases.create(ACCOUNT, fn.id, { name: 'nightly', functionVersion: '1' });
+      await db.dataSource.getRepository(Schedule).insert({ accountId: ACCOUNT, functionId: fn.id, name: 'report', expression: 'rate(1 day)', qualifier: 'nightly' });
+
+      await expect(aliases.update(ACCOUNT, fn.id, 'nightly', { functionVersion: '3' })).rejects.toThrow(
+        new BadRequestException(
+          "The alias nightly has schedules, which send EventBridge's Scheduled Event, and version 3 takes FF's original wrapped event: " +
+            'point it at a version published with eventFormat lambda, or delete its schedules first',
+        ),
+      );
+      // A schedule through an alias naming a version leaves $LATEST's format to the function.
+      await functions.update(ACCOUNT, fn.id, { eventFormat: EventFormat.WRAPPED });
+      await expect(aliases.update(ACCOUNT, fn.id, 'nightly', { functionVersion: '$LATEST' })).rejects.toThrow('and $LATEST takes');
+      await functions.update(ACCOUNT, fn.id, { eventFormat: EventFormat.LAMBDA });
+      await aliases.update(ACCOUNT, fn.id, 'nightly', { functionVersion: '$LATEST' });
+      await expect(functions.update(ACCOUNT, fn.id, { eventFormat: EventFormat.WRAPPED })).rejects.toThrow('The alias nightly names $LATEST and the schedule report runs it');
     });
 
     it('keeps a version an alias names, as its own or with a share, until the alias points elsewhere or goes', async () => {

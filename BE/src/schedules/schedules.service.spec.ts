@@ -1,14 +1,18 @@
 /**
  * L1: functions' schedules, as their accounts make, change and delete them:
  * each next run computed at every change, the expression checked as
- * EventBridge would, the plan's limit, a name once per function, the audit log.
+ * EventBridge would, the plan's limit, a name once per function, the audit
+ * log, and the version or the alias a schedule runs, which must be there and
+ * take EventBridge's event.
  */
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
-import { QueryFailedError } from 'typeorm';
+import { FindOperator, QueryFailedError } from 'typeorm';
+import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { EventFormat } from '../functions/entities/function.entity';
+import { FunctionVersion } from '../functions/entities/function-version.entity';
 import { plan } from '../plans/test-fixtures';
 import { Schedule } from './schedule.entity';
-import { SchedulesService, WRAPPED_SCHEDULE_REFUSAL } from './schedules.service';
+import { SchedulesService, WRAPPED_SCHEDULE_REFUSAL, wrappedQualifierRefusal } from './schedules.service';
 
 const ACCOUNT = '123456789012';
 const FN = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
@@ -19,6 +23,9 @@ describe('SchedulesService (L1)', () => {
   let rows: Schedule[];
   let eventFormat: EventFormat;
   let limit: number;
+  /** The function's versions, by number, each with its event format; and its aliases, each with its route. */
+  let versions: Map<number, EventFormat>;
+  let aliases: Map<string, Pick<FunctionAlias, 'version' | 'additionalVersion' | 'additionalWeight'>>;
   const audit = { record: jest.fn() };
   const functions = {
     findOne: jest.fn(async (accountId: string, id: string) => {
@@ -45,6 +52,14 @@ describe('SchedulesService (L1)', () => {
     delete: jest.fn(async ({ id }: { id: string }) => {
       rows = rows.filter((row) => row.id !== id);
     }),
+    manager: {
+      existsBy: jest.fn(async (target: unknown, where: { version: number }) => target === FunctionVersion && versions.has(where.version)),
+      findOne: jest.fn(async (target: unknown, { where }: { where: { name?: string; version?: FindOperator<number[]> } }) => {
+        if (target === FunctionAlias) return aliases.get(where.name as string) ?? null;
+        const wrapped = (where.version?.value ?? []).find((version) => versions.get(version) === EventFormat.WRAPPED);
+        return wrapped === undefined ? null : { version: wrapped };
+      }),
+    },
   };
 
   beforeEach(() => {
@@ -52,6 +67,14 @@ describe('SchedulesService (L1)', () => {
     rows = [];
     eventFormat = EventFormat.LAMBDA;
     limit = 20;
+    versions = new Map([
+      [2, EventFormat.LAMBDA],
+      [3, EventFormat.WRAPPED],
+    ]);
+    aliases = new Map([
+      ['live', { version: 2, additionalVersion: null, additionalWeight: null }],
+      ['canary', { version: 2, additionalVersion: 3, additionalWeight: 0.1 }],
+    ]);
     service = new SchedulesService(repository as never, functions as never, { forAccount: async () => plan({ schedules: limit }) } as never, audit as never);
   });
 
@@ -127,6 +150,48 @@ describe('SchedulesService (L1)', () => {
     await expect(service.create(ACCOUNT, FN, { name: 'one', expression: 'rate(2 hours)' }, NOW)).rejects.toThrow(
       new ConflictException('The function has a schedule named "one" already: names are unique within a function'),
     );
+  });
+
+  it('runs a version or an alias it names, the view and the audit log saying which; $LATEST kept as none', async () => {
+    const made = await service.create(ACCOUNT, FN, { name: 'live', expression: 'rate(1 hour)', qualifier: 'live' }, NOW);
+    const versioned = await service.create(ACCOUNT, FN, { name: 'two', expression: 'rate(1 hour)', qualifier: '2' }, NOW);
+    const latest = await service.create(ACCOUNT, FN, { name: 'latest', expression: 'rate(1 hour)', qualifier: '$LATEST' }, NOW);
+
+    expect([made.qualifier, versioned.qualifier, latest.qualifier]).toEqual(['live', '2', null]);
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'schedule.create', details: { name: 'live', expression: 'rate(1 hour)', enabled: true, qualifier: 'live' } }));
+    expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ details: { name: 'latest', expression: 'rate(1 hour)', enabled: true } }));
+  });
+
+  it.each([
+    ['an alias', 'gone', 'qualifier: the function has no alias gone'],
+    ['a version', '9', 'qualifier: the function has no version 9'],
+  ])("refuses %s the function hasn't, saying which", async (_case, qualifier, message) => {
+    await expect(service.create(ACCOUNT, FN, { name: 'x', expression: 'rate(1 hour)', qualifier }, NOW)).rejects.toThrow(new BadRequestException(message));
+    expect(rows).toEqual([]);
+  });
+
+  it("refuses a version that takes FF's original wrapped event, and an alias sending some calls to one; a version that takes Lambda's runs whatever $LATEST takes", async () => {
+    for (const qualifier of ['3', 'canary']) {
+      await expect(service.create(ACCOUNT, FN, { name: 'x', expression: 'rate(1 hour)', qualifier }, NOW)).rejects.toThrow(new BadRequestException(wrappedQualifierRefusal('version 3')));
+    }
+    eventFormat = EventFormat.WRAPPED;
+
+    expect((await service.create(ACCOUNT, FN, { name: 'x', expression: 'rate(1 hour)', qualifier: 'live' }, NOW)).qualifier).toBe('live');
+  });
+
+  it('checks a qualifier when a change names another, and clears it for $LATEST; a change that keeps it checks nothing', async () => {
+    const made = await service.create(ACCOUNT, FN, { name: 'x', expression: 'rate(1 hour)', qualifier: 'live' }, NOW);
+    aliases.delete('live');
+
+    // Deleted since, it skips the runs: a change of anything else is still the account's to make.
+    expect((await service.update(ACCOUNT, FN, made.id, { name: 'y', qualifier: 'live' })).qualifier).toBe('live');
+    await expect(service.update(ACCOUNT, FN, made.id, { qualifier: '3' })).rejects.toThrow(new BadRequestException(wrappedQualifierRefusal('version 3')));
+    expect((await service.update(ACCOUNT, FN, made.id, { qualifier: '2' })).qualifier).toBe('2');
+    expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'schedule.update', details: expect.objectContaining({ changed: ['qualifier'], qualifier: '2' }) }));
+    expect((await service.update(ACCOUNT, FN, made.id, { qualifier: '$LATEST' })).qualifier).toBeNull();
+    audit.record.mockClear();
+    await service.update(ACCOUNT, FN, made.id, { qualifier: '$LATEST' });
+    expect(audit.record).not.toHaveBeenCalled();
   });
 
   it("lists, reads and deletes the function's schedules, and finds no other account's", async () => {

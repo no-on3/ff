@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { IsBoolean, IsOptional, IsString, Length, Matches, MaxLength } from 'class-validator';
 import { AnyJson } from '../../common/no-nul.pipe';
+import { QUALIFIER } from '../../functions/qualifier';
 
 /** An EventBridge rule's name: letters, digits, ".", "-" and "_". */
 export const SCHEDULE_NAME = /^[.\-_A-Za-z0-9]+$/;
@@ -36,6 +37,15 @@ export class CreateScheduleDto {
   @IsOptional()
   @IsBoolean()
   enabled?: boolean;
+
+  @ApiPropertyOptional({
+    example: 'live',
+    description: "The version or the alias it runs, as an EventBridge rule's target names a qualified ARN: $LATEST, the function as it is, when left out",
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(QUALIFIER, { message: "qualifier is $LATEST, a version's number or an alias's name, as Lambda's" })
+  qualifier?: string;
 }
 
 /** PUT /functions/{id}/schedules/{scheduleId}: what changes; what is left out stays. */
@@ -45,6 +55,7 @@ export class UpdateScheduleDto extends PartialType(CreateScheduleDto) {}
 export class ScheduleView {
   @ApiProperty() id: string;
   @ApiProperty() functionId: string;
+  @ApiProperty({ nullable: true, type: String, example: 'live', description: 'The version or the alias it runs; null: $LATEST' }) qualifier: string | null;
   @ApiProperty() name: string;
   @ApiProperty({ nullable: true, type: String }) description: string | null;
   @ApiProperty() expression: string;

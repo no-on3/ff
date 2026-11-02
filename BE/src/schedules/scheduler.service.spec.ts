@@ -31,7 +31,7 @@ describe('the scheduler (L1)', () => {
   /** The transaction's manager, which the run is queued in. */
   let manager: Record<string, unknown>;
   const fn = { id: 'fn-1', name: 'reports', accountId: ACCOUNT, status: FunctionStatus.ACTIVE, eventFormat: EventFormat.LAMBDA };
-  const functions = { findOne: jest.fn() };
+  const functions = { findOne: jest.fn(), callTarget: jest.fn() };
   const credit = { admit: jest.fn() };
   const refused = { count: jest.fn() };
   const accounts = { findOne: jest.fn() };
@@ -82,6 +82,13 @@ describe('the scheduler (L1)', () => {
     updates = [];
     plans.get.mockImplementation(async () => plan({ invokesPerSecond: 100, queueStorageMb: 100 }));
     functions.findOne.mockImplementation(async () => fn);
+    // The function's alias live names version 2; its version 3 takes the wrapped event; it has nothing else.
+    functions.callTarget.mockImplementation(async (_fn: unknown, qualifier?: string) => {
+      if (qualifier === undefined) return {};
+      if (qualifier === 'live') return { version: { version: 2, eventFormat: EventFormat.LAMBDA }, alias: 'live' };
+      if (qualifier === '3') return { version: { version: 3, eventFormat: EventFormat.WRAPPED } };
+      throw new NotFoundException(`no ${qualifier}`);
+    });
     accounts.findOne.mockImplementation(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE, planId: 'beta' }));
     queues.accountBytes.mockImplementation(async () => 0);
     throttler = new ThrottlerStorageService();
@@ -125,6 +132,25 @@ describe('the scheduler (L1)', () => {
       resources: [`arn:aws:events:tn-tunis-1:${ACCOUNT}:rule/reports-nightly`],
       detail: {},
     });
+  });
+
+  it("queues the run of a version or an alias as naming it, for each attempt to run it, whatever $LATEST's state", async () => {
+    rows = [schedule({ qualifier: 'live' })];
+    functions.findOne.mockResolvedValue({ ...fn, status: FunctionStatus.ERROR });
+
+    expect(await tick()).toEqual(['running']);
+
+    expect(queues.sendEvent.mock.calls[0][4]).toEqual({ manager, attributes: { origin: 'schedule', scheduleId: 's-1', qualifier: 'live' } });
+  });
+
+  it.each([
+    ['gone', 'skipped: the function has no alias gone'],
+    ['3', "skipped: version 3 takes FF's original wrapped event"],
+  ])('skips the run of a schedule naming %s, which it can\'t run, and says why', async (qualifier, outcome) => {
+    rows = [schedule({ qualifier })];
+
+    expect(await tick()).toEqual([outcome]);
+    expect(queues.sendEvent).not.toHaveBeenCalled();
   });
 
   it("sends the schedule's input when it has one, as SAM's Input", async () => {

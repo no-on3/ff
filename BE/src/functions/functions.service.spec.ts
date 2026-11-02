@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, HttpException, HttpStatus, Inte
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { FindOperator, IsNull, Not } from 'typeorm';
+import { FindOperator, In, IsNull, Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import {
@@ -851,6 +851,26 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
         "The function has schedules, which send EventBridge's Scheduled Event, and the wrapped format can't take it: delete them (DELETE /functions/fn-1/schedules/{scheduleId}) first, or keep eventFormat lambda",
       );
       expect(orchestrator.update).not.toHaveBeenCalled();
+    });
+
+    it("refuses the wrapped event while a schedule runs it through an alias naming $LATEST, and not while its schedules run versions", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const { manager } = functionsRepo as unknown as { manager: { find: jest.Mock; findOne: jest.Mock } };
+      manager.find.mockImplementation(async (target: unknown) => (target === FunctionAlias ? [{ name: 'nightly' }] : []));
+      manager.findOne.mockImplementation(async (target: unknown) => (target === Schedule ? { name: 'cleanup', qualifier: 'nightly' } : null));
+
+      await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
+        "The alias nightly names $LATEST and the schedule cleanup runs it, which sends EventBridge's Scheduled Event, and the wrapped format can't take it: " +
+          'point the alias at a version, or delete the schedule, first, or keep eventFormat lambda',
+      );
+      expect(manager.find).toHaveBeenCalledWith(FunctionAlias, { where: { functionId: 'fn-1', version: IsNull() }, select: { name: true } });
+      expect(manager.findOne).toHaveBeenCalledWith(Schedule, { where: { functionId: 'fn-1', qualifier: In(['nightly']) } });
+      expect(orchestrator.update).not.toHaveBeenCalled();
+
+      // No alias names $LATEST: a schedule through one runs a version, which keeps its own format.
+      manager.find.mockImplementation(async () => []);
+      await service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED });
+      expect(orchestrator.update).toHaveBeenCalledWith(expect.objectContaining({ eventFormat: EventFormat.WRAPPED }), TENANT);
     });
 
     it("refuses a handler its runtime can't find in inline code, checking the runtime the function will have", async () => {

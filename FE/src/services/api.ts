@@ -1770,6 +1770,8 @@ export const EVENT_SOURCE_FIELDS = [
 
 /** What a mapping is made or changed with, by Lambda's names: each left as it is when not given; a scalingConfig of null removes the maximum. */
 export interface EventSourceSettings {
+  /** The version or the alias that reads the queue; $LATEST: the function as it is. */
+  qualifier?: string;
   batchSize?: number;
   maximumBatchingWindowInSeconds?: number;
   functionResponseTypes?: string[];

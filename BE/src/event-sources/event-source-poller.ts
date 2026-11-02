@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -6,10 +6,12 @@ import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
+import { unlessGone } from '../common/unless-gone';
 import { InvocationSource } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { MAX_INPUT_BYTES } from '../functions/limits';
+import { qualifierText } from '../functions/qualifier';
 import { CustomerQueues, Received } from '../queues/customer-queues';
 import { Queue } from '../queues/queue.entity';
 import { QueueEvents } from '../queues/queue-events';
@@ -216,12 +218,12 @@ export class EventSourcePoller implements OnModuleInit, OnModuleDestroy {
       reader.waiting = why;
       return undefined;
     };
-    const fn = await this.functions.findOne(mapping.accountId, mapping.functionId).catch((error: unknown) => {
-      if (error instanceof NotFoundException) return undefined;
-      throw error;
-    });
+    const fn = await unlessGone(this.functions.findOne(mapping.accountId, mapping.functionId));
     if (!fn) return waits('the function is gone');
-    if (fn.status !== FunctionStatus.ACTIVE) return waits('the function is not ACTIVE');
+    const target = await unlessGone(this.functions.callTarget(fn, mapping.qualifier ?? undefined));
+    if (!target) return waits(`the function has no ${qualifierText(mapping.qualifier)}`);
+    // A version reads whatever $LATEST's state, as a call that waits runs it.
+    if (!target.version && fn.status !== FunctionStatus.ACTIVE) return waits('the function is not ACTIVE');
     const account = await this.accounts.findOne({ where: { id: mapping.accountId }, select: { id: true, status: true, storageDisabledAt: true } });
     if (!account || account.status !== AccountStatus.ACTIVE) return waits('the account is not active');
     if (account.storageDisabledAt) return waits("FF turned the account's databases, buckets and queues off");
@@ -291,11 +293,17 @@ export class EventSourcePoller implements OnModuleInit, OnModuleDestroy {
     const some = `${batch.length} ${batch.length === 1 ? 'message' : 'messages'} of the queue ${queue.name}`;
     try {
       const fn = await this.functions.findOne(mapping.accountId, mapping.functionId);
-      if (fn.status !== FunctionStatus.ACTIVE) {
+      // What the mapping names, an alias drawn for each batch, as for each call.
+      const target = await unlessGone(this.functions.callTarget(fn, mapping.qualifier ?? undefined));
+      if (!target) {
+        this.logger.warn(`Function ${fn.name} has no ${qualifierText(mapping.qualifier)} any more: ${some} come back after the queue's visibility timeout`);
+        return;
+      }
+      if (!target.version && fn.status !== FunctionStatus.ACTIVE) {
         this.logger.warn(`Function ${fn.name} is not ACTIVE any more: ${some} come back after the queue's visibility timeout`);
         return;
       }
-      const outcome = await this.functions.call(fn, { Records: batch.map((item) => item.record) }, { source: InvocationSource.SQS });
+      const outcome = await this.functions.call(fn, { Records: batch.map((item) => item.record) }, { source: InvocationSource.SQS, target });
       let handled: Item[] = batch;
       if (!outcome.ok) {
         handled = [];

@@ -9,6 +9,7 @@ import { AliasRoutingConfigDto, CreateAliasDto, FunctionAliasView, UpdateAliasDt
 import { FunctionAlias } from './entities/function-alias.entity';
 import { FunctionUrl } from './entities/function-url.entity';
 import { FunctionVersion } from './entities/function-version.entity';
+import { Schedule } from '../schedules/schedule.entity';
 import { EventFormat, Function } from './entities/function.entity';
 import { noSuchAlias, noSuchVersion } from './function-not-found';
 import { FunctionsService } from './functions.service';
@@ -46,7 +47,7 @@ export function routeRefusal(route: Route): BadRequestException | undefined {
 }
 
 /**
- * What of a route takes FF's original wrapped event, which a function URL can't send: "$LATEST", "version n", or
+ * What of a route takes FF's original wrapped event, which a function URL and a schedule can't send: "$LATEST", "version n", or
  * undefined when every one it names takes Lambda's.
  */
 export async function wrappedIn(manager: EntityManager, function_: Pick<Function, 'id' | 'eventFormat'>, route: Route): Promise<string | undefined> {
@@ -54,6 +55,33 @@ export async function wrappedIn(manager: EntityManager, function_: Pick<Function
   const versions = [route.version, route.additionalVersion].filter((version): version is number => version !== null);
   const wrapped = await manager.findOne(FunctionVersion, { where: { functionId: function_.id, version: In(versions), eventFormat: EventFormat.WRAPPED } });
   return wrapped ? `version ${wrapped.version}` : undefined;
+}
+
+/**
+ * An alias with a URL or a schedule sends AWS's events, which FF's original wrapped event can't take: it can't be
+ * pointed at a version that takes it, nor at $LATEST while the function does.
+ */
+async function refuseWrappedWhileSent(manager: EntityManager, function_: Pick<Function, 'id' | 'eventFormat'>, name: string, route: Route): Promise<void> {
+  const sent = (await manager.existsBy(FunctionUrl, { functionId: function_.id, alias: name }))
+    ? { what: "a URL, which sends AWS Lambda's events", undo: 'delete its URL' }
+    : (await manager.existsBy(Schedule, { functionId: function_.id, qualifier: name }))
+      ? { what: "schedules, which send EventBridge's Scheduled Event", undo: 'delete its schedules' }
+      : undefined;
+  if (!sent) return;
+  const wrapped = await wrappedIn(manager, function_, route);
+  if (wrapped) {
+    throw new BadRequestException(
+      `The alias ${name} has ${sent.what}, and ${wrapped} takes FF's original wrapped event: point it at a version published with eventFormat lambda, or ${sent.undo} first`,
+    );
+  }
+}
+
+/** The longest timeout of what a route runs, $LATEST's or its versions': a queue it reads must hide a message that long. */
+export async function longestTimeoutIn(manager: EntityManager, function_: Pick<Function, 'id' | 'timeout'>, route: Route): Promise<number> {
+  if (route.version === null) return function_.timeout;
+  const versions = [route.version, route.additionalVersion].filter((version): version is number => version !== null);
+  const rows = await manager.find(FunctionVersion, { where: { functionId: function_.id, version: In(versions) }, select: { timeout: true } });
+  return Math.max(...rows.map((row) => row.timeout));
 }
 
 /** Where an alias's calls go, as the audit log says it. */
@@ -130,15 +158,7 @@ export class FunctionAliasesService {
         ...(sent.routingConfig ? routingOf(sent.routingConfig) : { additionalVersion: alias.additionalVersion, additionalWeight: alias.additionalWeight }),
       };
       await refuseRoute(manager, function_, route);
-      if (await manager.existsBy(FunctionUrl, { functionId: id, alias: name })) {
-        const wrapped = await wrappedIn(manager, function_, route);
-        if (wrapped) {
-          throw new BadRequestException(
-            `The alias ${name} has a URL, which sends AWS Lambda's events, and ${wrapped} takes FF's original wrapped event: ` +
-              'point it at a version published with eventFormat lambda, or delete its URL first',
-          );
-        }
-      }
+      await refuseWrappedWhileSent(manager, function_, name, route);
       const description = sent.description ?? alias.description;
       const before = routeOf(alias);
       const unchanged = (['version', 'additionalVersion', 'additionalWeight'] as const).every((field) => route[field] === alias[field]) && description === alias.description;

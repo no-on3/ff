@@ -476,9 +476,14 @@ made_at="$(date -u +%s)"
 every="$(http POST "/functions/$sched_fn/schedules" '{"name": "every-minute", "expression": "rate(1 minute)"}')"
 check "a schedule is made, its first run a minute after" "201 true" \
   "$(status) $(jq --argjson t "$made_at" '(.nextRunAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $t | (. >= 55 and . <= 65)' <<<"$every")"
-http POST "/functions/$sched_fn/schedules" '{"name": "with-input", "expression": "rate(1 minute)", "input": {"report": "daily"}}' >/dev/null
+# One runs through an alias, as an EventBridge rule's qualified target; naming $LATEST, it runs no other pods.
+http POST "/functions/$sched_fn/schedules" '{"name": "gone", "expression": "rate(1 minute)", "qualifier": "nightly"}' >/dev/null
+check "a schedule naming an alias the function hasn't is refused, saying which" "400 qualifier: the function has no alias nightly" "$(status) $(jq -r .message "$work/body")"
+http POST "/functions/$sched_fn/aliases" '{"name": "nightly", "functionVersion": "$LATEST"}' >/dev/null
+check "and one with an input of its own, through the alias" "201 nightly" \
+  "$(http POST "/functions/$sched_fn/schedules" '{"name": "with-input", "expression": "rate(1 minute)", "input": {"report": "daily"}, "qualifier": "nightly"}' >/dev/null; status) $(jq -r .qualifier "$work/body")"
 http POST "/functions/$sched_fn/schedules" '{"name": "off", "expression": "rate(1 minute)", "enabled": false}' >/dev/null
-check "and one with an input of its own, and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
+check "and one disabled" "201 null" "$(status) $(jq -r .nextRunAt "$work/body")"
 http PUT "/functions/$sched_fn" '{"eventFormat": "wrapped"}' >/dev/null
 check "a function with schedules keeps AWS Lambda's event" 400 "$(status)"
 # A function whose runs fail: each run is an asynchronous call, retried.
@@ -1114,7 +1119,8 @@ check "each schedule ran within a minute and a few seconds, as calls of its sche
 check "with EventBridge's Scheduled Event: its source, its account, FF's region, the rule's ARN" \
   "Scheduled Event aws.events $tenant tn-tunis-1 arn:aws:events:tn-tunis-1:$tenant:rule/e2e-scheduled-every-minute true" \
   "$(jq -r '"\(.["detail-type"]) \(.source) \(.account) \(.region) \(.resources[0]) \(.time | test("^[0-9-]{10}T[0-9:]{8}Z$"))"' <<<"$event")"
-check "or the schedule's own input" '{"report":"daily"}' "$(jq -c '[.[] | select(.input.report != null)][0].input' <<<"$first_calls")"
+check "or the schedule's own input, through the alias it names" '{"report":"daily"} nightly' \
+  "$(jq -r '[.[] | select(.input.report != null)][0] | "\(.input | tojson) \(.alias)"' <<<"$first_calls")"
 check "each schedule says how its run went, and which call it was; the disabled one never ran" \
   "every-minute success true off null with-input success" \
   "$(jq -r --argjson h "$history" '[.[] | "\(.name) \(.lastOutcome // "null")\(if .name == "every-minute" then " \(.lastRequestId as $id | [$h.invocations[].id] | index($id) != null)" else "" end)"] | join(" ")' <<<"$schedules")"
@@ -1484,13 +1490,17 @@ batch_code='export const handler = async (event) => ({ batchItemFailures: event.
 batch_fn="$(http POST /functions "$(jq -n --arg code "$batch_code" '{name: "e2e-batch-reader", runtime: "nodejs", code: $code, memory: 128, timeout: 3}')" | jq -r .id)"
 # Warm, so that its first batch isn't held past the queue's visibility timeout by a cold start.
 http POST "/functions/$batch_fn/invoke" '{"input": {"Records": []}}' >/dev/null
-mapping="$(http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn, maximumBatchingWindowInSeconds: 2, functionResponseTypes: ["ReportBatchItemFailures"]}')")"
-check "a function made to read a queue, as Lambda's CreateEventSourceMapping: 10 a batch, a window of 2 s, partial batch responses" \
-  "201 Enabled 10 2 ReportBatchItemFailures $batch_arn" \
-  "$(status) $(jq -r '"\(.state) \(.batchSize) \(.maximumBatchingWindowInSeconds) \(.functionResponseTypes[0]) \(.eventSourceArn)"' <<<"$mapping")"
+# It reads through an alias, as Lambda's mapping of a qualified function; naming $LATEST, it runs the pods just warmed.
+http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn, qualifier: "batch"}')" >/dev/null
+check "a mapping naming an alias the function hasn't is refused, saying which" "400 qualifier: the function has no alias batch" "$(status) $(jq -r .message "$work/body")"
+http POST "/functions/$batch_fn/aliases" '{"name": "batch", "functionVersion": "$LATEST"}' >/dev/null
+mapping="$(http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn, maximumBatchingWindowInSeconds: 2, functionResponseTypes: ["ReportBatchItemFailures"], qualifier: "batch"}')")"
+check "a function made to read a queue, as Lambda's CreateEventSourceMapping: 10 a batch, a window of 2 s, partial batch responses, through its alias" \
+  "201 Enabled 10 2 ReportBatchItemFailures $batch_arn arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-batch-reader:batch" \
+  "$(status) $(jq -r '"\(.state) \(.batchSize) \(.maximumBatchingWindowInSeconds) \(.functionResponseTypes[0]) \(.eventSourceArn) \(.functionArn)"' <<<"$mapping")"
 mapping_id="$(jq -r .uuid <<<"$mapping")"
 http POST "/functions/$batch_fn/event-sources" "$(jq -cn --arg arn "$batch_arn" '{eventSourceArn: $arn}')" >/dev/null
-check "  ... once: another for the same queue names the first, in Lambda's words" "409 Please update or delete the existing mapping with UUID $mapping_id" \
+check "  ... once, whatever it runs: another for the same queue names the first, in Lambda's words" "409 Please update or delete the existing mapping with UUID $mapping_id" \
   "$(status) $(jq -r .message "$work/body" | grep -oE 'Please update or delete the existing mapping with UUID [0-9a-f-]+$')"
 check "  ... which the function's list and the queue's show" "$mapping_id $mapping_id" \
   "$(http GET "/functions/$batch_fn/event-sources" | jq -r '.[0].uuid') $(http GET "/event-sources?eventSourceArn=$(jq -rn --arg arn "$batch_arn" '$arn | @uri')" | jq -r '.[0].uuid')"
@@ -1507,8 +1517,8 @@ check "the AWS CLI's five messages in one call of the function, SQS's event; the
   "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | last | .input.Records | "\(length) \(.[0].eventSource) \(.[0].eventSourceARN) \([.[].body | fromjson | select(.fail | not) | .order] | map(tostring) | join(","))"') \
 $(aws_sqs receive-message --queue-url "$sqs_endpoint/$tenant/e2e-batch-dlq" --max-number-of-messages 10 | jq -r '[.Messages[].Body | fromjson | .order] | sort | map(tostring) | join(",")') \
 $(http GET /queues/e2e-batch | jq '.messages.available + .messages.inFlight') $(http GET /queues/e2e-batch-dlq | jq '.messages.available + .messages.inFlight')"
-check "  ... each call in the function's history as the queue's: the batch, then the two again" "2 sqs" \
-  "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | "\(length) \(.[0].source)"')"
+check "  ... each call in the function's history as the queue's, through the alias: the batch, then the two again" "2 sqs batch" \
+  "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | "\(length) \(.[0].source) \(.[0].alias)"')"
 http PATCH "/event-sources/$mapping_id" '{"enabled": false}' >/dev/null
 check "a mapping disabled, as Lambda's UpdateEventSourceMapping: nothing read" "200 Disabled" "$(status) $(jq -r .state "$work/body")"
 aws_sqs send-message --queue-url "$sqs_endpoint/$tenant/e2e-batch" --message-body '{"order": 6}' >/dev/null

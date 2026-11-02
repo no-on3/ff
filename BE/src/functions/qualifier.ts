@@ -16,20 +16,43 @@ export const QUALIFIER = /^(\$LATEST|[1-9][0-9]{0,8}|(?!\d+$)[A-Za-z0-9_-]{1,128
 export type Named = { version: number } | { alias: string } | null;
 
 /** What `qualifier` names, as QUALIFIER reads it: none, or $LATEST, is $LATEST. */
-export function parseQualifier(qualifier: string | undefined): Named {
-  if (qualifier === undefined || qualifier === LATEST) return null;
+export function parseQualifier(qualifier: string | null | undefined): Named {
+  if (qualifier === undefined || qualifier === null || qualifier === LATEST) return null;
   return /^\d+$/.test(qualifier) ? { version: Number(qualifier) } : { alias: qualifier };
 }
 
+/** What a record keeps of a qualifier: a version's number or an alias's name; null for $LATEST, which none names. */
+export function storedQualifier(qualifier: string | null | undefined): string | null {
+  return parseQualifier(qualifier) ? (qualifier as string) : null;
+}
+
 /** Whether the function has what `qualifier` names: $LATEST always, else the version or the alias. */
-export async function hasQualifier(manager: EntityManager, functionId: string, qualifier: string | undefined): Promise<boolean> {
+export async function hasQualifier(manager: EntityManager, functionId: string, qualifier: string | null | undefined): Promise<boolean> {
   const named = parseQualifier(qualifier);
   if (!named) return true;
   return 'alias' in named ? manager.existsBy(FunctionAlias, { functionId, name: named.alias }) : manager.existsBy(FunctionVersion, { functionId, version: named.version });
 }
 
+/** Where the calls naming `qualifier` go: $LATEST alone, a version alone, or an alias's route; undefined for a version or an alias the function hasn't. */
+export async function routeNamed(
+  manager: EntityManager,
+  functionId: string,
+  qualifier: string | null | undefined,
+): Promise<Pick<FunctionAlias, 'version' | 'additionalVersion' | 'additionalWeight'> | undefined> {
+  const named = parseQualifier(qualifier);
+  const alone = (version: number | null) => ({ version, additionalVersion: null, additionalWeight: null });
+  if (!named) return alone(null);
+  if ('alias' in named) return (await manager.findOne(FunctionAlias, { where: { functionId, name: named.alias } })) ?? undefined;
+  return (await manager.existsBy(FunctionVersion, { functionId, version: named.version })) ? alone(named.version) : undefined;
+}
+
+/** What the audit log says of a qualifier: the version or the alias, when one is named; nothing for $LATEST. */
+export function qualifierDetail(qualifier: string | null): { qualifier?: string } {
+  return qualifier === null ? {} : { qualifier };
+}
+
 /** What a qualifier names, as a message says it: "version 3", "alias live", or $LATEST. */
-export function qualifierText(qualifier: string | undefined): string {
+export function qualifierText(qualifier: string | null | undefined): string {
   const named = parseQualifier(qualifier);
   if (!named) return LATEST;
   return 'alias' in named ? `alias ${named.alias}` : `version ${named.version}`;

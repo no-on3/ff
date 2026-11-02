@@ -35,6 +35,7 @@ const mapping = (values: Partial<EventSourceMapping> = {}): EventSourceMapping &
   functionId: 'fn-1',
   queueId: 'q-1',
   queue,
+  qualifier: null,
   batchSize: 10,
   maximumBatchingWindowInSeconds: 0,
   reportBatchItemFailures: false,
@@ -56,7 +57,7 @@ describe('the event source poller, which reads the queues functions are mapped t
   /** The queue's messages that can be received now. */
   let waiting: Received[];
   let queues: { receive: jest.Mock; deleteMessages: jest.Mock };
-  let functions: { findOne: jest.Mock; call: jest.Mock };
+  let functions: { findOne: jest.Mock; call: jest.Mock; callTarget: jest.Mock };
   let accounts: { findOne: jest.Mock };
   let credit: { admit: jest.Mock };
   let mappings: { find: jest.Mock };
@@ -84,7 +85,16 @@ describe('the event source poller, which reads the queues functions are mapped t
     n = 0;
     waiting = [];
     queues = { receive: jest.fn(async (_queue: Queue, max: number) => waiting.splice(0, max)), deleteMessages: jest.fn(async () => undefined) };
-    functions = { findOne: jest.fn(async () => active), call: jest.fn(async () => ({ ok: true, output: null, invocation: {} })) };
+    functions = {
+      findOne: jest.fn(async () => active),
+      call: jest.fn(async () => ({ ok: true, output: null, invocation: {} })),
+      // The function has the alias live, naming version 2, and no other.
+      callTarget: jest.fn(async (_fn: Function, qualifier?: string) => {
+        if (qualifier === undefined) return {};
+        if (qualifier === 'live') return { version: { version: 2 }, alias: 'live' };
+        throw new NotFoundException(`Function not found: ${qualifier}`);
+      }),
+    };
     accounts = { findOne: jest.fn(async () => ({ id: ACCOUNT, status: AccountStatus.ACTIVE, storageDisabledAt: null })) };
     credit = { admit: jest.fn(async () => undefined) };
     mappings = { find: jest.fn(async () => [mapping()]) };
@@ -108,7 +118,7 @@ describe('the event source poller, which reads the queues functions are mapped t
     await until(() => deleted().length === 2);
 
     expect(queues.receive).toHaveBeenCalledWith(queue, 10, 30, expect.any(Date));
-    expect(functions.call).toHaveBeenCalledWith(active, { Records: batch.map((received) => sqsRecord(received, ARN, 'tn-tunis-1')) }, { source: InvocationSource.SQS });
+    expect(functions.call).toHaveBeenCalledWith(active, { Records: batch.map((received) => sqsRecord(received, ARN, 'tn-tunis-1')) }, { source: InvocationSource.SQS, target: {} });
     expect(deleted()).toEqual(['1', '2']);
     expect(queues.deleteMessages.mock.calls[0][1]).toEqual(batch.map(({ id, receiveCount, messageId }) => ({ id, receiveCount, messageId })));
   });
@@ -250,6 +260,29 @@ describe('the event source poller, which reads the queues functions are mapped t
     await until(() => logs.mock.calls.length > 0);
 
     expect(logs).toHaveBeenCalledWith(`The queue orders waits for function fn-1: ${why}`);
+    expect([queues.receive.mock.calls.length, functions.call.mock.calls.length]).toEqual([0, 0]);
+  });
+
+  it("calls the version or the alias a mapping names, an alias drawn for each batch, whatever $LATEST's state", async () => {
+    functions.findOne.mockResolvedValue({ ...active, status: FunctionStatus.ERROR });
+    mappings.find.mockResolvedValue([mapping({ qualifier: 'live' })]);
+    waiting.push(message());
+
+    await poller.refresh();
+    await until(() => deleted().length === 1);
+
+    expect(functions.callTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 'live');
+    expect(functions.call.mock.calls[0][2]).toEqual({ source: InvocationSource.SQS, target: { version: { version: 2 }, alias: 'live' } });
+  });
+
+  it('receives nothing while the alias a mapping names is gone, and says so once', async () => {
+    mappings.find.mockResolvedValue([mapping({ qualifier: 'gone' })]);
+    waiting.push(message());
+
+    await poller.refresh();
+    await until(() => logs.mock.calls.length > 0);
+
+    expect(logs).toHaveBeenCalledWith('The queue orders waits for function fn-1: the function has no alias gone');
     expect([queues.receive.mock.calls.length, functions.call.mock.calls.length]).toEqual([0, 0]);
   });
 

@@ -4,7 +4,8 @@ import { Function } from '../functions/entities/function.entity';
 /**
  * A function's schedule, as SAM's Schedule event declares one and EventBridge
  * runs it: a name of its own within the function, an expression, an input or
- * EventBridge's Scheduled Event, enabled or not. The scheduler takes the due
+ * EventBridge's Scheduled Event, enabled or not, the function as it is or a
+ * version or an alias of it. The scheduler takes the due
  * ones by their next run. Deleting the function deletes them.
  */
 @Entity('schedules')
@@ -35,6 +36,10 @@ export class Schedule {
   /** rate(…) or cron(…), as written. */
   @Column({ type: 'varchar', length: 256 })
   expression: string;
+
+  /** The version or the alias it runs, as an EventBridge rule's target names a qualified ARN; null: $LATEST. */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  qualifier: string | null;
 
   /** The function's event, as given; null: EventBridge's Scheduled Event. */
   @Column({ type: 'jsonb', nullable: true })

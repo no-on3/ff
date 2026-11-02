@@ -78,6 +78,7 @@ describe('/functions/:id/event-sources and /event-sources (L1)', () => {
       functionResponseTypes: ['ReportBatchItemFailures'],
       scalingConfig: { maximumConcurrency: 2 },
       enabled: false,
+      qualifier: 'live',
     };
 
     expect((await call('POST', `/functions/${FUNCTION}/event-sources`, body)).status).toBe(201);
@@ -106,6 +107,7 @@ describe('/functions/:id/event-sources and /event-sources (L1)', () => {
     [{ eventSourceArn: ARN, enabled: 'yes' }, 'enabled must be a boolean value'],
     [{ batchSize: 5 }, 'eventSourceArn must be a string'],
     [{ eventSourceArn: ARN, filterCriteria: {} }, 'property filterCriteria should not exist'],
+    [{ eventSourceArn: ARN, qualifier: 'live:2' }, "qualifier is $LATEST, a version's number or an alias's name, as Lambda's"],
   ])('refuses %j before the service is called', async (body, problem) => {
     const [status, messages] = await refusal(await call('POST', `/functions/${FUNCTION}/event-sources`, body));
 

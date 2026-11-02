@@ -66,6 +66,7 @@ import { CodeStorage1793540275197 } from './1793540275197-CodeStorage';
 import { InvocationVersions1793560000000 } from './1793560000000-InvocationVersions';
 import { CapacityVersions1793570000000 } from './1793570000000-CapacityVersions';
 import { UrlAliases1793580000000 } from './1793580000000-UrlAliases';
+import { TriggerQualifiers1793590000000 } from './1793590000000-TriggerQualifiers';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -141,4 +142,5 @@ export const MIGRATIONS: Array<new () => object> = [
   InvocationVersions1793560000000,
   CapacityVersions1793570000000,
   UrlAliases1793580000000,
+  TriggerQualifiers1793590000000,
 ];

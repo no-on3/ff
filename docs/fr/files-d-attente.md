@@ -43,7 +43,7 @@ aws sqs send-message --queue-url "$(aws sqs get-queue-url --queue-name commandes
 ff event-sources add commandes traiter-commande --batching-window 2s --report-batch-item-failures
 ```
 
-FF appelle la fonction avec l'événement de SQS, `Records[]`, et supprime les messages que l'appel a traités. Avec `--report-batch-item-failures`, la réponse de la fonction, `batchItemFailures`, nomme ceux qui ont échoué : eux seuls reviennent après le délai de visibilité de la file, puis passent dans sa file de lettres mortes. Le délai de visibilité de la file doit être au moins le délai d'exécution de la fonction, comme Lambda l'exige. Désactivé (`ff event-sources update <uuid> --disable`), le mappage ne lit plus rien, et les messages attendent.
+FF appelle la fonction avec l'événement de SQS, `Records[]`, et supprime les messages que l'appel a traités. Avec `--report-batch-item-failures`, la réponse de la fonction, `batchItemFailures`, nomme ceux qui ont échoué : eux seuls reviennent après le délai de visibilité de la file, puis passent dans sa file de lettres mortes. Une version ou un alias de la fonction peut lire la file à sa place (`"qualifier": "live"` dans l'API), comme le mappage de Lambda d'une fonction qualifiée ; un alias supprimé depuis laisse les messages attendre. Le délai de visibilité de la file doit être au moins le délai d'exécution de ce qui la lit, le plus long des versions d'un alias, comme Lambda l'exige. Désactivé (`ff event-sources update <uuid> --disable`), le mappage ne lit plus rien, et les messages attendent.
 
 ## Un fichier qui lance une fonction
 

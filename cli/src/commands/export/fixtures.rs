@@ -52,7 +52,7 @@ fn queue(name: &str, visibility: u32, dead_letters: Option<&str>) -> Value {
 }
 
 fn schedule(name: &str, expression: &str, input: Value, enabled: bool) -> Value {
-    json!({ "id": name, "functionId": "f1", "name": name, "description": null, "expression": expression, "input": input,
+    json!({ "id": name, "functionId": "f1", "qualifier": null, "name": name, "description": null, "expression": expression, "input": input,
             "enabled": enabled, "nextRunAt": null, "lastRunAt": null, "lastRequestId": null, "lastOutcome": null,
             "createdAt": AT, "updatedAt": AT })
 }

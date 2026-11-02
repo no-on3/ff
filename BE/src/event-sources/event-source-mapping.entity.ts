@@ -8,7 +8,7 @@ import { Queue } from '../queues/queue.entity';
  * `batchSize`, waiting up to `maximumBatchingWindowInSeconds` to fill one,
  * and calls the function with SQS's event, deleting each message the call
  * handled. Over 10 messages a batch needs a window, as on Lambda. A function
- * reads a queue once. Deleting the function or the queue deletes it.
+ * reads a queue once, as it is or through a version or an alias of it. Deleting the function or the queue deletes it.
  */
 @Entity('event_source_mappings')
 @Index(['functionId', 'queueId'], { unique: true })
@@ -39,6 +39,10 @@ export class EventSourceMapping {
   @ManyToOne(() => Queue, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'queue_id' })
   queue?: Queue;
+
+  /** The version or the alias that reads it, as Lambda's mapping of a qualified function; null: $LATEST. */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  qualifier: string | null;
 
   /** The most messages in one call. */
   @Column({ type: 'integer', default: 10 })

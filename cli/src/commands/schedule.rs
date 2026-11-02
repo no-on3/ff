@@ -15,6 +15,9 @@ use crate::table::{table, time};
 #[serde(rename_all = "camelCase")]
 pub(super) struct Schedule {
     id: String,
+    /// The version or the alias it runs; none: $LATEST. Kept by `ff schedule set`, which never sends it.
+    #[serde(default)]
+    qualifier: Option<String>,
     pub(super) name: String,
     pub(super) description: Option<String>,
     pub(super) expression: String,
@@ -172,6 +175,7 @@ mod tests {
     fn schedule(outcome: Option<&str>) -> Schedule {
         Schedule {
             id: "s1".into(),
+            qualifier: None,
             name: "nightly".into(),
             description: None,
             expression: "cron(0 2 * * ? *)".into(),

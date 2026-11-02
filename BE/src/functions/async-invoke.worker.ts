@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
@@ -7,6 +7,7 @@ import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
+import { unlessGone } from '../common/unless-gone';
 import { withRequestContext } from '../common/request-context';
 import { FunctionRuntimeError, FunctionThrottledError } from '../orchestrator/orchestrator.errors';
 import { PlansService } from '../plans/plans.service';
@@ -63,16 +64,6 @@ const scheduleOf = (attributes: Record<string, unknown> | null): string | undefi
 
 /** A megabyte, as the plans count what messages hold. */
 const MB = 1024 * 1024;
-
-/** What `find` finds, or undefined once it is gone. */
-async function unlessGone<T>(find: Promise<T>): Promise<T | undefined> {
-  try {
-    return await find;
-  } catch (error) {
-    if (error instanceof NotFoundException) return undefined;
-    throw error;
-  }
-}
 
 /**
  * Runs functions' asynchronous calls (ADR 0010). As each call is kept,
