@@ -66,10 +66,10 @@ export class FunctionUrlsService {
     return this.urls.findOne({ where: { urlId } });
   }
 
-  /** The function's $LATEST URL, if it has one, for pages that show it. */
-  async find(functionId: string): Promise<FunctionUrlView | null> {
-    const url = await this.urls.findOne({ where: { functionId, alias: IsNull() } });
-    return url ? this.view(url) : null;
+  /** The function's URLs, $LATEST's first, then its aliases' by name: for its own account, or the platform's support page. */
+  async ofFunction(functionId: string): Promise<FunctionUrlView[]> {
+    const urls = await this.urls.find({ where: { functionId } });
+    return urls.sort((a, b) => (a.alias === null ? -1 : b.alias === null ? 1 : a.alias.localeCompare(b.alias))).map((url) => this.view(url));
   }
 
   async get(accountId: string, functionId: string, alias?: string): Promise<FunctionUrlView> {
@@ -79,8 +79,7 @@ export class FunctionUrlsService {
   /** As Lambda's ListFunctionUrlConfigs: the function's URLs, $LATEST's first, then its aliases' by name. */
   async list(accountId: string, functionId: string): Promise<FunctionUrlView[]> {
     await this.functions.findOne(accountId, functionId);
-    const urls = await this.urls.find({ where: { functionId, accountId } });
-    return urls.sort((a, b) => (a.alias === null ? -1 : b.alias === null ? 1 : a.alias.localeCompare(b.alias))).map((url) => this.view(url));
+    return this.ofFunction(functionId);
   }
 
   /** Gives the function, or its alias, its URL, at a new random address. */

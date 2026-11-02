@@ -159,8 +159,12 @@ run("customers' domains, in the database (L2)", () => {
     expect((await domains.list(TWO, fn.id, 'live')).map((domain) => domain.domain)).toEqual(['live.example.tn', 'wrong.example.tn']);
     expect((await domains.list(TWO, fn.id)).map((domain) => domain.domain)).toEqual(['latest.example.tn']);
     expect((await domains.forHost('live.example.tn'))?.urlId).toBe('i'.repeat(32));
-    // The platform's support page shows $LATEST's URL, and its domains alone.
-    expect((await domains.forLatestUrl(fn.id)).map((domain) => domain.domain)).toEqual(['latest.example.tn']);
+    // The platform's support page shows each URL with its own domains.
+    const byUrl = await domains.forFunctionUrls(fn.id);
+    expect([...byUrl].map(([alias, of]) => [alias, of.map((domain) => domain.domain)])).toEqual([
+      ['live', ['live.example.tn', 'wrong.example.tn']],
+      [null, ['latest.example.tn']],
+    ]);
     // A row naming a function without its URL, or a URL without its function, is refused by the database itself.
     const row = { domain: 'half.example.tn', accountId: TWO, token: 'x'.repeat(32), status: DomainStatus.PENDING, bucketId: null };
     await expect(db.dataSource.getRepository(CustomDomain).insert({ ...row, functionId: fn.id, urlId: null })).rejects.toThrow(/check constraint/);

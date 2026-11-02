@@ -151,8 +151,8 @@ describe('FunctionUrlsService (L1)', () => {
       ['edge', edge.functionUrl],
       ['live', live.functionUrl],
     ]);
-    // Pages that show the function's URL show $LATEST's.
-    expect((await service.find(FN))?.functionUrl).toBe(latest.functionUrl);
+    // The platform's support page reads them by the function alone, in the same order.
+    expect((await service.ofFunction(FN)).map((url) => url.alias)).toEqual([null, 'edge', 'live']);
   });
 
   it("refuses an alias the function hasn't, and one whose version, the other included, or $LATEST takes the wrapped event", async () => {

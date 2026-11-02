@@ -5,7 +5,7 @@ import { Fact, Table } from '../components/Facts';
 import ReasonDialog from '../components/ReasonDialog';
 import { EmptyState, ErrorState, Loading } from '../components/States';
 import StatusBadge from '../components/StatusBadge';
-import { ownersOf } from '../lib/accounts';
+import { formatBytes, ownersOf } from '../lib/accounts';
 import { apiErrorMessage, notAnOperator } from '../lib/errors';
 import {
   Call,
@@ -14,6 +14,7 @@ import {
   LogLine,
   Look,
   TRUNCATED,
+  aliasText,
   callValue,
   domainsText,
   eventFormatText,
@@ -168,6 +169,48 @@ const FunctionPage: React.FC<{ email: string | undefined }> = ({ email }) => {
           The code, a call's data and the logs are the customer's: each look needs a reason, and the account's owners see it in their audit log. The
           variables' and secrets' values are never shown here.
         </p>
+      </section>
+
+      <section className="space-y-3">
+        <h2 className="text-lg font-semibold">Aliases and versions</h2>
+        {page.aliases.length === 0 ? (
+          <EmptyState>No alias: every call runs $LATEST, the function as it is.</EmptyState>
+        ) : (
+          <Table
+            head={['Alias', 'Its calls go to', 'Its URL', 'Description']}
+            rows={page.aliases.map((alias) => [
+              alias.name,
+              aliasText(alias),
+              alias.url ? (
+                <>
+                  <span className="break-all font-mono text-xs">{alias.url.functionUrl}</span>
+                  <br />
+                  {urlText(alias.url)}; own domains: {domainsText(alias.url.domains)}
+                </>
+              ) : (
+                'none'
+              ),
+              alias.description || '–',
+            ])}
+          />
+        )}
+        {page.versions.length === 0 ? (
+          <EmptyState>No version published.</EmptyState>
+        ) : (
+          <Table
+            head={['Version', 'Published', 'Runtime', 'Memory, timeout', 'Code', 'Description']}
+            rows={page.versions.map((version) => [
+              version.version,
+              whenUtc(version.createdAt),
+              version.runtime,
+              `${version.memory} MB, ${version.timeout} s`,
+              <span className="font-mono text-xs" title={version.codeSha256}>
+                {version.codeSha256.slice(0, 12)}…, {formatBytes(version.codeSize)}
+              </span>,
+              version.description || '–',
+            ])}
+          />
+        )}
       </section>
 
       {shown && (

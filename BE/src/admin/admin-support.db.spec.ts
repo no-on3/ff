@@ -20,7 +20,8 @@ import { LedgerService } from '../billing/ledger/ledger.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
-import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from '../functions/entities/function.entity';
+import { FunctionVersion } from '../functions/entities/function-version.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { FunctionUrl, UrlAuthType } from '../functions/entities/function-url.entity';
@@ -126,6 +127,7 @@ run('support, for operators (L2)', () => {
       {} as never, // nor the queues
       {} as never,
       {} as never, // nor the caches
+      {} as never, // and the page of an account, which counts its packages, isn't read here
     );
     // The environment's names come from its store, which other suites test; the URL from its table, here.
     const environmentNames = async () => ({ variables: ['TABLE'], secrets: ['DB_PASSWORD'] });
@@ -141,6 +143,8 @@ run('support, for operators (L2)', () => {
       urls,
       domains,
       ds.getRepository(Schedule),
+      ds.getRepository(FunctionVersion),
+      ds.getRepository(FunctionAlias),
     );
   });
 
@@ -212,7 +216,7 @@ run('support, for operators (L2)', () => {
     ]);
   });
 
-  it("gives a function's page: its settings, its account, its recent calls and failures with their error types, and none of its customer's data", async () => {
+  it("gives a function's page: its settings, its URLs, versions and aliases, what its schedules run, its account, its recent calls and failures with their error types, and none of its customer's data", async () => {
     const id = await account('Page Labs', 'owner@page-labs.test');
     const f = await fn(id, 'checkout');
     const calls = [];
@@ -221,15 +225,27 @@ run('support, for operators (L2)', () => {
     const timedOut = await called(f, 2, InvocationStatus.TIMEOUT, 'Sandbox.Timedout: Task timed out after 10.00 seconds');
 
     await db.dataSource.getRepository(FunctionUrl).insert({ functionId: f.id, accountId: id, urlId: 'u'.repeat(32), authType: UrlAuthType.AWS_IAM, cors: { allowOrigins: ['*'] } });
-    // An alias's URL and its domain, which the page leaves out: it shows $LATEST's URL.
-    await db.dataSource.getRepository(FunctionAlias).insert({ functionId: f.id, accountId: id, name: 'live', version: null });
+    // Two versions, the code they froze the customer's; an alias naming the second, with a share to the first, and its own URL and domain.
+    const version = { functionId: f.id, accountId: id, runtime: Runtime.NODEJS, handler: 'index.handler', packageType: PackageType.INLINE, code: `export const handler = () => '${PRIVATE}';` };
+    const frozen = { codeSize: 64, packageSha256: 'p'.repeat(44), memory: 128, timeout: 3, eventFormat: EventFormat.LAMBDA, awsEndpoints: [] };
+    await db.dataSource.getRepository(FunctionVersion).insert([
+      { ...version, ...frozen, version: 1, codeSha256: 'a'.repeat(44), description: 'First' },
+      { ...version, ...frozen, version: 2, codeSha256: 'b'.repeat(44), memory: 256 },
+    ]);
+    await db.dataSource.getRepository(FunctionAlias).insert([
+      { functionId: f.id, accountId: id, name: 'live', version: 2, additionalVersion: 1, additionalWeight: 0.25, description: 'The shop' },
+      { functionId: f.id, accountId: id, name: 'beta', version: null },
+    ]);
     await db.dataSource.getRepository(FunctionUrl).insert({ functionId: f.id, accountId: id, urlId: 'v'.repeat(32), alias: 'live', authType: UrlAuthType.NONE });
     const domain = { accountId: id, functionId: f.id, token: 't'.repeat(32), status: DomainStatus.VERIFIED };
     await db.dataSource.getRepository(CustomDomain).insert([
       { ...domain, domain: 'shop.example.tn', urlId: 'u'.repeat(32) },
       { ...domain, domain: 'live.shop.example.tn', urlId: 'v'.repeat(32) },
     ]);
-    await db.dataSource.getRepository(Schedule).insert({ accountId: id, functionId: f.id, name: 'nightly', expression: 'cron(0 2 * * ? *)', input: { secret: PRIVATE }, lastOutcome: 'success' });
+    await db.dataSource.getRepository(Schedule).insert([
+      { accountId: id, functionId: f.id, name: 'nightly', expression: 'cron(0 2 * * ? *)', input: { secret: PRIVATE }, lastOutcome: 'success' },
+      { accountId: id, functionId: f.id, name: 'weekly', expression: 'rate(7 days)', qualifier: 'live' },
+    ]);
 
     const page = await support.functionPage(f.id);
 
@@ -254,8 +270,32 @@ run('support, for operators (L2)', () => {
       createdAt: expect.any(Date),
       domains: [{ domain: 'shop.example.tn', status: 'verified', checkError: null }],
     });
+    expect(page.versions).toEqual([
+      { version: '2', description: '', runtime: 'nodejs', memory: 256, timeout: 3, codeSha256: 'b'.repeat(44), codeSize: 64, createdAt: expect.any(Date) },
+      { version: '1', description: 'First', runtime: 'nodejs', memory: 128, timeout: 3, codeSha256: 'a'.repeat(44), codeSize: 64, createdAt: expect.any(Date) },
+    ]);
+    expect(page.aliases).toEqual([
+      { name: 'beta', functionVersion: '$LATEST', additionalVersion: null, additionalWeight: null, description: '', url: null },
+      {
+        name: 'live',
+        functionVersion: '2',
+        additionalVersion: '1',
+        additionalWeight: 0.25,
+        description: 'The shop',
+        url: {
+          functionUrl: `https://${'v'.repeat(32)}.fn.example.tn/`,
+          authType: 'NONE',
+          cors: false,
+          createdAt: expect.any(Date),
+          domains: [{ domain: 'live.shop.example.tn', status: 'verified', checkError: null }],
+        },
+      },
+    ]);
     expect([page.variables, page.secrets]).toEqual([['TABLE'], ['DB_PASSWORD']]);
-    expect(page.schedules).toEqual([{ name: 'nightly', expression: 'cron(0 2 * * ? *)', enabled: true, nextRunAt: null, lastRunAt: null, lastOutcome: 'success' }]);
+    expect(page.schedules).toEqual([
+      { name: 'nightly', expression: 'cron(0 2 * * ? *)', qualifier: '$LATEST', enabled: true, nextRunAt: null, lastRunAt: null, lastOutcome: 'success' },
+      { name: 'weekly', expression: 'rate(7 days)', qualifier: 'live', enabled: true, nextRunAt: null, lastRunAt: null, lastOutcome: null },
+    ]);
     expect([page.account.id, page.account.owners.map((o) => o.email)]).toEqual([id, ['owner@page-labs.test']]);
     expect(page.recentCalls.map((c) => c.id)).toEqual([timedOut, failed, ...calls.slice(-18).reverse()]);
     expect(page.recentErrors.map((c) => [c.id, c.status, c.errorType])).toEqual([

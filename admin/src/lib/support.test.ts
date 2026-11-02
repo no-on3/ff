@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TRUNCATED, callValue, domainsText, eventFormatText, scheduleText, foundIn, lookDialog, milliseconds, namesText, outcome, searchSummary, sourceText, urlText } from './support';
+import { TRUNCATED, aliasText, callValue, domainsText, eventFormatText, scheduleText, foundIn, lookDialog, milliseconds, namesText, outcome, qualifierText, searchSummary, sourceText, urlText } from './support';
 
 describe("a look at a customer's data", () => {
   it("says what it shows, and that the account's owners see it in their audit log, with the reason", () => {
@@ -72,11 +72,22 @@ describe("a function's configuration, to read", () => {
 
   it('says when each schedule runs, and how its last run went', () => {
     const when = (iso: string) => iso.slice(0, 16).replace('T', ' ');
-    const schedule = { name: 'nightly', expression: 'cron(0 2 * * ? *)', enabled: true, nextRunAt: '2026-10-22T02:00:00Z', lastRunAt: null, lastOutcome: null };
+    const schedule = { name: 'nightly', expression: 'cron(0 2 * * ? *)', qualifier: '$LATEST', enabled: true, nextRunAt: '2026-10-22T02:00:00Z', lastRunAt: null, lastOutcome: null };
 
     expect(scheduleText(schedule, when)).toBe('nightly: cron(0 2 * * ? *), next 2026-10-22 02:00');
     expect(scheduleText({ ...schedule, enabled: false, lastOutcome: 'error' }, when)).toBe('nightly: cron(0 2 * * ? *), disabled; last: error');
     expect(scheduleText({ ...schedule, nextRunAt: null }, when)).toBe('nightly: cron(0 2 * * ? *), no run left');
+    expect([scheduleText({ ...schedule, qualifier: 'live' }, when), scheduleText({ ...schedule, qualifier: '3' }, when)]).toEqual([
+      'nightly: cron(0 2 * * ? *), runs alias live, next 2026-10-22 02:00',
+      'nightly: cron(0 2 * * ? *), runs version 3, next 2026-10-22 02:00',
+    ]);
+  });
+
+  it("says where an alias's calls go: its version or $LATEST, and another version's share", () => {
+    expect([qualifierText('$LATEST'), qualifierText('12'), qualifierText('live')]).toEqual(['$LATEST', 'version 12', 'alias live']);
+    expect(aliasText({ functionVersion: '$LATEST', additionalVersion: null, additionalWeight: null })).toBe('$LATEST');
+    expect(aliasText({ functionVersion: '3', additionalVersion: '2', additionalWeight: 0.1 })).toBe('version 3; 10% to version 2');
+    expect(aliasText({ functionVersion: '3', additionalVersion: '2', additionalWeight: 0.055 })).toBe('version 3; 5.5% to version 2');
   });
 
   it('names the variables and secrets, or says there are none', () => {

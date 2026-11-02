@@ -15,6 +15,7 @@ import {
   ownersSee,
   queueMessagesLabel,
   queueStorageLabel,
+  codeStorageLabel,
   statusLabel,
   storageLabel,
 } from './accounts';
@@ -73,6 +74,7 @@ describe("an account's databases, buckets and queues, to read", () => {
       '0 waiting, 2 delayed',
     ]);
     expect(queueStorageLabel({ bytes: 2048, limitMb: 100 })).toBe("2 KB of the plan's 100 MB, its functions' calls that don't wait among them; past it, sends and those calls are refused");
+    expect(codeStorageLabel({ bytes: 3_670_016, limitMb: 5120 })).toBe("3.5 MB of the plan's 5,120 MB, the packages its functions and their versions name, each once; past it, new code is refused");
   });
 
   it("says how full the buckets are together against the plan's storage, full being when uploads wait", () => {

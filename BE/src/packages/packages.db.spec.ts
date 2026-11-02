@@ -272,13 +272,14 @@ run("functions' packages (L2)", () => {
     const NONE = sha(Buffer.from('a package no one names'));
 
     // The shared package once, though two functions name it; the version's; inline code's; not the unused one, nor b's.
+    expect(await packages.namedBytes(a)).toBe(shared.length + versioned.length + live.zip.length);
     expect(await packages.namedBytes(a, NONE)).toBe(shared.length + versioned.length + live.zip.length);
     // The package a change is about to name, which the change adds itself.
     expect(await packages.namedBytes(a, sha(shared))).toBe(versioned.length + live.zip.length);
     // A function's record left out: its package still counted while another names it, its versions' too.
     expect(await packages.namedBytes(a, NONE, await idOf('one'))).toBe(shared.length + versioned.length + live.zip.length);
     expect(await packages.namedBytes(a, NONE, await idOf('inline'))).toBe(shared.length + versioned.length);
-    expect(await packages.namedBytes(await account(), NONE)).toBe(0);
+    expect(await packages.namedBytes(await account())).toBe(0);
   });
 
   it("deletes all of an account's packages and their zips, and no other account's", async () => {

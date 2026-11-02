@@ -24,11 +24,13 @@ import { CreditService } from '../billing/credit.service';
 import { LedgerEvents } from '../billing/ledger/ledger-events';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
-import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
+import { Function, FunctionStatus, PackageType, Runtime } from '../functions/entities/function.entity';
 import { Mail } from '../mail/mail.service';
 import { capturingMail } from '../mail/capturing-mail';
 import { FunctionWorkload, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { BETA_LIMITS } from '../plans/test-fixtures';
+import { Package } from '../packages/package.entity';
+import { PackagesService } from '../packages/packages.service';
 import { PlansService } from '../plans/plans.service';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService, monthPartitions } from '../usage/usage.service';
@@ -169,6 +171,8 @@ run('accounts, for operators (L2, P-71)', () => {
             ? [{ name: 'sessions', serverName: 'fc-0123456789abcdef01234567', status: 'active', port: 6400, memoryMb: 64, bytesUsedForCache: 1_258_291, currConnections: 2, createdAt: new Date('2026-10-20T11:00:00Z'), host: 'cache.example.tn' }]
             : [],
       } as never,
+      // Only counts what its functions' and versions' packages hold: nothing here is uploaded or stored.
+      new PackagesService(ds.getRepository(Package), {} as never, audit, {} as never),
     );
   });
 
@@ -579,6 +583,25 @@ run('accounts, for operators (L2, P-71)', () => {
       { name: 'orders-dlq', messages: { available: 0, inFlight: 0, delayed: 0 }, sizeBytes: 0, deadLetterQueue: null, createdAt: new Date('2026-10-21T10:00:00Z') },
     ]);
     expect(page.queueStorage).toEqual({ bytes: 400, limitMb: BETA_LIMITS.queueStorageMb });
+  });
+
+  it("shows the code its functions and their versions name on its page, each package once, against the plan's code storage", async () => {
+    const id = await account({ status: AccountStatus.ACTIVE });
+    const stored = (codeSha256: string, codeSize: number) =>
+      query(`INSERT INTO packages (account_id, code_sha256, code_size, unpacked_size, file_count, files) VALUES ($1, $2, $3, $3, 1, '{index.js}')`, [id, codeSha256, codeSize]);
+    await stored('a'.repeat(44), 3_000);
+    await stored('b'.repeat(44), 500);
+    await stored('c'.repeat(44), 70_000); // uploaded, and named by nothing
+    // Two functions naming one package, counted once; a version naming the other.
+    for (const name of ['api', 'worker']) await fn(id, { name, packageType: PackageType.ZIP, codeSha256: 'a'.repeat(44), codeSize: 3_000, packageSha256: 'a'.repeat(44) });
+    const [{ id: api }] = await query<Array<{ id: string }>>(`SELECT id FROM functions WHERE account_id = $1 AND name = 'api'`, [id]);
+    await query(
+      `INSERT INTO function_versions (function_id, version, account_id, runtime, handler, package_type, code, code_sha256, code_size, package_sha256, memory, timeout, event_format, aws_endpoints)
+       VALUES ($1, 1, $2, 'nodejs', 'index.handler', 'zip', '', $3, 500, $3, 128, 5, 'lambda', '{}')`,
+      [api, id, 'b'.repeat(44)],
+    );
+
+    expect((await service.detail(id)).codeStorage).toEqual({ bytes: 3_500, limitMb: BETA_LIMITS.codeStorageMb });
   });
 
   it('changes nothing when the cluster refuses the NetworkPolicy; the value the account has writes nothing, but applies it again', async () => {

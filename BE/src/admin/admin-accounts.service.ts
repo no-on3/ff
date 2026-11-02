@@ -21,6 +21,7 @@ import { Function, FunctionStatus } from '../functions/entities/function.entity'
 import { Language, recipientsOf } from '../mail/language';
 import { Mail, MailService } from '../mail/mail.service';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
+import { PackagesService } from '../packages/packages.service';
 import { PlansService, tenantLimits } from '../plans/plans.service';
 import { UsageService } from '../usage/usage.service';
 import { AdminCreditsService } from './admin-credits.service';
@@ -217,6 +218,7 @@ export class AdminAccountsService {
     private readonly customerQueues: CustomerQueues,
     private readonly queueStore: QueueStore,
     private readonly caches: CachesService,
+    private readonly packages: PackagesService,
   ) {}
 
   /** GET /admin/accounts: newest first, a page at a time, each with its owners. */
@@ -271,6 +273,7 @@ export class AdminAccountsService {
     const lastInvoked = await this.usage.lastCalls(functions.map((function_) => function_.id));
     const month = new Date().toISOString().slice(0, 7);
     const { totals } = await this.usage.monthly(id, month);
+    const { limits } = await this.plans.get(account.planId);
     return {
       account: summary(account, memberships.filter((membership) => membership.role === 'owner').map(person)),
       members: memberships.map((membership) => ({ userId: membership.userId, ...person(membership), role: membership.role, joinedAt: membership.createdAt })),
@@ -305,7 +308,8 @@ export class AdminAccountsService {
       })),
       buckets: await this.buckets.measured(id),
       queues: await this.queuesOf(id),
-      queueStorage: { bytes: await this.queueStore.accountBytes(id), limitMb: (await this.plans.get(account.planId)).limits.queueStorageMb },
+      queueStorage: { bytes: await this.queueStore.accountBytes(id), limitMb: limits.queueStorageMb },
+      codeStorage: { bytes: await this.packages.namedBytes(id), limitMb: limits.codeStorageMb },
       usage: { month, totals },
       balances: (await this.ledger.balances(id)).map(({ currency, exponent, balanceMinor }) => ({ currency, balance: formatMinor(balanceMinor, exponent) })),
       credit: await this.credits.view(id),

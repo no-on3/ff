@@ -16,6 +16,7 @@ import {
   changesFor,
   dataDeletion,
   bucketStorageLabel,
+  codeStorageLabel,
   formatBytes,
   formatMegabytes,
   isAccountId,
@@ -453,6 +454,7 @@ const Account: React.FC<{ email: string | undefined }> = ({ email }) => {
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Functions</h2>
+        <p className="text-sm text-slate-600">Their code: {codeStorageLabel(view.codeStorage)}.</p>
         {view.functions.length === 0 ? (
           <EmptyState>No function.</EmptyState>
         ) : (

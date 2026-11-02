@@ -9,13 +9,16 @@ import { AuditModule } from '../audit/audit.module';
 import { CachesModule } from '../caches/caches.module';
 import { DatabasesModule } from '../databases/databases.module';
 import { EmailModule } from '../email/email.module';
+import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { FunctionInvocation } from '../functions/entities/function-invocation.entity';
+import { FunctionVersion } from '../functions/entities/function-version.entity';
 import { Function } from '../functions/entities/function.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { FunctionsModule } from '../functions/functions.module';
 import { FunctionUrlsModule } from '../function-urls/function-urls.module';
 import { MailModule } from '../mail/mail.module';
 import { OrchestratorModule } from '../orchestrator/orchestrator.module';
+import { PackagesModule } from '../packages/packages.module';
 import { PlansModule } from '../plans/plans.module';
 import { UsageModule } from '../usage/usage.module';
 import { AdminAccountsController } from './admin-accounts.controller';
@@ -41,7 +44,7 @@ import { QueuesModule } from '../queues/queues.module';
 /** The admin dashboard's routes, under /admin, for FF's operators only (P-70, D12). */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Account, Membership, Function, FunctionInvocation, PriceBook, Currency, Schedule]),
+    TypeOrmModule.forFeature([Account, Membership, Function, FunctionInvocation, FunctionVersion, FunctionAlias, PriceBook, Currency, Schedule]),
     AuditModule,
     CachesModule,
     DatabasesModule,
@@ -53,6 +56,8 @@ import { QueuesModule } from '../queues/queues.module';
     PlatformSettingsModule,
     MailModule,
     OrchestratorModule,
+    // The packages its functions and versions name, against the plan's code storage.
+    PackagesModule,
     PlansModule,
     UsageModule,
     // An account's buckets, and what each holds.

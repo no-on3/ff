@@ -2043,9 +2043,21 @@ check "the operator finds a call by its request ID: its function and account, in
   "$(status) $(jq -r '.calls[0] | "\(.functionId) \(.accountId) \(.inHistory)"' <<<"$found")"
 found="$(with_token "$operator_token" GET "/admin/search?q=$user_1")"
 check "and an account by its owner's e-mail" "200 $account_1" "$(status) $(jq -r '[.accounts[].id] | join(" ")' <<<"$found")"
+as_user_1 POST "/functions/$fn_1/versions" '{"description": "l5: for support"}' >/dev/null
+published="$(status)"
+as_user_1 POST "/functions/$fn_1/aliases" '{"name": "live", "functionVersion": "1"}' >/dev/null
+check "its owner publishes a version, and points the alias live at it" "201 201" "$published $(status)"
 page="$(with_token "$operator_token" GET "/admin/functions/$fn_1")"
 check "the function's page: its account and its recent calls, none of what went in or out" "200 $account_1 true false" \
   "$(status) $(jq -r --arg id "$logged_id" '"\(.account.id) \([.recentCalls[].id] | index($id) != null) \(tostring | contains("\"logs\""))"' <<<"$page")"
+check "  ... its versions and aliases: what a version froze, never its code or its variables" \
+  "1 l5: for support live:1 version,description,runtime,memory,timeout,codeSha256,codeSize,createdAt" \
+  "$(jq -r '"\(.versions[0].version) \(.versions[0].description) \(.aliases[0].name):\(.aliases[0].functionVersion) \(.versions[0] | keys_unsorted | join(","))"' <<<"$page")"
+account_page="$(with_token "$operator_token" GET "/admin/accounts/$account_1")"
+account_status="$(status)"
+code_room="$(as_user_1 GET /me | jq -r --arg a "$account_1" '.accounts[] | select(.id == $a) | .plan.limits.codeStorageMb')"
+check "  ... and the account's page what its functions' code holds, against its plan's code storage" "200 true $code_room" \
+  "$account_status $(jq -r '"\(.codeStorage.bytes > 0) \(.codeStorage.limitMb)"' <<<"$account_page")"
 with_token "$operator_token" POST "/admin/functions/$fn_1/invocations/$logged_id" '{}' >/dev/null
 check "a call's data needs a reason" 400 "$(status)"
 look="$(with_token "$operator_token" POST "/admin/functions/$fn_1/invocations/$logged_id" '{"reason": "l5: the customer asked about this call"}')"

@@ -169,13 +169,13 @@ export interface AccountQueue {
 export const QUEUE_FIELDS = ['name', 'messages', 'sizeBytes', 'deadLetterQueue', 'createdAt'] as const;
 export const QUEUE_MESSAGES_FIELDS = ['available', 'inFlight', 'delayed'] as const;
 
-/** What the account's queues hold together with its functions' calls that don't wait, against the plan's room for them. */
-export interface QueueStorage {
+/** What some of the account's things hold together, as its plan counts them, against the plan's room for them. */
+export interface StorageUsed {
   bytes: number;
   limitMb: number;
 }
 
-export const QUEUE_STORAGE_FIELDS = ['bytes', 'limitMb'] as const;
+export const STORAGE_FIELDS = ['bytes', 'limitMb'] as const;
 
 /** A queue's messages, in a few words: those in flight and delayed when there are some. */
 export function queueMessagesLabel(messages: AccountQueue['messages']): string {
@@ -186,8 +186,13 @@ export function queueMessagesLabel(messages: AccountQueue['messages']): string {
 }
 
 /** What the page says of the queues' room: what they hold with the calls that don't wait, of the plan's. */
-export function queueStorageLabel(storage: QueueStorage): string {
+export function queueStorageLabel(storage: StorageUsed): string {
   return `${formatBytes(storage.bytes)} of the plan's ${storage.limitMb.toLocaleString('en-US')} MB, its functions' calls that don't wait among them; past it, sends and those calls are refused`;
+}
+
+/** What the page says of its functions' code: the packages they and their versions name, of the plan's. */
+export function codeStorageLabel(storage: StorageUsed): string {
+  return `${formatBytes(storage.bytes)} of the plan's ${storage.limitMb.toLocaleString('en-US')} MB, the packages its functions and their versions name, each once; past it, new code is refused`;
 }
 
 /** What the page says of the account's buckets together against its plan's storage. */
@@ -244,7 +249,10 @@ export interface AccountView {
   buckets: AccountBucket[];
   /** Its queues, by name. */
   queues: AccountQueue[];
-  queueStorage: QueueStorage;
+  /** Its queues' messages with its functions' calls that don't wait. */
+  queueStorage: StorageUsed;
+  /** The packages its functions and their versions name. */
+  codeStorage: StorageUsed;
   usage: { month: string; totals: UsageTotals };
   /** Each wallet's balance (P-31), with its currency's decimals; none before the account's first credit or debit. */
   balances: Array<{ currency: string; balance: string }>;

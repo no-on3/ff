@@ -222,10 +222,14 @@ export class PackagesService {
    * out, a package a change is about to name, and the one `otherThan`'s record
    * names, which the change replaces, unless another names it too.
    */
-  async namedBytes(accountId: string, besides: string, otherThan?: string): Promise<number> {
+  async namedBytes(accountId: string, besides?: string, otherThan?: string): Promise<number> {
+    const parameters = [accountId];
+    const parameter = (value: string): string => `$${parameters.push(value)}`;
+    const leftOut = besides === undefined ? '' : ` AND "p"."code_sha256" <> ${parameter(besides)}`;
+    const named = namedBy(otherThan === undefined ? undefined : parameter(otherThan));
     const [{ bytes }] = await this.packages.query<Array<{ bytes: string }>>(
-      `SELECT COALESCE(sum("p"."code_size"), 0)::bigint AS "bytes" FROM "packages" "p" WHERE "p"."account_id" = $1 AND "p"."code_sha256" <> $2 AND ${namedBy(otherThan ? '$3' : undefined)}`,
-      otherThan ? [accountId, besides, otherThan] : [accountId, besides],
+      `SELECT COALESCE(sum("p"."code_size"), 0)::bigint AS "bytes" FROM "packages" "p" WHERE "p"."account_id" = $1${leftOut} AND ${named}`,
+      parameters,
     );
     return Number(bytes);
   }

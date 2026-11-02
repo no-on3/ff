@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
-import { IsNull, QueryDeepPartialEntity, QueryFailedError, Repository } from 'typeorm';
+import { QueryDeepPartialEntity, QueryFailedError, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { FunctionUrl } from '../functions/entities/function-url.entity';
 import { PlansService } from '../plans/plans.service';
@@ -123,9 +123,14 @@ export class CustomDomainsService {
     await this.removeFrom(accountId, this.siteTarget(await this.bucketOf(accountId, bucketName)), name);
   }
 
-  /** The domains of a function's $LATEST URL, which the platform's support page shows. */
-  forLatestUrl(functionId: string): Promise<CustomDomain[]> {
-    return this.domains.find({ where: { functionId, url: { alias: IsNull() } }, order: { createdAt: 'ASC' } });
+  /** The domains of a function's URLs, oldest first, by their URL's alias (null for $LATEST's), which the platform's support page shows. */
+  async forFunctionUrls(functionId: string): Promise<Map<string | null, CustomDomain[]>> {
+    const byAlias = new Map<string | null, CustomDomain[]>();
+    for (const domain of await this.domains.find({ where: { functionId }, relations: { url: true }, order: { createdAt: 'ASC' } })) {
+      const alias = domain.url?.alias ?? null;
+      byAlias.set(alias, [...(byAlias.get(alias) ?? []), domain]);
+    }
+    return byAlias;
   }
 
   /** The verified domain a request's host names, for the gateway, a site's with its bucket, a site or not; null for any other. */

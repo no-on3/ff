@@ -121,19 +121,44 @@ export class AdminFunctionUrlView {
   @ApiProperty({ type: [AdminDomainView] }) domains: AdminDomainView[];
 }
 
-/** A function's schedule as support sees it: when it runs, and how its last run went; never its input. */
+/** A function's schedule as support sees it: when it runs, what it runs, and how its last run went; never its input. */
 export class AdminScheduleView {
   @ApiProperty() name: string;
   @ApiProperty({ example: 'cron(0 2 * * ? *)' }) expression: string;
+  @ApiProperty({ example: 'live', description: '$LATEST, an alias or a version: what it runs' }) qualifier: string;
   @ApiProperty() enabled: boolean;
   @ApiProperty({ nullable: true, type: Date }) nextRunAt: Date | null;
   @ApiProperty({ nullable: true, type: Date }) lastRunAt: Date | null;
   @ApiProperty({ nullable: true, type: String, example: 'success' }) lastOutcome: string | null;
 }
 
+/** A function's version as support sees it: what it froze when it was published, never its variables. */
+export class AdminVersionView {
+  @ApiProperty({ example: '3' }) version: string;
+  @ApiProperty({ example: 'Receipts in French' }) description: string;
+  @ApiProperty({ example: 'nodejs24.x' }) runtime: string;
+  @ApiProperty({ example: 128, description: 'MB' }) memory: number;
+  @ApiProperty({ example: 30, description: 'Seconds' }) timeout: number;
+  @ApiProperty({ description: 'The SHA-256 of its code, in base64' }) codeSha256: string;
+  @ApiProperty({ description: 'Bytes' }) codeSize: number;
+  @ApiProperty() createdAt: Date;
+}
+
+/** A function's alias as support sees it: where its calls go, and its own URL. */
+export class AdminAliasView {
+  @ApiProperty({ example: 'live' }) name: string;
+  @ApiProperty({ example: '3', description: '$LATEST or the number of the version its calls go to' }) functionVersion: string;
+  @ApiProperty({ nullable: true, type: String, example: '2', description: 'Another version with a share of its calls; null for none' }) additionalVersion: string | null;
+  @ApiProperty({ nullable: true, type: Number, example: 0.1, description: "That version's share, from 0 to 1" }) additionalWeight: number | null;
+  @ApiProperty() description: string;
+  @ApiProperty({ type: AdminFunctionUrlView, nullable: true, description: "Its own URL, if it has one, with that address's domains" }) url: AdminFunctionUrlView | null;
+}
+
 export class AdminFunctionPageView {
   @ApiProperty({ type: AdminFunctionConfigView }) function: AdminFunctionConfigView;
   @ApiProperty({ type: AdminFunctionUrlView, nullable: true, description: "Its public address for $LATEST, if it has one, with that address's domains" }) url: AdminFunctionUrlView | null;
+  @ApiProperty({ type: [AdminVersionView], description: 'Its versions, newest first' }) versions: AdminVersionView[];
+  @ApiProperty({ type: [AdminAliasView], description: 'Its aliases, by name' }) aliases: AdminAliasView[];
   @ApiProperty({ type: [String], description: "Its variables' names, never their values" }) variables: string[];
   @ApiProperty({ type: [String], description: "Its secrets' names, never their values" }) secrets: string[];
   @ApiProperty({ type: [AdminScheduleView], description: 'Its schedules, by name' }) schedules: AdminScheduleView[];
