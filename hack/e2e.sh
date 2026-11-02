@@ -2304,6 +2304,10 @@ on_node() { docker exec "$node" crictl inspecti "$1" >/dev/null 2>&1 && echo tru
 meter_image="$(code_image_of "$meter_id")"
 meter_layer="$(curl -s -H 'accept: application/vnd.oci.image.manifest.v1+json' "$registry/v2/$(repository_of "$meter_image")/manifests/${meter_image##*@}" | jq -r '.layers[0].digest')"
 small_image="$(code_image_in "$small_ns" "$small_id")"
+# Stopped, to be restarted below as the runbook says after losing the registry: until then no autoscaler's minute
+# steps a function called in the last one, as the balance section's calls are, back up from zero.
+kill "$restarted_pid"
+e2e_gone "$restarted_pid"
 # Neither function has a pod, nor the node a copy of their images, as a node that never pulled them.
 kubectl -n "$tenant_ns" scale deployment "fn-$meter_id" --replicas=0 >/dev/null
 kubectl -n "$small_ns" scale deployment "fn-$small_id" --replicas=0 >/dev/null
@@ -2320,8 +2324,6 @@ check "the registry lost a layer of the meter function's image; the node has nei
   "404 false false $lost_image" \
   "$(layer_status "$meter_image" "$meter_layer") $(on_node "$meter_image") $(on_node "$small_image") $(code_image_in "$small_ns" "$small_id")"
 # Restarted, as the runbook says after losing the registry: the retention job runs at the backend's start.
-kill "$restarted_pid"
-e2e_gone "$restarted_pid"
 be_ready_timeout=90
 e2e_start_backend "$work/backend-restored.log" "$api" "${be_env[@]}" "${alarm_env[@]}"
 restored=""
