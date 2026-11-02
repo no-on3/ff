@@ -401,7 +401,8 @@ describe('the alarms', () => {
 
 describe('a failed create', () => {
   it("names the function the API saved anyway in the field the console reads, so the console opens it rather than create it twice", () => {
-    expect(functionsServiceSource).toContain(`failureResponse(error, failure, { ${SAVED_FUNCTION_FIELD}: savedFunction.id })`);
+    // The field is the contract, whatever the service calls the function it saved.
+    expect(functionsServiceSource).toMatch(new RegExp(`failureResponse\\(error, failure, \\{ ${SAVED_FUNCTION_FIELD}: \\w+\\.id \\}\\)`));
   });
 });
 
