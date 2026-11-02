@@ -18,6 +18,7 @@ mod export;
 mod functions;
 mod init;
 mod invoke;
+mod keys;
 mod local;
 mod logs;
 mod package;
@@ -31,9 +32,9 @@ mod versions;
 mod whoami;
 
 use crate::cli::{
-    AliasCommand, BucketKeysCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand,
-    EmailCommand, EnvCommand, EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand,
-    SiteDomainsCommand, SitesCommand, UrlCommand,
+    AliasCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EmailCommand,
+    EnvCommand, EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, SiteDomainsCommand,
+    SitesCommand, UrlCommand,
 };
 use crate::config::Settings;
 use crate::error::Error;
@@ -207,13 +208,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Buckets(BucketsCommand::List) => buckets::list(context),
         Command::Buckets(BucketsCommand::Get { name }) => buckets::get(&name, context),
         Command::Buckets(BucketsCommand::Delete { name, force, yes }) => buckets::delete(&name, force, yes, context),
-        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::List)) => buckets::keys_list(context),
-        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Create { buckets, queues, read_only })) => {
-            buckets::keys_create(&buckets, &queues, read_only, context)
-        }
-        Command::Buckets(BucketsCommand::Keys(BucketKeysCommand::Revoke { id, yes })) => {
-            buckets::keys_revoke(&id, yes, context)
-        }
+        Command::Keys(command) | Command::Buckets(BucketsCommand::Keys(command)) => keys::run(command, context),
         Command::Buckets(BucketsCommand::Notify { bucket, function, queue, events, prefix, suffix, id }) => {
             let destination = match (&function, &queue) {
                 (_, Some(queue)) => bucket_notifications::Destination::Queue(queue),

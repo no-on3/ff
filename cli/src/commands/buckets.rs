@@ -1,7 +1,6 @@
-//! `ff buckets create|list|get|delete <name>` and `ff buckets keys list|create|revoke`: the account's
-//! buckets, as AWS S3 gives them, and its access keys to them and to its queues. AWS's SDKs and CLI
-//! reach them at FF's S3 and SQS endpoints with one of those keys: a key's secret is shown once, when
-//! it is made, as the five variables AWS's tools read.
+//! `ff buckets create|list|get|delete <name>`: the account's buckets, as AWS S3 gives them. AWS's
+//! SDKs and CLI reach them at FF's S3 endpoint with one of the account's access keys, which
+//! `ff keys` makes (`ff buckets keys` another name for it).
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -44,58 +43,6 @@ fn held(bucket: &Bucket) -> String {
     }
 }
 
-/// An access key, as `GET /storage-keys` lists it: never its secret. Naming nothing, it reaches all the account's
-/// buckets and queues, and no function; naming buckets, queues or functions, those alone.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StorageKey {
-    pub id: String,
-    /// Its name; an API from before keys had names gives none.
-    #[serde(default)]
-    pub name: Option<String>,
-    pub buckets: Option<Vec<String>>,
-    #[serde(default)]
-    pub queues: Option<Vec<String>>,
-    pub read_only: bool,
-    /// The functions it names, or `*` for all; none for none.
-    #[serde(default)]
-    pub functions: Option<Vec<String>>,
-    /// What it may do with them: read, invoke or write.
-    #[serde(default)]
-    pub function_access: Option<String>,
-    pub created_at: String,
-    pub last_used_at: Option<String>,
-}
-
-impl StorageKey {
-    /// Whether it names nothing, and so reaches every bucket and queue of the account.
-    fn names_nothing(&self) -> bool {
-        self.buckets.is_none() && self.queues.is_none() && self.functions.is_none()
-    }
-}
-
-/// The account's access keys to its buckets and queues, which owners list.
-pub fn storage_keys(client: &Client) -> Result<Vec<StorageKey>, Error> {
-    client.json(&Call::get("/storage-keys"))
-}
-
-/// A key just made: its secret this once, and where to use it.
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CreatedKey {
-    #[serde(flatten)]
-    key: StorageKey,
-    secret_access_key: String,
-    endpoint: String,
-    /// The SQS endpoint, AWS_ENDPOINT_URL_SQS, for the account's queues.
-    #[serde(default)]
-    sqs_endpoint: Option<String>,
-    /// The SES endpoint, AWS_ENDPOINT_URL_SESV2, for the account's mail.
-    #[serde(default)]
-    ses_endpoint: Option<String>,
-    region: String,
-}
-
 /// AWS's prefixes and suffixes that no bucket of AWS's may have, and so no bucket of FF's.
 const RESERVED_PREFIXES: [&str; 3] = ["xn--", "sthree-", "amzn-s3-demo-"];
 const RESERVED_SUFFIXES: [&str; 4] = ["-s3alias", "--ol-s3", "--x-s3", "--table-s3"];
@@ -123,13 +70,6 @@ pub fn checked_name(name: &str) -> Result<&str, Error> {
     }
 }
 
-/// An access key ID as FF makes them: AKFF and 16 characters of base32.
-pub fn is_key_id(id: &str) -> bool {
-    id.len() == 20
-        && id.starts_with("AKFF")
-        && id[4..].bytes().all(|byte| byte.is_ascii_uppercase() || (b'2'..=b'7').contains(&byte))
-}
-
 /// What the account's buckets are reached with: the endpoint and the region, as AWS's tools take them.
 fn reach(bucket: &Bucket) -> String {
     format!(
@@ -144,7 +84,7 @@ pub fn create(name: &str, context: &Context) -> Result<(), Error> {
     let bucket: Bucket = client.json(&Call::post("/buckets", json!({ "name": name })))?;
     context.out.result(&bucket, || {
         format!(
-            "{} made\n{}\n`ff buckets keys create` makes an access key for AWS's SDKs and CLI\n\
+            "{} made\n{}\n`ff keys create` makes an access key for AWS's SDKs and CLI\n\
              FF keeps no copy of its files at a second site: keep your own of those that matter (`aws s3 sync`)",
             bucket.name,
             reach(&bucket)
@@ -209,124 +149,6 @@ pub fn delete(name: &str, force: bool, yes: bool, context: &Context) -> Result<(
     })
 }
 
-/// The buckets or the queues a key reaches, for a column: all, those it names, or none when it names others alone.
-fn column(names: Option<&Vec<String>>, key: &StorageKey) -> String {
-    match names {
-        Some(names) => names.join(","),
-        None if key.names_nothing() => "all".to_owned(),
-        None => "-".to_owned(),
-    }
-}
-
-/// What a key reaches, in words.
-pub fn reaches(key: &StorageKey) -> String {
-    let named = |kind: &str, names: &[String]| {
-        format!("the {kind}{} {}", if names.len() == 1 { "" } else { "s" }, names.join(", "))
-    };
-    if key.names_nothing() {
-        let reach = "every bucket and queue of the account";
-        return if key.read_only { format!("{reach}, read-only") } else { reach.to_owned() };
-    }
-    let storage: Vec<String> = [("bucket", &key.buckets), ("queue", &key.queues)]
-        .into_iter()
-        .filter_map(|(kind, names)| names.as_ref().map(|names| named(kind, names)))
-        .collect();
-    let mut reach = storage.join(" and ");
-    if key.read_only && !storage.is_empty() {
-        reach.push_str(", read-only");
-    }
-    if let Some(functions) = &key.functions {
-        let which = if functions.iter().any(|name| name == "*") {
-            "every function of the account".to_owned()
-        } else {
-            named("function", functions)
-        };
-        let level = key.function_access.as_deref().unwrap_or("read");
-        reach =
-            if reach.is_empty() { format!("{which}, to {level}") } else { format!("{reach}, and {which}, to {level}") };
-    }
-    reach
-}
-
-pub fn keys_list(context: &Context) -> Result<(), Error> {
-    let client = Client::new(&context.settings()?)?;
-    let keys = storage_keys(&client)?;
-    context.out.result(&keys, || {
-        if keys.is_empty() {
-            return "The account has no access key to its buckets and queues: `ff buckets keys create` makes one"
-                .to_owned();
-        }
-        let rows: Vec<Vec<String>> = keys
-            .iter()
-            .map(|key| {
-                vec![
-                    key.id.clone(),
-                    column(key.buckets.as_ref(), key),
-                    column(key.queues.as_ref(), key),
-                    if key.read_only { "read-only" } else { "read-write" }.to_owned(),
-                    key.last_used_at.as_deref().map(time).unwrap_or_else(|| "never".to_owned()),
-                    time(&key.created_at),
-                ]
-            })
-            .collect();
-        table(&["ID", "BUCKETS", "QUEUES", "ACCESS", "LAST USED (UTC)", "CREATED (UTC)"], &rows)
-    })
-}
-
-pub fn keys_create(buckets: &[String], queues: &[String], read_only: bool, context: &Context) -> Result<(), Error> {
-    for bucket in buckets {
-        checked_name(bucket)?;
-    }
-    for queue in queues {
-        super::queues::checked_name(queue)?;
-    }
-    let client = Client::new(&context.settings()?)?;
-    let mut body = json!({ "readOnly": read_only });
-    if !buckets.is_empty() {
-        body["buckets"] = json!(buckets);
-    }
-    if !queues.is_empty() {
-        body["queues"] = json!(queues);
-    }
-    let made: CreatedKey = client.json(&Call::post("/storage-keys", body))?;
-    context.out.result(&made, || {
-        let mut text = format!(
-            "{} made, reaching {}: its secret, shown this once (FF keeps it sealed; `ff buckets keys revoke {}` stops it):\n\
-             export AWS_ACCESS_KEY_ID={}\nexport AWS_SECRET_ACCESS_KEY={}\nexport AWS_REGION={}\nexport AWS_ENDPOINT_URL_S3={}",
-            made.key.id,
-            reaches(&made.key),
-            made.key.id,
-            made.key.id,
-            made.secret_access_key,
-            made.region,
-            made.endpoint
-        );
-        if let Some(sqs) = &made.sqs_endpoint {
-            text.push_str(&format!("\nexport AWS_ENDPOINT_URL_SQS={sqs}"));
-        }
-        if let Some(ses) = made.ses_endpoint.as_ref().filter(|ses| !ses.is_empty()) {
-            text.push_str(&format!("\nexport AWS_ENDPOINT_URL_SESV2={ses}"));
-        }
-        text
-    })
-}
-
-pub fn keys_revoke(id: &str, yes: bool, context: &Context) -> Result<(), Error> {
-    if !is_key_id(id) {
-        return Err(Error::usage(format!("\"{id}\" is no access key ID of FF's: AKFF and 16 letters and digits")));
-    }
-    let client = Client::new(&context.settings()?)?;
-    if !super::functions::confirmed(
-        "ff buckets keys revoke",
-        &format!("Revoke the access key {id}? Whatever uses it is refused at once"),
-        yes,
-    )? {
-        return context.out.result(&json!({ "revoked": false, "id": id }), || "Nothing revoked".to_owned());
-    }
-    client.done(&Call::delete(format!("/storage-keys/{id}")))?;
-    context.out.result(&json!({ "revoked": true, "id": id }), || format!("revoked the access key {id}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,67 +172,5 @@ mod tests {
             assert!(!is_bucket_name(name), "{name}");
         }
         assert_eq!(checked_name("my.photos").unwrap_err().exit_code(), 2);
-    }
-
-    fn key(buckets: Option<&[&str]>, queues: Option<&[&str]>, read_only: bool) -> StorageKey {
-        let names = |names: Option<&[&str]>| names.map(|names| names.iter().map(|name| name.to_string()).collect());
-        StorageKey {
-            id: "AKFF7Q2MLKX4RTZB3W5N".into(),
-            name: None,
-            buckets: names(buckets),
-            queues: names(queues),
-            read_only,
-            functions: None,
-            function_access: None,
-            created_at: "2026-10-24T08:00:00.000Z".into(),
-            last_used_at: None,
-        }
-    }
-
-    #[test]
-    fn a_key_reaches_every_bucket_and_queue_or_those_it_names_alone() {
-        let all = key(None, None, false);
-        let photos = key(Some(&["photos"]), None, true);
-        let orders = key(None, Some(&["orders", "orders-dlq"]), false);
-        let both = key(Some(&["photos"]), Some(&["orders"]), false);
-        assert_eq!(
-            [reaches(&all), reaches(&photos), reaches(&orders), reaches(&both)],
-            [
-                "every bucket and queue of the account",
-                "the bucket photos, read-only",
-                "the queues orders, orders-dlq",
-                "the bucket photos and the queue orders"
-            ]
-        );
-        let columns = |key: &StorageKey| (column(key.buckets.as_ref(), key), column(key.queues.as_ref(), key));
-        assert_eq!(columns(&all), ("all".into(), "all".into()));
-        assert_eq!(columns(&photos), ("photos".into(), "-".into()));
-        assert_eq!(columns(&orders), ("-".into(), "orders,orders-dlq".into()));
-        // A key that names functions alone reaches no bucket and no queue; its read-only says nothing of them.
-        let functions = |names: &[&str], level: &str, of: StorageKey| StorageKey {
-            functions: Some(names.iter().map(|name| name.to_string()).collect()),
-            function_access: Some(level.into()),
-            ..of
-        };
-        let invoker = functions(&["*"], "invoke", key(None, None, true));
-        assert_eq!(columns(&invoker), ("-".into(), "-".into()));
-        assert_eq!(
-            [reaches(&invoker), reaches(&functions(&["orders"], "write", key(Some(&["photos"]), None, true)))],
-            [
-                "every function of the account, to invoke",
-                "the bucket photos, read-only, and the function orders, to write"
-            ]
-        );
-        // An API before queues says nothing of them: such a key reaches what its buckets say.
-        let older: StorageKey = serde_json::from_value(json!({ "id": "AKFF7Q2MLKX4RTZB3W5N", "buckets": null, "readOnly": false, "createdAt": "x", "lastUsedAt": null })).unwrap();
-        assert_eq!(reaches(&older), "every bucket and queue of the account");
-    }
-
-    #[test]
-    fn key_ids_are_ffs() {
-        assert!(is_key_id("AKFF7Q2MLKX4RTZB3W5N"));
-        for id in ["AKIA7Q2MLKX4RTZB3W5N", "AKFF7Q2MLKX4RTZB3W5", "AKFF7Q2MLKX4RTZB3W51", "akff7q2mlkx4rtzb3w5n"] {
-            assert!(!is_key_id(id), "{id}");
-        }
     }
 }

@@ -1,6 +1,6 @@
 //! `ff queues create|list|get|set|send|receive|delete-message|purge|delete`: the account's queues, as
 //! Amazon SQS's standard queues, through FF's API, which runs SQS's own operations: AWS's SDKs and CLI
-//! see the same queues at FF's SQS endpoint, with a key of `ff buckets keys create`. Sending,
+//! see the same queues at FF's SQS endpoint, with a key of `ff keys create`. Sending,
 //! receiving and deleting a message are there to debug a queue, or for a script.
 
 use std::collections::BTreeMap;
@@ -263,7 +263,7 @@ pub fn create(name: &str, args: &QueueAttributeArgs, context: &Context) -> Resul
     let queue: Queue = client.json(&Call::post("/queues", Value::Object(body)))?;
     context.out.result(&queue, || {
         format!(
-            "{} made\n{}\n`ff buckets keys create --queue {}` makes an access key for AWS's SDKs and CLI",
+            "{} made\n{}\n`ff keys create --queue {}` makes an access key for AWS's SDKs and CLI",
             queue.name,
             reach(&queue),
             queue.name

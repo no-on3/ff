@@ -56,7 +56,7 @@ fn create_sends_the_attributes_its_flags_give_its_dead_letter_queue_by_the_arn_t
         .stdout(format!(
             "orders made\nurl                 https://sqs.example.tn/{ACCOUNT}/orders\narn                 arn:aws:sqs:tn-tunis-1:{ACCOUNT}:orders\n\
              endpoint            https://sqs.example.tn (AWS_ENDPOINT_URL_SQS)\n\
-             `ff buckets keys create --queue orders` makes an access key for AWS's SDKs and CLI\n"
+             `ff keys create --queue orders` makes an access key for AWS's SDKs and CLI\n"
         ));
     assert_eq!(calls(&api), ["GET /queues/orders-dlq", "POST /queues"]);
     assert_eq!(

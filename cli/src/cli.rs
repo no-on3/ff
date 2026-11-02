@@ -227,16 +227,21 @@ pub enum Command {
     #[command(subcommand)]
     Email(EmailCommand),
 
-    /// The account's buckets, as AWS S3 gives them, and its access keys to them and to its queues
+    /// The account's buckets, as AWS S3 gives them
     #[command(subcommand)]
     Buckets(BucketsCommand),
+
+    /// The account's access keys, as an IAM user's, for AWS's SDKs and CLI: each with its name and what it reaches,
+    /// buckets, queues, the mail and functions
+    #[command(subcommand)]
+    Keys(KeysCommand),
 
     /// The account's sites: a bucket's files, public at its own address, as S3's website hosting serves them
     #[command(subcommand)]
     Sites(SitesCommand),
 
     /// The account's queues, as Amazon SQS's standard queues, which AWS's SDKs and CLI reach with a key of
-    /// `ff buckets keys create`
+    /// `ff keys create`
     #[command(subcommand)]
     Queues(QueuesCommand),
 
@@ -901,9 +906,9 @@ pub enum BucketsCommand {
         yes: bool,
     },
 
-    /// The account's access keys to its buckets and queues, for AWS's SDKs and CLI
+    /// The account's access keys, for AWS's SDKs and CLI: another name for `ff keys`
     #[command(subcommand)]
-    Keys(BucketKeysCommand),
+    Keys(KeysCommand),
 
     /// Send a bucket's events to a function of the account, called without waiting with S3's event, or to a queue,
     /// as S3's notifications
@@ -1065,35 +1070,70 @@ pub enum SiteDomainsCommand {
 }
 
 #[derive(Subcommand)]
-pub enum BucketKeysCommand {
-    /// List the account's access keys: what each reaches, when it was last used; never a secret
+pub enum KeysCommand {
+    /// List the account's access keys: each one's name, what it reaches, when it was last used; never a secret
     List,
 
-    /// Make an access key: its secret printed this once, as the variables AWS's tools read
-    Create {
-        /// A bucket it reaches, by name; again for each. Naming neither buckets nor queues, it reaches all the
-        /// account's; naming some, those alone
-        #[arg(long = "bucket", value_name = "NAME")]
-        buckets: Vec<String>,
-
-        /// A queue it reaches, by name; again for each
-        #[arg(long = "queue", value_name = "NAME")]
-        queues: Vec<String>,
-
-        /// Reads and lists only: no upload, copy or delete, no message sent, received or deleted
-        #[arg(long)]
-        read_only: bool,
-    },
+    /// Make an access key: its secret printed this once, as the variables AWS's tools read. Naming nothing, it
+    /// reaches every bucket and queue of the account, and its mail; naming buckets, queues or functions, those alone.
+    /// A key stays as it was made: another reach is another key
+    Create(NewKeyArgs),
 
     /// Revoke an access key: whatever uses it is refused at once
     Revoke {
-        /// The access key ID, AKFF and 16 characters
-        id: String,
+        /// The access key ID, AKFF and 16 characters, or its name
+        key: String,
 
         /// Don't ask first: a script must say it
         #[arg(long, short)]
         yes: bool,
     },
+}
+
+#[derive(Args)]
+pub struct NewKeyArgs {
+    /// Its name, as an IAM user's: 1 to 64 letters, digits and +=,.@_-, once among the account's keys. Without it,
+    /// the key is named by its ID
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// A bucket it reaches, by name; again for each
+    #[arg(long = "bucket", value_name = "NAME")]
+    pub buckets: Vec<String>,
+
+    /// A queue it reaches, by name; again for each
+    #[arg(long = "queue", value_name = "NAME")]
+    pub queues: Vec<String>,
+
+    /// Its buckets and queues read and listed only: no upload, copy or delete, no message sent, received or deleted
+    #[arg(long)]
+    pub read_only: bool,
+
+    /// A function it reaches, by name, or '*' alone for all the account's; again for each
+    #[arg(long = "function", value_name = "NAME")]
+    pub functions: Vec<String>,
+
+    /// What it may do with its functions, as IAM groups Lambda's actions: read lists and reads them; invoke reads
+    /// and calls them; write does every operation, deploys and deletes among them [default: invoke]
+    #[arg(long, value_enum, requires = "functions")]
+    pub function_access: Option<FunctionAccess>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+pub enum FunctionAccess {
+    Read,
+    Invoke,
+    Write,
+}
+
+impl FunctionAccess {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FunctionAccess::Read => "read",
+            FunctionAccess::Invoke => "invoke",
+            FunctionAccess::Write => "write",
+        }
+    }
 }
 
 #[derive(Subcommand)]

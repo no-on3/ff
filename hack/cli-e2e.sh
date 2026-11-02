@@ -704,7 +704,7 @@ check "  ... which writes again through its new secret" "0 HTTP 201 2" "$(code) 
 section_def databases section_databases small_app_db budget=55
 
 section_buckets() {
-section "buckets, with ff buckets: one made, a key for AWS's tools, the AWS CLI with those alone"
+section "buckets, with ff buckets and ff keys: one made, a named key for AWS's tools, the AWS CLI with those alone, a key to functions"
 ff buckets create My.Photos
 check "ff buckets create refuses a name AWS wouldn't take, before calling" "2 true" "$(code) $(err | grep "can't be a bucket's name" >/dev/null && echo true || echo false)"
 ff buckets create cli-photos
@@ -712,8 +712,8 @@ check "ff buckets create makes it, and says where AWS's tools reach it" "0 cli-p
   "$(code) $(out | head -1) $(out | sed -n 3p | awk '{ print $2 }')"
 ff buckets list
 check "ff buckets list shows it" "0 cli-photos active" "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }')"
-ff buckets keys create --bucket cli-photos
-check "ff buckets keys create prints its secret once, as the six variables AWS's tools read" "0 6" "$(code) $(out | grep -c '^export AWS_')"
+ff keys create --name cli-photos-key --bucket cli-photos
+check "ff keys create prints its secret once, as the six variables AWS's tools read" "0 6" "$(code) $(out | grep -c '^export AWS_')"
 out | grep '^export AWS_' >"$work/s3.env"
 key_id="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/s3.env")"
 printf 'Ahlan from the CLI' >"$work/hello.txt"
@@ -728,14 +728,29 @@ aws_with_key() { (set -a; . "$work/s3.env"; set +a; AWS_CONFIG_FILE=/dev/null AW
 uploaded="$(aws_with_key s3 cp "$work/hello.txt" s3://cli-photos/hello.txt --only-show-errors >/dev/null 2>&1; echo $?)"
 check "the AWS CLI uploads with them and reads it back, AWS_ENDPOINT_URL_S3 its only change" "0 Ahlan from the CLI" \
   "$uploaded $(aws_with_key s3 cp s3://cli-photos/hello.txt - 2>/dev/null)"
+ff keys list
+check "ff keys list names each key and what it reaches, never its secret" "0 $key_id cli-photos-key cli-photos - read-write - false" \
+  "$(code) $(out | sed -n 2p | awk '{ print $1, $2, $3, $4, $5, $6 }') $(out | grep "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" >/dev/null && echo true || echo false)"
+listed="$(out | sed -n 2p | awk '{ print $1, $2, $3, $4, $5, $6 }')"
 ff buckets keys list
-check "ff buckets keys list names what it reaches, never its secret" "0 $key_id cli-photos false" \
-  "$(code) $(out | sed -n 2p | awk '{ print $1, $2 }') $(out | grep "$(sed -n 's/^export AWS_SECRET_ACCESS_KEY=//p' "$work/s3.env")" >/dev/null && echo true || echo false)"
+check "  ... ff buckets keys, its name before, the same" "0 $listed" "$(code) $(out | sed -n 2p | awk '{ print $1, $2, $3, $4, $5, $6 }')"
+# A key to the account's functions alone, to invoke them: no bucket or queue, so no read-only either.
+ff keys create --name cli-invoker --function '*' --read-only
+check "ff keys create refuses --read-only for a key to functions alone, before calling" "2 true" \
+  "$(code) $(err | grep -- "--read-only is for a key's buckets and queues" >/dev/null && echo true || echo false)"
+ff keys create --name cli-invoker --function '*'
+check "ff keys create makes a key to every function, to invoke when no level is said" "0 every function of the account, to invoke" \
+  "$(code) $(out | head -1 | sed -n 's/^cli-invoker (AKFF[A-Z2-7]\{16\}) made, reaching \(.*\): its secret.*/\1/p')"
+ff keys list
+check "  ... listed with its functions and their level, no bucket or queue" "0 - - - all (invoke)" \
+  "$(code) $(out | awk '$2 == "cli-invoker" { print $3, $4, $5, $6, $7 }')"
+ff keys revoke cli-invoker --yes
+check "ff keys revoke takes a key's name" "0 true" "$(code) $(out | grep -E '^revoked the access key cli-invoker \(AKFF[A-Z2-7]{16}\)$' >/dev/null && echo true || echo false)"
 # The export kit's way out to AWS S3, both halves: the bucket to a folder with the key's variables, then the folder to
 # "S3", here another bucket behind an AWS CLI profile whose key reaches that one alone, so that a second half still
 # holding FF's variables would be refused there. The script calls the AWS CLI by name: the one above.
 ff buckets create cli-photos-out
-ff buckets keys create --bucket cli-photos-out
+ff keys create --bucket cli-photos-out
 printf '[profile as-s3]\nregion = %s\nendpoint_url = %s\n' "$(sed -n 's/^export AWS_REGION=//p' "$work/s3.env")" \
   "$(sed -n 's/^export AWS_ENDPOINT_URL_S3=//p' "$work/s3.env")" >"$work/aws-config"
 printf '[as-s3]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$(out | sed -n 's/^export AWS_ACCESS_KEY_ID=//p')" \
@@ -750,10 +765,10 @@ check "the export kit's s3-sync.sh copies the bucket to a folder, then to S3 wit
   "0 Ahlan from the CLI Ahlan from the CLI" \
   "$synced $(cat "$work/backup/hello.txt" 2>/dev/null) $(as_s3 "${aws_cli[@]}" s3 cp s3://cli-photos-out/hello.txt - 2>/dev/null)"
 ff buckets delete cli-photos-out --force --yes
-ff buckets keys revoke "$key_id" --yes
+ff keys revoke cli-photos-key --yes
 # The AWS CLI exits non-zero when refused: its words, kept whatever its exit, say why.
 refused="$(aws_with_key s3 ls 2>&1 || true)"
-check "ff buckets keys revoke stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
+check "ff keys revoke, by its name, stops the key at once" "0 true" "$(code) $(grep -q InvalidAccessKeyId <<<"$refused" && echo true || echo false)"
 }
 section_def buckets section_buckets backend budget=15
 
@@ -783,7 +798,7 @@ check "the site answers its index, an app's route with it, each file typed and c
   "$(visit /)|$(visit /orders/42)|$(curl -s -o /dev/null -w '%{content_type}' "$site_url/assets/app-3c9d1a2b.js") \
 $(curl -sI "$site_url/assets/app-3c9d1a2b.js" | tr -d '\r' | sed -n 's/^cache-control: //Ip')|$(curl -sI "$site_url/" | tr -d '\r' | sed -n 's/^cache-control: //Ip')"
 check "  ... with a key of its own, never one of the account's keys" "0 0" \
-  "$(ff buckets keys list --output json; code) $(out | jq '[.[] | select(.buckets == ["cli-site"])] | length')"
+  "$(ff keys list --output json; code) $(out | jq '[.[] | select(.buckets == ["cli-site"])] | length')"
 rm "$work/dist/assets/app-3c9d1a2b.js"
 printf '<!doctype html><title>cli shop, again</title>' >"$work/dist/index.html"
 ff sites deploy cli-site "$work/dist" --output json
@@ -814,7 +829,7 @@ check "  ... with its attributes, its dead-letter queue by the ARN of the queue 
   "$(code) $(out | jq -r '"\(.visibilityTimeout) \(.messageRetentionPeriod) \(.redrivePolicy.maxReceiveCount) \(.redrivePolicy.deadLetterTargetArn | split(":")[5])"')"
 ff queues send cli-orders '{"order": 1}' --attribute item=bsissa
 check "ff queues send sends a message, an attribute with it" "0 true" "$(code) $(out | grep -E '^sent [0-9a-f-]{36} to cli-orders$' >/dev/null && echo true || echo false)"
-ff buckets keys create --queue cli-orders
+ff keys create --queue cli-orders
 check "a key for that queue alone gives the SQS endpoint among its six variables" "0 6 http://localhost:$sqs_port" \
   "$(code) $(out | grep -c '^export AWS_') $(out | sed -n 's/^export AWS_ENDPOINT_URL_SQS=//p')"
 out | grep '^export AWS_' >"$work/sqs.env"
@@ -855,7 +870,7 @@ check "  ... as the AWS CLI sees it" "3600" \
 ff queues list --profile b
 check "the other account has none of them" "0 The account has no queue: \`ff queues create <name>\` makes one" "$(code) $(out)"
 # Its key's last use is above: revoked now, so that the sections after find the account's keys as they left them.
-ff buckets keys revoke "$queue_key" --yes
+ff keys revoke "$queue_key" --yes
 }
 section_def queues section_queues buckets budget=15
 
@@ -919,7 +934,7 @@ check "  ... and its deletions go to a queue, both now listed" "0 uploads,remova
   "$(code) $("$ff_bin" buckets notifications cli-drop --output json | jq -r '[.lambdaFunctionConfigurations[].id, .queueConfigurations[].id] | join(",")')"
 ff buckets notify cli-drop cli-on-upload --id again
 check "  ... a configuration one event could match twice refused, in S3's words, exit 3" "3 true" "$(code) $(err | grep 'Configuration is ambiguously defined' >/dev/null && echo true || echo false)"
-ff buckets keys create --bucket cli-drop
+ff keys create --bucket cli-drop
 out | grep '^export AWS_' >"$work/drop.env"
 drop_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/drop.env")"
 aws_drop() { (set -a; . "$work/drop.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
@@ -937,7 +952,7 @@ check "ff buckets notifications --remove takes one away by its ID" "0 removals" 
   "$(code) $("$ff_bin" buckets notifications cli-drop --output json | jq -r '[.lambdaFunctionConfigurations[].id, .queueConfigurations[].id] | join(",")')"
 ff buckets notifications cli-drop --clear --yes
 check "  ... and --clear all of them" "0 cli-drop sends no event any more" "$(code) $(out)"
-ff buckets keys revoke "$drop_key" --yes
+ff keys revoke "$drop_key" --yes
 ff buckets delete cli-drop --force --yes
 ff queues delete cli-drop-events --yes
 ff delete cli-on-upload --yes
@@ -1049,7 +1064,7 @@ ff url enable shop-api --auth none --cors-origin "$site_origin" --cors-method GE
 check "  ... and the function URL lets the page's origin in, as a browser's preflight asks" "$site_origin" \
   "$(curl -s -o /dev/null -D - -X OPTIONS "$shop_url/orders" -H "Origin: $site_origin" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
 # The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
-ff buckets keys create --bucket cli-receipts --read-only
+ff keys create --bucket cli-receipts --read-only
 out | grep '^export AWS_' >"$work/receipts.env"
 receipts_key="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/receipts.env")"
 aws_receipts() { (set -a; . "$work/receipts.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
@@ -1070,7 +1085,7 @@ done
 check "the night 91 days on, called without waiting, removes the order and its receipt, which the bucket no longer has" "async 1 1 0" \
   "$night $(aws_receipts s3 ls s3://cli-receipts --recursive 2>/dev/null | wc -l | tr -d ' ')"
 check "  ... and clears the latest orders, which the cache had" "hit miss" "$kept $(latest)"
-ff buckets keys revoke "$receipts_key" --yes
+ff keys revoke "$receipts_key" --yes
 }
 section_def small_app section_small_app small_app_db buckets budget=195
 

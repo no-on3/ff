@@ -9,10 +9,10 @@ use serde::Serialize;
 use super::Level;
 use crate::api::Client;
 use crate::commands::Context;
-use crate::commands::buckets::{self, StorageKey};
 use crate::commands::export::account::{self, Account, FunctionRecord};
 use crate::commands::export::names::{lambda_names, renamed};
 use crate::commands::export::template::WRAPPED_EVENT;
+use crate::commands::keys::{self, StorageKey};
 use crate::error::{Error, Kind};
 use crate::progress::Progress;
 use crate::table::time;
@@ -138,14 +138,14 @@ fn function_findings(record: &FunctionRecord, lambda_name: &str) -> Vec<AccountF
 
 fn key_finding(key: &StorageKey) -> AccountFinding {
     let resource = format!("storage key {}", key.id);
-    let reach = buckets::reaches(key);
+    let reach = keys::reaches(key);
     let message = match &key.last_used_at {
         Some(used) => format!(
             "reaches {reach}, used last at {} UTC: on AWS, an IAM user's or role's keys, with AWS's endpoints, for \
              what uses it",
             time(used)
         ),
-        None => format!("reaches {reach}, never used: `ff buckets keys revoke {}` once nothing will", key.id),
+        None => format!("reaches {reach}, never used: `ff keys revoke {}` once nothing will", key.id),
     };
     warning(resource, "storage-key", message)
 }
@@ -201,7 +201,7 @@ pub fn run(strict: bool, context: &Context) -> Result<(), Error> {
     let current = crate::commands::account::current(&me, &settings)?;
     let progress = Progress::start(context.out, &format!("reading account {}", current.id));
     let read = account::read(&client, current, &[]);
-    let keys = read.as_ref().ok().map(|_| buckets::storage_keys(&client));
+    let keys = read.as_ref().ok().map(|_| keys::storage_keys(&client));
     progress.stop();
     let read = read?;
     let mut not_checked = Vec::new();
@@ -304,7 +304,7 @@ mod tests {
         );
         assert_eq!(
             message("storage key AKFF0002", "storage-key"),
-            "reaches the bucket photos, never used: `ff buckets keys revoke AKFF0002` once nothing will"
+            "reaches the bucket photos, never used: `ff keys revoke AKFF0002` once nothing will"
         );
     }
 

@@ -3,12 +3,12 @@
 # in between. First from FF to a folder here, with an access key of your FF account; then from that folder to a bucket
 # on S3, with your AWS credentials as the AWS CLI finds them (a profile, or the environment once FF's are gone).
 #
-#   eval "$(ff buckets keys create --read-only | grep '^export ')"    # FF's key, endpoint and region, for this shell
+#   eval "$(ff keys create --read-only | grep '^export ')"            # FF's key, endpoint and region, for this shell
 #   ./s3-sync.sh <ff-bucket> <s3-bucket> [<folder>]                    # <s3-bucket> made on S3 first; - for the folder only
 #
 # Run it again to copy what changed since: sync copies the files that differ, and only those. With --delete-gone, the
 # files deleted on FF since go from the folder and from S3 too. AWS_S3_REGION names the S3 bucket's region when your
-# profile has none. Then revoke the key: ff buckets keys revoke <id>.
+# profile has none. Then revoke the key: ff keys revoke <id>.
 set -euo pipefail
 
 delete=()
@@ -24,7 +24,7 @@ ff_bucket=$1
 s3_bucket=$2
 folder=${3:-./$ff_bucket}
 if [ -z "${AWS_ENDPOINT_URL_S3:-}" ] || [ -z "${AWS_ACCESS_KEY_ID:-}" ]; then
-  echo "FF's key isn't in this shell: eval \"\$(ff buckets keys create --read-only | grep '^export ')\" first" >&2
+  echo "FF's key isn't in this shell: eval \"\$(ff keys create --read-only | grep '^export ')\" first" >&2
   exit 2
 fi
 
