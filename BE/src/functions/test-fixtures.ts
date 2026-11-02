@@ -60,7 +60,7 @@ export class MemoryRepository<T extends { id?: string }> {
     this.rows.set(entity.id, { ...entity });
   }
 
-  /** The first row whose fields equal every value of `where`, as the account-scoped queries need (P-10). */
+  /** The first row whose fields equal every value of `where`, as the account-scoped queries need. */
   async findOne(options: { where: Partial<T> }): Promise<T | null> {
     const [row] = await this.find(options);
     return row ?? null;
@@ -82,23 +82,21 @@ export class MemoryRepository<T extends { id?: string }> {
   }
 
   /**
-   * Enough of TypeORM's EntityManager for FunctionsService's transactions, the
-   * create and the end of an invocation (P-20): one process, so locks are ignored.
+   * Enough of TypeORM's EntityManager for FunctionsService: its lookups, and its transactions, the create and the
+   * end of an invocation, which get the same manager: one process, so locks are ignored. Another table's
+   * rows, such as a function's versions, are none: this repository holds the functions alone.
    */
   get manager() {
-    return {
-      existsBy: (target: unknown, where: Partial<T>) => this.existsBy(target, where),
-      // Another table's rows, such as a function's versions: this repository holds none.
+    const manager = {
+      query: async () => [],
       find: async () => [],
-      transaction: async <R>(work: (manager: unknown) => Promise<R>): Promise<R> =>
-        work({
-          query: async () => [],
-          countBy: async (_target: unknown, where: Partial<T>) => (await this.find({ where })).length,
-          existsBy: (target: unknown, where: Partial<T>) => this.existsBy(target, where),
-          findOne: async (_target: unknown, options: { where: Partial<T> }) => this.findOne(options),
-          save: async (_target: unknown, entity: T) => this.save(entity),
-        }),
+      countBy: async (_target: unknown, where: Partial<T>) => (await this.find({ where })).length,
+      existsBy: (target: unknown, where: Partial<T>) => this.existsBy(target, where),
+      findOne: async (_target: unknown, options: { where: Partial<T> }) => this.findOne(options),
+      save: async (_target: unknown, entity: T) => this.save(entity),
+      transaction: async <R>(work: (manager: unknown) => Promise<R>): Promise<R> => work(manager),
     };
+    return manager;
   }
 
   async remove(entity: T): Promise<T> {
