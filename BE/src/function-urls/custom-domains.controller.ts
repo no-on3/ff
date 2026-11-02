@@ -1,13 +1,15 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
 import { CustomDomainsService } from './custom-domains.service';
 import { AddCustomDomainDto, CustomDomainView } from './dto/custom-domain.dto';
+import { UrlQualifierQuery } from './dto/function-url.dto';
 
 /**
- * A function URL's own domains: every member reads them; owners and developers
- * add, verify and remove them, as they change the URL. Removing needs no active
+ * A function URL's own domains, $LATEST's URL's or an alias's, named by
+ * qualifier as the URL is: every member reads them; owners and developers add,
+ * verify and remove them, as they change the URL. Removing needs no active
  * account, as deleting the URL doesn't.
  */
 @ApiTags('functions')
@@ -19,8 +21,8 @@ export class CustomDomainsController {
   @RequireScope('functions:read')
   @ApiOperation({ summary: "The URL's own domains, each with the DNS records that prove it and where it stands" })
   @ApiResponse({ status: 200, type: [CustomDomainView] })
-  list(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<CustomDomainView[]> {
-    return this.domains.list(principal.accountId, id);
+  list(@Param('id', ParseUUIDPipe) id: string, @Query() query: UrlQualifierQuery, @Principal() principal: Principal): Promise<CustomDomainView[]> {
+    return this.domains.list(principal.accountId, id, query.qualifier);
   }
 
   @Post()
@@ -37,8 +39,13 @@ export class CustomDomainsController {
   @ApiResponse({ status: 201, type: CustomDomainView })
   @ApiResponse({ status: 400, description: 'A name that is no domain, or the plan\'s limit reached' })
   @ApiResponse({ status: 409, description: 'The account has the domain already' })
-  add(@Param('id', ParseUUIDPipe) id: string, @Body() dto: AddCustomDomainDto, @Principal() principal: Principal): Promise<CustomDomainView> {
-    return this.domains.add(principal.accountId, id, dto.domain);
+  add(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: UrlQualifierQuery,
+    @Body() dto: AddCustomDomainDto,
+    @Principal() principal: Principal,
+  ): Promise<CustomDomainView> {
+    return this.domains.add(principal.accountId, id, dto.domain, query.qualifier);
   }
 
   @Post(':domain/verify')
@@ -52,8 +59,13 @@ export class CustomDomainsController {
   })
   @ApiResponse({ status: 200, type: CustomDomainView })
   @ApiResponse({ status: 409, description: 'Another account proved the domain first' })
-  verify(@Param('id', ParseUUIDPipe) id: string, @Param('domain') domain: string, @Principal() principal: Principal): Promise<CustomDomainView> {
-    return this.domains.verify(principal.accountId, id, domain);
+  verify(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('domain') domain: string,
+    @Query() query: UrlQualifierQuery,
+    @Principal() principal: Principal,
+  ): Promise<CustomDomainView> {
+    return this.domains.verify(principal.accountId, id, domain, query.qualifier);
   }
 
   @Delete(':domain')
@@ -62,7 +74,7 @@ export class CustomDomainsController {
   @RequireRole(...WRITERS)
   @ApiOperation({ summary: 'Remove the domain: the URL stops answering there at once' })
   @ApiResponse({ status: 204 })
-  async remove(@Param('id', ParseUUIDPipe) id: string, @Param('domain') domain: string, @Principal() principal: Principal): Promise<void> {
-    await this.domains.remove(principal.accountId, id, domain);
+  async remove(@Param('id', ParseUUIDPipe) id: string, @Param('domain') domain: string, @Query() query: UrlQualifierQuery, @Principal() principal: Principal): Promise<void> {
+    await this.domains.remove(principal.accountId, id, domain, query.qualifier);
   }
 }

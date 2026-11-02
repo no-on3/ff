@@ -587,13 +587,21 @@ export class FunctionsService {
 
   /**
    * A function URL and a schedule send AWS's events: their function can't go
-   * back to FF's original wrapped one while it has either.
+   * back to FF's original wrapped one while either calls it, a URL of an alias
+   * naming $LATEST included; an alias's URL that runs a version doesn't call it.
    */
   private async refuseWrappedWhileSent(id: string): Promise<void> {
     const manager = this.functionsRepository.manager;
-    if (await manager.existsBy(FunctionUrl, { functionId: id })) {
+    if (await manager.existsBy(FunctionUrl, { functionId: id, alias: IsNull() })) {
       throw new BadRequestException(
         `The function has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: delete its URL (DELETE /functions/${id}/url) first, or keep eventFormat lambda`,
+      );
+    }
+    const aliased = await manager.findOne(FunctionUrl, { where: { functionId: id, alias: Not(IsNull()), aliasOf: { version: IsNull() } } });
+    if (aliased) {
+      throw new BadRequestException(
+        `The alias ${aliased.alias} names $LATEST and has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: ` +
+          `point the alias at a version, or delete its URL (DELETE /functions/${id}/url?qualifier=${aliased.alias}), first, or keep eventFormat lambda`,
       );
     }
     if (await manager.existsBy(Schedule, { functionId: id })) {

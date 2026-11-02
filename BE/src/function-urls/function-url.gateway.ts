@@ -19,7 +19,7 @@ import { withRequestContext } from '../common/request-context';
 import { InvocationSource } from '../functions/entities/function-invocation.entity';
 import { FunctionUrl, UrlAuthType, UrlCors } from '../functions/entities/function-url.entity';
 import { EventFormat, Function, FunctionStatus } from '../functions/entities/function.entity';
-import { FunctionsService } from '../functions/functions.service';
+import { CallTarget, FunctionsService } from '../functions/functions.service';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { S3FrontDoor } from '../storage/front-door';
 import { WebsiteServer } from '../storage/website-server';
@@ -236,7 +236,8 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     const name = hostName(host);
     const domain = urlId || !name ? null : await this.domains.forHost(name);
     if (domain?.bucketId) return domain.bucket?.website ? { site: domain.bucket.name } : null;
-    const url = urlId ? await this.urls.forUrlId(urlId) : domain?.functionId ? await this.urls.forFunction(domain.functionId) : null;
+    const id = urlId ?? domain?.urlId;
+    const url = id ? await this.urls.forUrlId(id) : null;
     return url ? { url } : null;
   }
 
@@ -262,7 +263,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     const account = caller ? { status: caller.accountStatus, planId: caller.planId } : await this.accountOf(url);
     if (account.status !== AccountStatus.ACTIVE) throw new Refusal(HttpStatus.FORBIDDEN, 'Forbidden');
     await this.count(url, account.planId);
-    const function_ = await this.functionOf(url);
+    const { function_, target } = await this.runOf(url);
     await this.admit(url);
 
     const body = await readBody(request, URL_PAYLOAD_LIMIT);
@@ -289,7 +290,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
       throw new Refusal(HttpStatus.PAYLOAD_TOO_LARGE, 'Request Entity Too Large', [['connection', 'close']]);
     }
 
-    const outcome = await this.functions.call(function_, event, { source: InvocationSource.URL, requestId: context.requestId, history: eventForHistory(event) });
+    const outcome = await this.functions.call(function_, event, { source: InvocationSource.URL, requestId: context.requestId, history: eventForHistory(event), target });
     if (!outcome.ok) {
       // No instance free in time: the caller may try again. The function's own error is its account's to read, in the history.
       if (outcome.error instanceof FunctionThrottledError) throw new Refusal(HttpStatus.TOO_MANY_REQUESTS, 'Too Many Requests');
@@ -333,22 +334,28 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     throw new Refusal(HttpStatus.TOO_MANY_REQUESTS, 'Too Many Requests', [['retry-after', String(wait)]]);
   }
 
-  private async functionOf(url: FunctionUrl): Promise<Function> {
+  /**
+   * What the URL's call runs: the function as it is, for $LATEST's URL; for an alias's, the version it names, its
+   * share drawn for the call, whatever $LATEST's state, as the API's invoke runs one.
+   */
+  private async runOf(url: FunctionUrl): Promise<{ function_: Function; target: CallTarget }> {
     let function_: Function;
+    let target: CallTarget;
     try {
       function_ = await this.functions.findOne(url.accountId, url.functionId);
+      target = await this.functions.callTarget(function_, url.alias ?? undefined);
     } catch (error) {
-      // Deleted meanwhile: its URL went with it.
+      // Deleted meanwhile, the function or the alias: its URL went with it.
       if (error instanceof NotFoundException) throw new Refusal(HttpStatus.NOT_FOUND, 'Not Found');
       throw error;
     }
-    if (function_.status !== FunctionStatus.ACTIVE) throw new Refusal(HttpStatus.SERVICE_UNAVAILABLE, 'Service Unavailable');
-    if (function_.eventFormat !== EventFormat.LAMBDA) {
-      // The API refuses a URL to such a function, and the format to a function with a URL: only a race gets here.
-      this.logger.warn(`Function ${function_.id} has a URL but takes the wrapped event: its URL can't call it`);
+    if (!target.version && function_.status !== FunctionStatus.ACTIVE) throw new Refusal(HttpStatus.SERVICE_UNAVAILABLE, 'Service Unavailable');
+    if ((target.version?.eventFormat ?? function_.eventFormat) !== EventFormat.LAMBDA) {
+      // The API refuses a URL to what takes it, and the format, or an alias's move, to what has a URL: only a race gets here.
+      this.logger.warn(`Function ${function_.id} has a URL but what it calls takes the wrapped event: its URL can't call it`);
       throw new Refusal(HttpStatus.SERVICE_UNAVAILABLE, 'Service Unavailable');
     }
-    return function_;
+    return { function_, target };
   }
 
   /** The account's credit, as the API's invoke checks it; the caller learns nothing of the account's balance. */

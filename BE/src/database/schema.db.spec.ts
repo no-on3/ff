@@ -87,6 +87,8 @@ const FUNCTION_VERSIONS = migrationNames.find((name) => name.startsWith('Functio
 const FUNCTION_ALIASES = migrationNames.find((name) => name.startsWith('FunctionAliases')) as string;
 const CODE_STORAGE = migrationNames.find((name) => name.startsWith('CodeStorage')) as string;
 const INVOCATION_VERSIONS = migrationNames.find((name) => name.startsWith('InvocationVersions')) as string;
+const CAPACITY_VERSIONS = migrationNames.find((name) => name.startsWith('CapacityVersions')) as string;
+const URL_ALIASES = migrationNames.find((name) => name.startsWith('UrlAliases')) as string;
 /** A table's partition for the month `ahead` months from now, by the UTC calendar (P-20, P-21). */
 function monthPartition(table: string, ahead = 0): string {
   const now = new Date();
@@ -997,10 +999,63 @@ run('database schema (L2, real PostgreSQL)', () => {
         { version: 1, instances: 3, memory_mb: 1024 },
       ]);
       await expect(dataSource.query(`UPDATE capacity_samples SET instances = 1 WHERE function_id = $1 AND version = 1`, [fn])).rejects.toThrow('append-only: UPDATE refused');
+      await migrateDownTo(dataSource, CAPACITY_VERSIONS);
       await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow(
         "1 capacity sample(s) of versions were taken: reverting would lose them, or count them at $LATEST's memory",
       );
       expect(await samples()).toHaveLength(2);
+      await dataSource.runMigrations({ transaction: 'each' });
+      expect(await schemaDrift(dataSource)).toEqual([]);
+    });
+  });
+
+  it("the URL-aliases migration keeps a function's URL as $LATEST's, its domains on it, gives an alias a URL of its own, gone with it, and refuses to revert once one has", async () => {
+    await withScratchDatabase(settings, 'ff_test', async (dataSource) => {
+      await dataSource.runMigrations({ transaction: 'each' });
+      await migrateDownTo(dataSource, CAPACITY_VERSIONS);
+      await dataSource.query(`INSERT INTO accounts (id, name, status, plan_id) VALUES ($1, 'A', 'active', 'beta')`, [ACCOUNT]);
+      const [{ id }] = await dataSource.query(`INSERT INTO functions (name, account_id, runtime, code, memory, timeout) VALUES ('before', $1, 'nodejs', 'x', 128, 5) RETURNING id`, [
+        ACCOUNT,
+      ]);
+      const urlOf = (urlId: string, alias: string | null) =>
+        dataSource.query(`INSERT INTO function_urls (function_id, account_id, url_id, auth_type${alias ? ', alias' : ''}) VALUES ($1, $2, $3, 'NONE'${alias ? ', $4' : ''})`, [
+          id,
+          ACCOUNT,
+          urlId,
+          ...(alias ? [alias] : []),
+        ]);
+      await urlOf('a'.repeat(32), null);
+      await dataSource.query(`INSERT INTO custom_domains (domain, account_id, function_id, token) VALUES ('shop.example.tn', $1, $2, $3)`, [ACCOUNT, id, 't'.repeat(32)]);
+
+      await dataSource.runMigrations({ transaction: 'each' });
+      const urls = () => dataSource.query(`SELECT url_id, alias FROM function_urls WHERE function_id = $1 ORDER BY alias NULLS FIRST`, [id]);
+      expect(await urls()).toEqual([{ url_id: 'a'.repeat(32), alias: null }]);
+      expect(await dataSource.query(`SELECT url_id FROM custom_domains WHERE domain = 'shop.example.tn'`)).toEqual([{ url_id: 'a'.repeat(32) }]);
+      // $LATEST's once, as before; an alias's once, and only the function's own aliases.
+      await expect(urlOf('b'.repeat(32), null)).rejects.toThrow('duplicate key value violates unique constraint "UQ_function_urls_latest"');
+      await expect(urlOf('b'.repeat(32), 'live')).rejects.toThrow('violates foreign key constraint');
+      await dataSource.query(`INSERT INTO function_aliases (function_id, account_id, name) VALUES ($1, $2, 'live')`, [id, ACCOUNT]);
+      await urlOf('b'.repeat(32), 'live');
+      await expect(urlOf('c'.repeat(32), 'live')).rejects.toThrow('duplicate key value violates unique constraint');
+      await dataSource.query(`INSERT INTO custom_domains (domain, account_id, function_id, url_id, token) VALUES ('live.example.tn', $1, $2, $3, $4)`, [
+        ACCOUNT,
+        id,
+        'b'.repeat(32),
+        't'.repeat(32),
+      ]);
+      await migrateDownTo(dataSource, URL_ALIASES);
+      await expect(dataSource.undoLastMigration({ transaction: 'each' })).rejects.toThrow(
+        '1 alias(es) have a URL: reverting would delete them, as a function has one URL at most before',
+      );
+
+      // The alias goes, and its URL with it, and that URL's domain; then it reverts, $LATEST's URL and its domain kept.
+      await dataSource.query(`DELETE FROM function_aliases WHERE function_id = $1`, [id]);
+      expect(await urls()).toEqual([{ url_id: 'a'.repeat(32), alias: null }]);
+      expect(await dataSource.query(`SELECT domain FROM custom_domains ORDER BY domain`)).toEqual([{ domain: 'shop.example.tn' }]);
+      await migrateDownTo(dataSource, CAPACITY_VERSIONS);
+      await expect(urls()).rejects.toThrow('column "alias" does not exist');
+      expect(await dataSource.query(`SELECT domain FROM custom_domains WHERE function_id = $1`, [id])).toEqual([{ domain: 'shop.example.tn' }]);
+      await dataSource.runMigrations({ transaction: 'each' });
       expect(await schemaDrift(dataSource)).toEqual([]);
     });
   });

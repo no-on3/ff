@@ -18,6 +18,8 @@ const ACCOUNT = '123456789012';
 const FN = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
 const URL_ID = '0123456789abcdefghijklmnopqrstuv';
 const URL_HOST = `${URL_ID}.fn.example.tn`;
+/** The URL of the function's alias live. */
+const ALIAS_URL_ID = 'abcdefghijklmnopqrstuv0123456789';
 const SITE_HOST = 'docs.site.example.tn';
 
 describe('CustomDomainsService (L1)', () => {
@@ -29,11 +31,12 @@ describe('CustomDomainsService (L1)', () => {
   let limit: number;
   let buckets: Bucket[];
   const audit = { record: jest.fn() };
-  const url = { functionId: FN, accountId: ACCOUNT, urlId: URL_ID, authType: UrlAuthType.NONE } as FunctionUrl;
+  const url = { functionId: FN, alias: null, accountId: ACCOUNT, urlId: URL_ID, authType: UrlAuthType.NONE } as FunctionUrl;
+  const aliasUrl = { ...url, alias: 'live', urlId: ALIAS_URL_ID } as FunctionUrl;
   const urls = {
-    urlOf: jest.fn(async (accountId: string, functionId: string) => {
+    urlOf: jest.fn(async (accountId: string, functionId: string, alias?: string) => {
       if (accountId !== ACCOUNT || functionId !== FN) throw new NotFoundException(`Function with ID ${functionId} not found`);
-      return url;
+      return alias === 'live' ? aliasUrl : url;
     }),
   };
   const ask = (answers: Record<string, string[]>) => async (name: string) => {
@@ -189,6 +192,20 @@ describe('CustomDomainsService (L1)', () => {
     expect(audit.record).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'custom_domain.remove', details: { domain: 'shop.example.tn' } }));
     await expect(service.remove(ACCOUNT, FN, 'shop.example.tn')).rejects.toThrow('The function\'s URL has no domain shop.example.tn');
     await expect(service.list('999999999999', FN)).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it("keeps the domains of an alias's URL apart from $LATEST's URL's, proved by a CNAME to its own host", async () => {
+    const added = await service.add(ACCOUNT, FN, 'api.example.tn', 'live');
+    await service.add(ACCOUNT, FN, 'shop.example.tn');
+
+    expect(added).toMatchObject({ domain: 'api.example.tn', functionId: FN, alias: 'live' });
+    expect(added.records.cname).toEqual([{ type: 'CNAME', name: 'api.example.tn', value: `${ALIAS_URL_ID}.fn.example.tn` }]);
+    expect(urls.urlOf).toHaveBeenCalledWith(ACCOUNT, FN, 'live');
+    expect([(await service.list(ACCOUNT, FN, 'live')).map((domain) => domain.domain), (await service.list(ACCOUNT, FN)).map((domain) => domain.domain)]).toEqual([
+      ['api.example.tn'],
+      ['shop.example.tn'],
+    ]);
+    await expect(service.remove(ACCOUNT, FN, 'shop.example.tn', 'live')).rejects.toThrow('The URL of the alias live has no domain shop.example.tn');
   });
 
   describe("a bucket's site", () => {

@@ -39,6 +39,9 @@ export class CustomDomainView {
   @ApiProperty()
   functionId: string;
 
+  @ApiProperty({ type: String, nullable: true, example: 'live', description: "The alias whose URL it serves; null for the function's $LATEST URL" })
+  alias: string | null;
+
   @ApiProperty({ enum: DomainStatus, description: 'pending until the DNS proves it; verified, it is served' })
   status: DomainStatus;
 

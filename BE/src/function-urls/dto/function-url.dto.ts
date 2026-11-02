@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ArrayMaxSize, IsArray, IsBoolean, IsEnum, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, ValidateNested } from 'class-validator';
+import { ALIAS_NAME } from '../../functions/dto/aliases.dto';
 import { UrlAuthType, UrlCors, UrlInvokeMode } from '../../functions/entities/function-url.entity';
 import { TOKEN } from '../url-response';
 
@@ -102,6 +103,15 @@ export class UpdateFunctionUrlDto {
   invokeMode?: UrlInvokeMode;
 }
 
+/** Which of a function's URLs a request means, as Lambda's Qualifier names it: an alias's, or $LATEST's without one. */
+export class UrlQualifierQuery {
+  @ApiPropertyOptional({ example: 'live', description: "The alias whose URL it is, as Lambda's Qualifier; $LATEST's URL when missing. A version has none: an alias names it" })
+  @IsOptional()
+  @IsString()
+  @Matches(ALIAS_NAME, { message: "qualifier is an alias's name, as Lambda's for a URL: leave it out for $LATEST's URL, and name a version through an alias" })
+  qualifier?: string;
+}
+
 /** A function's URL, as the API answers it. */
 export class FunctionUrlView {
   @ApiProperty({ example: 'https://0123456789abcdefghijklmnopqrstuv.fn.example.tn/', description: 'Its address, fixed for its life' })
@@ -109,6 +119,9 @@ export class FunctionUrlView {
 
   @ApiProperty()
   functionId: string;
+
+  @ApiProperty({ type: String, nullable: true, example: 'live', description: "The alias whose calls it makes, as Lambda's Qualifier; null for $LATEST's URL" })
+  alias: string | null;
 
   @ApiProperty({ enum: UrlAuthType })
   authType: UrlAuthType;

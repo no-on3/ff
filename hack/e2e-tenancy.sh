@@ -238,10 +238,10 @@ function_body() { jq -cn --arg code "$code" --arg name "$1" '{name: $name, runti
 snapshot() {
   local caller=$1 fn=$2
   jq -cn --argjson fn "$("$caller" GET "/functions/$fn")" --argjson history "$("$caller" GET "/functions/$fn/invocations")" \
-    --argjson url "$("$caller" GET "/functions/$fn/url")" \
+    --argjson urls "$("$caller" GET "/functions/$fn/urls")" \
     '{name: $fn.name, code: $fn.code, status: $fn.status, memory: $fn.memory, timeout: $fn.timeout, revisionId: $fn.revisionId,
       minInstances: $fn.minInstances, maxInstances: $fn.maxInstances, invocations: $history.total,
-      url: $url.functionUrl, urlAuthType: $url.authType}'
+      urls: [$urls[] | "\(.alias // "$LATEST") \(.authType) \(.functionUrl)"]}'
 }
 
 # proved_domain <account> <domain>: the domain marked proved, as its DKIM record found would prove it.
@@ -470,6 +470,9 @@ as_a POST "/functions/$id/invoke" '{"input": {}, "qualifier": "live", "invocatio
 dry_live="$(status)"
 as_a POST "/functions/$id/invoke" '{"input": {}, "qualifier": "9", "invocationType": "DryRun"}' >/dev/null
 check "  ... which a call that doesn't wait names too: a DryRun through live passes, one of a version A hasn't is 404" "204 404" "$dry_live $(status)"
+live_url_a="$(as_a POST "/functions/$id/url?qualifier=live" '{"authType": "NONE"}' | jq -r .functionUrl)"
+check "  ... and a URL of its own, as Lambda's, which runs the version" '201 true 200 {"message":"Hello world"}' \
+  "$(status) $([ "$live_url_a" != "$url_a" ] && echo true || echo false) $(call_url "$live_url_a") $(cat "$work/url-body")"
 before="$(snapshot as_a "$id")"
 database_a="$(as_a POST /databases '{"name": "l5-orders"}')"
 check "A makes a database, its password in the answer" "201 active true" "$(status) $(jq -r '"\(.status) \(.connectionString | startswith("postgresql://"))"' <<<"$database_a")"
@@ -876,6 +879,15 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       aliases_now="$(as_a GET "/functions/$id/aliases")"
       check "  ... A's versions and aliases as they were" "1 l5 live:1" \
         "$(jq -r '"\(map(.version) | join(",")) \(.[0].description)"' <<<"$versions_now") $(jq -r 'map("\(.name):\(.functionVersion)") | join(",")' <<<"$aliases_now")"
+      ;;
+    "GET /functions/{id}/urls")
+      as_b GET "/functions/$id/urls" >/dev/null
+      check "$route: B gets 404, as for a missing function" "404 Function with ID $id not found" "$(status) $(message)"
+      as_b PUT "/functions/$id/url?qualifier=live" '{"authType": "AWS_IAM"}' >/dev/null
+      check "  ... and for the URL of A's alias" "404 Function with ID $id not found" "$(status) $(message)"
+      urls_now="$(as_a GET "/functions/$id/urls")"
+      check "  ... A's URLs as they were, \$LATEST's first, then live's, both open to anyone" "200 \$LATEST:NONE,live:NONE $live_url_a" \
+        "$(status) $(jq -r '"\(map("\(.alias // "$LATEST"):\(.authType)") | join(",")) \(.[1].functionUrl)"' <<<"$urls_now")"
       ;;
     *'{'*)
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null

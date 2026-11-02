@@ -4,7 +4,8 @@
  * published, their variables sealed for each alone; refused as Lambda's
  * PublishVersion refuses. Aliases naming versions that are there, which can't
  * be deleted while one names them; refused as Lambda's CreateAlias and
- * UpdateAlias refuse. Both gone with their function. A version's pods, as the
+ * UpdateAlias refuse, and kept from a version taking the wrapped event while
+ * they have a URL. Both gone with their function. A version's pods, as the
  * service asks the cluster for them: $LATEST's label at a publish, a version's
  * objects deleted with it. Each run works in a scratch database, dropped
  * afterwards.
@@ -27,8 +28,9 @@ import { FunctionEnvironment } from './entities/function-environment.entity';
 import { FunctionInvocation } from './entities/function-invocation.entity';
 import { FunctionAliasesService } from './aliases.service';
 import { FunctionAlias } from './entities/function-alias.entity';
+import { FunctionUrl, UrlAuthType } from './entities/function-url.entity';
 import { FunctionVersion } from './entities/function-version.entity';
-import { Function, Runtime } from './entities/function.entity';
+import { EventFormat, Function, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { FunctionsService } from './functions.service';
 import { noFunctionKeys, noPackages } from './test-fixtures';
@@ -354,6 +356,30 @@ run("functions' versions and aliases (L2)", () => {
         { name: 'live', before: { version: '1', additionalVersion: '2', additionalWeight: 0.1 }, after: { version: '3', additionalVersion: '2', additionalWeight: 0.1 } },
         { name: 'live', before: { version: '3', additionalVersion: '2', additionalWeight: 0.1 }, after: { version: '$LATEST' } },
       ]);
+    });
+
+    it("keeps an alias with a URL off a version, its share's too, that takes the wrapped event, which a URL can't send; one without a URL may go there", async () => {
+      const fn = await withVersions('wrapped');
+      await query(`UPDATE function_versions SET event_format = $1 WHERE function_id = $2 AND version = 3`, [EventFormat.WRAPPED, fn.id]);
+      await aliases.create(ACCOUNT, fn.id, { name: 'live', functionVersion: '1' });
+      await aliases.create(ACCOUNT, fn.id, { name: 'dev', functionVersion: '1' });
+      await db.dataSource.getRepository(FunctionUrl).insert({ functionId: fn.id, accountId: ACCOUNT, urlId: 'w'.repeat(32), alias: 'live', authType: UrlAuthType.NONE });
+
+      const refusal =
+        "The alias live has a URL, which sends AWS Lambda's events, and version 3 takes FF's original wrapped event: point it at a version published with eventFormat lambda, or delete its URL first";
+      await expect(aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '3' })).rejects.toThrow(new BadRequestException(refusal));
+      await expect(aliases.update(ACCOUNT, fn.id, 'live', { routingConfig: { additionalVersionWeights: { '3': 0.1 } } })).rejects.toThrow(new BadRequestException(refusal));
+      expect((await aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '2' })).functionVersion).toBe('2');
+      expect((await aliases.update(ACCOUNT, fn.id, 'dev', { functionVersion: '3' })).functionVersion).toBe('3');
+      // $LATEST may take the wrapped event while the URL runs a version; not while it runs $LATEST, either way round.
+      await functions.update(ACCOUNT, fn.id, { eventFormat: EventFormat.WRAPPED });
+      await expect(aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '$LATEST' })).rejects.toThrow('and $LATEST takes');
+      await functions.update(ACCOUNT, fn.id, { eventFormat: EventFormat.LAMBDA });
+      await aliases.update(ACCOUNT, fn.id, 'live', { functionVersion: '$LATEST' });
+      await expect(functions.update(ACCOUNT, fn.id, { eventFormat: EventFormat.WRAPPED })).rejects.toThrow('The alias live names $LATEST and has a URL');
+      // The alias's URL goes with it.
+      await aliases.remove(ACCOUNT, fn.id, 'live');
+      expect(await query(`SELECT * FROM function_urls WHERE function_id = $1`, [fn.id])).toEqual([]);
     });
 
     it('keeps a version an alias names, as its own or with a share, until the alias points elsewhere or goes', async () => {

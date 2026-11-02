@@ -21,6 +21,7 @@ import { valueOf } from '../monitoring/test-fixtures';
 import { FunctionRuntimeError, FunctionThrottledError } from '../orchestrator/orchestrator.errors';
 import { countInvocation } from '../plans/rate-limits';
 import { plan } from '../plans/test-fixtures';
+import { CallTarget } from '../functions/functions.service';
 import { FunctionUrlGateway, URL_PAYLOAD_LIMIT } from './function-url.gateway';
 import { FunctionUrlEvent } from './url-event';
 
@@ -28,13 +29,15 @@ const ACCOUNT = '123456789012';
 const PUBLIC = 'p0000000000000000000000000000001';
 const PRIVATE = 'k0000000000000000000000000000001';
 const WITH_CORS = 'c0000000000000000000000000000001';
+/** The URL of the alias live of fn-p, whose $LATEST URL is PUBLIC. */
+const ALIASED = 'a0000000000000000000000000000001';
 const host = (urlId: string) => `${urlId}.fn.localhost:3001`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const CORS: UrlCors = { allowOrigins: ['https://app.example.tn'], allowMethods: ['GET', 'POST'], allowHeaders: ['content-type'], maxAge: 300 };
 
-const urlRow = (urlId: string, authType: UrlAuthType, cors: UrlCors | null = null): FunctionUrl =>
-  ({ functionId: `fn-${urlId[0]}`, accountId: ACCOUNT, urlId, authType, cors, invokeMode: UrlInvokeMode.BUFFERED }) as FunctionUrl;
+const urlRow = (urlId: string, authType: UrlAuthType, cors: UrlCors | null = null, alias: string | null = null): FunctionUrl =>
+  ({ functionId: `fn-${alias ? 'p' : urlId[0]}`, alias, accountId: ACCOUNT, urlId, authType, cors, invokeMode: UrlInvokeMode.BUFFERED }) as FunctionUrl;
 
 const KEY: Principal = {
   accountId: ACCOUNT,
@@ -60,12 +63,12 @@ describe('the function URL gateway (L1)', () => {
   let port: number;
   let throttler: ThrottlerStorageService;
   const urls = new Map<string, FunctionUrl>();
-  /** Customers' verified domains, each to its function. */
+  /** Customers' verified domains, each to the URL it serves, by its ID. */
   const domains = new Map<string, string>();
   /** Customers' verified domains for sites, each to its bucket, a site or no longer one. */
   const siteDomains = new Map<string, { name: string; website: object | null }>();
   const websites = { serve: jest.fn(), allowsCertificate: jest.fn() };
-  const functions = { findOne: jest.fn(), call: jest.fn() };
+  const functions = { findOne: jest.fn(), callTarget: jest.fn(), call: jest.fn() };
   const apiKeys = { authenticate: jest.fn() };
   const credit = { admit: jest.fn() };
   const plans = { get: jest.fn() };
@@ -77,7 +80,8 @@ describe('the function URL gateway (L1)', () => {
 
   /** The function's answer to the next calls, and the calls it got. */
   let output: unknown;
-  const calls = () => functions.call.mock.calls as Array<[Function, FunctionUrlEvent, { source: InvocationSource; requestId: string; history: FunctionUrlEvent }]>;
+  const calls = () =>
+    functions.call.mock.calls as Array<[Function, FunctionUrlEvent, { source: InvocationSource; requestId: string; history: FunctionUrlEvent; target: CallTarget }]>;
   const lastEvent = () => calls().at(-1)![1];
 
   const send = (
@@ -115,7 +119,9 @@ describe('the function URL gateway (L1)', () => {
       response.end(`the site of ${bucket}`);
     });
     websites.allowsCertificate.mockImplementation(async (domain: string) => domain === 'docs.site.localhost');
-    for (const row of [urlRow(PUBLIC, UrlAuthType.NONE), urlRow(PRIVATE, UrlAuthType.AWS_IAM), urlRow(WITH_CORS, UrlAuthType.NONE, CORS)]) urls.set(row.urlId, row);
+    for (const row of [urlRow(PUBLIC, UrlAuthType.NONE), urlRow(PRIVATE, UrlAuthType.AWS_IAM), urlRow(WITH_CORS, UrlAuthType.NONE, CORS), urlRow(ALIASED, UrlAuthType.NONE, null, 'live')]) {
+      urls.set(row.urlId, row);
+    }
     output = { statusCode: 200, body: 'ok' };
     functions.findOne.mockImplementation(async (accountId: string, id: string) => ({
       id,
@@ -123,6 +129,7 @@ describe('the function URL gateway (L1)', () => {
       status: FunctionStatus.ACTIVE,
       eventFormat: EventFormat.LAMBDA,
     }));
+    functions.callTarget.mockImplementation(async () => ({}));
     functions.call.mockImplementation(async (_fn: Function, _event: unknown, options: { requestId: string }) => ({
       ok: true,
       invocation: { id: options.requestId },
@@ -134,14 +141,11 @@ describe('the function URL gateway (L1)', () => {
     throttler = new ThrottlerStorageService();
     gateway = new FunctionUrlGateway(
       config,
-      {
-        forUrlId: async (urlId: string) => urls.get(urlId) ?? null,
-        forFunction: async (functionId: string) => [...urls.values()].find((url) => url.functionId === functionId) ?? null,
-      } as never,
+      { forUrlId: async (urlId: string) => urls.get(urlId) ?? null } as never,
       {
         forHost: async (host: string) =>
           domains.has(host)
-            ? { domain: host, functionId: domains.get(host) }
+            ? { domain: host, functionId: urls.get(domains.get(host)!)?.functionId ?? 'fn-none', urlId: domains.get(host) }
             : siteDomains.has(host)
               ? { domain: host, functionId: null, bucketId: `b-${siteDomains.get(host)!.name}`, bucket: siteDomains.get(host) }
               : null,
@@ -426,12 +430,59 @@ describe('the function URL gateway (L1)', () => {
     });
   });
 
+  describe("an alias's URL", () => {
+    const version2 = { version: 2, eventFormat: EventFormat.LAMBDA };
+
+    it('calls the version its alias names, its share drawn for the call, whatever the state of $LATEST', async () => {
+      functions.findOne.mockResolvedValue({ id: 'fn-p', accountId: ACCOUNT, status: FunctionStatus.ERROR, eventFormat: EventFormat.LAMBDA });
+      functions.callTarget.mockResolvedValue({ version: version2, alias: 'live' });
+
+      const answer = await send(ALIASED);
+
+      expect([answer.status, answer.body.toString()]).toEqual([200, 'ok']);
+      expect(functions.callTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-p' }), 'live');
+      expect(calls()[0][2]).toMatchObject({ source: InvocationSource.URL, target: { version: version2, alias: 'live' } });
+      expect(lastEvent().requestContext).toMatchObject({ apiId: ALIASED });
+    });
+
+    it("runs $LATEST's URL as the function is, naming no alias", async () => {
+      await send(PUBLIC);
+
+      expect(functions.callTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-p' }), undefined);
+      expect(calls()[0][2].target).toEqual({});
+    });
+
+    it('answers 404 once its alias is gone, the URL with it; 503 for $LATEST not ACTIVE through an alias naming it, or a version that takes the wrapped event', async () => {
+      functions.callTarget.mockRejectedValueOnce(new NotFoundException('The function fn-p has no alias live'));
+      const gone = await send(ALIASED);
+      functions.findOne.mockResolvedValueOnce({ id: 'fn-p', accountId: ACCOUNT, status: FunctionStatus.ERROR, eventFormat: EventFormat.LAMBDA });
+      functions.callTarget.mockResolvedValueOnce({ alias: 'live' });
+      const inactive = await send(ALIASED);
+      functions.callTarget.mockResolvedValueOnce({ version: { version: 1, eventFormat: EventFormat.WRAPPED }, alias: 'live' });
+      const wrapped = await send(ALIASED);
+
+      expect([gone.status, inactive.status, wrapped.status]).toEqual([404, 503, 503]);
+      expect(functions.call).not.toHaveBeenCalled();
+    });
+
+    it('serves a domain of its own, as the URL it names', async () => {
+      domains.set('api.example.tn', ALIASED);
+      functions.callTarget.mockResolvedValue({ version: version2, alias: 'live' });
+
+      const answer = await send('', '/', { headers: { host: 'api.example.tn' } });
+
+      expect(answer.status).toBe(200);
+      expect(calls()[0][2].target).toEqual({ version: version2, alias: 'live' });
+      expect(lastEvent().requestContext).toMatchObject({ domainName: 'api.example.tn', apiId: ALIASED });
+    });
+  });
+
   describe("a customer's own domain", () => {
     const onDomain = (domain: string, path = '/', headers: Record<string, string> = {}) =>
       send('', path, { headers: { host: domain, ...headers } });
 
     it('reaches its function once verified, and the event names the domain', async () => {
-      domains.set('shop.example.tn', 'fn-p');
+      domains.set('shop.example.tn', PUBLIC);
 
       const answer = await onDomain('Shop.Example.TN:443', '/cart?item=1');
 
@@ -442,7 +493,7 @@ describe('the function URL gateway (L1)', () => {
     });
 
     it('answers 404 for a domain not verified, or whose URL is gone', async () => {
-      domains.set('gone.example.tn', 'fn-none');
+      domains.set('gone.example.tn', 'g0000000000000000000000000000001');
 
       expect((await onDomain('pending.example.tn')).status).toBe(404);
       expect((await onDomain('gone.example.tn')).status).toBe(404);
@@ -450,7 +501,7 @@ describe('the function URL gateway (L1)', () => {
     });
 
     it("leaves a function's own /tls/allowed to it on its domain", async () => {
-      domains.set('shop.example.tn', 'fn-p');
+      domains.set('shop.example.tn', PUBLIC);
 
       await onDomain('shop.example.tn', '/tls/allowed?domain=anything.example');
 
@@ -458,7 +509,7 @@ describe('the function URL gateway (L1)', () => {
     });
 
     it('gets a certificate on demand once verified, and not before', async () => {
-      domains.set('shop.example.tn', 'fn-p');
+      domains.set('shop.example.tn', PUBLIC);
       const ask = (domain: string) => send('', `/tls/allowed?domain=${domain}`, { headers: { host: 'ff-backend.ff-system.svc.cluster.local:3001' } });
 
       expect([(await ask('shop.example.tn')).status, (await ask('pending.example.tn')).status]).toEqual([200, 404]);

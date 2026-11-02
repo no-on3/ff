@@ -450,6 +450,14 @@ check "four calls at once through the alias scale the version up, on its own cal
 as_ver POST "/functions/$versioned_id/invoke" '{"qualifier": "live", "invocationType": "Event", "input": {}}' >/dev/null
 check "a call that doesn't wait through the alias is kept, as Lambda's Event, to run as the version" 202 "$(status)"
 event_request="$(jq -r .requestId "$work/body")"
+live_url="$(as_ver POST "/functions/$versioned_id/url?qualifier=live" '{"authType": "NONE"}')"
+check "the alias gets a URL of its own, as Lambda's, \$LATEST none" "201 live 404" \
+  "$(status) $(jq -r .alias <<<"$live_url") $(as_ver GET "/functions/$versioned_id/url" >/dev/null; status)"
+live_host="$(jq -r .functionUrl <<<"$live_url")"
+live_host="${live_host#http://}"
+live_host="${live_host%%:*}"
+check "  ... and a request to it runs the version the alias names" '200 {"ran":"1"}' \
+  "$(curl -sS -o "$work/live-url" -w '%{http_code}' --resolve "$live_host:$url_port:127.0.0.1" "http://$live_host:$url_port/") $(jq -c . "$work/live-url")"
 # Idle a minute on, in the background while the sections between run: the version's pods sampled first, at a minute's
 # fifth second, then removed by the scaler's run of the minute after the window (versions_idle).
 (sleep 65 && sql "UPDATE plans SET limits = limits || '{\"idleSeconds\": 1}' WHERE id = 'e2e-versions'") >/dev/null 2>&1 &
@@ -1899,6 +1907,8 @@ check "\$LATEST scaled to zero; the version and its alias kept, for the next cal
 as_ver GET "/functions/$versioned_id/invocations?resource=live" >/dev/null
 check "the alias's call that didn't wait ran version 1, an attempt of the queue's worker, its history through live" "200 async 1 live COMPLETED" \
   "$(status) $(jq -r --arg r "$event_request" '.invocations[] | select(.requestId == $r) | "\(.source) \(.version) \(.alias) \(.status)"' "$work/body")"
+check "  ... and its URL's request too, its history through live" "url 1 live COMPLETED" \
+  "$(jq -r '.invocations[] | select(.source == "url") | "\(.source) \(.version) \(.alias) \(.status)"' "$work/body")"
 check "the version's pods were sampled apart while they ran, at the memory it was published with, none warm; \$LATEST's at its own" \
   "128 0 256" \
   "$(q "SELECT memory_mb, min_instances FROM capacity_samples WHERE function_id = '$versioned_id' AND version = 1 LIMIT 1") $(q "SELECT memory_mb FROM capacity_samples WHERE function_id = '$versioned_id' AND version = 0 ORDER BY minute DESC LIMIT 1")"

@@ -15,12 +15,13 @@ export enum DomainStatus {
  * once at most, serving one of the two, and verified in one account at most:
  * another account may add it too, but can't take it once proved, so nobody
  * holds a domain by adding it first. It goes with its URL, and so with its
- * function, or with its bucket.
+ * function or its alias, or with its bucket.
  */
 @Entity('custom_domains')
 @Index(['accountId', 'domain'], { unique: true })
 @Index('UQ_custom_domains_verified_domain', ['domain'], { unique: true, where: `"status" = 'verified'` })
 @Check(`("function_id" IS NULL) <> ("bucket_id" IS NULL)`)
+@Check(`("function_id" IS NULL) = ("url_id" IS NULL)`)
 export class CustomDomain {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -37,8 +38,13 @@ export class CustomDomain {
   @Column('uuid', { nullable: true })
   functionId: string | null;
 
+  /** The URL it serves, $LATEST's or an alias's; null for a site's. */
+  @Index()
+  @Column({ type: 'char', length: 32, nullable: true })
+  urlId: string | null;
+
   @ManyToOne(() => FunctionUrl, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'function_id', referencedColumnName: 'functionId' })
+  @JoinColumn({ name: 'url_id' })
   url?: FunctionUrl;
 
   /** The bucket whose site it serves; null for a function URL's. */

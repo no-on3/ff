@@ -22,6 +22,7 @@ import { ScratchDatabase, createScratchDatabase } from '../database/scratch-data
 import { FunctionInvocation, InvocationStatus } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
+import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { FunctionUrl, UrlAuthType } from '../functions/entities/function-url.entity';
 import { FunctionUrlsService } from '../function-urls/function-urls.service';
 import { CustomDomain, DomainStatus } from '../function-urls/custom-domain.entity';
@@ -129,8 +130,8 @@ run('support, for operators (L2)', () => {
     // The environment's names come from its store, which other suites test; the URL from its table, here.
     const environmentNames = async () => ({ variables: ['TABLE'], secrets: ['DB_PASSWORD'] });
     const urls = new FunctionUrlsService(ds.getRepository(FunctionUrl), {} as never, audit, { getOrThrow: () => 'https://fn.example.tn' } as unknown as ConfigService);
-    // The domains' own rows: added and checked by their service, which other suites test.
-    const domains = { forFunction: (functionId: string) => ds.getRepository(CustomDomain).find({ where: { functionId } }) } as unknown as CustomDomainsService;
+    // The domains' own rows, read by their service: added and checked by it, which other suites test.
+    const domains = new CustomDomainsService(ds.getRepository(CustomDomain), urls, {} as never, audit, {} as never, {} as never, {} as never);
     support = new AdminSupportService(
       ds.getRepository(Function),
       ds.getRepository(FunctionInvocation),
@@ -220,7 +221,14 @@ run('support, for operators (L2)', () => {
     const timedOut = await called(f, 2, InvocationStatus.TIMEOUT, 'Sandbox.Timedout: Task timed out after 10.00 seconds');
 
     await db.dataSource.getRepository(FunctionUrl).insert({ functionId: f.id, accountId: id, urlId: 'u'.repeat(32), authType: UrlAuthType.AWS_IAM, cors: { allowOrigins: ['*'] } });
-    await db.dataSource.getRepository(CustomDomain).insert({ domain: 'shop.example.tn', accountId: id, functionId: f.id, token: 't'.repeat(32), status: DomainStatus.VERIFIED });
+    // An alias's URL and its domain, which the page leaves out: it shows $LATEST's URL.
+    await db.dataSource.getRepository(FunctionAlias).insert({ functionId: f.id, accountId: id, name: 'live', version: null });
+    await db.dataSource.getRepository(FunctionUrl).insert({ functionId: f.id, accountId: id, urlId: 'v'.repeat(32), alias: 'live', authType: UrlAuthType.NONE });
+    const domain = { accountId: id, functionId: f.id, token: 't'.repeat(32), status: DomainStatus.VERIFIED };
+    await db.dataSource.getRepository(CustomDomain).insert([
+      { ...domain, domain: 'shop.example.tn', urlId: 'u'.repeat(32) },
+      { ...domain, domain: 'live.shop.example.tn', urlId: 'v'.repeat(32) },
+    ]);
     await db.dataSource.getRepository(Schedule).insert({ accountId: id, functionId: f.id, name: 'nightly', expression: 'cron(0 2 * * ? *)', input: { secret: PRIVATE }, lastOutcome: 'success' });
 
     const page = await support.functionPage(f.id);

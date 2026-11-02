@@ -31,13 +31,15 @@ export interface UrlCors {
 }
 
 /** The fields of a function's URL as the API answers them: contract.test.ts checks them against its view. */
-export const FUNCTION_URL_FIELDS = ['functionUrl', 'functionId', 'authType', 'cors', 'invokeMode', 'createdAt', 'updatedAt'] as const;
+export const FUNCTION_URL_FIELDS = ['functionUrl', 'functionId', 'alias', 'authType', 'cors', 'invokeMode', 'createdAt', 'updatedAt'] as const;
 
 /** A function's URL, as the API answers it. */
 export interface FunctionUrl {
   /** Its address, fixed for its life: https://<32 letters and digits>.<the function domain>/. */
   functionUrl: string;
   functionId: string;
+  /** The alias whose calls it makes; null for $LATEST's URL, the one the console shows. */
+  alias: string | null;
   authType: AuthType;
   cors: UrlCors | null;
   /** BUFFERED: the answer is sent whole, once the function returns. */

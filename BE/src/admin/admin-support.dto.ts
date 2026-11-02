@@ -133,7 +133,7 @@ export class AdminScheduleView {
 
 export class AdminFunctionPageView {
   @ApiProperty({ type: AdminFunctionConfigView }) function: AdminFunctionConfigView;
-  @ApiProperty({ type: AdminFunctionUrlView, nullable: true, description: 'Its public address, if it has one' }) url: AdminFunctionUrlView | null;
+  @ApiProperty({ type: AdminFunctionUrlView, nullable: true, description: "Its public address for $LATEST, if it has one, with that address's domains" }) url: AdminFunctionUrlView | null;
   @ApiProperty({ type: [String], description: "Its variables' names, never their values" }) variables: string[];
   @ApiProperty({ type: [String], description: "Its secrets' names, never their values" }) secrets: string[];
   @ApiProperty({ type: [AdminScheduleView], description: 'Its schedules, by name' }) schedules: AdminScheduleView[];

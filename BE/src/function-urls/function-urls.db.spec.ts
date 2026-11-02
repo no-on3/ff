@@ -1,8 +1,9 @@
 /**
  * L2: functions' URLs on a real PostgreSQL: a URL's ID names one URL, a
- * function has one URL at most and takes it along when deleted, and a call
- * through a URL is kept under the ID the gateway chose, with its source. Each
- * run works in a scratch database, dropped afterwards.
+ * function has one URL at most for $LATEST and one for each alias, takes them
+ * along when deleted, an alias its own, and a call through a URL is kept under
+ * the ID the gateway chose, with its source. Each run works in a scratch
+ * database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -12,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
+import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from '../functions/entities/function-invocation.entity';
 import { FunctionUrl, UrlAuthType } from '../functions/entities/function-url.entity';
 import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
@@ -86,7 +88,7 @@ run("functions' URLs, in the database (L2)", () => {
     await expect(urls.create(ACCOUNT, fn.id, { authType: UrlAuthType.NONE })).rejects.toBeInstanceOf(ConflictException);
   });
 
-  it('refuses a second URL to two requests at once: the function is the table\'s key', async () => {
+  it("refuses a second URL for $LATEST to two requests at once: the database keeps one", async () => {
     const fn = await newFunction('raced');
 
     const results = await Promise.allSettled([1, 2, 3].map(() => urls.create(ACCOUNT, fn.id, { authType: UrlAuthType.NONE })));
@@ -107,6 +109,48 @@ run("functions' URLs, in the database (L2)", () => {
       db.dataSource.getRepository(FunctionUrl).insert({ functionId: b.id, accountId: ACCOUNT, urlId, authType: UrlAuthType.NONE }),
     ).rejects.toThrow(/duplicate key value violates unique constraint/);
     expect((await urls.forUrlId(urlId))?.functionId).toBe(a.id);
+  });
+
+  it("gives each alias a URL of its own, beside $LATEST's, one at most to two requests at once; lists them $LATEST's first", async () => {
+    const fn = await newFunction('aliased');
+    await db.dataSource.getRepository(FunctionAlias).insert([
+      { functionId: fn.id, accountId: ACCOUNT, name: 'live', version: null },
+      { functionId: fn.id, accountId: ACCOUNT, name: 'canary', version: null },
+    ]);
+    const latest = await urls.create(ACCOUNT, fn.id, { authType: UrlAuthType.NONE });
+
+    const results = await Promise.allSettled([1, 2, 3].map(() => urls.create(ACCOUNT, fn.id, { authType: UrlAuthType.NONE }, 'live')));
+    const canary = await urls.create(ACCOUNT, fn.id, { authType: UrlAuthType.AWS_IAM }, 'canary');
+
+    expect(results.map((result) => result.status).sort()).toEqual(['fulfilled', 'rejected', 'rejected']);
+    expect(results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map((result) => result.reason)).toEqual([
+      expect.any(ConflictException),
+      expect.any(ConflictException),
+    ]);
+    expect((await urls.list(ACCOUNT, fn.id)).map((url) => url.alias)).toEqual([null, 'canary', 'live']);
+    expect((await urls.get(ACCOUNT, fn.id, 'canary')).functionUrl).toBe(canary.functionUrl);
+    expect((await urls.get(ACCOUNT, fn.id)).functionUrl).toBe(latest.functionUrl);
+    // The database keeps one for $LATEST, as for each alias, whatever the service does.
+    await expect(db.dataSource.getRepository(FunctionUrl).insert({ functionId: fn.id, accountId: ACCOUNT, urlId: 'l'.repeat(32), authType: UrlAuthType.NONE })).rejects.toThrow(
+      /duplicate key value violates unique constraint "UQ_function_urls_latest"/,
+    );
+    // Nor for an alias the function hasn't.
+    await expect(
+      db.dataSource.getRepository(FunctionUrl).insert({ functionId: fn.id, accountId: ACCOUNT, urlId: 'm'.repeat(32), alias: 'gone', authType: UrlAuthType.NONE }),
+    ).rejects.toThrow(/foreign key constraint/);
+  });
+
+  it("deletes an alias's URL with the alias, $LATEST's and the other aliases' staying", async () => {
+    const fn = await newFunction('unaliased');
+    await db.dataSource.getRepository(FunctionAlias).insert([
+      { functionId: fn.id, accountId: ACCOUNT, name: 'live', version: null },
+      { functionId: fn.id, accountId: ACCOUNT, name: 'dev', version: null },
+    ]);
+    for (const alias of [undefined, 'live', 'dev']) await urls.create(ACCOUNT, fn.id, { authType: UrlAuthType.NONE }, alias);
+
+    await db.dataSource.getRepository(FunctionAlias).delete({ functionId: fn.id, name: 'live' });
+
+    expect((await urls.list(ACCOUNT, fn.id)).map((url) => url.alias)).toEqual([null, 'dev']);
   });
 
   it('deletes the URL with its function', async () => {

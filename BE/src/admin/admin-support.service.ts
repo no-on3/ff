@@ -144,7 +144,7 @@ export class AdminSupportService {
       this.invocations.find({ where: { functionId: id, status: In(FAILED) }, order: { createdAt: 'DESC' }, take: 10 }),
       this.urls.find(id),
       this.functionsService.environmentNames(id),
-      this.domains.forFunction(id),
+      this.domains.forLatestUrl(id),
       this.schedules.find({ where: { functionId: id }, order: { name: 'ASC' } }),
     ]);
     const { name, runtime, memory, timeout, minInstances, maxInstances, status, eventFormat, createdAt, updatedAt } = fn;

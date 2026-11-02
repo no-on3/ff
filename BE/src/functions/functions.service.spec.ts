@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, HttpException, HttpStatus, Inte
 import { ConfigService } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { IsNull, Not } from 'typeorm';
+import { FindOperator, IsNull, Not } from 'typeorm';
 import { MetricsService } from '../metrics/metrics.service';
 import { ObjectStoreService, StoredObjectMissingError } from '../object-store/object-store.service';
 import {
@@ -151,6 +151,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       manager: {
         transaction: jest.fn(async (work) => work(transaction)),
         existsBy: jest.fn(async (_target, where: { name: string }) => named(where)),
+        // No alias's URL that calls $LATEST, unless a test gives one.
+        findOne: jest.fn(async () => null),
         // No versions, so none to delete nor any version's code to make a one-file package of, unless a test gives some.
         find: jest.fn(async () => []),
       },
@@ -814,7 +816,9 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     it("refuses the wrapped event to a function with a URL, which sends AWS Lambda's events, and rolls nothing out", async () => {
       functionsRepo.findOne.mockResolvedValue(activeFunction());
       const { manager } = functionsRepo as unknown as { manager: { existsBy: jest.Mock } };
-      manager.existsBy.mockImplementation(async (target: unknown, where: { functionId?: string }) => target === FunctionUrl && where.functionId === 'fn-1');
+      manager.existsBy.mockImplementation(
+        async (target: unknown, where: { functionId?: string; alias?: unknown }) => target === FunctionUrl && where.functionId === 'fn-1' && where.alias instanceof FindOperator,
+      );
 
       await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
         "The function has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: delete its URL (DELETE /functions/fn-1/url) first, or keep eventFormat lambda",
@@ -823,6 +827,19 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       // Back to lambda, or another change, is no business of its URL's.
       await service.update('user-1', 'fn-1', { eventFormat: EventFormat.LAMBDA, memory: 256 });
       expect(orchestrator.update).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses the wrapped event while an alias naming $LATEST has a URL, which calls it with AWS Lambda's events", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      const { manager } = functionsRepo as unknown as { manager: { findOne: jest.Mock } };
+      manager.findOne.mockResolvedValueOnce({ functionId: 'fn-1', alias: 'dev' });
+
+      await expect(service.update('user-1', 'fn-1', { eventFormat: EventFormat.WRAPPED })).rejects.toThrow(
+        "The alias dev names $LATEST and has a URL, which sends AWS Lambda's events, and the wrapped format can't take them: " +
+          'point the alias at a version, or delete its URL (DELETE /functions/fn-1/url?qualifier=dev), first, or keep eventFormat lambda',
+      );
+      expect(manager.findOne).toHaveBeenCalledWith(FunctionUrl, { where: { functionId: 'fn-1', alias: Not(IsNull()), aliasOf: { version: IsNull() } } });
+      expect(orchestrator.update).not.toHaveBeenCalled();
     });
 
     it("refuses the wrapped event to a function with schedules, which send EventBridge's Scheduled Event", async () => {

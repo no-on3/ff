@@ -16,7 +16,7 @@ import { CustomDomainsController } from './custom-domains.controller';
 import { CustomDomainsService, DOMAIN_RESOLVER } from './custom-domains.service';
 import { NodeDomainResolver } from './domain-check';
 import { FunctionUrlGateway } from './function-url.gateway';
-import { FunctionUrlsController } from './function-urls.controller';
+import { FunctionUrlListController, FunctionUrlsController } from './function-urls.controller';
 import { FunctionUrlsService } from './function-urls.service';
 import { SiteDomainsController } from './site-domains.controller';
 
@@ -36,7 +36,7 @@ import { SiteDomainsController } from './site-domains.controller';
     PlansModule,
     StorageModule,
   ],
-  controllers: [FunctionUrlsController, CustomDomainsController, SiteDomainsController],
+  controllers: [FunctionUrlsController, FunctionUrlListController, CustomDomainsController, SiteDomainsController],
   providers: [
     FunctionUrlsService,
     CustomDomainsService,

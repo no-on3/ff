@@ -2,7 +2,7 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
-import { QueryDeepPartialEntity, QueryFailedError, Repository } from 'typeorm';
+import { IsNull, QueryDeepPartialEntity, QueryFailedError, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { FunctionUrl } from '../functions/entities/function-url.entity';
 import { PlansService } from '../plans/plans.service';
@@ -24,8 +24,8 @@ const isUniqueViolation = (error: unknown) => error instanceof QueryFailedError 
 
 /** What a domain serves, and where its CNAME points: a function's URL, or a bucket's site. */
 interface DomainTarget {
-  /** The domains' rows it has: by its function, or by its bucket. */
-  where: { functionId: string } | { bucketId: string };
+  /** The domains' rows it has: by its URL, with its function, or by its bucket. */
+  where: { functionId: string; urlId: string } | { bucketId: string };
   /** What the audit log names. */
   resource: string;
   /** The URL's host, or the site's, which a subdomain's CNAME names. */
@@ -67,6 +67,7 @@ export class CustomDomainsService {
     return {
       domain: domain.domain,
       functionId: domain.functionId as string,
+      alias: url.alias,
       status: domain.status,
       records: domainRecords(domain.domain, urlHost(this.base, url.urlId), domain.token, this.edgeAddresses),
       checkedAt: domain.checkedAt,
@@ -76,26 +77,27 @@ export class CustomDomainsService {
     };
   }
 
-  async list(accountId: string, functionId: string): Promise<CustomDomainView[]> {
-    const url = await this.urls.urlOf(accountId, functionId);
+  /** The domains of the function's URL, $LATEST's or its alias's. */
+  async list(accountId: string, functionId: string, alias?: string): Promise<CustomDomainView[]> {
+    const url = await this.urls.urlOf(accountId, functionId, alias);
     return (await this.domainsOf(accountId, this.urlTarget(url))).map((domain) => this.view(domain, url));
   }
 
-  /** Adds a domain to the function's URL, then checks its records at once: they may be there already. */
-  async add(accountId: string, functionId: string, name: string): Promise<CustomDomainView> {
-    const url = await this.urls.urlOf(accountId, functionId);
+  /** Adds a domain to the function's URL, or its alias's, then checks its records at once: they may be there already. */
+  async add(accountId: string, functionId: string, name: string, alias?: string): Promise<CustomDomainView> {
+    const url = await this.urls.urlOf(accountId, functionId, alias);
     return this.view(await this.addTo(accountId, this.urlTarget(url), name), url);
   }
 
   /** Checks the domain's records again, as its account asks once it has made them. */
-  async verify(accountId: string, functionId: string, name: string): Promise<CustomDomainView> {
-    const url = await this.urls.urlOf(accountId, functionId);
+  async verify(accountId: string, functionId: string, name: string, alias?: string): Promise<CustomDomainView> {
+    const url = await this.urls.urlOf(accountId, functionId, alias);
     const target = this.urlTarget(url);
     return this.view(await this.check(await this.domainOf(accountId, target, name), target), url);
   }
 
-  async remove(accountId: string, functionId: string, name: string): Promise<void> {
-    await this.removeFrom(accountId, this.urlTarget(await this.urls.urlOf(accountId, functionId)), name);
+  async remove(accountId: string, functionId: string, name: string, alias?: string): Promise<void> {
+    await this.removeFrom(accountId, this.urlTarget(await this.urls.urlOf(accountId, functionId, alias)), name);
   }
 
   /** GET /buckets/:name/website/domains: the site's own domains, each with the records that prove it and where it stands. */
@@ -121,9 +123,9 @@ export class CustomDomainsService {
     await this.removeFrom(accountId, this.siteTarget(await this.bucketOf(accountId, bucketName)), name);
   }
 
-  /** A function URL's domains, for the platform's support. */
-  forFunction(functionId: string): Promise<CustomDomain[]> {
-    return this.domains.find({ where: { functionId }, order: { createdAt: 'ASC' } });
+  /** The domains of a function's $LATEST URL, which the platform's support page shows. */
+  forLatestUrl(functionId: string): Promise<CustomDomain[]> {
+    return this.domains.find({ where: { functionId, url: { alias: IsNull() } }, order: { createdAt: 'ASC' } });
   }
 
   /** The verified domain a request's host names, for the gateway, a site's with its bucket, a site or not; null for any other. */
@@ -132,7 +134,12 @@ export class CustomDomainsService {
   }
 
   private urlTarget(url: FunctionUrl): DomainTarget {
-    return { where: { functionId: url.functionId }, resource: `function:${url.functionId}`, host: urlHost(this.base, url.urlId), it: "The function's URL" };
+    return {
+      where: { functionId: url.functionId, urlId: url.urlId },
+      resource: `function:${url.functionId}`,
+      host: urlHost(this.base, url.urlId),
+      it: url.alias === null ? "The function's URL" : `The URL of the alias ${url.alias}`,
+    };
   }
 
   private siteTarget(bucket: Bucket): DomainTarget {
@@ -181,7 +188,16 @@ export class CustomDomainsService {
     if (count >= plan.limits.customDomains) {
       throw new BadRequestException(`The ${plan.name} plan allows ${plan.limits.customDomains} custom domains, and the account has ${count}: remove one first`);
     }
-    const row = this.domains.create({ domain, accountId, functionId: null, bucketId: null, ...target.where, token: randomBytes(16).toString('hex'), status: DomainStatus.PENDING });
+    const row = this.domains.create({
+      domain,
+      accountId,
+      functionId: null,
+      urlId: null,
+      bucketId: null,
+      ...target.where,
+      token: randomBytes(16).toString('hex'),
+      status: DomainStatus.PENDING,
+    });
     try {
       await this.domains.insert(row as QueryDeepPartialEntity<CustomDomain>);
     } catch (error) {

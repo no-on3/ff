@@ -2,13 +2,14 @@ import { BadRequestException, ConflictException, Injectable, PreconditionFailedE
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, In, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { functionArn } from './arns';
 import { AliasRoutingConfigDto, CreateAliasDto, FunctionAliasView, UpdateAliasDto } from './dto/aliases.dto';
 import { FunctionAlias } from './entities/function-alias.entity';
+import { FunctionUrl } from './entities/function-url.entity';
 import { FunctionVersion } from './entities/function-version.entity';
-import { Function } from './entities/function.entity';
+import { EventFormat, Function } from './entities/function.entity';
 import { noSuchAlias, noSuchVersion } from './function-not-found';
 import { FunctionsService } from './functions.service';
 import { lockedFunction } from './locked-function';
@@ -44,6 +45,17 @@ export function routeRefusal(route: Route): BadRequestException | undefined {
   return undefined;
 }
 
+/**
+ * What of a route takes FF's original wrapped event, which a function URL can't send: "$LATEST", "version n", or
+ * undefined when every one it names takes Lambda's.
+ */
+export async function wrappedIn(manager: EntityManager, function_: Pick<Function, 'id' | 'eventFormat'>, route: Route): Promise<string | undefined> {
+  if (route.version === null) return function_.eventFormat === EventFormat.WRAPPED ? LATEST : undefined;
+  const versions = [route.version, route.additionalVersion].filter((version): version is number => version !== null);
+  const wrapped = await manager.findOne(FunctionVersion, { where: { functionId: function_.id, version: In(versions), eventFormat: EventFormat.WRAPPED } });
+  return wrapped ? `version ${wrapped.version}` : undefined;
+}
+
 /** Where an alias's calls go, as the audit log says it. */
 const routeOf = (route: Route) => ({
   version: route.version === null ? LATEST : String(route.version),
@@ -53,8 +65,9 @@ const routeOf = (route: Route) => ({
 /**
  * A function's aliases, as AWS Lambda's: made, changed and deleted under the
  * function's lock, as its versions are published and deleted, so that every
- * version an alias names is there; each change in the audit log. Calls don't
- * come through them yet: they name what will run.
+ * version an alias names is there; each change in the audit log. A call
+ * naming one runs the version it names, its share drawn for each; deleting
+ * one deletes its URL.
  */
 @Injectable()
 export class FunctionAliasesService {
@@ -117,6 +130,15 @@ export class FunctionAliasesService {
         ...(sent.routingConfig ? routingOf(sent.routingConfig) : { additionalVersion: alias.additionalVersion, additionalWeight: alias.additionalWeight }),
       };
       await refuseRoute(manager, function_, route);
+      if (await manager.existsBy(FunctionUrl, { functionId: id, alias: name })) {
+        const wrapped = await wrappedIn(manager, function_, route);
+        if (wrapped) {
+          throw new BadRequestException(
+            `The alias ${name} has a URL, which sends AWS Lambda's events, and ${wrapped} takes FF's original wrapped event: ` +
+              'point it at a version published with eventFormat lambda, or delete its URL first',
+          );
+        }
+      }
       const description = sent.description ?? alias.description;
       const before = routeOf(alias);
       const unchanged = (['version', 'additionalVersion', 'additionalWeight'] as const).every((field) => route[field] === alias[field]) && description === alias.description;
@@ -127,7 +149,7 @@ export class FunctionAliasesService {
     });
   }
 
-  /** As Lambda's DeleteAlias: the versions it named stay. */
+  /** As Lambda's DeleteAlias: the versions it named stay; its URL goes with it, and that URL's domains. */
   async remove(accountId: string, id: string, name: string): Promise<void> {
     await this.aliases.manager.transaction(async (manager) => {
       const function_ = await lockedFunction(manager, accountId, id);
