@@ -30,6 +30,7 @@ import { LogsFilter, filterFromSearch, searchForFilter } from '../lib/logs';
 import { EnvironmentTab } from './FunctionEnvironment';
 import { FunctionUrlTab } from './FunctionUrl';
 import { FunctionSchedules } from './FunctionSchedules';
+import { FunctionVersions } from './FunctionVersions';
 import { FunctionAsyncSettings } from './FunctionAsyncSettings';
 import { FunctionEventSources } from './FunctionEventSources';
 import { FunctionLogs } from './FunctionLogs';
@@ -45,9 +46,10 @@ import StatusPill from './StatusPill';
 const HISTORY_PAGE = 20;
 
 /** The page's tabs, by their name in the address (`?tab=logs`), so that a link opens one, in their order. */
-const TABS = ['overview', 'environment', 'url', 'schedules', 'invocations', 'logs', 'metrics', 'scaling'] as const;
+const TABS = ['overview', 'versions', 'environment', 'url', 'schedules', 'invocations', 'logs', 'metrics', 'scaling'] as const;
 const TAB_LABELS: Record<(typeof TABS)[number], string> = {
   overview: 'Overview',
+  versions: 'Versions',
   environment: 'Environment',
   url: 'URL',
   schedules: 'Schedules',
@@ -379,6 +381,8 @@ const FunctionDetail: React.FC = () => {
           </div>
         </div>
       )}
+
+      {tab === 'versions' && <FunctionVersions func={func} mayChange={mayChange} />}
 
       {tab === 'environment' && <EnvironmentTab func={func} mayChange={mayChange} onSaved={setFunc} />}
 

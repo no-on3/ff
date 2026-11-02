@@ -33,6 +33,8 @@ import functionUrlEntitySource from '../../BE/src/functions/entities/function-ur
 import customDomainDtoSource from '../../BE/src/function-urls/dto/custom-domain.dto.ts?raw';
 import customDomainEntitySource from '../../BE/src/function-urls/custom-domain.entity.ts?raw';
 import scheduleDtoSource from '../../BE/src/schedules/dto/schedule.dto.ts?raw';
+import versionsDtoSource from '../../BE/src/functions/dto/versions.dto.ts?raw';
+import aliasesDtoSource from '../../BE/src/functions/dto/aliases.dto.ts?raw';
 import cacheDtoSource from '../../BE/src/caches/dto/cache.dto.ts?raw';
 import emailDtoSource from '../../BE/src/email/dto/email.dto.ts?raw';
 import emailIdentityEntitySource from '../../BE/src/email/email-identity.entity.ts?raw';
@@ -57,13 +59,14 @@ import { CACHE_METRICS, COMPARISONS, MAX_EVALUATION_PERIODS, MAX_WEBHOOKS, MISSI
 import { PLAN_LIMIT_KEYS } from './lib/plans';
 import { AUTH_TYPES, CORS_LIMITS, CORS_METHODS, FUNCTION_URL_FIELDS, HEADER_NAME, ORIGIN } from './lib/function-url';
 import { CUSTOM_DOMAIN_FIELDS, DOMAIN_STATUSES } from './lib/custom-domains';
-import { SCHEDULE_FIELDS, SCHEDULE_NAME } from './lib/schedules';
+import { SCHEDULE_FIELDS, SCHEDULE_NAME, emptyForm as emptyScheduleForm, scheduleOf } from './lib/schedules';
+import { ALIAS_FIELDS, ALIAS_NAME, VERSION_FIELDS, aliasBody, rollbackBody } from './lib/versions';
 import { CACHE_NAME } from './lib/caches';
 import { EMAIL_ACCOUNT_FIELDS, IDENTITY_FIELDS, IDENTITY_STATUSES, MESSAGE_FIELDS, RECIPIENT_FIELDS, RECIPIENT_STATUSES, SEND_FIELDS, SUPPRESSION_FIELDS } from './lib/email';
 import { DATABASE_NAME } from './lib/databases';
 import { BUCKET_NAME } from './lib/buckets';
 import { QUEUE_ATTRIBUTES, QUEUE_NAME } from './lib/queues';
-import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES } from './lib/event-sources';
+import { BATCHING_WINDOW, BATCH_SIZE, MAXIMUM_CONCURRENCY, REPORT_BATCH_ITEM_FAILURES, eventSourceBody, eventSourceForm } from './lib/event-sources';
 import { EVENT_TYPES as NOTIFICATION_EVENTS } from './lib/bucket-notifications';
 import { SITE_DOMAIN_FIELDS, SITE_METRICS, WEBSITE_FIELDS } from './lib/sites';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
@@ -635,5 +638,30 @@ describe("a function's schedule", () => {
   it("has the API's fields and name rule, so the tab reads each one there is and the form refuses what the API would", () => {
     expect(dtoFields(scheduleDtoSource, 'export class ScheduleView {')).toEqual([...SCHEDULE_FIELDS]);
     expect(scheduleDtoSource).toContain(`export const SCHEDULE_NAME = ${SCHEDULE_NAME.toString()};`);
+  });
+});
+
+/** The fields a form's body sends; none when the form is refused. */
+const sentFields = (built: { body: object } | { problem: string }) => ('body' in built ? Object.keys(built.body) : ['refused: ' + built.problem]);
+
+describe("a function's versions and aliases", () => {
+  it("have the API's fields and an alias's name rule, so the Versions tab reads each one there is and the form refuses what the API would", () => {
+    expect(dtoFields(versionsDtoSource, 'export class FunctionVersionView {')).toEqual([...VERSION_FIELDS]);
+    expect(dtoFields(aliasesDtoSource, 'export class FunctionAliasView {')).toEqual([...ALIAS_FIELDS]);
+    expect(aliasesDtoSource).toContain(`export const ALIAS_NAME = ${ALIAS_NAME.toString()};`);
+  });
+
+  it('are published, made, changed and rolled back with fields the API takes', () => {
+    const form = { name: 'live', version: '3', shareVersion: '2', sharePercent: '10', description: 'The shop' };
+    expect(dtoFields(versionsDtoSource, 'export class PublishVersionDto {')).toContain('description');
+    expect(dtoFields(aliasesDtoSource, 'export class CreateAliasDto {')).toEqual(expect.arrayContaining(sentFields(aliasBody(form, true))));
+    expect(dtoFields(aliasesDtoSource, 'export class UpdateAliasDto {')).toEqual(
+      expect.arrayContaining([...sentFields(aliasBody(form, false)), ...Object.keys(rollbackBody({ revisionId: 'r-1' }, '2'))]),
+    );
+  });
+
+  it('are named by a schedule and a queue reader with the field the API takes', () => {
+    expect(dtoFields(scheduleDtoSource, 'export class CreateScheduleDto {')).toEqual(expect.arrayContaining(sentFields(scheduleOf({ ...emptyScheduleForm(), name: 'nightly', qualifier: 'live' }))));
+    expect(dtoFields(eventSourceDtoSource, 'export class EventSourceSettingsDto {')).toEqual(expect.arrayContaining(sentFields(eventSourceBody({ ...eventSourceForm(), qualifier: '3' }))));
   });
 });

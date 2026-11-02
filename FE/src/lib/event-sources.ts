@@ -1,4 +1,5 @@
-import { nameOfArn } from './arns';
+import { functionOfArn, nameOfArn } from './arns';
+import { LATEST } from './versions';
 import type { EventSource, EventSourceSettings } from '../services/api';
 
 /** Lambda's bounds for a mapping of an SQS queue, which the API holds them to: contract.test.ts checks them against the API's. */
@@ -7,9 +8,10 @@ export const BATCHING_WINDOW = { min: 0, max: 300 } as const;
 export const MAXIMUM_CONCURRENCY = { min: 2, max: 1000 } as const;
 export const REPORT_BATCH_ITEM_FAILURES = 'ReportBatchItemFailures';
 
-/** The form for a mapping: the queue by its name, '' until one is chosen; the numbers as typed, the concurrency '' for none. */
+/** The form for a mapping: the queue by its name, '' until one is chosen; what reads it, '' for $LATEST; the numbers as typed, the concurrency '' for none. */
 export interface EventSourceForm {
   queue: string;
+  qualifier: string;
   batchSize: string;
   window: string;
   reportFailures: boolean;
@@ -21,6 +23,7 @@ export interface EventSourceForm {
 export function eventSourceForm(mapping?: EventSource): EventSourceForm {
   return {
     queue: mapping ? nameOfArn(mapping.eventSourceArn) : '',
+    qualifier: (mapping && functionOfArn(mapping.functionArn)?.qualifier) ?? '',
     batchSize: String(mapping?.batchSize ?? BATCH_SIZE.byDefault),
     window: String(mapping?.maximumBatchingWindowInSeconds ?? 0),
     reportFailures: mapping?.functionResponseTypes.includes(REPORT_BATCH_ITEM_FAILURES) ?? false,
@@ -55,6 +58,7 @@ export function eventSourceBody(form: EventSourceForm): { body: EventSourceSetti
   }
   return {
     body: {
+      qualifier: form.qualifier || LATEST,
       batchSize,
       maximumBatchingWindowInSeconds: window,
       functionResponseTypes: form.reportFailures ? [REPORT_BATCH_ITEM_FAILURES] : [],

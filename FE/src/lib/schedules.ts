@@ -5,6 +5,8 @@
  * reads. contract.test.ts ties the fields and the name's rule to the API's.
  */
 
+import { LATEST } from './versions';
+
 /** The fields of a schedule as the API answers them. */
 export const SCHEDULE_FIELDS = [
   'id',
@@ -52,6 +54,8 @@ export const EXPRESSION_EXAMPLES = ['rate(5 minutes)', 'rate(1 hour)', 'cron(0 8
 /** The form, as typed. */
 export interface ScheduleForm {
   name: string;
+  /** The version or the alias it runs; empty for $LATEST, the function as it is. */
+  qualifier: string;
   expression: string;
   description: string;
   /** JSON text; empty for EventBridge's Scheduled Event. */
@@ -59,11 +63,12 @@ export interface ScheduleForm {
   enabled: boolean;
 }
 
-export const emptyForm = (): ScheduleForm => ({ name: '', expression: 'rate(1 hour)', description: '', input: '', enabled: true });
+export const emptyForm = (): ScheduleForm => ({ name: '', qualifier: '', expression: 'rate(1 hour)', description: '', input: '', enabled: true });
 
 /** The form filled from a schedule, to change it. */
 export const formOf = (schedule: Schedule): ScheduleForm => ({
   name: schedule.name,
+  qualifier: schedule.qualifier ?? '',
   expression: schedule.expression,
   description: schedule.description ?? '',
   input: schedule.input === null || schedule.input === undefined ? '' : JSON.stringify(schedule.input, null, 2),
@@ -86,7 +91,7 @@ export function scheduleOf(form: ScheduleForm): { body: Record<string, unknown> 
     }
   }
   return {
-    body: { name, expression: form.expression.trim(), description: form.description.trim() || null, input, enabled: form.enabled },
+    body: { name, qualifier: form.qualifier || LATEST, expression: form.expression.trim(), description: form.description.trim() || null, input, enabled: form.enabled },
   };
 }
 
@@ -98,12 +103,6 @@ export function lastRunText(schedule: Pick<Schedule, 'lastRunAt' | 'lastOutcome'
 }
 
 /** When the next run is, in words: off, none left, or its time. */
-/** What a schedule runs, when it names a version or an alias: "Runs version 3", "Runs alias live"; null for $LATEST, the function as it is. */
-export function runsText(schedule: Pick<Schedule, 'qualifier'>): string | null {
-  if (!schedule.qualifier) return null;
-  return /^[1-9][0-9]*$/.test(schedule.qualifier) ? `Runs version ${schedule.qualifier}` : `Runs alias ${schedule.qualifier}`;
-}
-
 export function nextRunText(schedule: Pick<Schedule, 'enabled' | 'nextRunAt'>, when: (iso: string) => string): string {
   if (!schedule.enabled) return 'Disabled';
   return schedule.nextRunAt ? when(schedule.nextRunAt) : 'No run left';

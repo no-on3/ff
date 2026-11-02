@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, Box, Button, Card, CardContent, Checkbox, Chip, FormControlLabel, TextField, Typography } from '@mui/material';
-import { EXPRESSION_EXAMPLES, Schedule, ScheduleForm, emptyForm, formOf, lastRunText, nextRunText, runsText, scheduleOf } from '../lib/schedules';
+import { Alert, Box, Button, Card, CardContent, Checkbox, Chip, FormControlLabel, MenuItem, TextField, Typography } from '@mui/material';
+import { EXPRESSION_EXAMPLES, Schedule, ScheduleForm, emptyForm, formOf, lastRunText, nextRunText, scheduleOf } from '../lib/schedules';
 import { apiErrorMessage } from '../lib/functions';
+import { runsText } from '../lib/versions';
 import { Function, schedulesApi } from '../services/api';
+import { useQualifierChoices } from './useQualifierChoices';
 
 interface FunctionSchedulesProps {
   func: Function;
@@ -26,6 +28,7 @@ export const FunctionSchedules: React.FC<FunctionSchedulesProps> = ({ func, mayC
   const [preview, setPreview] = useState<{ runs: string[] } | { problem: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const qualifiers = useQualifierChoices(func.id, editing !== undefined, form.qualifier);
 
   useEffect(() => {
     let current = true;
@@ -120,6 +123,21 @@ export const FunctionSchedules: React.FC<FunctionSchedulesProps> = ({ func, mayC
           helperText="Unique within the function: letters, digits, '.', '-' and '_'"
           slotProps={{ htmlInput: { spellCheck: false, maxLength: 64 } }}
         />
+        {qualifiers && qualifiers.length > 1 && (
+          <TextField
+            select
+            label="What it runs"
+            value={form.qualifier}
+            onChange={(e) => setForm({ ...form, qualifier: e.target.value })}
+            helperText="A version never changes; an alias runs what it names when each run comes"
+          >
+            {qualifiers.map((choice) => (
+              <MenuItem key={choice.value} value={choice.value}>
+                {choice.label}
+              </MenuItem>
+            ))}
+          </TextField>
+        )}
         <TextField
           label="Expression"
           value={form.expression}
@@ -209,7 +227,7 @@ export const FunctionSchedules: React.FC<FunctionSchedulesProps> = ({ func, mayC
                   <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
                     <Typography sx={{ fontWeight: 500 }}>{schedule.name}</Typography>
                     <Typography sx={{ fontFamily: 'monospace' }}>{schedule.expression}</Typography>
-                    {runsText(schedule) && <Chip size="small" variant="outlined" label={runsText(schedule)} />}
+                    {runsText(schedule.qualifier) && <Chip size="small" variant="outlined" label={runsText(schedule.qualifier)} />}
                     <Chip size="small" label={schedule.enabled ? 'Enabled' : 'Disabled'} color={schedule.enabled ? 'success' : 'default'} />
                     {mayChange && (
                       <Box sx={{ ml: 'auto', display: 'flex', gap: 1 }}>

@@ -5,6 +5,7 @@ import type { AuthType, FunctionUrl, UrlCors } from '../lib/function-url';
 import type { CustomDomain } from '../lib/custom-domains';
 import type { SiteDomain, SiteMetrics, Website, WebsiteBody } from '../lib/sites';
 import type { Schedule } from '../lib/schedules';
+import type { FunctionAlias, FunctionVersion } from '../lib/versions';
 
 const api = axios.create({
   baseURL: config.apiUrl,
@@ -223,6 +224,8 @@ export const functionUrlApi = {
   update: (functionId: string, configuration: { authType?: AuthType; cors?: UrlCors | null }) =>
     api.put<FunctionUrl>(`/functions/${functionId}/url`, configuration),
   remove: (functionId: string) => api.delete(`/functions/${functionId}/url`),
+  /** Every URL of the function, $LATEST's first, then each alias's. */
+  list: (functionId: string) => api.get<FunctionUrl[]>(`/functions/${functionId}/urls`),
 };
 
 /** A function URL's own domains: listed, added, checked again, removed. */
@@ -266,6 +269,26 @@ export const schedulesApi = {
   update: (functionId: string, id: string, changes: Record<string, unknown>) => api.put<Schedule>(`/functions/${functionId}/schedules/${id}`, changes),
   remove: (functionId: string, id: string) => api.delete(`/functions/${functionId}/schedules/${id}`),
   nextRuns: (expression: string) => api.get<{ runs: string[] }>('/schedules/next-runs', { params: { expression } }),
+};
+
+/** A function's versions, as AWS Lambda's: every member reads them; owners and developers publish and delete them. */
+export const versionsApi = {
+  /** Oldest first. */
+  list: (functionId: string) => api.get<FunctionVersion[]>(`/functions/${functionId}/versions`),
+  /** The function as it is now, frozen; the last version again when nothing but the description changed since. */
+  publish: (functionId: string, description: string) => api.post<FunctionVersion>(`/functions/${functionId}/versions`, { description }),
+  /** Refused with 409 while an alias names it. */
+  remove: (functionId: string, version: string) => api.delete(`/functions/${functionId}/versions/${version}`),
+};
+
+/** A function's aliases, as AWS Lambda's: every member reads them; owners and developers make, change and delete them. */
+export const aliasesApi = {
+  list: (functionId: string) => api.get<FunctionAlias[]>(`/functions/${functionId}/aliases`),
+  create: (functionId: string, body: Record<string, unknown>) => api.post<FunctionAlias>(`/functions/${functionId}/aliases`, body),
+  /** What is sent changes, what is left out stays; a revisionId other than the alias's is refused with 412. */
+  update: (functionId: string, name: string, changes: Record<string, unknown>) => api.put<FunctionAlias>(`/functions/${functionId}/aliases/${encodeURIComponent(name)}`, changes),
+  /** Its URL and the URL's domains go with it; the versions it named stay. */
+  remove: (functionId: string, name: string) => api.delete(`/functions/${functionId}/aliases/${encodeURIComponent(name)}`),
 };
 
 /** GET and PUT /functions/:id/scaling-config. Each instance serves one call at a time. */
