@@ -138,11 +138,13 @@ function refuseArchitectures(architectures: unknown): void {
   }
 }
 
-/** A field the operation doesn't take: refused, never ignored. */
-function refuseUnknown(input: Record<string, unknown>, operation: Operation): void {
-  const unknown = Object.keys(input).find((field) => !TAKEN[operation].has(field));
+/** A field an operation doesn't take: refused, never ignored. */
+export function refuseUnknownFields(input: Record<string, unknown>, operation: string, taken: ReadonlySet<string>): void {
+  const unknown = Object.keys(input).find((field) => !taken.has(field));
   if (unknown !== undefined) throw invalidParameterValue(`FF doesn't take ${unknown} in ${operation}.`);
 }
+
+const refuseUnknown = (input: Record<string, unknown>, operation: Operation): void => refuseUnknownFields(input, operation, TAKEN[operation]);
 
 /** The settings FF has one value of: sent as that value, or not at all; those it can't do refused, unless sent empty. */
 function refuseOtherSettings(input: Record<string, unknown>, name: string, operation: Operation): void {

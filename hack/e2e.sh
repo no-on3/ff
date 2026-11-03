@@ -685,6 +685,60 @@ as_ver DELETE /buckets/e2e-lambda-code >/dev/null
 }
 section_def lambda_updates section_lambda_updates lambda_changes budget=120
 
+section_lambda_aliases() {
+section "Lambda's versions and aliases with the AWS CLI: versions published and listed after \$LATEST; an alias made, its calls shared with another version, read, listed, invoked, changed, deleted, its versions kept; refused as Lambda refuses"
+aliased_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-aliased"
+# aliased_zip <zip> <its answer's code>: a function that names the version that ran it.
+aliased_zip() { lambda_zip "$1" "export const handler = async () => ({ code: \"$2\", version: process.env.FUNCTION_VERSION });" >/dev/null; }
+aliased_zip "$work/aliased-1.zip" one
+as_maker aws_lambda create-function --function-name e2e-aliased --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/aliased-1.zip" >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-aliased >/dev/null 2>&1 || true
+check "PublishVersion: version 1, its ARN, its description; published again with nothing changed, version 1 again" "1 $aliased_arn:1 first 1" \
+  "$(as_maker aws_lambda publish-version --function-name e2e-aliased --description first | jq -r '"\(.Version) \(.FunctionArn) \(.Description)"') \
+$(as_maker aws_lambda publish-version --function-name e2e-aliased | jq -r .Version)"
+aliased_zip "$work/aliased-2.zip" two
+as_maker aws_lambda update-function-code --function-name e2e-aliased --zip-file "fileb://$work/aliased-2.zip" >/dev/null
+as_maker aws_lambda wait function-updated-v2 --function-name e2e-aliased >/dev/null 2>&1 || true
+check "  ... new code, version 2; ListVersionsByFunction lists \$LATEST, then 1 and 2, each its own code" '2 $LATEST,1,2' \
+  "$(as_maker aws_lambda publish-version --function-name e2e-aliased | jq -r .Version) \
+$(as_reader list-versions-by-function --function-name e2e-aliased | jq -r '[.Versions[].Version] | join(",")')"
+created="$(as_maker aws_lambda create-alias --function-name e2e-aliased --name live --function-version 1 --description shop \
+  --routing-config '{"AdditionalVersionWeights": {"2": 0.5}}')"
+check "CreateAlias: live at version 1, half its calls to 2" "$aliased_arn:live 1 0.5 shop" \
+  "$(jq -r '"\(.AliasArn) \(.FunctionVersion) \(.RoutingConfig.AdditionalVersionWeights["2"]) \(.Description)"' <<<"$created")"
+check "  ... GetAlias reads it as made; ListAliases lists it" "$(jq -r .RevisionId <<<"$created") live" \
+  "$(as_reader get-alias --function-name e2e-aliased --name live | jq -r .RevisionId) $(as_reader list-aliases --function-name e2e-aliased | jq -r '[.Aliases[].Name] | join(",")')"
+ran=''
+for _ in $(seq 20); do
+  as_maker aws_lambda invoke --function-name e2e-aliased --qualifier live "$work/aliased.json" >"$work/aliased.meta"
+  ran+="$(jq -r .ExecutedVersion "$work/aliased.meta")=$(jq -r '"\(.version):\(.code)"' "$work/aliased.json") "
+done
+check "  ... invoked through it, its calls run by both versions, each its own code, ExecutedVersion naming it" "1=1:one 2=2:two" \
+  "$(tr ' ' '\n' <<<"$ran" | grep . | sort -u | paste -sd ' ')"
+stale="$(jq -r .RevisionId <<<"$created")"
+updated="$(as_maker aws_lambda update-alias --function-name e2e-aliased --name live --function-version 2 --routing-config '{"AdditionalVersionWeights": {}}')"
+check "UpdateAlias: live at version 2 alone, a new revision; a change from the revision before refused" \
+  "2 none true refused PreconditionFailedException" \
+  "$(jq -r '"\(.FunctionVersion) \(.RoutingConfig.AdditionalVersionWeights // {} | keys | first // "none") \(.RevisionId != "'"$stale"'")"' <<<"$updated") \
+$(outcome as_maker aws_lambda update-alias --function-name e2e-aliased --name live --description again --revision-id "$stale")"
+check "refused as Lambda refuses: a name taken, a version the function hasn't, an alias it hasn't, a key that may only read" \
+  "refused ResourceConflictException refused ResourceNotFoundException refused ResourceNotFoundException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda create-alias --function-name e2e-aliased --name live --function-version 1) \
+$(outcome as_maker aws_lambda create-alias --function-name e2e-aliased --name next --function-version 9) \
+$(outcome as_reader get-alias --function-name e2e-aliased --name gone) \
+$(outcome as_reader create-alias --function-name e2e-aliased --name next --function-version 1)"
+check "  ... in Lambda's words, with the ARNs" "Alias already exists: $aliased_arn:live Alias not found: $aliased_arn:gone" \
+  "$(outcome as_maker aws_lambda create-alias --function-name e2e-aliased --name live --function-version 1 >/dev/null; grep -oE 'Alias already exists: [^ ]+' "$work/aws.err") \
+$(outcome as_reader get-alias --function-name e2e-aliased --name gone >/dev/null; grep -oE 'Alias not found: [^ ]+' "$work/aws.err")"
+as_maker aws_lambda delete-alias --function-name e2e-aliased --name live
+check "DeleteAlias: it goes, its versions stay" 'refused ResourceNotFoundException $LATEST,1,2' \
+  "$(outcome as_reader get-alias --function-name e2e-aliased --name live) \
+$(as_reader list-versions-by-function --function-name e2e-aliased | jq -r '[.Versions[].Version] | join(",")')"
+as_maker aws_lambda delete-function --function-name e2e-aliased >/dev/null
+}
+section_def lambda_aliases section_lambda_aliases lambda_changes budget=90
+
 section_lambda_invoke() {
 section "Lambda's Invoke with the AWS CLI: the function's answer as it returned it, the version that ran, the call's log with LogType Tail, the ClientContext in Node.js and Python; an error and a timeout as the call's outcome; Event and DryRun; refused as Lambda refuses"
 invoker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-invoker", "functions": ["e2e-invoked", "e2e-invoked-py", "e2e-invoked-broken"], "functionAccess": "invoke"}')"
@@ -763,7 +817,7 @@ as_ver DELETE "/storage-keys/$(jq -r .id <<<"$invoker")" >/dev/null
 section_def lambda_invoke section_lambda_invoke lambda_changes budget=60
 
 section_lambda_sdks() {
-section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, refused as Lambda refuses, deleted"
+section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, refused as Lambda refuses, deleted"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0014 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
 lambda_clients="$FF_REPO_ROOT/hack/.cache/lambda-clients"
@@ -781,9 +835,9 @@ clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$make
 };')"
   OTHER_FUNCTION=e2e-versioned)
 env "${clients_env[@]}" MODULES="$lambda_clients/node_modules" node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
-client_checks "$work/lambda-sdk.jsonl" 12
+client_checks "$work/lambda-sdk.jsonl" 13
 env "${clients_env[@]}" "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
-client_checks "$work/lambda-boto3.jsonl" 12
+client_checks "$work/lambda-boto3.jsonl" 13
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60
 

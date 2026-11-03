@@ -5,7 +5,7 @@ import { IsOptional, IsString, IsUUID, Matches, MaxLength, ValidateBy, ValidateN
 /** An alias's name, as Lambda's: letters, digits, - and _, not digits alone, which name a version. */
 export const ALIAS_NAME = /^(?!\d+$)[A-Za-z0-9_-]{1,128}$/;
 /** What an alias points at: $LATEST, the function as it is, or a version by its number. */
-const FUNCTION_VERSION = /^(\$LATEST|[1-9]\d{0,8})$/;
+export const FUNCTION_VERSION = /^(\$LATEST|[1-9]\d{0,8})$/;
 
 /** At most one version, by its number, with its share of the calls from 0 to 1; none clears it. */
 export function isVersionWeights(value: unknown): value is Record<string, number> {

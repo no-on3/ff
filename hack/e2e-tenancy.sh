@@ -1102,6 +1102,11 @@ check "B's key doesn't find A's function, by its name or by its ARN: each accoun
 check "  ... nor its alias, nor deletes it, nor invokes it" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" get-alias --function-name l5-a --name live) $(lambda_with "${lambda_b[@]}" delete-function --function-name "$arn_a") \
 $(lambda_with "${lambda_b[@]}" invoke --function-name l5-a /dev/null)"
+check "  ... nor publishes a version of it, nor makes, changes or deletes an alias of it, nor lists either" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
+  "$(lambda_with "${lambda_b[@]}" publish-version --function-name "$arn_a") $(lambda_with "${lambda_b[@]}" create-alias --function-name l5-a --name b --function-version 1) \
+$(lambda_with "${lambda_b[@]}" update-alias --function-name "$arn_a" --name live --function-version 1) $(lambda_with "${lambda_b[@]}" delete-alias --function-name l5-a --name live) \
+$(lambda_with "${lambda_b[@]}" list-versions-by-function --function-name "$arn_a") $(lambda_with "${lambda_b[@]}" list-aliases --function-name l5-a)"
 check "  ... nor reads its tags, nor tags it, nor untags it, by its ARN" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" list-tags --resource "$arn_a") $(lambda_with "${lambda_b[@]}" tag-resource --resource "$arn_a" --tags owner=b) \
 $(lambda_with "${lambda_b[@]}" untag-resource --resource "$arn_a" --tag-keys owner)"

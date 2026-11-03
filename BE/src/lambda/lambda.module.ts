@@ -12,8 +12,12 @@ import { LambdaFrontDoor } from './lambda-front-door';
 import { LambdaFunctionChanges } from './lambda-function-changes';
 import { LambdaFunctionReads } from './lambda-functions';
 import { LambdaInvoke } from './lambda-invoke';
-import { LambdaOperations } from './lambda-operations';
+import { LambdaHandlers, LambdaOperations } from './lambda-operations';
 import { LambdaTags } from './lambda-tags';
+import { LambdaVersions } from './lambda-versions';
+
+/** Each group of operations built so far; the others answer that FF doesn't offer them yet. */
+const GROUPS = [LambdaFunctionReads, LambdaFunctionChanges, LambdaTags, LambdaInvoke, LambdaVersions];
 
 /**
  * Lambda's endpoint (ADR 0014), which main.ts starts on its port: AWS Lambda's
@@ -23,17 +27,8 @@ import { LambdaTags } from './lambda-tags';
   imports: [BillingModule, EncryptionModule, FunctionsModule, MetricsModule, PackagesModule, PlansModule, StorageModule, TagsModule],
   providers: [
     LambdaCodeLinks,
-    LambdaFunctionReads,
-    LambdaFunctionChanges,
-    LambdaTags,
-    LambdaInvoke,
-    // Each group of operations built so far; the others answer that FF doesn't offer them yet.
-    {
-      provide: LambdaOperations,
-      useFactory: (reads: LambdaFunctionReads, changes: LambdaFunctionChanges, tags: LambdaTags, invoke: LambdaInvoke) =>
-        new LambdaOperations(reads, changes, tags, invoke),
-      inject: [LambdaFunctionReads, LambdaFunctionChanges, LambdaTags, LambdaInvoke],
-    },
+    ...GROUPS,
+    { provide: LambdaOperations, useFactory: (...groups: LambdaHandlers[]) => new LambdaOperations(...groups), inject: GROUPS },
     LambdaFrontDoor,
   ],
   exports: [LambdaFrontDoor],

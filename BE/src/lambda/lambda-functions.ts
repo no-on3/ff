@@ -9,6 +9,7 @@ import { PACKAGE_LIMITS } from '../packages/package-archive';
 import { PackagesService } from '../packages/packages.service';
 import { invalidParameterValue, resourceNotFound } from './lambda-error';
 import { LambdaCodeLinks } from './lambda-code-links';
+import { pageOf } from './lambda-pages';
 import { ResourceTagsService } from '../tags/resource-tags.service';
 import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, namedFunction, ok } from './lambda-operations';
 
@@ -20,10 +21,6 @@ export const LAMBDA_RUNTIMES: Record<Runtime, string> = {
 
 /** A time as Lambda writes `LastModified`: ISO 8601 with milliseconds, its zone as +0000. */
 export const lambdaTime = (date: Date): string => date.toISOString().replace('Z', '+0000');
-
-/** The most functions a page of ListFunctions holds, and the default, as Lambda's. */
-const LIST_MAX = 10_000;
-const LIST_DEFAULT = 50;
 
 /** What Lambda's FunctionConfiguration says of a function's state and its last change. */
 type States = Record<'State' | 'LastUpdateStatus', string> & Partial<Record<'StateReason' | 'StateReasonCode' | 'LastUpdateStatusReason' | 'LastUpdateStatusReasonCode', string>>;
@@ -120,24 +117,6 @@ export function versionConfiguration(function_: Pick<Function, 'name' | 'role'>,
   };
 }
 
-/** A page's place in ListFunctions: the last entry given, a function's name and its version's number, if one. */
-type Place = [name: string, version: number | null];
-
-const markerOf = (place: Place): string => Buffer.from(JSON.stringify(place), 'utf8').toString('base64url');
-
-function placeOf(marker: string): Place {
-  try {
-    const place: unknown = JSON.parse(Buffer.from(marker, 'base64url').toString('utf8'));
-    if (Array.isArray(place) && place.length === 2 && typeof place[0] === 'string' && (place[1] === null || Number.isInteger(place[1]))) return place as Place;
-  } catch {
-    // Not one of FF's markers: refused below.
-  }
-  throw invalidParameterValue('Marker is not one that ListFunctions gave.');
-}
-
-const after = (entry: Place, place: Place): boolean =>
-  entry[0] > place[0] || (entry[0] === place[0] && (entry[1] ?? 0) > (place[1] ?? 0));
-
 /**
  * Lambda's reads of functions over FF's (ADR 0014, 2): GetFunction,
  * GetFunctionConfiguration, ListFunctions, GetFunctionCodeSigningConfig and
@@ -200,26 +179,19 @@ export class LambdaFunctionReads {
     const all = query.get('FunctionVersion');
     if (all !== null && all !== 'ALL') throw invalidParameterValue(`FunctionVersion must be ALL, not ${all}.`);
     if (query.get('MasterRegion') !== null) throw invalidParameterValue("MasterRegion names a Lambda@Edge function's replicas: FF has none.");
-    const sent = query.get('MaxItems');
-    const size = sent === null ? LIST_DEFAULT : Number(sent);
-    if (!Number.isInteger(size) || size < 1 || size > LIST_MAX) throw invalidParameterValue(`MaxItems must be a whole number from 1 to ${LIST_MAX}, not ${sent}.`);
-    const marker = query.get('Marker');
-    const place = marker === null ? undefined : placeOf(marker);
-
-    const readable = (await this.functions.findAll(caller.accountId))
-      .filter((function_) => function_.status !== FunctionStatus.DELETED && caller.mayUse(function_.name, 'read'))
-      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    const entries: Array<{ function_: Function; place: Place }> = [];
+    const readable = (await this.functions.findAll(caller.accountId)).filter(
+      (function_) => function_.status !== FunctionStatus.DELETED && caller.mayUse(function_.name, 'read'),
+    );
+    // Each function, then each of its versions, by its number, which the page sorts: $LATEST is null, first.
+    const entries: Array<{ function_: Function; version: number | null }> = [];
     for (const function_ of readable) {
-      entries.push({ function_, place: [function_.name, null] });
+      entries.push({ function_, version: null });
       if (all === null) continue;
-      const numbers = (await this.versions.list(caller.accountId, function_.id)).map((version) => Number(version.version)).sort((a, b) => a - b);
-      for (const number of numbers) entries.push({ function_, place: [function_.name, number] });
+      for (const version of await this.versions.list(caller.accountId, function_.id)) entries.push({ function_, version: Number(version.version) });
     }
-    const rest = place ? entries.filter((entry) => after(entry.place, place)) : entries;
-    const page = rest.slice(0, size);
+    const { page, nextMarker } = pageOf(query, entries, ({ function_, version }) => [function_.name, version], 'ListFunctions');
     const configurations = [];
-    for (const { function_, place: [, version] } of page) {
+    for (const { function_, version } of page) {
       if (version === null) {
         const view = await this.functions.describe(caller.accountId, function_.id);
         configurations.push(latestConfiguration(function_, caller.region, view.environment));
@@ -227,8 +199,7 @@ export class LambdaFunctionReads {
         configurations.push(versionConfiguration(function_, await this.versions.get(caller.accountId, function_.id, version)));
       }
     }
-    const last = page.at(-1);
-    return ok({ Functions: configurations, ...(rest.length > page.length && last ? { NextMarker: markerOf(last.place) } : {}) });
+    return ok({ Functions: configurations, ...(nextMarker !== undefined ? { NextMarker: nextMarker } : {}) });
   }
 
   /** The plan's limits under Lambda's names, and what the account uses: its packages each once, and its functions. */
