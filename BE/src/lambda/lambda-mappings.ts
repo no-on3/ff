@@ -1,17 +1,17 @@
-import { Injectable, NotFoundException, ValidationPipe } from '@nestjs/common';
+import { Injectable, ValidationPipe } from '@nestjs/common';
 import { DTO_VALIDATION } from '../common/validation';
 import { CreateEventSourceDto, EventSourceView, UpdateEventSourceDto } from '../event-sources/dto/event-source.dto';
 import { EventSourcesService } from '../event-sources/event-sources.service';
 import { FunctionAliasesService } from '../functions/aliases.service';
-import { parseFunctionArn, parseFunctionName, qualifiedFunctionArn } from '../functions/arns';
+import { parseFunctionArn, parseFunctionName } from '../functions/arns';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { parseQualifier } from '../functions/qualifier';
 import { FunctionVersionsService } from '../functions/versions.service';
 import { parseQueueArn } from '../queues/sqs-attributes';
-import { invalidParameterValue, keyCannot, resourceNotFound } from './lambda-error';
+import { invalidParameterValue, keyCannot, notFoundAs, resourceNotFound } from './lambda-error';
 import { defined, isEmpty, isObject, refuseUnknownFields, said } from './lambda-fields';
-import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, LambdaHandlers, namedFunction, ok } from './lambda-operations';
+import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, LambdaHandlers, namedFunction, ok, qualifiedLookup } from './lambda-operations';
 import { pageOf } from './lambda-pages';
 
 /** The fields a mapping of a queue takes, as Lambda's for SQS; CreateEventSourceMapping's FunctionName and EventSourceArn besides. */
@@ -177,13 +177,7 @@ export class LambdaMappings implements LambdaHandlers {
     const uuid = groups[0];
     const missing = () => resourceNotFound('The resource you requested does not exist.');
     if (!UUID.test(uuid)) throw missing();
-    let mapping: EventSourceView;
-    try {
-      mapping = await this.mappings.get(caller.accountId, uuid);
-    } catch (error) {
-      if (error instanceof NotFoundException) throw missing();
-      throw error;
-    }
+    const mapping = await notFoundAs(this.mappings.get(caller.accountId, uuid), missing);
     const name = parseFunctionArn(mapping.functionArn)?.name ?? '';
     if (!caller.mayUse(name, operation.access)) throw keyCannot(caller.key, operation, name);
     return { mapping, name };
@@ -193,13 +187,8 @@ export class LambdaMappings implements LambdaHandlers {
   private async refuseMissing(function_: Function, qualifier: string | undefined, caller: LambdaCaller): Promise<void> {
     const named = parseQualifier(qualifier);
     if (!named) return;
-    try {
-      if ('version' in named) await this.versions.get(caller.accountId, function_.id, named.version);
-      else await this.aliases.get(caller.accountId, function_.id, named.alias);
-    } catch (error) {
-      if (error instanceof NotFoundException) throw resourceNotFound(`Function not found: ${qualifiedFunctionArn(caller.region, caller.accountId, function_.name, qualifier)}`);
-      throw error;
-    }
+    const lookup: Promise<unknown> = 'version' in named ? this.versions.get(caller.accountId, function_.id, named.version) : this.aliases.get(caller.accountId, function_.id, named.alias);
+    await qualifiedLookup(lookup, caller, function_, qualifier);
   }
 
   /** The version or the alias an update's FunctionName names, of the mapping's function alone; undefined when it names none. */

@@ -1,5 +1,5 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { functionArn, qualifiedFunctionArn } from '../functions/arns';
+import { Injectable } from '@nestjs/common';
+import { functionArn } from '../functions/arns';
 import { FunctionVersionView } from '../functions/dto/versions.dto';
 import { Function, FunctionStatus, Runtime, UpdateStatus } from '../functions/entities/function.entity';
 import { FunctionAliasesService } from '../functions/aliases.service';
@@ -7,12 +7,12 @@ import { FunctionsService } from '../functions/functions.service';
 import { FunctionVersionsService } from '../functions/versions.service';
 import { PACKAGE_LIMITS } from '../packages/package-archive';
 import { PackagesService } from '../packages/packages.service';
-import { invalidParameterValue, resourceNotFound } from './lambda-error';
+import { invalidParameterValue } from './lambda-error';
 import { LambdaCodeLinks } from './lambda-code-links';
 import { reservedConcurrency } from './lambda-concurrency';
 import { pageOf } from './lambda-pages';
 import { ResourceTagsService } from '../tags/resource-tags.service';
-import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, namedFunction, ok } from './lambda-operations';
+import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, namedFunction, ok, qualifiedLookup } from './lambda-operations';
 
 /** FF's two runtimes under Lambda's names (ADR 0014, 7). */
 export const LAMBDA_RUNTIMES: Record<Runtime, string> = {
@@ -166,17 +166,16 @@ export class LambdaFunctionReads {
   private async configuration(caller: LambdaCaller): Promise<{ configuration: Record<string, unknown>; version?: number }> {
     const function_ = namedFunction(caller);
     const qualifier = caller.named?.qualifier;
-    const missing = () => resourceNotFound(`Function not found: ${qualifiedFunctionArn(caller.region, caller.accountId, function_.name, qualifier)}`);
     let version = qualifier === undefined || qualifier === '$LATEST' ? undefined : Number(qualifier);
     if (qualifier !== undefined && version !== undefined && !Number.isInteger(version)) {
-      const alias = await notFoundAs(this.aliases.get(caller.accountId, function_.id, qualifier), missing);
+      const alias = await qualifiedLookup(this.aliases.get(caller.accountId, function_.id, qualifier), caller, function_, qualifier);
       version = alias.functionVersion === '$LATEST' ? undefined : Number(alias.functionVersion);
     }
     if (version === undefined) {
       const view = await this.functions.describe(caller.accountId, function_.id);
       return { configuration: latestConfiguration(function_, caller.region, view.environment) };
     }
-    const published = await notFoundAs(this.versions.get(caller.accountId, function_.id, version), missing);
+    const published = await qualifiedLookup(this.versions.get(caller.accountId, function_.id, version), caller, function_, qualifier);
     return { configuration: versionConfiguration(function_, published), version };
   }
 
@@ -231,15 +230,5 @@ export class LambdaFunctionReads {
         FunctionCount: functions.filter((function_) => function_.status !== FunctionStatus.DELETED).length,
       },
     });
-  }
-}
-
-/** A lookup whose NotFoundException, FF's API's, is Lambda's ResourceNotFoundException instead. */
-async function notFoundAs<T>(lookup: Promise<T>, missing: () => Error): Promise<T> {
-  try {
-    return await lookup;
-  } catch (error) {
-    if (error instanceof NotFoundException) throw missing();
-    throw error;
   }
 }

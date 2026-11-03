@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException, ValidationPipe } from '@nestjs/common';
+import { ConflictException, Injectable, ValidationPipe } from '@nestjs/common';
 import { DTO_VALIDATION } from '../common/validation';
 import { FunctionAliasesService } from '../functions/aliases.service';
 import { qualifiedFunctionArn } from '../functions/arns';
@@ -6,9 +6,9 @@ import { ALIAS_NAME } from '../functions/dto/aliases.dto';
 import { UrlAuthType, UrlCors, UrlInvokeMode } from '../functions/entities/function-url.entity';
 import { CreateFunctionUrlDto, FunctionUrlView, UpdateFunctionUrlDto } from '../function-urls/dto/function-url.dto';
 import { FunctionUrlsService } from '../function-urls/function-urls.service';
-import { invalidParameterValue, resourceConflict, resourceNotFound } from './lambda-error';
+import { invalidParameterValue, notFoundAs, resourceConflict, resourceNotFound } from './lambda-error';
 import { defined, isObject, oneOf, refuseUnknownFields } from './lambda-fields';
-import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, LambdaHandlers, namedFunction, ok, unqualifiedFunction } from './lambda-operations';
+import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, LambdaHandlers, namedFunction, ok, qualifiedLookup, unqualifiedFunction } from './lambda-operations';
 import { pageOf } from './lambda-pages';
 
 /** The fields CreateFunctionUrlConfig and UpdateFunctionUrlConfig take. */
@@ -143,24 +143,14 @@ export class LambdaUrls implements LambdaHandlers {
     if (!ALIAS_NAME.test(qualifier)) {
       throw invalidParameterValue(`A function URL is $LATEST's or an alias's, and ${qualifier} is a version's number: name the version through an alias.`);
     }
-    try {
-      await this.aliases.get(caller.accountId, function_.id, qualifier);
-    } catch (error) {
-      if (error instanceof NotFoundException) throw resourceNotFound(`Function not found: ${this.arnOf(caller, qualifier)}`);
-      throw error;
-    }
+    await qualifiedLookup(this.aliases.get(caller.accountId, function_.id, qualifier), caller, function_, qualifier);
     return qualifier;
   }
 
   /** What `act` gives, the URL it needs missing as Lambda says it. */
-  private async withUrl<T>(act: () => Promise<T>): Promise<T> {
-    try {
-      return await act();
-    } catch (error) {
-      // The function and the alias were found: what is missing is the URL.
-      if (error instanceof NotFoundException) throw resourceNotFound(NO_URL);
-      throw error;
-    }
+  private withUrl<T>(act: () => Promise<T>): Promise<T> {
+    // The function and the alias were found: what is missing is the URL.
+    return notFoundAs(act(), () => resourceNotFound(NO_URL));
   }
 
   private arnOf(caller: LambdaCaller, alias: string | undefined): string {

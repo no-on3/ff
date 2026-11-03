@@ -1,11 +1,10 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectThrottlerStorage, ThrottlerStorage } from '@nestjs/throttler';
 import { IncomingHttpHeaders } from 'node:http';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
 import { currentRequestId } from '../common/request-context';
-import { qualifiedFunctionArn } from '../functions/arns';
 import { MAX_ASYNC_INPUT_BYTES } from '../functions/async-invoke';
 import { AsyncInvocationsService } from '../functions/async-invocations.service';
 import { InvocationType } from '../functions/dto/invoke-function.dto';
@@ -22,12 +21,11 @@ import {
   invalidRequestContent,
   requestEntityTooLarge,
   resourceConflict,
-  resourceNotFound,
   serviceException,
   tooManyRequests,
 } from './lambda-error';
 import { statesOf } from './lambda-functions';
-import { INVOKE_FUNCTION, LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, LambdaHandlers, namedFunction } from './lambda-operations';
+import { INVOKE_FUNCTION, LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, LambdaHandlers, namedFunction, qualifiedLookup } from './lambda-operations';
 
 /** Lambda's limit on a ClientContext, in base64. */
 export const CLIENT_CONTEXT_BYTES = 3583;
@@ -132,13 +130,8 @@ export class LambdaInvoke implements LambdaHandlers {
   }
 
   /** What the qualifier names; a version or an alias the function hasn't as Lambda says it, the function's ARN with it. */
-  private async targetOf(function_: Function, qualifier: string | undefined, caller: LambdaCaller): Promise<CallTarget> {
-    try {
-      return await this.functions.callTarget(function_, qualifier);
-    } catch (error) {
-      if (!(error instanceof NotFoundException)) throw error;
-      throw resourceNotFound(`Function not found: ${qualifiedFunctionArn(caller.region, caller.accountId, function_.name, qualifier)}`);
-    }
+  private targetOf(function_: Function, qualifier: string | undefined, caller: LambdaCaller): Promise<CallTarget> {
+    return qualifiedLookup(this.functions.callTarget(function_, qualifier), caller, function_, qualifier);
   }
 
   /** The call counts against the plan's invocations per second, with the API's invokes and the URLs' calls. */

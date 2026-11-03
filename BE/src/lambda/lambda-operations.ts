@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { IncomingHttpHeaders } from 'node:http';
+import { qualifiedFunctionArn } from '../functions/arns';
 import { Function } from '../functions/entities/function.entity';
 import { PlanView } from '../plans/plan-limits';
 import { ActiveKey } from '../storage/storage-directory.service';
 import { FunctionAccess } from '../storage/storage-key.entity';
-import { invalidParameterValue } from './lambda-error';
+import { invalidParameterValue, notFoundAs, resourceNotFound } from './lambda-error';
 
 /**
  * Where an operation's function is named: in its path, in its JSON body's
@@ -286,6 +287,11 @@ export function unqualifiedFunction(caller: LambdaCaller, operation: string): Fu
   const qualifier = caller.named?.qualifier;
   if (qualifier !== undefined) throw invalidParameterValue(`${operation} names the function alone, not its version or alias ${qualifier}: send ${function_.name}.`);
   return function_;
+}
+
+/** What `lookup` finds of the function's version or alias; one it hasn't refused as Lambda refuses it, by its ARN. */
+export function qualifiedLookup<T>(lookup: Promise<T>, caller: Pick<LambdaCaller, 'region' | 'accountId'>, function_: Pick<Function, 'name'>, qualifier: string | undefined): Promise<T> {
+  return notFoundAs(lookup, () => resourceNotFound(`Function not found: ${qualifiedFunctionArn(caller.region, caller.accountId, function_.name, qualifier)}`));
 }
 
 /** A group of operations built over FF's services: each one's handler, by the operation's name. */

@@ -1,4 +1,4 @@
-import { HttpException } from '@nestjs/common';
+import { HttpException, NotFoundException } from '@nestjs/common';
 import { functionArn } from '../functions/arns';
 import { ChangeUnderWayException } from '../functions/change-under-way';
 import { FunctionStatus } from '../functions/entities/function.entity';
@@ -67,6 +67,16 @@ export function keyCannot(key: ActiveKey, operation: { name: string; access: Fun
   const access = functionAccessOf(key, name);
   if (!access) return accessDenied(`The access key ${label} doesn't reach the function ${name}.`);
   return accessDenied(`The access key ${label} may ${DOES[access]} the function ${name}, not ${DOES[operation.access]} it.`);
+}
+
+/** What `lookup` finds; FF's NotFoundException, its API's, the refusal `missing` makes in Lambda's words instead. */
+export async function notFoundAs<T>(lookup: Promise<T>, missing: () => LambdaError): Promise<T> {
+  try {
+    return await lookup;
+  } catch (error) {
+    if (error instanceof NotFoundException) throw missing();
+    throw error;
+  }
 }
 
 export const serviceException = () => new LambdaError(500, 'ServiceException', 'The AWS Lambda service encountered an internal error.');
