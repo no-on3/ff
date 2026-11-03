@@ -11,8 +11,8 @@ set -euo pipefail
 suggest_repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 suggest_map="$suggest_repo/hack/suggest.map"
 # The stages in the order they run; a suite's sections run in its stage's place.
-suggest_order=(static unit db security l3 l4 l5 cli images platform tools)
-declare -A suggest_suite=([l4]=hack/e2e.sh [l5]=hack/e2e-tenancy.sh [cli]=hack/cli-e2e.sh)
+suggest_order=(static unit db security l3 l4 l5 cli aws-tools images platform tools)
+declare -A suggest_suite=([l4]=hack/e2e.sh [l5]=hack/e2e-tenancy.sh [cli]=hack/cli-e2e.sh [aws-tools]=hack/e2e-aws-tools.sh)
 
 # suggest_needs <path>: what the first line of the map that it matches names; none, and it fails.
 suggest_needs() {
@@ -62,7 +62,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
       needs+=" $found"
     else
       found="all: not in hack/suggest.map, which a line for it would narrow"
-      needs+=" ${suggest_order[*]:0:9}"
+      needs+=" ${suggest_order[*]:0:10}"
     fi
     listing+="  $path: $found"$'\n'
   done <<<"$paths"

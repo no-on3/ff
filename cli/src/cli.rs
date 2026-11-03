@@ -92,14 +92,20 @@ pub enum Format {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Make a function's folder: its handler, an event to call it with, and a README
+    /// Make a function's folder: its handler, an event to call it with, and a README; or an app's Terraform project
     Init {
-        /// The function's name, and its folder's
+        /// The function's name, and its folder's; a Terraform project's, which names its resources
         name: String,
 
-        /// Its runtime
+        /// Its runtime; a Terraform project's functions'
         #[arg(long, value_enum)]
         runtime: Runtime,
+
+        /// What to make: a function's folder; or a Terraform project, FF's provider block with the endpoints of the
+        /// FF logged in to and four modules (a function with its URL, a queue worker, a bucket that runs a function,
+        /// a site), which apply on FF and, with only the provider block changed, on AWS
+        #[arg(long, value_enum, default_value = "function")]
+        template: Template,
     },
 
     /// Create a function from a file or a folder, or update the function of that name with what changed
@@ -497,6 +503,22 @@ impl Runtime {
         match self {
             Runtime::Nodejs => "nodejs",
             Runtime::Python => "python",
+        }
+    }
+}
+
+/// What `ff init` makes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+pub enum Template {
+    Function,
+    Terraform,
+}
+
+impl Template {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Template::Function => "function",
+            Template::Terraform => "terraform",
         }
     }
 }

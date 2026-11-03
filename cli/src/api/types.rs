@@ -188,6 +188,24 @@ pub struct MeAccount {
     pub data_deletion_due_at: Option<String>,
     #[serde(default)]
     pub data_deleted_at: Option<String>,
+    /// FF's region and endpoints, for AWS's tools; none from an API older than this ff.
+    #[serde(default)]
+    pub aws: Option<AwsEndpoints>,
+}
+
+/// FF's region and the endpoints AWS's tools reach the account's buckets, queues, mail and functions at, as
+/// `GET /me` gives them with each account; each but S3's empty where FF has none.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwsEndpoints {
+    pub region: String,
+    pub s3_endpoint: String,
+    #[serde(default)]
+    pub sqs_endpoint: String,
+    #[serde(default)]
+    pub ses_endpoint: String,
+    #[serde(default)]
+    pub lambda_endpoint: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

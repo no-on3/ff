@@ -133,7 +133,7 @@ expect "run alone, as it waits its minutes out, it is not flagged" "0 0" \
 expect "--list says each budget after what the section needs" "slow N s slow (budget 1 s)|quick N s quick (needs: slow; budget 30 s)" \
   "$(suite "$budgeted" --list >/dev/null; tr -s ' ' <"$work/out" | sed -E 's/^([a-z]+) [0-9]+ s /\1 N s /' | paste -sd'|')"
 # The three suites' sections, each with its budget, which a section added without one would lack.
-expect "every section of L4, L5 and the ff suite names a budget" "" \
-  "$(grep -h '^section_def ' "$hack/e2e.sh" "$hack/e2e-tenancy.sh" "$hack/cli-e2e.sh" | grep -v ' budget=[0-9]*$' | awk '{ print $2 }' | paste -sd' ')"
+expect "every section of L4, L5, the ff suite and AWS's tools' names a budget" "" \
+  "$(grep -h '^section_def ' "$hack/e2e.sh" "$hack/e2e-tenancy.sh" "$hack/cli-e2e.sh" "$hack/e2e-aws-tools.sh" | grep -v ' budget=[0-9]*$' | awk '{ print $2 }' | paste -sd' ')"
 
 echo "test-sections: $asserted assertions passed"

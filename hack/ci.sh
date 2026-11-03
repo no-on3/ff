@@ -16,13 +16,15 @@
 #   security  the dependencies' advisories (npm audit, but those .npmauditignore accepts until a date), and every
 #             image built, scanned (Trivy, but what .trivyignore.yaml accepts) and listed as an SBOM (CycloneDX),
 #             into hack/.ci/sbom
-#   cluster   l3, l4, l5, cli and images below, one after the other, as a laptop runs them; GitHub runs l3 to cli
-#             each on a runner of its own, at once, and images after security, in its job, on the images it built.
+#   cluster   l3, l4, l5, cli, aws-tools and images below, one after the other, as a laptop runs them; GitHub runs l3
+#             to aws-tools each on a runner of its own, at once, and images after security, in its job, on its images.
 #             Each makes or reuses the k3d dev cluster (hack/k8s/cluster-up.sh):
 #     l3      the Kubernetes driver (L3)
 #     l4      the stack through the API (L4)
 #     l5      every route as another account (L5)
 #     cli     the ff command on the stack and in Docker, its export checked by the SAM CLI and OpenTofu
+#     aws-tools  AWS's tools on the stack: the project ff init --template terraform writes, applied by OpenTofu and by
+#             Terraform's CLI, each pinned, planned again with nothing to change, destroyed; a throttled change retried
 #     images  the platform's images, run as the cluster runs them, and its manifests, without deploying them
 #   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last push's) and the lockfiles,
 #             checked again with the day's advisories, for an image or a package unchanged since its push: nightly
@@ -103,9 +105,9 @@ free_ports() {
 # with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
   [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust" [db]=BE [security]=''
-  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [images]=BE [platform]='' [advisories]='' [tools]=''
+  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [aws-tools]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
 )
-stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[images]}"
+stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[aws-tools]} ${stage_uses[images]}"
 stage_uses[all]="${stage_uses[static]} ${stage_uses[unit]} ${stage_uses[db]} ${stage_uses[security]} ${stage_uses[cluster]}"
 
 stage_deps() {
@@ -387,13 +389,15 @@ stage_l3() {
 stage_l4() { cluster_ready; step "L4: the stack through the API" hack/e2e.sh; }
 stage_l5() { cluster_ready; step "L5: every route as another account" hack/e2e-tenancy.sh; }
 stage_cli() { cluster_ready; step "the ff command on the stack and in Docker" hack/cli-e2e.sh; }
+# The suite installs the tools it pins, OpenTofu, Terraform's CLI and both providers, kept between runs on GitHub.
+stage_aws_tools() { cluster_ready; step "AWS's tools on the stack: Terraform's CLIs applying ff init's project" hack/e2e-aws-tools.sh; }
 # After security in a run, the images are built already: Docker's build cache has every layer of them.
 stage_images() {
   cluster_ready
   step "the platform's images, run as the cluster runs them" hack/test-images.sh
   step "the platform's manifests, without deploying them" hack/k8s/test-platform-manifests.sh
 }
-stage_cluster() { stage_l3; stage_l4; stage_l5; stage_cli; stage_images; }
+stage_cluster() { stage_l3; stage_l4; stage_l5; stage_cli; stage_aws_tools; stage_images; }
 
 stage_platform() {
   prepare "kubectl and k3d, pinned and checked" hack/install-tools.sh
@@ -405,9 +409,9 @@ stage_platform() {
 ci_stages="$*"
 for stage in "$@"; do
   case "$stage" in
-    deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | images | advisories | tools | platform) "stage_$stage" ;;
+    deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | aws-tools | images | advisories | tools | platform) "stage_${stage//-/_}" ;;
     all) stage_static; stage_unit; stage_db; stage_security; stage_cluster ;;
-    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), advisories, tools, platform or all; suggest, alone" >&2; exit 2 ;;
+    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, aws-tools, images), advisories, tools, platform or all; suggest, alone" >&2; exit 2 ;;
   esac
 done
 ci_done

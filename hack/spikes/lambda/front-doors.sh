@@ -6,7 +6,7 @@
 # site.tf (a bucket made through FF's API and imported, its website, a page and a notification), and tagged (the queue
 # and the site again, with the provider's default tags, which many teams set). Each is applied, planned again, which
 # must find nothing to change, and destroyed, whatever the step before it gave: what fails is what the spike is for.
-# Each step's outcome, and each request the provider sent with FF's answer (provider_log.py, from the provider's log at
+# Each step's outcome, and each request the provider sent with FF's answer (hack/lib/provider_log.py, from the provider's log at
 # DEBUG), land in hack/.spike-lambda-tf/, with summary.md.
 #   hack/spikes/lambda/front-doors.sh        # a few minutes: the stack, the backend's build, the four flows
 set -euo pipefail
@@ -56,7 +56,7 @@ step() {
   shift 2
   started="$(date +%s%3N)"
   TF_LOG_PATH="$dir/$name.log" "${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/tofu" "-chdir=$dir" "$@" -input=false -no-color >"$dir/$name.out" 2>&1 || status=$?
-  python3 "$here/provider_log.py" "$dir/$name.log" >"$dir/$name.requests.tsv"
+  python3 "$FF_REPO_ROOT/hack/lib/provider_log.py" "$dir/$name.log" >"$dir/$name.requests.tsv"
   jq -cn --arg flow "$flow" --arg step "$name" --argjson status "$status" --argjson ms "$(($(date +%s%3N) - started))" \
     --arg errors "$(grep -A3 '^Error: ' "$dir/$name.out" | grep -vE '^(--|\s*)$' | head -40 || true)" \
     '{flow: $flow, step: $step, status: $status, ms: $ms, errors: $errors}'

@@ -59,7 +59,7 @@ impl Context<'_> {
 
 pub fn run(command: Command, context: &Context) -> Result<(), Error> {
     match command {
-        Command::Init { name, runtime } => init::run(&name, runtime, context),
+        Command::Init { name, runtime, template } => init::run(&name, runtime, template, context),
         Command::Deploy(args) => deploy::run(args, context),
         Command::Package(args) => package::run(args, context),
         Command::Doctor(args) => doctor::run(args, context),

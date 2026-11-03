@@ -169,7 +169,7 @@ jobs:
   cluster:
     needs: [changes, static, unit, db]
     # After the three it needs, or without them when a run started by hand names a stage alone.
-    if: ${{ !cancelled() && needs.static.result != 'failure' && needs.unit.result != 'failure' && needs.db.result != 'failure' && needs.changes.outputs.code != 'false' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',cluster,') || contains(format(',{0},', inputs.jobs), ',l3,') || contains(format(',{0},', inputs.jobs), ',l4,') || contains(format(',{0},', inputs.jobs), ',l5,') || contains(format(',{0},', inputs.jobs), ',cli,')) }}
+    if: ${{ !cancelled() && needs.static.result != 'failure' && needs.unit.result != 'failure' && needs.db.result != 'failure' && needs.changes.outputs.code != 'false' && github.event_name != 'schedule' && (github.event_name != 'workflow_dispatch' || inputs.jobs == 'all' || contains(format(',{0},', inputs.jobs), ',cluster,') || contains(format(',{0},', inputs.jobs), ',l3,') || contains(format(',{0},', inputs.jobs), ',l4,') || contains(format(',{0},', inputs.jobs), ',l5,') || contains(format(',{0},', inputs.jobs), ',cli,') || contains(format(',{0},', inputs.jobs), ',aws-tools,')) }}
     name: ${{ matrix.stage }}
     strategy:
       fail-fast: false # every stage's failures, not only the first stage's
@@ -179,6 +179,7 @@ jobs:
           - { stage: l4, minutes: 30 }
           - { stage: l5, minutes: 20 }
           - { stage: cli, minutes: 30 }
+          - { stage: aws-tools, minutes: 30 }
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.minutes }}
     steps:
@@ -197,8 +198,9 @@ jobs:
       - uses: ./.github/actions/setup
         if: steps.wanted.outputs.run == 'true'
         with:
-          cargo: ${{ matrix.stage == 'cli' && 'cli' || '' }}
-          aws-tools: ${{ matrix.stage == 'cli' }}
+          # The ff suite and AWS's tools' build ff alike, with the e2e profile: one cache.
+          cargo: ${{ (matrix.stage == 'cli' || matrix.stage == 'aws-tools') && 'cli' || '' }}
+          aws-tools: ${{ matrix.stage == 'cli' && 'export' || matrix.stage == 'aws-tools' && 'terraform' || '' }}
           room: true
       - if: steps.wanted.outputs.run == 'true'
         run: hack/ci.sh deps ${{ matrix.stage }}
