@@ -78,9 +78,17 @@ export class CustomerQueues {
    * that name there is, when it has the same values for the attributes given,
    * as SQS's CreateQueue answers; else QueueNameExists, naming the first that
    * differs. Within the plan's queues, counted under the account's lock.
-   * Answers whether it was made now.
+   * `alongside` makes what goes with a new queue, its tags, in its
+   * transaction: its refusal makes none. Answers whether it was made now.
    */
-  create(accountId: string, name: string, settings: Partial<QueueSettings>, plan: { limit: number; name: string }, region: string): Promise<{ queue: Queue; created: boolean }> {
+  create(
+    accountId: string,
+    name: string,
+    settings: Partial<QueueSettings>,
+    plan: { limit: number; name: string },
+    region: string,
+    alongside?: (manager: EntityManager, queue: Queue) => Promise<void>,
+  ): Promise<{ queue: Queue; created: boolean }> {
     return this.dataSource.transaction(async (manager) => {
       await manager.query('SELECT 1 FROM "accounts" WHERE "id" = $1 FOR NO KEY UPDATE', [accountId]);
       const existing = await manager.findOneBy(Queue, { accountId, name, kind: QueueKind.CUSTOMER });
@@ -97,6 +105,7 @@ export class CustomerQueues {
         throw overLimit(`The ${plan.name} plan allows ${plan.limit === 1 ? '1 queue' : `${plan.limit} queues`} per account: delete one first.`);
       }
       const queue = await manager.save(Queue, manager.create(Queue, { accountId, name, kind: QueueKind.CUSTOMER, functionId: null, ...DEFAULT_SETTINGS, ...settings }));
+      await alongside?.(manager, queue);
       return { queue, created: true };
     });
   }

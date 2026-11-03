@@ -78,6 +78,7 @@ import { FunctionDeadLetterQueues1793670000000 } from './1793670000000-FunctionD
 import { FunctionCallsStopped1793680000000 } from './1793680000000-FunctionCallsStopped';
 import { FunctionPolicies1793690000000 } from './1793690000000-FunctionPolicies';
 import { BucketTags1793700000000 } from './1793700000000-BucketTags';
+import { QueueTags1793710000000 } from './1793710000000-QueueTags';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -165,4 +166,5 @@ export const MIGRATIONS: Array<new () => object> = [
   FunctionCallsStopped1793680000000,
   FunctionPolicies1793690000000,
   BucketTags1793700000000,
+  QueueTags1793710000000,
 ];

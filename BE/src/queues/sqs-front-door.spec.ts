@@ -11,6 +11,7 @@ import { CreditService } from '../billing/credit.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { ActiveKey, EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
 import { notedUses, useLine } from '../storage/test-fixtures';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { CustomerQueues } from './customer-queues';
 import { QueueEvents } from './queue-events';
 import { QueueRequestCounts } from './queue-request-counts.service';
@@ -83,6 +84,7 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
         events as unknown as QueueEvents,
         { record: async () => undefined } as unknown as AuditService,
         { count: () => undefined } as unknown as QueueRequestCounts,
+        {} as ResourceTagsService,
         sqs.base,
         sqs.region,
       ),

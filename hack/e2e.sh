@@ -57,7 +57,7 @@
 # first when asked, its alarm with it. Then customers' queues: the AWS CLI, AWS's
 # SDK for JavaScript v3 and boto3 through the SQS endpoint, only their endpoint
 # changed (queues made and listed, messages with attributes sent and received,
-# long polls, batches, visibility, a dead-letter queue, a queue that isn't there,
+# long polls, batches, visibility, a dead-letter queue, tags, a queue that isn't there,
 # another account's, a wrong secret, an unknown key); two functions with no
 # setting at all, the SDK's own queue URL inside the cluster and boto3 with one
 # from outside, which the SDK for JavaScript sends to its host; a queue as a
@@ -2080,6 +2080,11 @@ check "another account's queue of the same name is its own: its URL under its ac
   "$sqs_endpoint/$other/e2e-cli-orders refused AWS.SimpleQueueService.NonExistentQueue" \
   "$other_url $(outcome aws_sqs send-message --queue-url "$other_url" --message-body 'not mine')"
 check "  ... nor lists" "$cli_url" "$(aws_sqs list-queues --query 'QueueUrls' --output text)"
+check "  ... tags its queue and reads its tags, put by the key in the audit log; the other account's key finds no queue to tag" \
+  "shop dev access_key:$queue_key_id refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$(aws_sqs tag-queue --queue-url "$cli_url" --tags team=shop,stage=dev; aws_sqs list-queue-tags --queue-url "$cli_url" --query '[Tags.team, Tags.stage]' --output text | xargs) \
+$(env_q "SELECT actor FROM audit_log WHERE account_id = '$tenant' AND action = 'queue.tag' AND resource = 'queue:e2e-cli-orders'") \
+$(as_other_sqs outcome aws_sqs tag-queue --queue-url "$cli_url" --tags team=theirs)"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0010 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
 sqs_clients="$FF_REPO_ROOT/hack/.cache/sqs-clients"
@@ -2088,10 +2093,10 @@ if [ ! -d "$sqs_clients/node_modules/@aws-sdk/client-sqs" ]; then
 fi
 MODULES="$sqs_clients/node_modules" ENDPOINT="$sqs_endpoint" ACCOUNT="$tenant" KEY="$queue_key_id" SECRET="$queue_key_secret" OTHER_URL="$other_url" \
   node "$FF_REPO_ROOT/hack/lib/sqs-clients/sdk.mjs" >"$work/sqs-sdk.jsonl" 2>"$work/sqs-sdk.log" || true
-client_checks "$work/sqs-sdk.jsonl" 13
+client_checks "$work/sqs-sdk.jsonl" 14
 ENDPOINT="$sqs_endpoint" ACCOUNT="$tenant" KEY="$queue_key_id" SECRET="$queue_key_secret" OTHER_URL="$other_url" \
   "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/sqs-clients/boto3_checks.py" >"$work/sqs-boto3.jsonl" 2>"$work/sqs-boto3.log" || true
-client_checks "$work/sqs-boto3.jsonl" 8
+client_checks "$work/sqs-boto3.jsonl" 9
 # Two messages left waiting in a queue, and an alarm on them, as a dead-letter queue is watched: judged at the end of
 # the queues' sections, by when a minute has sampled them.
 aws_sqs create-queue --queue-name e2e-waiting >/dev/null

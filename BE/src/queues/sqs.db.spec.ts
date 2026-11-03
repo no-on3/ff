@@ -6,7 +6,7 @@
  * after it, deleted by their last receipt only; delays, batches, a long poll
  * woken by PostgreSQL's NOTIFY, two consumers never holding one message, a
  * dead-letter queue taking what was received too often, retention, purges;
- * the plan's queues and storage; a read-only key and another account's. The
+ * the plan's queues and storage; tags; a read-only key and another account's. The
  * keys are FF's own, in its database. Each run works in a scratch database,
  * dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
@@ -20,6 +20,7 @@ import {
   DeleteQueueCommand,
   GetQueueAttributesCommand,
   GetQueueUrlCommand,
+  ListQueueTagsCommand,
   ListQueuesCommand,
   PurgeQueueCommand,
   ReceiveMessageCommand,
@@ -28,6 +29,8 @@ import {
   SendMessageBatchCommand,
   SendMessageCommand,
   SetQueueAttributesCommand,
+  TagQueueCommand,
+  UntagQueueCommand,
 } from '@aws-sdk/client-sqs';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
@@ -46,6 +49,8 @@ import { KeyUse } from '../storage/key-use.entity';
 import { KeyUses } from '../storage/key-uses.service';
 import { StorageKey } from '../storage/storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey } from '../storage/storage-names';
+import { ResourceTag } from '../tags/resource-tag.entity';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { CustomerQueues } from './customer-queues';
 import { QueueEvents } from './queue-events';
 import { QueueRequestCount } from './queue-request-count.entity';
@@ -133,7 +138,9 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
     const customerQueues = new CustomerQueues(db.dataSource, db.dataSource.getRepository(Queue));
     counts = new QueueRequestCounts(db.dataSource.getRepository(QueueRequestCount));
     keyUses = new KeyUses(db.dataSource.getRepository(KeyUse));
-    const operations = new SqsOperations(customerQueues, store, events, new AuditService(db.dataSource.getRepository(AuditEntry)), counts, BASE, REGION);
+    const audit = new AuditService(db.dataSource.getRepository(AuditEntry));
+    const tags = new ResourceTagsService(db.dataSource.getRepository(ResourceTag), audit);
+    const operations = new SqsOperations(customerQueues, store, events, audit, counts, tags, BASE, REGION);
     // Every account on that plan, with credit, and as many requests a second as it sends: the checks of each have their own tests.
     frontDoor = new SqsFrontDoor(
       new ConfigService({ sqs: { base: BASE, region: REGION } }),
@@ -492,6 +499,40 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
       ]);
       expect(entries[0]).toMatchObject({ actorLabel: `access key ${key.id}`, ip: '127.0.0.1', details: { attributes: {} } });
       expect(entries[1].details).toEqual({ attributes: { visibilityTimeout: 90 } });
+    });
+
+    it("keeps a queue's tags, CreateQueue's and TagQueue's, removed by UntagQueue, read by ListQueueTags, each change under the key in the audit log; gone with the queue", async () => {
+      const { QueueUrl } = await sqs.send(new CreateQueueCommand({ QueueName: 'tagged', tags: { team: 'shop', stage: 'dev' } }));
+      await sqs.send(new TagQueueCommand({ QueueUrl, Tags: { stage: 'prod', owner: 'ops' } }));
+      await sqs.send(new UntagQueueCommand({ QueueUrl, TagKeys: ['team'] }));
+      expect((await sqs.send(new ListQueueTagsCommand({ QueueUrl }))).Tags).toEqual({ owner: 'ops', stage: 'prod' });
+      const readOnly = client(reader);
+      expect((await readOnly.send(new ListQueueTagsCommand({ QueueUrl }))).Tags).toEqual({ owner: 'ops', stage: 'prod' });
+      expect((await failure(readOnly.send(new TagQueueCommand({ QueueUrl, Tags: { team: 'readers' } })))).name).toBe('AccessDenied');
+
+      const entries = await db.dataSource.getRepository(AuditEntry).find({ where: { accountId: ACCOUNT, resource: 'queue:tagged' }, order: { at: 'ASC' } });
+      expect(entries.map((entry) => [entry.action, entry.actor, entry.ip, entry.details])).toEqual([
+        ['queue.create', `access_key:${key.id}`, '127.0.0.1', { attributes: {}, tags: { team: 'shop', stage: 'dev' } }],
+        ['queue.tag', `access_key:${key.id}`, '127.0.0.1', { tags: { stage: 'prod', owner: 'ops' } }],
+        ['queue.untag', `access_key:${key.id}`, '127.0.0.1', { keys: ['team'] }],
+      ]);
+      await sqs.send(new DeleteQueueCommand({ QueueUrl }));
+      expect(await db.dataSource.getRepository(ResourceTag).countBy({ accountId: ACCOUNT })).toBe(0);
+    });
+
+    it('makes no queue whose tags SQS would refuse, and takes 50 at most, InvalidParameterValue', async () => {
+      expect(await failure(sqs.send(new CreateQueueCommand({ QueueName: 'refused', tags: { 'aws:team': 'shop' } })))).toMatchObject({
+        name: 'InvalidParameterValue',
+        message: 'The key aws:team starts with aws:, which AWS keeps for its own tags.',
+      });
+      expect((await failure(sqs.send(new GetQueueUrlCommand({ QueueName: 'refused' })))).name).toBe('QueueDoesNotExist');
+
+      const QueueUrl = await newQueue();
+      await sqs.send(new TagQueueCommand({ QueueUrl, Tags: Object.fromEntries(Array.from({ length: 50 }, (_, n) => [`k${n}`, 'v'])) }));
+      expect(await failure(sqs.send(new TagQueueCommand({ QueueUrl, Tags: { one: 'more' } })))).toMatchObject({
+        name: 'InvalidParameterValue',
+        message: 'A resource has at most 50 tags: these would make it 51.',
+      });
     });
   });
 

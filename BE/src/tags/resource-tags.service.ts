@@ -1,29 +1,34 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, In, Repository } from 'typeorm';
-import { AuditService } from '../audit/audit.service';
+import { AuditEvent, AuditService } from '../audit/audit.service';
 import { ResourceTag } from './resource-tag.entity';
 import { tagsProblem } from './tag-rules';
 
-/** What tags are put on: one of the account's functions or buckets, by its ID, and how the audit log names it. */
+/** What tags are put on: one of the account's functions, buckets or queues, by its ID, and how the audit log names it. */
 export interface Tagged {
-  kind: 'function' | 'bucket';
+  kind: 'function' | 'bucket' | 'queue';
   id: string;
-  /** function:<id>, bucket:<name>, as the audit log names each of its other changes. */
+  /** function:<id>, bucket:<name>, queue:<name>, as the audit log names each of its other changes. */
   resource: string;
 }
+
+/** Who the audit log names for a change, and from where, when the request's context doesn't say: SQS's caller, at its endpoint. */
+export type ChangedBy = Pick<AuditEvent, 'actor' | 'ip'>;
 
 export const taggedFunction = (id: string): Tagged => ({ kind: 'function', id, resource: `function:${id}` });
 
 export const taggedBucket = (bucket: { id: string; name: string }): Tagged => ({ kind: 'bucket', id: bucket.id, resource: `bucket:${bucket.name}` });
 
+export const taggedQueue = (queue: { id: string; name: string }): Tagged => ({ kind: 'queue', id: queue.id, resource: `queue:${queue.name}` });
+
 /** The column that names each kind's resource. */
-const COLUMN = { function: 'functionId', bucket: 'bucketId' } as const;
+const COLUMN = { function: 'functionId', bucket: 'bucketId', queue: 'queueId' } as const;
 
 const rowsOf = (tagged: Tagged) => ({ [COLUMN[tagged.kind]]: tagged.id });
 
 /**
- * The tags on an account's functions and buckets, as AWS's: put, a key
+ * The tags on an account's functions, buckets and queues, as AWS's: put, a key
  * already there taking its new value, or a bucket's replaced whole, as S3
  * replaces them; removed by key; read. Each change is in the audit log, and a
  * resource's tags change one request at a time, so that two can't pass its 50
@@ -44,12 +49,12 @@ export class ResourceTagsService {
   }
 
   /** Puts tags on the account's resource; 400, nothing put, for one AWS wouldn't take, or past 50. */
-  async tag(accountId: string, tagged: Tagged, tags: Record<string, string>): Promise<void> {
+  async tag(accountId: string, tagged: Tagged, tags: Record<string, string>, by: ChangedBy = {}): Promise<void> {
     await this.changing(tagged, async (manager) => {
       const problem = tagsProblem(await this.of(tagged, manager), tags);
       if (problem) throw new BadRequestException(problem);
       await this.put(manager, accountId, tagged, tags);
-      await this.audit.record({ accountId, action: `${tagged.kind}.tag`, resource: tagged.resource, details: { tags } }, manager);
+      await this.audit.record({ accountId, action: `${tagged.kind}.tag`, resource: tagged.resource, details: { tags }, ...by }, manager);
     });
   }
 
@@ -69,10 +74,10 @@ export class ResourceTagsService {
   }
 
   /** Removes the resource's tags of these keys; a key it hasn't is no error, as on AWS. */
-  async untag(accountId: string, tagged: Tagged, keys: string[]): Promise<void> {
+  async untag(accountId: string, tagged: Tagged, keys: string[], by: ChangedBy = {}): Promise<void> {
     await this.changing(tagged, async (manager) => {
       await manager.delete(ResourceTag, { ...rowsOf(tagged), key: In(keys) });
-      await this.audit.record({ accountId, action: `${tagged.kind}.untag`, resource: tagged.resource, details: { keys: [...new Set(keys)].sort() } }, manager);
+      await this.audit.record({ accountId, action: `${tagged.kind}.untag`, resource: tagged.resource, details: { keys: [...new Set(keys)].sort() }, ...by }, manager);
     });
   }
 

@@ -34,7 +34,7 @@
 #   - Buckets and queues, through the S3 front door and the SQS endpoint: each
 #     account's key reaches its own account's alone; another's bucket is
 #     AccessDenied, another's queue one that doesn't exist, by its URL or its
-#     name, and its messages stay; a key deletes no other account's bucket
+#     name, and its messages and tags stay; a key deletes no other account's bucket
 #     through S3, nor takes its name, nor reads or changes its tags.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
@@ -1055,6 +1055,11 @@ check "  ... nor by its name, naming its owner" "refused AWS.SimpleQueueService.
   "$(sqs_with "$key_b_id" "$key_b_secret" get-queue-url --queue-name l5-orders --queue-owner-aws-account-id "$account_a" --query QueueUrl)"
 check "  ... nor purged, nor deleted: A's message is there still" "refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue A's own" \
   "$(sqs_with "$key_b_id" "$key_b_secret" purge-queue --queue-url "$queue_a") $(sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_a") $(sqs_with "$key_a_id" "$key_a_secret" receive-message --queue-url "$queue_a" --query 'Messages[].Body')"
+sqs_with "$key_a_id" "$key_a_secret" tag-queue --queue-url "$queue_a" --tags team=a >/dev/null
+check "  ... nor its tags read, put or removed: A's tag is there still" \
+  "refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue a" \
+  "$(sqs_with "$key_b_id" "$key_b_secret" list-queue-tags --queue-url "$queue_a") $(sqs_with "$key_b_id" "$key_b_secret" tag-queue --queue-url "$queue_a" --tags team=b) \
+$(sqs_with "$key_b_id" "$key_b_secret" untag-queue --queue-url "$queue_a" --tag-keys team) $(sqs_with "$key_a_id" "$key_a_secret" list-queue-tags --queue-url "$queue_a" --query Tags.team)"
 # Each lists its own: this queue, and the one its account made through FF's API above.
 listed_by() { sqs_with "$1" "$2" list-queues --query QueueUrls | tr '\t' ' '; }
 check "ListQueues lists each key's own account's queues alone" \

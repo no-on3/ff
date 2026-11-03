@@ -1,16 +1,18 @@
 import { Check, Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
 import { Function } from '../functions/entities/function.entity';
+import { Queue } from '../queues/queue.entity';
 import { Bucket } from '../storage/bucket.entity';
 
 /**
  * A tag on one of an account's resources, as AWS's: a key, the resource's
  * once, and its value. Each row is one resource's, by that resource's column:
- * a function's or a bucket's, which go with it.
+ * a function's, a bucket's or a queue's, which go with it.
  */
 @Entity('resource_tags')
 @Index(['functionId', 'key'], { unique: true })
 @Index(['bucketId', 'key'], { unique: true })
-@Check(`num_nonnulls("function_id", "bucket_id") = 1`)
+@Index(['queueId', 'key'], { unique: true })
+@Check(`num_nonnulls("function_id", "bucket_id", "queue_id") = 1`)
 export class ResourceTag {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -31,6 +33,13 @@ export class ResourceTag {
   @ManyToOne(() => Bucket, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'bucket_id' })
   bucket?: Bucket;
+
+  @Column({ type: 'uuid', nullable: true })
+  queueId: string | null;
+
+  @ManyToOne(() => Queue, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'queue_id' })
+  queue?: Queue;
 
   /** Up to 128 characters, as AWS's. */
   @Column({ type: 'varchar', length: 128 })

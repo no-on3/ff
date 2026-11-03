@@ -101,6 +101,9 @@ export type AuditAction =
   | 'queue.update'
   | 'queue.purge'
   | 'queue.delete'
+  // A queue's tags, as SQS's: put and removed by key, through the SQS endpoint.
+  | 'queue.tag'
+  | 'queue.untag'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

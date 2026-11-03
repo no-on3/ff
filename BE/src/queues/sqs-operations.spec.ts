@@ -1,6 +1,10 @@
+import { BadRequestException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { EntityManager } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { plan } from '../plans/test-fixtures';
+import { ResourceTagsService, Tagged } from '../tags/resource-tags.service';
+import { tagsProblem } from '../tags/tag-rules';
 import { CustomerQueues, Outgoing, Received } from './customer-queues';
 import { QueueEvents } from './queue-events';
 import { QueueRequestCounts } from './queue-request-counts.service';
@@ -47,7 +51,11 @@ function setup(options: { bytes?: number; receives?: Received[][] } = {}) {
   const receives = [...(options.receives ?? [])];
   const queues = {
     find: jest.fn(async (accountId: string, name: string) => (accountId === ACCOUNT && name === 'orders' ? ORDERS : null)),
-    create: jest.fn(async (accountId: string, name: string, settings: object) => ({ queue: Object.assign(new Queue(), { ...ORDERS, accountId, name, ...settings }), created: true })),
+    create: jest.fn(async (accountId: string, name: string, settings: object, _plan: object, _region: string, alongside?: (manager: EntityManager, queue: Queue) => Promise<void>) => {
+      const queue = Object.assign(new Queue(), { ...ORDERS, id: `queue-${name}`, accountId, name, ...settings });
+      await alongside?.({} as EntityManager, queue);
+      return { queue, created: true };
+    }),
     setAttributes: jest.fn(async () => undefined),
     list: jest.fn(async () => ({ queues: [ORDERS] })),
     delete: jest.fn(async () => undefined),
@@ -62,16 +70,37 @@ function setup(options: { bytes?: number; receives?: Received[][] } = {}) {
   const events = { wait: jest.fn(async (): Promise<void> => undefined) };
   const audit = { record: jest.fn(async (_event: object): Promise<void> => undefined) };
   const counts = { count: jest.fn() };
+  // Each queue's tags by its ID, checked by AWS's rules as FF's tags' service checks them.
+  const tagged = new Map<string, Record<string, string>>();
+  const checked = (existing: Record<string, string>, adding: Record<string, string>) => {
+    const problem = tagsProblem(existing, adding);
+    if (problem) throw new BadRequestException(problem);
+  };
+  const tags = {
+    of: jest.fn(async ({ id }: Tagged) => ({ ...tagged.get(id) })),
+    tag: jest.fn(async (_account: string, { id }: Tagged, adding: Record<string, string>, _by?: object) => {
+      checked(tagged.get(id) ?? {}, adding);
+      tagged.set(id, { ...tagged.get(id), ...adding });
+    }),
+    untag: jest.fn(async (_account: string, { id }: Tagged, keys: string[], _by?: object) => {
+      tagged.set(id, Object.fromEntries(Object.entries(tagged.get(id) ?? {}).filter(([key]) => !keys.includes(key))));
+    }),
+    putNew: jest.fn(async (_manager: EntityManager, _account: string, { id }: Tagged, adding: Record<string, string>) => {
+      checked({}, adding);
+      tagged.set(id, adding);
+    }),
+  };
   const operations = new SqsOperations(
     queues as unknown as CustomerQueues,
     store as unknown as QueueStore,
     events as unknown as QueueEvents,
     audit as unknown as AuditService,
     counts as unknown as QueueRequestCounts,
+    tags as unknown as ResourceTagsService,
     BASE,
     REGION,
   );
-  return { operations, queues, store, events, sent, audit, counts };
+  return { operations, queues, store, events, sent, audit, counts, tags };
 }
 
 const caller = (extra: Partial<Caller> = {}): Caller => ({ accountId: ACCOUNT, keyId: 'AKFFAAAAAAAAAAAAAAAA', readOnly: false, plan: plan(), ...extra });
@@ -90,7 +119,7 @@ describe("SQS's operations on an account's queues", () => {
   describe('which operations, for which key', () => {
     it("answers UnsupportedOperation for SQS's operations FF doesn't offer, and for names SQS doesn't have", async () => {
       const { operations } = setup();
-      expect(await refusal(operations.run('TagQueue', { QueueUrl: URL_ }, caller()))).toMatchObject({ type: 'UnsupportedOperation', message: "FF's queues don't offer TagQueue." });
+      expect(await refusal(operations.run('AddPermission', { QueueUrl: URL_ }, caller()))).toMatchObject({ type: 'UnsupportedOperation', message: "FF's queues don't offer AddPermission." });
       expect((await refusal(operations.run('MakeCoffee', {}, caller()))).type).toBe('UnsupportedOperation');
     });
 
@@ -99,7 +128,8 @@ describe("SQS's operations on an account's queues", () => {
       const reader = caller({ readOnly: true });
       await expect(operations.run('GetQueueUrl', { QueueName: 'orders' }, reader)).resolves.toEqual({ QueueUrl: URL_ });
       await expect(operations.run('ReceiveMessage', { QueueUrl: URL_ }, reader)).resolves.toEqual({});
-      for (const operation of ['SendMessage', 'DeleteMessage', 'CreateQueue', 'DeleteQueue', 'PurgeQueue', 'SetQueueAttributes', 'ChangeMessageVisibility']) {
+      await expect(operations.run('ListQueueTags', { QueueUrl: URL_ }, reader)).resolves.toEqual({});
+      for (const operation of ['SendMessage', 'DeleteMessage', 'CreateQueue', 'DeleteQueue', 'PurgeQueue', 'SetQueueAttributes', 'ChangeMessageVisibility', 'TagQueue', 'UntagQueue']) {
         expect(await refusal(operations.run(operation, { QueueUrl: URL_ }, reader))).toMatchObject({ type: 'AccessDenied', status: 403 });
       }
     });
@@ -140,13 +170,64 @@ describe("SQS's operations on an account's queues", () => {
       await expect(operations.run('CreateQueue', { QueueName: 'invoices', Attributes: { VisibilityTimeout: '60' } }, caller())).resolves.toEqual({
         QueueUrl: `${BASE}/${ACCOUNT}/invoices`,
       });
-      expect(queues.create).toHaveBeenCalledWith(ACCOUNT, 'invoices', { visibilityTimeout: 60 }, { limit: plan().limits.queues, name: plan().name }, REGION);
+      expect(queues.create).toHaveBeenCalledWith(ACCOUNT, 'invoices', { visibilityTimeout: 60 }, { limit: plan().limits.queues, name: plan().name }, REGION, undefined);
     });
 
-    it("refuses tags, which FF's queues don't have yet, and FIFO queues", async () => {
+    it('makes a queue with its tags, kept in the transaction that makes it, which its entry in the audit log names', async () => {
+      const { operations, tags, audit } = setup();
+      await operations.run('CreateQueue', { QueueName: 'invoices', tags: { team: 'billing', stage: 'dev' } }, caller());
+
+      expect(tags.putNew).toHaveBeenCalledWith({}, ACCOUNT, { kind: 'queue', id: 'queue-invoices', resource: 'queue:invoices' }, { team: 'billing', stage: 'dev' });
+      expect(audit.record).toHaveBeenCalledWith({ accountId: ACCOUNT, action: 'queue.create', resource: 'queue:invoices', details: { attributes: {}, tags: { team: 'billing', stage: 'dev' } } });
+    });
+
+    it('refuses tags SQS would refuse, and FIFO queues', async () => {
       const { operations } = setup();
-      expect((await refusal(operations.run('CreateQueue', { QueueName: 'invoices', tags: { team: 'billing' } }, caller()))).message).toBe("FF's queues have no tags yet.");
+      expect(await refusal(operations.run('CreateQueue', { QueueName: 'invoices', tags: { 'aws:team': 'billing' } }, caller()))).toMatchObject({
+        type: 'InvalidParameterValue',
+        message: 'The key aws:team starts with aws:, which AWS keeps for its own tags.',
+      });
+      expect((await refusal(operations.run('CreateQueue', { QueueName: 'invoices', tags: ['team'] }, caller()))).message).toBe(
+        "Value for parameter tags is invalid. Reason: It must map each tag's key to its value, a string.",
+      );
       expect((await refusal(operations.run('CreateQueue', { QueueName: 'invoices.fifo' }, caller()))).type).toBe('InvalidParameterValue');
+    });
+  });
+
+  describe("a queue's tags, as SQS's", () => {
+    const by = { actor: { id: 'access_key:AKFFAAAAAAAAAAAAAAAA', label: 'access key AKFFAAAAAAAAAAAAAAAA' }, ip: '10.0.0.7' };
+
+    it('puts tags, a key there taking its new value, removes them by key, and lists them, none when there are none; each change under its caller', async () => {
+      const { operations, tags } = setup();
+      expect(await operations.run('ListQueueTags', { QueueUrl: URL_ }, caller())).toEqual({});
+
+      await operations.run('TagQueue', { QueueUrl: URL_, Tags: { team: 'shop', stage: 'dev' } }, caller(by));
+      await operations.run('TagQueue', { QueueUrl: URL_, Tags: { stage: 'prod' } }, caller(by));
+      expect(await operations.run('ListQueueTags', { QueueUrl: URL_ }, caller())).toEqual({ Tags: { team: 'shop', stage: 'prod' } });
+      await operations.run('UntagQueue', { QueueUrl: URL_, TagKeys: ['team', 'never-there'] }, caller(by));
+
+      expect(await operations.run('ListQueueTags', { QueueUrl: URL_ }, caller())).toEqual({ Tags: { stage: 'prod' } });
+      const orders = { kind: 'queue', id: 'queue-orders', resource: 'queue:orders' };
+      expect(tags.tag).toHaveBeenCalledWith(ACCOUNT, orders, { stage: 'prod' }, by);
+      expect(tags.untag).toHaveBeenCalledWith(ACCOUNT, orders, ['team', 'never-there'], by);
+    });
+
+    it("refuses what SQS refuses: a tag AWS wouldn't take or past 50, InvalidParameterValue; none given, MissingParameter; another queue's, QueueDoesNotExist", async () => {
+      const { operations } = setup();
+      const refused = async (operation: string, input: Record<string, unknown>) => {
+        const { type, message } = await refusal(operations.run(operation, { QueueUrl: URL_, ...input }, caller()));
+        return `${type}: ${message}`;
+      };
+
+      expect(await refused('TagQueue', { Tags: { 'a<b': 'x' } })).toBe("InvalidParameterValue: The key a<b holds a character a tag can't: letters, digits, spaces and + - = . _ : / @ only.");
+      expect(await refused('TagQueue', { Tags: Object.fromEntries(Array.from({ length: 51 }, (_, n) => [`k${n}`, 'v'])) })).toBe(
+        'InvalidParameterValue: A resource has at most 50 tags: these would make it 51.',
+      );
+      expect(await refused('TagQueue', { Tags: { team: 7 } })).toBe("InvalidParameterValue: Value for parameter Tags is invalid. Reason: It must map each tag's key to its value, a string.");
+      expect(await refused('TagQueue', {})).toBe('MissingParameter: The request must contain the parameter Tags.');
+      expect(await refused('UntagQueue', { TagKeys: [] })).toBe('MissingParameter: The request must contain the parameter TagKeys.');
+      expect(await refused('UntagQueue', { TagKeys: [7] })).toBe('InvalidParameterValue: Value for parameter TagKeys is invalid. Reason: Each tag key must be a string.');
+      expect(await refused('ListQueueTags', { QueueUrl: `${BASE}/000000000002/orders` })).toBe('QueueDoesNotExist: The specified queue does not exist.');
     });
   });
 
@@ -422,7 +503,7 @@ describe("SQS's operations on an account's queues", () => {
       await operations.run('ListQueues', {}, caller());
       await refusal(operations.run('PurgeQueue', { QueueUrl: URL_ }, caller({ readOnly: true })));
 
-      expect(counts.count.mock.calls).toEqual([[counted()], [counted({ queueName: 'invoices' })]]);
+      expect(counts.count.mock.calls).toEqual([[counted()], [counted({ queueId: 'queue-invoices', queueName: 'invoices' })]]);
     });
   });
 

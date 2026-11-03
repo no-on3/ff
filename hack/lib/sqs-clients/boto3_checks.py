@@ -92,6 +92,12 @@ def batches():
 
 
 check("ok", "SendMessageBatch of 10, ReceiveMessage of 10, DeleteMessageBatch of 10", batches)
+check("ok", "a queue's tags: TagQueue's, a key's new value, read by ListQueueTags; UntagQueue's removal", lambda: (
+    sqs.tag_queue(QueueUrl=url, Tags={"team": "shop", "stage": "dev"}),
+    sqs.tag_queue(QueueUrl=url, Tags={"stage": "prod"}),
+    expect(sqs.list_queue_tags(QueueUrl=url).get("Tags"), {"stage": "prod", "team": "shop"}),
+    sqs.untag_queue(QueueUrl=url, TagKeys=["team", "stage"]),
+    expect(sqs.list_queue_tags(QueueUrl=url).get("Tags", "none"), "none"))[-1])
 check("ok", "a queue that is not there: its query code, AWS.SimpleQueueService.NonExistentQueue",
       lambda: refused_as(lambda: sqs.get_queue_url(QueueName="nowhere"), "AWS.SimpleQueueService.NonExistentQueue"))
 check("ok", "another account's queue, by its URL: one that doesn't exist",
