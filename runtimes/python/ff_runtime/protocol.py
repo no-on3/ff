@@ -4,7 +4,7 @@ between the two processes. Runtime protocol v3.
 Messages are JSON arrays sent over a socket pair, each prefixed by its length
 as a 4-byte big-endian integer:
 
-  main -> worker: ["invoke", request_id, event, deadline_ms]
+  main -> worker: ["invoke", request_id, event, deadline_ms, client_context]
   worker -> main: ["ready"] | ["init_error", type, message]
                   | ["result", json_text] | ["error", type, message]
 

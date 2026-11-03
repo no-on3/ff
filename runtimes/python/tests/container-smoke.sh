@@ -53,6 +53,9 @@ check "/tmp is writable" ok "$(docker exec "$prefix-hello" sh -c 'touch /tmp/pro
 check "user output reaches the container log" 1 "$(docker logs "$prefix-hello" 2>&1 | grep -c 'hello from user code' || true)"
 check "no install at start (no pip activity in logs)" 0 "$(docker logs "$prefix-hello" 2>&1 | grep -ci 'pip' || true)"
 check "speaks runtime protocol 3" 1 "$(docker logs "$prefix-hello" 2>&1 | grep -c '"protocol": 3' || true)"
+check "gives back the call's log when asked, from its START to its END" 2 \
+  "$(curl -s -o /dev/null -D - -X POST -H 'x-ff-log-type: Tail' -H 'x-ff-request-id: smoke-tail' -d '{}' "http://127.0.0.1:$port/invoke" |
+    tr -d '\r' | sed -n 's/^x-ff-log-result: //Ip' | base64 -d | grep -c -e '^START RequestId: smoke-tail ' -e '^END RequestId: smoke-tail$' || true)"
 
 # Inside the container's 256 MB limit, a function that hoards memory gets
 # Runtime.OutOfMemory from the runtime's own limit, and the container survives.

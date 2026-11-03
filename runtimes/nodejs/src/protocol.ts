@@ -46,6 +46,8 @@ export interface InvokeMessage {
   event: unknown;
   /** Epoch milliseconds at which the invocation times out. */
   deadlineMs: number;
+  /** Lambda's ClientContext, the JSON object the caller sent, for context.clientContext; none when it sent none. */
+  clientContext?: unknown;
 }
 
 export interface FunctionError {

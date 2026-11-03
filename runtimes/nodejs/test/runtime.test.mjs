@@ -749,6 +749,81 @@ describe("logs: a call's output comes before its END", () => {
   });
 });
 
+describe("what a caller of Lambda's Invoke asks for: the call's log's tail, its client context", () => {
+  /** The call's log as X-FF-Log-Result gives it back, decoded from its base64. */
+  const tailOf = (res) => Buffer.from(res.headers.get('x-ff-log-result') ?? '', 'base64');
+
+  it("gives back the call's log from its START to its REPORT, both streams, when asked, and nothing when not", async () => {
+    const rt = await startRuntime('output', { FUNCTION_TIMEOUT: '5000' });
+    await readyz(rt, 200);
+
+    const asked = await invoke(rt, { lines: 2, errors: 1 }, { 'x-ff-request-id': 'req-tail', 'x-ff-log-type': 'Tail' });
+    const notAsked = await invoke(rt, { lines: 1 }, { 'x-ff-request-id': 'req-none' });
+
+    assert.equal(asked.status, 200);
+    const lines = tailOf(asked).toString('utf8').split('\n');
+    assert.equal(lines[0], 'START RequestId: req-tail Version: $LATEST');
+    // Each stream's lines come whole, in either stream's order, forwarded apart; the line left open last.
+    assert.deepEqual(lines.slice(1, 4).sort(), ['req-tail: error 1', 'req-tail: line 1', 'req-tail: line 2']);
+    assert.deepEqual(lines.slice(4, 6), ['req-tail: left open', 'END RequestId: req-tail']);
+    assert.match(lines[6], /^REPORT RequestId: req-tail\tDuration: [\d.]+ ms\t.*\tMax Memory Used: \d+ MB$/);
+    assert.deepEqual(lines.slice(7), ['']);
+    assert.equal(notAsked.headers.get('x-ff-log-result'), null);
+    await rt.stop();
+  });
+
+  it("keeps a long call's last 4 KB, its REPORT last", async () => {
+    const rt = await startRuntime('output', { FUNCTION_TIMEOUT: '5000' });
+    await readyz(rt, 200);
+
+    const res = await invoke(rt, { lines: 400, errors: 0, open: false }, { 'x-ff-request-id': 'req-long', 'x-ff-log-type': 'Tail' });
+
+    const tail = tailOf(res);
+    assert.equal(tail.length, 4096);
+    assert.ok(!tail.toString('utf8').includes('START RequestId'));
+    assert.match(tail.toString('utf8'), /req-long: line 400\nEND RequestId: req-long\nREPORT RequestId: req-long\t[^\n]+\n$/);
+    await rt.stop();
+  });
+
+  it('gives back the log of a call that threw, with its error, and of one that timed out, with the timeout', async () => {
+    const throws = await startRuntime('throws');
+    const timesOut = await startRuntime('async-timeout', { FUNCTION_TIMEOUT: '300' });
+    await readyz(throws, 200);
+    await readyz(timesOut, 200);
+
+    const threw = await invoke(throws, {}, { 'x-ff-request-id': 'req-threw', 'x-ff-log-type': 'Tail' });
+    const late = await invoke(timesOut, {}, { 'x-ff-request-id': 'req-late', 'x-ff-log-type': 'Tail' });
+
+    assert.equal(threw.status, 500);
+    assert.match(tailOf(threw).toString('utf8'), /"msg":"function error","requestId":"req-threw","errorType":"TypeError"[^\n]*\nEND RequestId: req-threw\n/);
+    assert.equal(late.status, 504);
+    assert.match(tailOf(late).toString('utf8'), /"msg":"task timed out; restarting worker","requestId":"req-late"[\s\S]*\nEND RequestId: req-late\n/);
+    await throws.stop();
+    await timesOut.stop();
+  });
+
+  it("hands the caller's client context to the handler as context.clientContext, and refuses one that isn't a JSON object in base64", async () => {
+    const rt = await startRuntime('client-context');
+    await readyz(rt, 200);
+    const said = { client: { installation_id: 'i-1', app_title: 'shop' }, custom: { cart: '7' }, env: { locale: 'ar-TN' } };
+    const base64 = (text) => Buffer.from(text).toString('base64');
+
+    const given = await invoke(rt, {}, { 'x-ff-client-context': base64(JSON.stringify(said)) });
+    const none = await invoke(rt, {});
+    const unpadded = await invoke(rt, {}, { 'x-ff-client-context': 'e30' }); // "{}", its padding left out, as Lambda takes it
+    const refusals = await Promise.all([base64('not json'), base64('[1]'), base64('null'), base64('NaN')].map((header) => invoke(rt, {}, { 'x-ff-client-context': header })));
+
+    assert.deepEqual(given.json, { clientContext: said, given: true });
+    assert.deepEqual(none.json, { clientContext: null, given: true });
+    assert.deepEqual(unpadded.json, { clientContext: {}, given: true });
+    assert.deepEqual(
+      refusals.map((res) => [res.status, res.json.errorType, res.json.errorMessage]),
+      Array(4).fill([400, 'InvalidRequestContentException', 'Client context must be a valid Base64-encoded JSON object.']),
+    );
+    await rt.stop();
+  });
+});
+
 describe('connections', () => {
   it("answers a call on a connection left idle past Node.js's 5 seconds, as the cluster's proxy reuses them", async () => {
     const rt = await startRuntime('js-function');

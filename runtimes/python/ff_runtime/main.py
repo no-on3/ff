@@ -5,7 +5,9 @@ code (worker.py):
 
   GET  /healthz   liveness: the main process is responsive
   GET  /readyz    readiness: user code is loaded (503 with the error if not)
-  POST /invoke    run the handler once; invocations are serialized, as on Lambda
+  POST /invoke    run the handler once; invocations are serialized, as on Lambda.
+                  X-FF-Log-Type: Tail asks for the call's last 4 KB of log, answered
+                  in X-FF-Log-Result; X-FF-Client-Context carries Lambda's ClientContext.
 
 A timeout, out-of-memory, or crash kills the worker and starts a fresh one, so
 even CPU-bound infinite loops are stopped and probes keep answering. If that
@@ -13,6 +15,7 @@ fresh worker can't load code that loaded before, the process exits, so that
 Kubernetes restarts the container. Environment variables are never logged.
 """
 import _thread
+import base64
 import json
 import math
 import os
@@ -26,11 +29,12 @@ import threading
 import time
 import traceback
 import uuid
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
 from ff_runtime import protocol
-from ff_runtime.output import Output, WorkerStreams
+from ff_runtime.output import LogTail, Output, WorkerStreams
 from ff_runtime.protocol import (
     FUNCTION_VERSION,
     HANDLER,
@@ -78,6 +82,16 @@ def memory_used_mb(worker):
     """Peak resident memory of this process plus the worker."""
     own = protocol.proc_status_kb("VmHWM") or resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return max(1, round((own + (protocol.proc_status_kb("VmHWM", worker.pid) or 0)) / 1024))
+
+
+@dataclass
+class Call:
+    """One call of POST /invoke, as its request asked for it."""
+
+    request_id: str
+    event: object
+    client_context: dict | None = None  # Lambda's ClientContext, the JSON object the caller sent; None when it sent none
+    tail: LogTail | None = None  # the call's log, kept while it runs when the caller asked for its tail
 
 
 # A call refused before it ran, as the header says, so that the caller may send it to another instance: the backend does.
@@ -229,7 +243,7 @@ class Supervisor:
         with self.lock:
             self.lock.wait_for(lambda: self.pending == 0, timeout_s)
 
-    def invoke(self, request_id, event):
+    def invoke(self, call):
         """Runs one admitted invocation. Returns (status, body, headers)."""
         with self.lock:
             # A call still waiting its turn when the runtime stops is refused, never run (see main()).
@@ -247,17 +261,19 @@ class Supervisor:
                     error = self.init_error or {"errorType": "Runtime.Unavailable", "errorMessage": "Runtime is not ready"}
                     return 500, json.dumps(error), {"x-ff-function-error": "Unhandled"}
                 process, sock, streams = self.process, self.sock, self.streams
-            return self._run(process, sock, streams, request_id, event)
+            return self._run(process, sock, streams, call)
         finally:
             with self.lock:
                 self.running = False
                 self.lock.notify_all()
 
-    def _run(self, process, sock, streams, request_id, event):
+    def _run(self, process, sock, streams, call):
+        request_id = call.request_id
+        OUTPUT.keep_tail(call.tail)
         OUTPUT.line(f"START RequestId: {request_id} Version: {FUNCTION_VERSION}")
         started = time.perf_counter()
         try:
-            protocol.send(sock, "invoke", request_id, event, time.time() * 1000 + TIMEOUT_MS)
+            protocol.send(sock, "invoke", request_id, call.event, time.time() * 1000 + TIMEOUT_MS, call.client_context)
             message = protocol.recv(sock) if protocol.wait_readable(sock, TIMEOUT_MS / 1000) else ["timeout"]
         except (EOFError, OSError):
             message = ["exited"]
@@ -307,6 +323,9 @@ class Supervisor:
             f"Billed Duration: {math.ceil(duration_ms)} ms\tMemory Size: {MEMORY_MB} MB\t"
             f"Max Memory Used: {memory_mb} MB"
         )
+        OUTPUT.keep_tail(None)  # its log ends with its REPORT: what comes after is no call's, or the next one's
+        if call.tail:
+            headers["x-ff-log-result"] = call.tail.base64()
         return status, body, headers
 
 
@@ -316,6 +335,23 @@ SHUTTING_DOWN = threading.Event()
 
 def reject_constant(name):
     raise ValueError(f"{name} is not valid JSON")
+
+
+CLIENT_CONTEXT_REFUSED = (400, json.dumps({
+    "errorType": "InvalidRequestContentException",
+    "errorMessage": "Client context must be a valid Base64-encoded JSON object.",
+}))
+
+
+def client_context_of(header):
+    """Lambda's ClientContext from X-FF-Client-Context: the base64 of a JSON object, as the caller sent it to Lambda's
+    Invoke, its padding optional as Lambda's; None without the header. ValueError when it isn't one."""
+    if header is None:
+        return None
+    value = json.loads(base64.b64decode(header + "=" * (-len(header) % 4)), parse_constant=reject_constant)
+    if not isinstance(value, dict):
+        raise ValueError("the client context is not a JSON object")
+    return value
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -377,14 +413,22 @@ class Handler(BaseHTTPRequestHandler):
                 "errorMessage": f"Request must be smaller than {MAX_PAYLOAD_BYTES} bytes",
             })
             return
+        try:
+            client_context = client_context_of(self.headers.get("x-ff-client-context"))
+        except ValueError:
+            self.send_json(*CLIENT_CONTEXT_REFUSED)
+            return
         refusal = SUPERVISOR.admit()
         if refusal:
             self.send_json(*refusal)
             return
         try:
-            event = body if protocol.EVENT_FORMAT == "lambda" else self.wrapped(body, url)
-            request_id = self.headers.get("x-ff-request-id") or str(uuid.uuid4())
-            self.send_json(*SUPERVISOR.invoke(request_id, event))
+            self.send_json(*SUPERVISOR.invoke(Call(
+                request_id=self.headers.get("x-ff-request-id") or str(uuid.uuid4()),
+                event=body if protocol.EVENT_FORMAT == "lambda" else self.wrapped(body, url),
+                client_context=client_context,
+                tail=LogTail() if self.headers.get("x-ff-log-type") == "Tail" else None,
+            )))
         finally:
             SUPERVISOR.release()
 

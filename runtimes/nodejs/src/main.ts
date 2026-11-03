@@ -7,6 +7,8 @@
  *   POST /invoke    run the handler once; invocations are serialized, as on Lambda.
  *                   The body is the event (FF_EVENT_FORMAT=lambda, the default), or
  *                   goes in FF's original wrapper (wrapped), for older functions.
+ *                   X-FF-Log-Type: Tail asks for the call's last 4 KB of log, answered
+ *                   in X-FF-Log-Result; X-FF-Client-Context carries Lambda's ClientContext.
  *
  * A timeout, out-of-memory, or crash terminates the worker and starts a fresh
  * one, so even CPU-bound infinite loops are stopped and probes keep answering.
@@ -22,6 +24,8 @@ import { performance } from 'node:perf_hooks';
 import { Worker } from 'node:worker_threads';
 import { EVENT_FORMATS } from './protocol';
 import type { EventFormat, FunctionError, WorkerConfig, WorkerMessage } from './protocol';
+import { LogTail } from './log-tail';
+import type { Stream } from './log-tail';
 import { OutputRelay } from './relay';
 
 type ResultMessage = Extract<WorkerMessage, { type: 'result' }>;
@@ -123,6 +127,10 @@ interface Invocation {
   outputTimer?: NodeJS.Timeout;
   /** Answers 429 if the call is still queued after maxQueueWaitMs. */
   queueTimer?: NodeJS.Timeout;
+  /** The call's log, kept while it runs when the caller asked for its tail. */
+  tail?: LogTail;
+  /** Lambda's ClientContext, as the caller sent it. */
+  clientContext?: unknown;
 }
 
 let worker: Worker | undefined;
@@ -140,10 +148,21 @@ let shuttingDown = false;
 /** The current worker's stdout, forwarded by this thread: the runtime's own lines start a line of their own. */
 let stdoutRelay: OutputRelay | undefined;
 
-/** One of the runtime's own lines, after any line the user's output left open. */
+/** One of the runtime's own lines, after any line the user's output left open; the call running's log keeps it. */
 function line(text: string): void {
   stdoutRelay?.endLine();
   console.log(text);
+  current?.tail?.line(text);
+}
+
+/** This process's stream the worker's output on it is forwarded to: the call running's log keeps what it gets. */
+function keptBy(stream: Stream): { write(text: string): unknown } {
+  return {
+    write: (text: string) => {
+      current?.tail?.add(stream, text);
+      return process[stream].write(text);
+    },
+  };
 }
 
 function log(fields: Record<string, unknown>): void {
@@ -173,6 +192,7 @@ function invocationHeaders(inv: Invocation): Record<string, string> {
     'x-ff-request-id': inv.requestId,
     'x-ff-duration-ms': (inv.durationMs ?? 0).toFixed(2),
     'x-ff-max-memory-used-mb': String(maxMemoryUsedMb()),
+    ...(inv.tail ? { 'x-ff-log-result': inv.tail.base64() } : {}),
   };
 }
 
@@ -198,8 +218,8 @@ function startWorker(): void {
   });
   worker = w;
   const relays = {
-    stdout: new OutputRelay(process.stdout, (id) => gen === generation && onEndOfCall(id, 'stdout')),
-    stderr: new OutputRelay(process.stderr, (id) => gen === generation && onEndOfCall(id, 'stderr')),
+    stdout: new OutputRelay(keptBy('stdout'), (id) => gen === generation && onEndOfCall(id, 'stdout')),
+    stderr: new OutputRelay(keptBy('stderr'), (id) => gen === generation && onEndOfCall(id, 'stderr')),
   };
   stdoutRelay = relays.stdout;
   for (const name of ['stdout', 'stderr'] as const) {
@@ -349,7 +369,6 @@ function onCrash(errorType: string, errorMessage: string): void {
 function finish(inv: Invocation): void {
   if (inv.timer) clearTimeout(inv.timer);
   clearTimeout(inv.outputTimer);
-  if (current === inv) current = undefined;
   inv.durationMs = inv.startedAt === undefined ? 0 : (inv.endedAt ?? performance.now()) - inv.startedAt;
   line(`END RequestId: ${inv.requestId}`);
   line(
@@ -357,6 +376,8 @@ function finish(inv: Invocation): void {
       `Billed Duration: ${Math.ceil(inv.durationMs)} ms\tMemory Size: ${memoryLimitMb} MB\t` +
       `Max Memory Used: ${maxMemoryUsedMb()} MB`,
   );
+  // Its log ends with its REPORT: what comes after is no call's, or the next one's.
+  if (current === inv) current = undefined;
 }
 
 function onTimeout(inv: Invocation): void {
@@ -389,7 +410,14 @@ function dispatch(): void {
   line(`START RequestId: ${inv.requestId} Version: ${workerConfig.functionVersion}`);
   const target = inv;
   inv.timer = setTimeout(() => onTimeout(target), timeoutMs);
-  worker.postMessage({ type: 'invoke', id: inv.id, requestId: inv.requestId, event: inv.event, deadlineMs: Date.now() + timeoutMs });
+  worker.postMessage({
+    type: 'invoke',
+    id: inv.id,
+    requestId: inv.requestId,
+    event: inv.event,
+    deadlineMs: Date.now() + timeoutMs,
+    clientContext: inv.clientContext,
+  });
 }
 
 function readBody(req: http.IncomingMessage): Promise<Buffer | null> {
@@ -404,6 +432,23 @@ function readBody(req: http.IncomingMessage): Promise<Buffer | null> {
     req.on('end', () => resolve(size > MAX_PAYLOAD_BYTES ? null : Buffer.concat(chunks)));
     req.on('error', reject);
   });
+}
+
+/** A header's one value: the first, when it came twice. */
+const headerOf = (value: string | string[] | undefined): string | undefined => (Array.isArray(value) ? value[0] : value);
+
+/**
+ * Lambda's ClientContext from X-FF-Client-Context: the base64 of a JSON object, as the caller sent it to Lambda's
+ * Invoke, its padding optional as Lambda's; undefined without the header, null when it isn't one.
+ */
+function clientContextOf(header: string | undefined): Record<string, unknown> | undefined | null {
+  if (header === undefined) return undefined;
+  try {
+    const value: unknown = JSON.parse(Buffer.from(header, 'base64').toString('utf8'));
+    return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 function flattenHeaders(headers: http.IncomingHttpHeaders): Record<string, string> {
@@ -432,6 +477,11 @@ async function acceptInvocation(req: http.IncomingMessage, res: http.ServerRespo
       return;
     }
   }
+  const clientContext = clientContextOf(headerOf(req.headers['x-ff-client-context']));
+  if (clientContext === null) {
+    sendJson(res, 400, { errorType: 'InvalidRequestContentException', errorMessage: 'Client context must be a valid Base64-encoded JSON object.' });
+    return;
+  }
   if (state === 'failed' && initError) {
     sendJson(res, 500, initError, { 'x-ff-function-error': 'Unhandled' });
     return;
@@ -444,11 +494,12 @@ async function acceptInvocation(req: http.IncomingMessage, res: http.ServerRespo
     sendJson(res, 429, { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded' });
     return;
   }
-  const header = req.headers['x-ff-request-id'];
   const inv: Invocation = {
     id: nextId++,
-    requestId: (Array.isArray(header) ? header[0] : header) || randomUUID(),
+    requestId: headerOf(req.headers['x-ff-request-id']) || randomUUID(),
     res,
+    ...(headerOf(req.headers['x-ff-log-type']) === 'Tail' ? { tail: new LogTail() } : {}),
+    ...(clientContext !== undefined ? { clientContext } : {}),
     event:
       eventFormat === 'wrapped'
         ? { body, headers: flattenHeaders(req.headers), method: req.method ?? 'POST', query: Object.fromEntries(url.searchParams), path: url.pathname }

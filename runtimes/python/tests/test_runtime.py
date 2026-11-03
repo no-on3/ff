@@ -3,6 +3,7 @@ against one fixture on a free port. No Docker needed.
 
 Run from runtimes/python:  python3 -m unittest discover -s tests -v
 """
+import base64
 import json
 import os
 import signal
@@ -677,6 +678,129 @@ class CallOutput(RuntimeTest):
         self.assertEqual(len(written), 4, lines)  # three lines on stdout, one on stderr
         self.assertLess(max(written), timed_out)
         self.assertLess(timed_out, lines.index("END RequestId: req-late"))
+
+
+class WhatLambdasCallerAsksFor(RuntimeTest):
+    """A caller of Lambda's Invoke may ask for the call's last 4 KB of log, which the log store has only seconds later,
+    and may say who it is, in a client context the handler reads."""
+
+    @staticmethod
+    def tail_of(res):
+        return base64.b64decode(res.headers.get("x-ff-log-result", "")).decode(errors="replace")
+
+    def test_gives_back_the_call_s_log_from_its_start_to_its_report_both_streams_when_asked_and_nothing_when_not(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="5000")
+        rt.ready()
+
+        asked = rt.invoke({"lines": 2, "errors": 1}, {"x-ff-request-id": "req-tail", "x-ff-log-type": "Tail"})
+        not_asked = rt.invoke({"lines": 1}, {"x-ff-request-id": "req-none"})
+
+        self.assertEqual(asked.status, 200)
+        lines = self.tail_of(asked).split("\n")
+        self.assertEqual(lines[0], "START RequestId: req-tail Version: $LATEST")
+        # Each stream's lines come whole, in either stream's order, through pipes of their own; the line left open last.
+        self.assertEqual(sorted(lines[1:4]), ["req-tail: error 1", "req-tail: line 1", "req-tail: line 2"])
+        self.assertEqual(lines[4:6], ["req-tail: left open", "END RequestId: req-tail"])
+        self.assertRegex(lines[6], r"^REPORT RequestId: req-tail\tDuration: [\d.]+ ms\t.*\tMax Memory Used: \d+ MB$")
+        self.assertEqual(lines[7:], [""])
+        self.assertNotIn("x-ff-log-result", not_asked.headers)
+
+    def test_keeps_a_long_call_s_last_4_kb_its_report_last(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="5000")
+        rt.ready()
+
+        res = rt.invoke({"lines": 400, "errors": 0, "open": False}, {"x-ff-request-id": "req-long", "x-ff-log-type": "Tail"})
+
+        tail = base64.b64decode(res.headers["x-ff-log-result"])
+        self.assertEqual(len(tail), 4096)
+        self.assertNotIn(b"START RequestId", tail)
+        self.assertRegex(tail.decode(), r"req-long: line 400\nEND RequestId: req-long\nREPORT RequestId: req-long\t[^\n]+\n$")
+
+    def test_gives_back_the_log_of_a_call_that_raised_with_its_error_and_of_one_that_timed_out_with_the_timeout(self):
+        raises = self.start("throws")
+        times_out = self.start("timeout", FUNCTION_TIMEOUT="300")
+        raises.ready()
+        times_out.ready()
+
+        raised = raises.invoke({}, {"x-ff-request-id": "req-raised", "x-ff-log-type": "Tail"})
+        late = times_out.invoke({}, {"x-ff-request-id": "req-late", "x-ff-log-type": "Tail"})
+
+        self.assertFunctionError(raised, 500, "TypeError")
+        self.assertRegex(self.tail_of(raised),
+                         r'"msg": "function error", "requestId": "req-raised", "errorType": "TypeError"[^\n]*\nEND RequestId: req-raised\n')
+        self.assertFunctionError(late, 504, "Sandbox.Timedout")
+        self.assertRegex(self.tail_of(late), r'(?s)"msg": "task timed out; restarting worker", "requestId": "req-late".*\nEND RequestId: req-late\n')
+
+    def test_hands_the_caller_s_client_context_to_the_handler_as_lambda_s_objects_and_refuses_one_that_is_no_json_object(self):
+        rt = self.start("client-context")
+        rt.ready()
+        said = {"client": {"installation_id": "i-1", "app_title": "shop"}, "custom": {"cart": "7"}, "env": {"locale": "ar-TN"}}
+
+        def header(text):
+            return {"x-ff-client-context": base64.b64encode(text.encode()).decode()}
+
+        given = rt.invoke({}, header(json.dumps(said)))
+        without_client = rt.invoke({}, header(json.dumps({"custom": {"cart": "8"}})))
+        none = rt.invoke({})
+        refusals = [rt.invoke({}, header(text)) for text in ("not json", "[1]", "null", "NaN")]
+        unpadded = rt.invoke({}, {"x-ff-client-context": "e30"})  # "{}", its padding left out, as Lambda takes it
+
+        self.assertEqual(given.json, {
+            "custom": {"cart": "7"},
+            "env": {"locale": "ar-TN"},
+            "client": {"installation_id": "i-1", "app_title": "shop", "app_version_name": None, "app_version_code": None,
+                       "app_package_name": None},
+            "slots": False,
+        })
+        self.assertEqual(without_client.json, {"custom": {"cart": "8"}, "env": None, "client": None, "slots": False})
+        self.assertIsNone(none.json)
+        self.assertEqual(unpadded.json, {"custom": None, "env": None, "client": None, "slots": False})
+        message = "Client context must be a valid Base64-encoded JSON object."
+        for res in refusals:
+            self.assertEqual((res.status, res.json["errorType"], res.json["errorMessage"]), (400, "InvalidRequestContentException", message))
+
+
+class LogTailMerging(unittest.TestCase):
+    """The log of a call a caller of Lambda's Invoke asks for: both streams merged line by line, its last 4 KB."""
+
+    @staticmethod
+    def text_of(tail):
+        return base64.b64decode(tail.base64()).decode()
+
+    def test_keeps_a_line_written_in_parts_whole_the_other_stream_s_lines_after_it(self):
+        from ff_runtime.output import LogTail
+        tail = LogTail()
+
+        tail.line(b"START\n")
+        tail.add("stdout", b"one, ")
+        tail.add("stderr", b"an error\n")
+        tail.add("stdout", b"two\nthree, ")
+        tail.add("stdout", b"four\n")
+        tail.line(b"END\n")
+
+        self.assertEqual(self.text_of(tail), "START\nan error\none, two\nthree, four\nEND\n")
+
+    def test_ends_the_lines_the_streams_left_open_before_the_runtime_s_own(self):
+        from ff_runtime.output import LogTail
+        tail = LogTail()
+
+        tail.add("stdout", b"open on stdout")
+        tail.add("stderr", b"open on stderr")
+        tail.line(b"END\n")
+        tail.line(b"REPORT\n")
+
+        self.assertEqual(self.text_of(tail), "open on stdout\nopen on stderr\nEND\nREPORT\n")
+
+    def test_gives_back_the_last_4_kb_of_a_line_left_open_as_of_the_others(self):
+        from ff_runtime.output import LOG_TAIL_BYTES, LogTail
+        tail = LogTail()
+
+        tail.add("stdout", b"x" * (3 * LOG_TAIL_BYTES))
+        tail.line(b"END\n")
+        kept = base64.b64decode(tail.base64())
+
+        self.assertEqual(len(kept), LOG_TAIL_BYTES)
+        self.assertEqual(kept, b"x" * (LOG_TAIL_BYTES - len(b"\nEND\n")) + b"\nEND\n")
 
 
 class Secrets(RuntimeTest):

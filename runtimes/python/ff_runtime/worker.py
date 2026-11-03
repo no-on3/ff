@@ -35,10 +35,40 @@ class InitError(Exception):
         self.error_type = error_type
 
 
+class Client:
+    """The app that called, as the caller said in its client context: context.client_context.client, as on Lambda."""
+
+    __slots__ = ("installation_id", "app_title", "app_version_name", "app_version_code", "app_package_name")
+
+
+class ClientContext:
+    """What the caller of Lambda's Invoke said of itself: context.client_context, as on Lambda."""
+
+    __slots__ = ("custom", "env", "client")
+
+
+def from_fields(kind, fields):
+    """An object of kind with each of its attributes taken from the dict fields, None for those fields lacks."""
+    made = kind()
+    for name in kind.__slots__:
+        setattr(made, name, fields.get(name))
+    return made
+
+
+def client_context_from(fields):
+    """Lambda's Python runtime's ClientContext, its client a Client, from the JSON object the caller sent; None for none."""
+    if fields is None:
+        return None
+    context = from_fields(ClientContext, fields)
+    if isinstance(context.client, dict):
+        context.client = from_fields(Client, context.client)
+    return context
+
+
 class Context:
     """The handler's context argument, with the attributes of AWS Lambda's Python runtime."""
 
-    def __init__(self, request_id, deadline_ms):
+    def __init__(self, request_id, deadline_ms, client_context=None):
         self.function_name = FUNCTION_NAME
         self.function_version = FUNCTION_VERSION
         self.invoked_function_arn = ""
@@ -48,7 +78,7 @@ class Context:
         self.log_group_name = ""
         self.log_stream_name = ""
         self.identity = None
-        self.client_context = None
+        self.client_context = client_context_from(client_context)
         self._deadline_ms = deadline_ms
 
     def get_remaining_time_in_millis(self):
@@ -162,10 +192,10 @@ def log_error(request_id, error):
     )
 
 
-def run_once(handler, request_id, event, deadline_ms):
+def run_once(handler, request_id, event, deadline_ms, client_context=None):
     """Runs one invocation and returns the message for main.py. MemoryError propagates."""
     try:
-        value = handler(event, Context(request_id, deadline_ms))
+        value = handler(event, Context(request_id, deadline_ms, client_context))
     except MemoryError:
         raise
     except Exception as error:
@@ -204,11 +234,11 @@ def end_output(request_id):
 def serve(sock, handler):
     while True:
         try:
-            _, request_id, event, deadline_ms = protocol.recv(sock)
+            _, request_id, event, deadline_ms, client_context = protocol.recv(sock)
         except EOFError:
             return  # main.py went away
         try:
-            message = run_once(handler, request_id, event, deadline_ms)
+            message = run_once(handler, request_id, event, deadline_ms, client_context)
         except MemoryError:
             message = None  # leave the except block first so the hoarded memory is released
         end_output(request_id)

@@ -6,7 +6,11 @@ call's output must come before its END. The worker marks the end of each call's
 output on both streams (protocol.END_OF_CALL), after what the call wrote; main.py
 prints END once both markers have come, or both streams have ended, the worker
 gone. The markers never reach the output.
+
+When the caller asks for a call's log (X-FF-Log-Type: Tail), the Output keeps what
+it writes from the call's START to its REPORT in a LogTail.
 """
+import base64
 import os
 import threading
 
@@ -15,6 +19,8 @@ from ff_runtime.protocol import END_OF_CALL
 STREAMS = {"stdout": 1, "stderr": 2}
 # Calls whose markers are kept for main.py to wait on: a marker that came after its call's wait ended is dropped.
 KEPT_CALLS = 16
+# How much of a call's log Lambda gives back with LogType Tail: its last 4 KB.
+LOG_TAIL_BYTES = 4096
 
 
 def held_from(data):
@@ -28,6 +34,37 @@ def held_from(data):
     return len(data)
 
 
+class LogTail:
+    """A call's log as this process writes it, the runtime's lines and the worker's output on both streams, merged
+    line by line: a line a stream left open waits for its end, so that the other stream's lines don't split it, and
+    the runtime's next line ends it. Its last LOG_TAIL_BYTES, which base64() gives as Lambda's X-Amz-Log-Result."""
+
+    def __init__(self):
+        self.data = b""
+        self.open = {stream: b"" for stream in STREAMS}  # what each stream wrote of a line it hasn't ended yet
+
+    def add(self, stream, data):
+        """What the worker wrote on a stream: its lines are kept as they end."""
+        held = self.open[stream] + data
+        end = held.rfind(b"\n") + 1
+        self.open[stream] = held[end:][-LOG_TAIL_BYTES:]
+        self._keep(held[:end])
+
+    def line(self, data):
+        """One of the runtime's own lines, after each line the streams left open, ended."""
+        for stream, held in self.open.items():
+            if held:
+                self._keep(held + b"\n")
+                self.open[stream] = b""
+        self._keep(data)
+
+    def base64(self):
+        return base64.b64encode(self.data).decode()
+
+    def _keep(self, data):
+        self.data = (self.data + data)[-LOG_TAIL_BYTES:]
+
+
 class Output:
     """This process's stdout and stderr, written from several threads: the worker's output and the runtime's lines."""
 
@@ -35,17 +72,28 @@ class Output:
         self.lock = threading.Lock()
         # Whether the last write to a stream left a line open: the runtime's own lines start a line of their own.
         self.open_line = {stream: False for stream in STREAMS}
+        self.tail = None  # the log of the call running, when its caller asked for it
+
+    def keep_tail(self, tail):
+        """What is written from now on goes to tail as well; None stops it."""
+        with self.lock:
+            self.tail = tail
 
     def line(self, text):
         """One of the runtime's own lines, on stdout, after any line the worker's output left open there."""
+        data = text.encode() + b"\n"
         with self.lock:
-            self._write("stdout", (b"\n" if self.open_line["stdout"] else b"") + text.encode() + b"\n")
+            self._write("stdout", (b"\n" if self.open_line["stdout"] else b"") + data)
+            if self.tail is not None:
+                self.tail.line(data)
 
     def forward(self, stream, data):
         """The worker's output, as it came."""
         if data:
             with self.lock:
                 self._write(stream, data)
+                if self.tail is not None:
+                    self.tail.add(stream, data)
 
     def _write(self, stream, data):
         self.open_line[stream] = not data.endswith(b"\n")
