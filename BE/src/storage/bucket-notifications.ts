@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { invalidArgument, malformedXml } from './s3-error';
-import { S3_NAMESPACE, escapeXml } from './xml';
+import { S3_NAMESPACE, XML_DECLARATION, escapeXml } from './xml';
 import { childText, childrenNamed, readS3Document } from './xml-reader';
 
 /** Where a rule's events go: a function of the account, called without waiting, as S3 calls Lambda; or a queue of it, a message each. */
@@ -138,7 +138,7 @@ export function rulesXml(rules: NotificationRule[]): string {
     return `<${name}><Id>${escapeXml(rule.id)}</Id><${arn}>${escapeXml(rule.arn)}</${arn}>${events}${filterXml(rule)}</${name}>`;
   };
   const ordered = [...rules.filter((rule) => rule.target === 'queue'), ...rules.filter((rule) => rule.target === 'function')];
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<NotificationConfiguration xmlns="${S3_NAMESPACE}">${ordered.map(element).join('')}</NotificationConfiguration>`;
+  return `${XML_DECLARATION}<NotificationConfiguration xmlns="${S3_NAMESPACE}">${ordered.map(element).join('')}</NotificationConfiguration>`;
 }
 
 /** A configuration's key filter, as S3's API names it in JSON. */

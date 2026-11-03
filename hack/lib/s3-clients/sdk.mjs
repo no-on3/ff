@@ -129,6 +129,23 @@ await check('ok', "a bucket's tags: CreateBucket's, read by GetBucketTagging; Pu
   await virtual.send(new s3.DeleteBucketCommand({ Bucket: name }));
   return expect(`${made} ${replaced} ${refused} ${none}`, 'team=web cost centre=42,stage=dev InvalidTag NoSuchTagSet');
 });
+await check('ok', "a bucket's settings FF's buckets don't have, read as S3 answers a bucket without them, as Terraform reads them at each plan", async () => {
+  const read = (Command) => virtual.send(new Command({ Bucket: BUCKET }));
+  const none = await Promise.all([
+    refusedAs('NoSuchBucketPolicy', read(s3.GetBucketPolicyCommand)),
+    refusedAs('NoSuchCORSConfiguration', read(s3.GetBucketCorsCommand)),
+    refusedAs('NoSuchLifecycleConfiguration', read(s3.GetBucketLifecycleConfigurationCommand)),
+    refusedAs('ReplicationConfigurationNotFoundError', read(s3.GetBucketReplicationCommand)),
+    refusedAs('ServerSideEncryptionConfigurationNotFoundError', read(s3.GetBucketEncryptionCommand)),
+    refusedAs('ObjectLockConfigurationNotFoundError', read(s3.GetObjectLockConfigurationCommand)),
+  ]);
+  const versioning = (await read(s3.GetBucketVersioningCommand)).Status ?? 'never';
+  const logging = (await read(s3.GetBucketLoggingCommand)).LoggingEnabled ?? 'never';
+  const payer = (await read(s3.GetBucketRequestPaymentCommand)).Payer;
+  const grants = (await read(s3.GetBucketAclCommand)).Grants.map((grant) => grant.Permission).join(',');
+  const ownership = (await read(s3.GetBucketOwnershipControlsCommand)).OwnershipControls.Rules[0].ObjectOwnership;
+  return expect(`${none.length} ${versioning} ${logging} ${payer} ${grants} ${ownership}`, '6 never never BucketOwner FULL_CONTROL BucketOwnerEnforced');
+});
 await check('ok', "CreateBucket of another account's bucket's name, BucketAlreadyExists; of its own, BucketAlreadyOwnedByYou", async () => {
   const configuration = { LocationConstraint: region };
   const theirs = await refusedAs('BucketAlreadyExists', virtual.send(new s3.CreateBucketCommand({ Bucket: OTHER_BUCKET, CreateBucketConfiguration: configuration })));

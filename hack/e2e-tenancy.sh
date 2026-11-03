@@ -1021,6 +1021,8 @@ $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-tagging -
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-tagging --bucket l5-photos-a --tagging 'TagSet=[{Key=team,Value=b}]') \
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-tagging --bucket l5-photos-a) \
 $(sql_value "SELECT string_agg(t.key || '=' || t.value, ',') FROM resource_tags t JOIN buckets b ON b.id = t.bucket_id WHERE b.name = 'l5-photos-a'")"
+check "  ... nor reads its settings, its ACL and versioning among them" "refused AccessDenied refused AccessDenied" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-acl --bucket l5-photos-a) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-versioning --bucket l5-photos-a)"
 check "B's key can neither delete A's bucket through S3, AccessDenied, nor take its name, BucketAlreadyExists: it stays A's" \
   "refused AccessDenied refused BucketAlreadyExists $account_a" \
   "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 rb s3://l5-photos-a) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 mb s3://l5-photos-a) \

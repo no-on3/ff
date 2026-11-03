@@ -76,6 +76,23 @@ def bucket_tags():
     return f"{same(kept, [{'Key': 'team', 'Value': 'shop'}]) and 'replaced'} {none}"
 
 
+def unset_settings():
+    missing = [refused_as(code, lambda read=read: read(Bucket=bucket)) for code, read in [
+        ("NoSuchBucketPolicy", s3.get_bucket_policy),
+        ("NoSuchCORSConfiguration", s3.get_bucket_cors),
+        ("NoSuchLifecycleConfiguration", s3.get_bucket_lifecycle_configuration),
+        ("ReplicationConfigurationNotFoundError", s3.get_bucket_replication),
+        ("ServerSideEncryptionConfigurationNotFoundError", s3.get_bucket_encryption),
+        ("ObjectLockConfigurationNotFoundError", s3.get_object_lock_configuration),
+    ]]
+    same(s3.get_bucket_versioning(Bucket=bucket).get("Status"), None)
+    same(s3.get_bucket_accelerate_configuration(Bucket=bucket).get("Status"), None)
+    same(s3.get_bucket_logging(Bucket=bucket).get("LoggingEnabled"), None)
+    same(s3.get_bucket_request_payment(Bucket=bucket)["Payer"], "BucketOwner")
+    same([grant["Permission"] for grant in s3.get_bucket_acl(Bucket=bucket)["Grants"]], ["FULL_CONTROL"])
+    return f"{len(missing)} none, the rest a new bucket's"
+
+
 def fetch(url, method="GET", data=None):
     request = urllib.request.Request(url, method=method, data=data)
     with urllib.request.urlopen(request) as answer:
@@ -118,3 +135,4 @@ check("ok", "copies, then deletes a batch", lambda: (s3.copy_object(Bucket=bucke
 check("ok", "create_bucket in FF's region; delete_bucket refused while it holds a file, BucketNotEmpty, then deleted", bucket_life)
 check("ok", "create_bucket in another region, IllegalLocationConstraintException; a name AWS keeps, InvalidBucketName", bucket_refusals)
 check("ok", "a bucket's tags put, the second set replacing the first, read, then deleted: NoSuchTagSet", bucket_tags)
+check("ok", "a bucket's settings FF's buckets don't have, read as S3 answers a bucket without them", unset_settings)

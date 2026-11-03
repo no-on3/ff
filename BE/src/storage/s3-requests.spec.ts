@@ -42,6 +42,28 @@ describe('the operation a request is', () => {
     expect(of('GET', bucket, 'tagging&policy')).toBe('NotImplemented tier2');
   });
 
+  it("the bucket's settings FF's buckets don't have, each read as a GET, which S3 answers for a bucket without it; set, NotImplemented", () => {
+    const reads = {
+      policy: 'GetBucketPolicy',
+      acl: 'GetBucketAcl',
+      cors: 'GetBucketCors',
+      versioning: 'GetBucketVersioning',
+      accelerate: 'GetBucketAccelerateConfiguration',
+      requestPayment: 'GetBucketRequestPayment',
+      logging: 'GetBucketLogging',
+      lifecycle: 'GetBucketLifecycleConfiguration',
+      replication: 'GetBucketReplication',
+      encryption: 'GetBucketEncryption',
+      'object-lock': 'GetObjectLockConfiguration',
+      ownershipControls: 'GetBucketOwnershipControls',
+    };
+    for (const [parameter, name] of Object.entries(reads)) {
+      expect(of('GET', bucket, `${parameter}&x-id=${name}`)).toBe(`${name} tier2`);
+      expect(of('PUT', bucket, parameter)).toBe('NotImplemented tier2');
+    }
+    expect(of('GET', object, 'acl')).toBe('NotImplemented tier2');
+  });
+
   it("the bucket's: listings, its location, the bucket itself, a batch of deletes", () => {
     expect(of('GET', { ...bucket, bucket: '' })).toBe('ListBuckets tier1');
     expect(of('GET', bucket, 'list-type=2&prefix=2026%2F&delimiter=%2F&max-keys=100&x-id=ListObjectsV2')).toBe('ListObjectsV2 tier1');
@@ -81,9 +103,9 @@ describe('the operation a request is', () => {
     expect(of('GET', object, `${presigned}&x-amz-checksum-mode=ENABLED&x-id=GetObject`)).toBe('GetObject tier2');
   });
 
-  it("anything else answers NotImplemented: a bucket's policy, an object's tags, versions", () => {
+  it("anything else answers NotImplemented: a bucket's policy set, its public access block, an object's tags, versions", () => {
     for (const [method, address, query] of [
-      ['GET', bucket, 'policy'],
+      ['GET', bucket, 'publicAccessBlock'],
       ['PUT', bucket, 'policy'],
       ['GET', bucket, 'versions'],
       ['GET', bucket, 'list-type=2&acl'],

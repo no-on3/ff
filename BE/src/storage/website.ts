@@ -1,5 +1,5 @@
 import { S3Error, invalidArgument, malformedXml, notImplemented } from './s3-error';
-import { S3_NAMESPACE, escapeXml } from './xml';
+import { S3_NAMESPACE, XML_DECLARATION, escapeXml } from './xml';
 import { XmlElement, childText, childrenNamed, readS3Document } from './xml-reader';
 
 /**
@@ -76,7 +76,7 @@ export function websiteFromXml(xml: string, current: WebsiteConfiguration | null
 export function websiteXml(website: WebsiteConfiguration): string {
   const error = website.errorDocument === null ? '' : `<ErrorDocument><Key>${escapeXml(website.errorDocument)}</Key></ErrorDocument>`;
   return (
-    '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    XML_DECLARATION +
     `<WebsiteConfiguration xmlns="${S3_NAMESPACE}"><IndexDocument><Suffix>${escapeXml(website.indexDocument)}</Suffix></IndexDocument>${error}</WebsiteConfiguration>`
   );
 }

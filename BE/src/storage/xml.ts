@@ -3,7 +3,8 @@ import { Transform } from 'node:stream';
 /** S3's namespace, which its answers declare. */
 export const S3_NAMESPACE = 'http://s3.amazonaws.com/doc/2006-03-01/';
 
-const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>\n';
+/** The declaration S3's documents begin with. */
+export const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>\n';
 
 /** Text made safe in an XML element or attribute. */
 export function escapeXml(text: string): string {

@@ -1,5 +1,6 @@
 import { IncomingHttpHeaders } from 'node:http';
 import { decodeEscapes } from '../common/signature-v4';
+import { UNSET_SETTINGS } from './bucket-defaults';
 
 /** A request's bucket and key: by its host (virtual-hosted) or its path's first segment (path-style). */
 export interface S3Address {
@@ -57,8 +58,8 @@ const NOT_IMPLEMENTED = op('NotImplemented', 'tier2');
 
 /**
  * The operation a request is, from its method, its address and its query, as
- * S3 tells them apart; anything else, a bucket's policy or an object's tags
- * among them, is NotImplemented. Its parameters must all be the operation's.
+ * S3 tells them apart; anything else, a bucket's policy set or an object's
+ * tags among them, is NotImplemented. Its parameters must all be the operation's.
  */
 export function operationOf(method: string, address: S3Address, query: URLSearchParams, headers: IncomingHttpHeaders): S3Operation {
   const names = [...new Set(query.keys())].filter((name) => !ALWAYS.test(name));
@@ -78,6 +79,10 @@ export function operationOf(method: string, address: S3Address, query: URLSearch
     if (method === 'GET' && has('tagging') && only('tagging')) return op('GetBucketTagging', 'tier2');
     if (method === 'PUT' && has('tagging') && only('tagging')) return op('PutBucketTagging', 'tier1', true);
     if (method === 'DELETE' && has('tagging') && only('tagging')) return op('DeleteBucketTagging', 'free', true);
+    if (method === 'GET' && names.length === 1) {
+      const unset = Object.entries(UNSET_SETTINGS).find(([, setting]) => setting.parameter === names[0]);
+      if (unset) return op(unset[0], 'tier2');
+    }
     if (method === 'GET' && has('uploads') && only(UPLOADS_LISTING)) return op('ListMultipartUploads', 'tier1');
     if (method === 'GET' && only(LISTING)) return op(query.get('list-type') === '2' ? 'ListObjectsV2' : 'ListObjects', 'tier1');
     if (method === 'HEAD' && names.length === 0) return op('HeadBucket', 'tier2');

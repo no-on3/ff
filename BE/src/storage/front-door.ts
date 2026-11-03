@@ -25,6 +25,7 @@ import { BucketNotificationsService, ChangedBy } from './bucket-notifications.se
 import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket } from './bucket.entity';
 import { BucketsService } from './buckets.service';
+import { UNSET_SETTINGS } from './bucket-defaults';
 import { noSuchTagSet, taggingFromXml, taggingXml } from './bucket-tagging';
 import { CHECKSUM_ALGORITHMS, isChecksumAlgorithm } from './checksums';
 import { fullBuckets } from './bucket-storage';
@@ -366,6 +367,13 @@ export class S3FrontDoor implements OnModuleDestroy {
       await this.admitUpload(key.accountId);
     }
     if (operation.name === 'GetBucketLocation') return this.document(exchange, 200, locationDocument(this.region));
+    // The settings FF's buckets don't have, read as S3 answers a bucket without them.
+    const unset = UNSET_SETTINGS[operation.name];
+    if (unset) {
+      const answer = unset.answer(bucket.accountId);
+      if (answer instanceof S3Error) throw answer;
+      return this.document(exchange, 200, answer);
+    }
     if (operation.name === 'HeadBucket') return this.emptyAnswer(exchange, 200, { 'x-amz-bucket-region': this.region });
     return this.forward(exchange, signature, chain, key, bucket, operation, plan);
   }

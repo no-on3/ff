@@ -1,4 +1,4 @@
-import { escapeXml } from './xml';
+import { XML_DECLARATION, escapeXml } from './xml';
 
 /**
  * An answer the front door gives itself, in S3's words: its status, its code
@@ -53,7 +53,7 @@ export const accountProblem = (why: string) =>
 /** S3's error document: its code and message, the resource asked for, and the request's ID. */
 export function errorDocument(error: S3Error, requestId: string, resource?: string): string {
   return (
-    '<?xml version="1.0" encoding="UTF-8"?>\n<Error>' +
+    `${XML_DECLARATION}<Error>` +
     `<Code>${escapeXml(error.code)}</Code><Message>${escapeXml(error.message)}</Message>` +
     (resource ? `<Resource>${escapeXml(resource)}</Resource>` : '') +
     `<RequestId>${escapeXml(requestId)}</RequestId></Error>`

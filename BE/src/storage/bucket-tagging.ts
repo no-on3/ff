@@ -1,6 +1,6 @@
 import { tagsProblem } from '../tags/tag-rules';
 import { S3Error, malformedXml } from './s3-error';
-import { S3_NAMESPACE, escapeXml } from './xml';
+import { S3_NAMESPACE, XML_DECLARATION, escapeXml } from './xml';
 import { XmlElement, childrenNamed, readS3Document } from './xml-reader';
 
 export const invalidTag = (message: string) => new S3Error(400, 'InvalidTag', message);
@@ -39,5 +39,5 @@ export function taggingXml(tags: Record<string, string>): string {
   const tagSet = Object.entries(tags)
     .map(([key, value]) => `<Tag><Key>${escapeXml(key)}</Key><Value>${escapeXml(value)}</Value></Tag>`)
     .join('');
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<Tagging xmlns="${S3_NAMESPACE}"><TagSet>${tagSet}</TagSet></Tagging>`;
+  return `${XML_DECLARATION}<Tagging xmlns="${S3_NAMESPACE}"><TagSet>${tagSet}</TagSet></Tagging>`;
 }

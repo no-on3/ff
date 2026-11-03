@@ -110,3 +110,13 @@ Terraform's provider puts its `default_tags` on each bucket it makes, by `PutBuc
 - **`ff export`** gives a role that tags buckets `s3:GetBucketTagging` and `s3:PutBucketTagging`, which S3 also asks for a removal.
 - **Measured** with the SDK for JavaScript (`CreateBucket`'s tags, a set replacing them, a key AWS keeps refused, `NoSuchTagSet` after the removal), boto3 and the AWS CLI (`s3api put-bucket-tagging`, `get-bucket-tagging`) in L4, and in L5 a key of one account that neither reads nor changes another's.
 
+## As built: a bucket's other settings, read as S3 answers a bucket without them (X-11, part 1, 2026-11-03)
+
+Terraform's provider reads every setting of a bucket at each plan, and AWS's CLI and SDKs read some of them too. Each answered `NotImplemented`, which the provider 6.69.1 passes over as none, but which other tools take for an error. They are now answered as S3 answers a bucket that has none, from one table (`BE/src/storage/bucket-defaults.ts`), so that what they read is so:
+
+- **None, in S3's `404`:** a policy (`NoSuchBucketPolicy`), CORS (`NoSuchCORSConfiguration`), a lifecycle (`NoSuchLifecycleConfiguration`), replication (`ReplicationConfigurationNotFoundError`), Object Lock (`ObjectLockConfigurationNotFoundError`) and an encryption setting (`ServerSideEncryptionConfigurationNotFoundError`). S3 has answered SSE-S3 for every bucket since 2023; FF's buckets have no such setting, and FF claims none.
+- **A new bucket's, in S3's documents:** versioning, acceleration and logging never turned on (each an empty document), the owner paying for requests (`BucketOwner`), the owner's full control the one grant of its ACL, and `BucketOwnerEnforced` its ownership, as FF's buckets are.
+- **Each a `GET`,** billed and counted as one, a `404` too; a read-only key reads them; another account's bucket answers `AccessDenied` first. Setting any of them still answers `NotImplemented`.
+- **`ff export`** allows each by S3's own action (`s3:GetBucketCORS`, `s3:GetLifecycleConfiguration`, `s3:GetEncryptionConfiguration`, …).
+- **Measured** with the SDK for JavaScript and boto3 (each read) and the AWS CLI (`get-bucket-policy`, `get-bucket-request-payment`, `get-bucket-versioning`) in L4, and in L5 a key of one account that reads none of another's.
+

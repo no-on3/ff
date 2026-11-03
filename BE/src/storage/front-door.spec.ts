@@ -7,10 +7,22 @@ import {
   DeleteBucketWebsiteCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
+  GetBucketAccelerateConfigurationCommand,
+  GetBucketAclCommand,
+  GetBucketCorsCommand,
+  GetBucketEncryptionCommand,
+  GetBucketLifecycleConfigurationCommand,
   GetBucketLocationCommand,
+  GetBucketLoggingCommand,
   GetBucketNotificationConfigurationCommand,
+  GetBucketOwnershipControlsCommand,
+  GetBucketPolicyCommand,
+  GetBucketReplicationCommand,
+  GetBucketRequestPaymentCommand,
   GetBucketTaggingCommand,
+  GetBucketVersioningCommand,
   GetBucketWebsiteCommand,
+  GetObjectLockConfigurationCommand,
   GetObjectCommand,
   HeadBucketCommand,
   ListBucketsCommand,
@@ -586,6 +598,53 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       expect(await refused(client(READ_ONLY).send(new DeleteBucketTaggingCommand({ Bucket: 'photos' })))).toBe('403 AccessDenied');
       expect(await refused(client().send(new GetBucketTaggingCommand({ Bucket: 'theirs' })))).toBe('403 AccessDenied');
       expect(bucketChanges).toEqual([]);
+    });
+  });
+
+  describe("a bucket's settings FF's buckets don't have, read as S3 answers a bucket without them", () => {
+    it("answers that there is none: no policy, CORS, lifecycle, replication, encryption or Object Lock of its own, in S3's errors", async () => {
+      const answers = await Promise.all([
+        refused(client().send(new GetBucketPolicyCommand({ Bucket: 'photos' }))),
+        refused(client().send(new GetBucketCorsCommand({ Bucket: 'photos' }))),
+        refused(client().send(new GetBucketLifecycleConfigurationCommand({ Bucket: 'photos' }))),
+        refused(client().send(new GetBucketReplicationCommand({ Bucket: 'photos' }))),
+        refused(client().send(new GetBucketEncryptionCommand({ Bucket: 'photos' }))),
+        refused(client().send(new GetObjectLockConfigurationCommand({ Bucket: 'photos' }))),
+      ]);
+
+      expect(answers).toEqual([
+        '404 NoSuchBucketPolicy',
+        '404 NoSuchCORSConfiguration',
+        '404 NoSuchLifecycleConfiguration',
+        '404 ReplicationConfigurationNotFoundError',
+        '404 ServerSideEncryptionConfigurationNotFoundError',
+        '404 ObjectLockConfigurationNotFoundError',
+      ]);
+      // Each counted, as S3 bills a request it refuses, and the store never asked.
+      expect(counted.map((request) => `${request.method} ${request.class} ${request.status}`)).toEqual(Array(6).fill('GET tier2 404'));
+      expect(seen).toEqual([]);
+    });
+
+    it('answers the rest as S3 does for a new bucket: versioning, acceleration and logging never on, the owner paying, and owning every object without ACLs; a read-only key reads them', async () => {
+      const reader = client(READ_ONLY);
+      const versioning = await reader.send(new GetBucketVersioningCommand({ Bucket: 'photos' }));
+      const accelerate = await reader.send(new GetBucketAccelerateConfigurationCommand({ Bucket: 'photos' }));
+      const logging = await reader.send(new GetBucketLoggingCommand({ Bucket: 'photos' }));
+      const payment = await reader.send(new GetBucketRequestPaymentCommand({ Bucket: 'photos' }));
+      const ownership = await reader.send(new GetBucketOwnershipControlsCommand({ Bucket: 'photos' }));
+      const acl = await reader.send(new GetBucketAclCommand({ Bucket: 'photos' }));
+
+      expect([versioning.Status, versioning.MFADelete, accelerate.Status, logging.LoggingEnabled, payment.Payer]).toEqual([undefined, undefined, undefined, undefined, 'BucketOwner']);
+      expect(ownership.OwnershipControls?.Rules).toEqual([{ ObjectOwnership: 'BucketOwnerEnforced' }]);
+      const owner = { ID: KEY.accountId, DisplayName: KEY.accountId };
+      expect([acl.Owner, acl.Grants]).toEqual([owner, [{ Grantee: { ...owner, Type: 'CanonicalUser' }, Permission: 'FULL_CONTROL' }]]);
+      // Each a GET, as S3 bills it.
+      expect(counted.map((request) => `${request.method} ${request.class} ${request.status}`)).toEqual(Array(6).fill('GET tier2 200'));
+    });
+
+    it("refuses another account's bucket, AccessDenied, before it answers", async () => {
+      expect(await refused(client().send(new GetBucketVersioningCommand({ Bucket: 'theirs' })))).toBe('403 AccessDenied');
+      expect(await refused(client().send(new GetBucketPolicyCommand({ Bucket: 'theirs' })))).toBe('403 AccessDenied');
     });
   });
 

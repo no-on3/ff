@@ -131,6 +131,19 @@ fn s3_action(operation: &str) -> Option<(&'static str, Scope)> {
         "GetBucketTagging" => ("s3:GetBucketTagging", Scope::Bucket),
         // S3 allows the removal of a bucket's tags by the action that puts them: it has no other.
         "PutBucketTagging" | "DeleteBucketTagging" => ("s3:PutBucketTagging", Scope::Bucket),
+        // A bucket's settings FF's buckets don't have, which tools read all the same.
+        "GetBucketPolicy" => ("s3:GetBucketPolicy", Scope::Bucket),
+        "GetBucketAcl" => ("s3:GetBucketAcl", Scope::Bucket),
+        "GetBucketCors" => ("s3:GetBucketCORS", Scope::Bucket),
+        "GetBucketVersioning" => ("s3:GetBucketVersioning", Scope::Bucket),
+        "GetBucketAccelerateConfiguration" => ("s3:GetAccelerateConfiguration", Scope::Bucket),
+        "GetBucketRequestPayment" => ("s3:GetBucketRequestPayment", Scope::Bucket),
+        "GetBucketLogging" => ("s3:GetBucketLogging", Scope::Bucket),
+        "GetBucketLifecycleConfiguration" => ("s3:GetLifecycleConfiguration", Scope::Bucket),
+        "GetBucketReplication" => ("s3:GetReplicationConfiguration", Scope::Bucket),
+        "GetBucketEncryption" => ("s3:GetEncryptionConfiguration", Scope::Bucket),
+        "GetObjectLockConfiguration" => ("s3:GetBucketObjectLockConfiguration", Scope::Bucket),
+        "GetBucketOwnershipControls" => ("s3:GetBucketOwnershipControls", Scope::Bucket),
         "ListBuckets" => ("s3:ListAllMyBuckets", Scope::Account),
         _ => return None,
     })
@@ -444,6 +457,37 @@ mod tests {
             [statement(
                 Target::Bucket("uploads".to_owned()),
                 &["s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucketTagging", "s3:PutBucketTagging"]
+            )]
+        );
+        assert!(role.templates.is_empty() && role.unknown.is_empty());
+    }
+
+    #[test]
+    fn a_bucket_s_settings_read_as_terraform_reads_them_are_allowed_by_s3_s_own_actions() {
+        let role = role(
+            &uses(&[
+                ("s3", "site", "GetBucketCors"),
+                ("s3", "site", "GetBucketAccelerateConfiguration"),
+                ("s3", "site", "GetBucketLifecycleConfiguration"),
+                ("s3", "site", "GetBucketReplication"),
+                ("s3", "site", "GetBucketEncryption"),
+                ("s3", "site", "GetObjectLockConfiguration"),
+            ]),
+            &[],
+        );
+
+        assert_eq!(
+            role.statements,
+            [statement(
+                Target::Bucket("site".to_owned()),
+                &[
+                    "s3:GetAccelerateConfiguration",
+                    "s3:GetBucketCORS",
+                    "s3:GetBucketObjectLockConfiguration",
+                    "s3:GetEncryptionConfiguration",
+                    "s3:GetLifecycleConfiguration",
+                    "s3:GetReplicationConfiguration"
+                ]
             )]
         );
         assert!(role.templates.is_empty() && role.unknown.is_empty());
