@@ -7,6 +7,7 @@ import {
   FUNCTION_NAME_PATTERN,
   INVOCATION_STATUS_INFO,
   eventFormatText,
+  stackText,
   FUNCTION_NAME_RULE,
   MAX_FUNCTION_NAME_LENGTH,
   TRUNCATED_NOTE,
@@ -248,6 +249,12 @@ const FunctionDetail: React.FC = () => {
               It was made before functions got AWS Lambda&apos;s event, the input itself, which every new function gets, and which a web address or a
               schedule needs. To move it, change its handler to read <code>event</code> where it reads <code>event.body</code>, and choose AWS
               Lambda&apos;s event below, in the same update: the new version rolls out, and the previous one stays if it can&apos;t start.
+            </Callout>
+          )}
+
+          {stackText(func) && (
+            <Callout tone="info" title={`In the stack ${func.stack}`}>
+              {stackText(func)}
             </Callout>
           )}
 

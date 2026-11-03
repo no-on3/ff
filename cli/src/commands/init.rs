@@ -1,6 +1,7 @@
 //! `ff init <name>`: a function's folder, its handler and an event to call it with, with AWS
 //! Lambda's handler and event; or, with `--template terraform`, an app's Terraform project, FF's
-//! provider block and four modules that apply on FF and, with only that block changed, on AWS.
+//! provider block and four modules that apply on FF and, with only that block changed, on AWS;
+//! or, with `--template sam`, a SAM application, which `ff deploy` and `sam deploy` both take.
 //! From templates the binary holds.
 
 use std::path::{Path, PathBuf};
@@ -9,7 +10,6 @@ use serde::Serialize;
 
 use super::Context;
 use super::account;
-use super::export::template::lambda_runtime;
 use crate::api::Client;
 use crate::api::types::AwsEndpoints;
 use crate::cli::{Runtime, Template};
@@ -60,6 +60,41 @@ const TERRAFORM_PYTHON: [(&str, &str); 3] = [
     ("src/worker.py", include_str!("../../templates/terraform/src/worker.py")),
     ("src/uploads.py", include_str!("../../templates/terraform/src/uploads.py")),
 ];
+
+/// A SAM application's files, by their path in it, but its code's: its template, samconfig.toml naming its stack, an
+/// event and a README.
+const SAM: [(&str, &str); 5] = [
+    ("template.yaml", include_str!("../../templates/sam/template.yaml")),
+    ("samconfig.toml", include_str!("../../templates/sam/samconfig.toml")),
+    ("README.md", include_str!("../../templates/sam/README.md")),
+    (".gitignore", include_str!("../../templates/sam/gitignore")),
+    ("events/event.json", EVENT),
+];
+const SAM_NODEJS: (&str, &str) = ("hello/app.mjs", include_str!("../../templates/sam/hello/app.mjs"));
+const SAM_PYTHON: (&str, &str) = ("hello/app.py", include_str!("../../templates/sam/hello/app.py"));
+
+/// The files of a new SAM application, by their path in it: its name, its stack's, in them, and its function in the
+/// runtime's language.
+pub fn sam_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
+    let code = match runtime {
+        Runtime::Nodejs => SAM_NODEJS,
+        Runtime::Python => SAM_PYTHON,
+    };
+    let fill = |template: &str| template.replace("{{name}}", name).replace("{{runtime}}", runtime.lambda());
+    SAM.iter().chain([&code]).map(|(path, template)| (*path, fill(template))).collect()
+}
+
+/// Writes a SAM application's folder, which must not exist yet, or be empty.
+fn create_sam(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf>, Error> {
+    if !super::stack::is_stack_name(name) {
+        return Err(Error::usage(format!(
+            "\"{name}\" can't name a SAM application, which names its stack: letters, digits and hyphens, a letter \
+             first, 128 at most, as CloudFormation's"
+        )));
+    }
+    new_folder(folder, "ff init makes a new folder")?;
+    write_folder(folder, sam_files(name, runtime))
+}
 
 /// The files of a new function's folder, by their path in it, with the function's name in them.
 pub fn files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
@@ -144,7 +179,7 @@ pub fn terraform_files(
             .replace("{{region}}", &aws.region)
             .replace("{{endpoints}}", &endpoints)
             .replace("{{account}}", account)
-            .replace("{{runtime}}", lambda_runtime(runtime.as_str()))
+            .replace("{{runtime}}", runtime.lambda())
             .replace("{{language}}", language)
             .replace("{{key}}", &key)
     };
@@ -225,6 +260,7 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
     let written = match template {
         Template::Function => create(&folder, name, runtime)?,
         Template::Terraform => create_terraform(&folder, name, runtime, context)?,
+        Template::Sam => create_sam(&folder, name, runtime)?,
     };
     let created = Created {
         name: name.to_owned(),
@@ -246,6 +282,11 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
              (or terraform's)",
             folder.display(),
             created.key_command.as_deref().unwrap_or_default()
+        ),
+        Template::Sam => format!(
+            "created {}/, a SAM application: template.yaml, its function in hello/, samconfig.toml naming the stack {name}\n\
+             then: cd {name} && ff deploy template.yaml, again after a change; sam deploy takes the same folder to AWS",
+            folder.display()
         ),
     })
 }
@@ -397,5 +438,44 @@ mod tests {
         assert!(folder.join("events/event.json").is_file());
         assert_eq!(create(&folder, "orders", Runtime::Python).unwrap_err().exit_code(), 2);
         assert_eq!(create(&dir.path().join("my orders"), "my orders", Runtime::Python).unwrap_err().exit_code(), 2);
+    }
+
+    #[test]
+    fn a_sam_application_is_one_function_with_its_alias_and_url_in_ffs_subset_which_ff_deploy_plans() {
+        use crate::sam::{parameters, plan, subset};
+        for (runtime, code) in [(Runtime::Nodejs, "app.mjs"), (Runtime::Python, "app.py")] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let folder = dir.path().join("shop");
+            let written = create_sam(&folder, "shop", runtime).unwrap();
+
+            let paths: Vec<String> =
+                written.iter().map(|path| path.strip_prefix(&folder).unwrap().display().to_string()).collect();
+            let code_path = format!("hello/{code}");
+            assert_eq!(
+                paths,
+                ["template.yaml", "samconfig.toml", "README.md", ".gitignore", "events/event.json", &code_path]
+            );
+            assert!(
+                !sam_files("shop", runtime).iter().any(|(_, text)| text.contains("{{")),
+                "every placeholder is filled"
+            );
+            let read = |file: &str| std::fs::read_to_string(folder.join(file)).unwrap();
+            let template = crate::sam::read(&read("template.yaml")).unwrap();
+            let config = parameters::samconfig(&read("samconfig.toml")).unwrap();
+            assert_eq!(config.stack_name.as_deref(), Some("shop"));
+            let values = parameters::values(&template, &config.parameter_overrides);
+            assert_eq!(subset::check(&template, &values.values), []);
+
+            let place = plan::Place { stack: "shop", region: "tn-tunis-1", account: "000000000001" };
+            let planned = plan::plan(&template, &values.values, &place, &[], &folder, &mut || "ABCDEFGHIJKL".into());
+            let [function] = &planned.unwrap().functions[..] else { panic!("one function") };
+            assert_eq!(
+                (function.name.as_str(), function.runtime, function.description.as_str(), function.alias.as_deref()),
+                ("shop-HelloFunction-ABCDEFGHIJKL", runtime, "Says hello, in dev", Some("live"))
+            );
+            assert_eq!(function.environment, [("STAGE".to_owned(), "dev".to_owned())].into());
+            assert_eq!(crate::package::handler_problem(&[code.to_owned()], &function.handler, runtime), None);
+        }
+        assert_eq!(create_sam(&PathBuf::from("2shop"), "2shop", Runtime::Nodejs).unwrap_err().exit_code(), 2);
     }
 }

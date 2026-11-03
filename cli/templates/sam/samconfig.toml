@@ -1,0 +1,9 @@
+# What `sam deploy` and `ff deploy template.yaml` take without flags: the stack, and the parameters' values.
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "{{name}}"
+parameter_overrides = "Stage=dev"
+# For AWS alone: SAM uploads the code to a bucket of its own, and makes the function's role.
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"

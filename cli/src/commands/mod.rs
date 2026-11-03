@@ -26,6 +26,7 @@ mod queues;
 mod schedule;
 mod secrets;
 mod sites;
+mod stack;
 mod url;
 mod version;
 mod versions;
@@ -72,6 +73,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::History { name, limit } => functions::history(&name, limit, context),
         Command::Scale { name, min, max } => functions::scale(&name, min, max, context),
         Command::Delete { name, yes } => functions::delete(&name, yes, context),
+        Command::DeleteStack { name, yes } => stack::delete_stack(name.as_deref(), yes, context),
         Command::Publish { name, description } => versions::publish(&name, description.as_deref(), context),
         Command::Versions { name, delete: Some(version), yes } => versions::delete(&name, version, yes, context),
         Command::Versions { name, delete: None, .. } => versions::list(&name, context),

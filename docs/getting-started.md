@@ -991,6 +991,24 @@ The provider resolves names with Go's own resolver, which finds `localhost` but,
 
 **Moving to AWS:** in `providers.tf`, an AWS region, the lines between the two "FF" comments removed, and `function_role` set to `null`, so that each module makes its function's role; then `apply` with an AWS account's key. `ff doctor` in the project's folder names what is left of FF's: the `endpoints` block an error (`provider-endpoints`), each of the five settings a warning (`provider-setting`), Terraform's `.terraform/` left out, the functions' code read as for any move (below). `hack/e2e-aws-tools.sh` applies the project, calls each part, plans it again, destroys it and readies it for AWS, with OpenTofu and with Terraform's CLI ("Run the tests", in [Everyday tasks](#5-everyday-tasks)).
 
+### SAM templates
+
+`ff deploy template.yaml` makes a SAM template's functions on FF as `sam deploy` makes them on AWS, in a stack FF keeps: each logical ID with its type and the FF resource it made, so that the next deploy changes what the template changed and deletes what it no longer has. `ff init <name> --template sam --runtime nodejs|python` writes one to start from: `template.yaml`, a function in `hello/` with its alias `live` and a URL anyone may call, and `samconfig.toml`, which names the stack and the parameters' values, for `sam deploy` too.
+
+```bash
+ff init shop --template sam --runtime nodejs
+cd shop
+ff deploy template.yaml                       # the stack samconfig.toml names, shop: the function, its alias and URL, the outputs printed
+ff deploy template.yaml --parameter-overrides Stage=prod --yes   # what changed changes; what the template no longer has is deleted
+ff delete-stack shop --yes                    # the stack, with what it made, as sam delete
+```
+
+**What it takes** is FF's subset of SAM ([ADR 0016](adr/0016-sam-templates.md)), and `ff doctor template.yaml` says what is outside it: `Globals`; `Parameters`, from `--parameter-overrides`, else `samconfig.toml`, a parameter not given keeping the stack's last value, else its Default, as `sam deploy` gives them; `!Ref`, `!GetAtt`, `!Sub`, `!Join` and the pseudo parameters, FF's region and account; and, so far, `AWS::Serverless::Function`: its `CodeUri`, a folder built as `ff deploy <folder>` builds one, or a .zip deployed as it is; `Handler`, `Runtime`, `MemorySize`, `Timeout`, `Description`, `Environment`, `Tags`; `ReservedConcurrentExecutions`, the most instances it runs, and `ProvisionedConcurrencyConfig`, those kept running; `FunctionUrlConfig`; `AutoPublishAlias`, a version published at each deploy and the alias moved to it, the URL then the alias's; `EventInvokeConfig`; `DeadLetterQueue`, a queue of the account. `Policies` are read and left for AWS, `AWS::Lambda::Permission` kept without effect, and the `Outputs` printed once FF knows what they name, a function's URL and its version among them. Queues, buckets and events come next. `sam build`'s `.aws-sam/build/template.yaml` is taken too: its folders, built already, are deployed as they are, and `samconfig.toml` is the project's, two folders up.
+
+**A function's name** is its `FunctionName`, else the one the stack's last deploy gave it, else one made CloudFormation's way, the stack's name, the logical ID and 12 random letters and digits, within Lambda's 64 characters. A function of that name in no stack, or in another, is refused: `ff deploy` doesn't take it over.
+
+**Every problem first,** in one refusal that changes nothing: the template's, each at its line; its parameters'; a value that can't be known before the deploy, such as a function's URL in a variable; a variable with the name of one of the function's secrets, which stay with `ff secrets`, out of the template; a handler the code hasn't. When the template no longer has what the stack's last deploy made, `ff deploy` then asks before deleting it, and a script says `--yes`. Each function is created or updated with what changed, as `ff deploy` does one, then its instances, its alias, its URL and its asynchronous calls' settings; what the template no longer has is deleted last, as CloudFormation cleans up. The stack is saved as the deploy goes: one stopped halfway leaves what it made in the stack, and the next updates it. `ff get` names a function's stack, and the console says it on the function's page, since a change made elsewhere the next deploy undoes. `--output json` gives each function's action, changes, version and URL, what was deleted, and the outputs.
+
 ### Moving to AWS: ff export
 
 FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's, its mail SES's: an account moves to AWS with its code as it is. `ff export` writes what the move needs in a new folder, from the account's own resources, with `functions:read` and the other services' reads, and `usage:read` for its estimate:

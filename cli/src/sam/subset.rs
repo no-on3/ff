@@ -16,13 +16,14 @@ use serde_json::{Map, Value};
 use super::parameters;
 use super::resolve::{self, FUNCTION, Part};
 use super::{Template, text_of};
+use crate::cli::Runtime;
 use crate::table::in_words;
 
 /// SAM's transform, which makes a template's `AWS::Serverless::` resources CloudFormation's.
 pub const TRANSFORM: &str = "AWS::Serverless-2016-10-31";
 
 /// The runtimes FF runs, as Lambda names them.
-pub const RUNTIMES: [&str; 2] = ["nodejs24.x", "python3.13"];
+pub const RUNTIMES: [&str; 2] = [Runtime::Nodejs.lambda(), Runtime::Python.lambda()];
 
 /// CloudFormation's pseudo parameters that FF gives: its region, the account's ID, the stack's name, and AWS's
 /// partition, which FF's ARNs are in.

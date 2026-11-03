@@ -1,7 +1,8 @@
 //! A package's zip, as AWS Lambda takes one, and the same zip each time for the same files:
 //! entries in the order of their names, dated 1980-01-01, 0644 or 0755 for the files that run,
 //! deflated when that makes them smaller, names in UTF-8. No folder entries, no extra fields, no
-//! zip64: a package has 20,000 files and 250 MB unpacked at most.
+//! zip64: a package has 20,000 files and 250 MB unpacked at most. And a zip made elsewhere, as
+//! `sam build` or a script leaves one, read for its files' names and sizes.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -108,6 +109,46 @@ pub fn write(mut entries: Vec<Entry>) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The end of a zip's central directory, its signature, and how far from the zip's end it may be: its 22 bytes and a
+/// comment of 65,535 at most.
+const END: u32 = 0x0605_4b50;
+const END_SEARCH: usize = 22 + 65_535;
+
+/// The files of a zip made elsewhere, each one's name and size unpacked, as its central directory lists them; its
+/// folders' entries left out. Zip64's, which a package never needs, aren't read.
+pub fn files(zip: &[u8]) -> Result<Vec<(String, u64)>, String> {
+    let truncated = || "its central directory is cut short: it isn't a whole zip".to_owned();
+    let u16at = |at: usize| zip.get(at..at + 2).map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]));
+    let u32at =
+        |at: usize| zip.get(at..at + 4).map(|bytes| u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+    let last = zip.len().checked_sub(22).ok_or("it is too short to be a zip")?;
+    let end = (last.saturating_sub(END_SEARCH - 22)..=last)
+        .rev()
+        .find(|&at| u32at(at) == Some(END))
+        .ok_or("it has no zip's central directory: it isn't a zip")?;
+    let (count, offset) = (u16at(end + 10).ok_or_else(truncated)?, u32at(end + 16).ok_or_else(truncated)?);
+    if count == u16::MAX || offset == u32::MAX {
+        return Err("it is a zip64 zip, which ff doesn't read: zip it again without zip64".to_owned());
+    }
+    let mut files = Vec::new();
+    let mut at = offset as usize;
+    for _ in 0..count {
+        if u32at(at) != Some(0x0201_4b50) {
+            return Err(truncated());
+        }
+        let size = u32at(at + 24).ok_or_else(truncated)?;
+        let [name_length, extra, comment] =
+            [28, 30, 32].map(|field| u16at(at + field).map(usize::from).unwrap_or(usize::MAX));
+        let name = zip.get(at + 46..(at + 46).saturating_add(name_length)).ok_or_else(truncated)?;
+        let name = String::from_utf8_lossy(name).into_owned();
+        if !name.ends_with('/') {
+            files.push((name, u64::from(size)));
+        }
+        at += 46 + name_length + extra.min(u16::MAX.into()) + comment.min(u16::MAX.into());
+    }
+    Ok(files)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Read;
@@ -186,6 +227,25 @@ mod tests {
                 ("é.txt", 0o100644, 0, (0, 0x21), 0),
             ]
         );
+    }
+
+    #[test]
+    fn reads_the_files_of_a_zip_made_elsewhere_its_folders_left_out_and_refuses_what_isnt_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let source = dir.path().join("app");
+        std::fs::write(&source, [b'x'; 300]).unwrap();
+        let entry = |name: &str| Entry { name: name.into(), source: source.clone(), executable: false };
+        let mut zip = write(vec![entry("app.js"), entry("lib/")]).unwrap();
+        // A comment after the directory, as some tools write one.
+        let length = zip.len();
+        zip[length - 2..].copy_from_slice(&5u16.to_le_bytes());
+        zip.extend_from_slice(b"built");
+
+        assert_eq!(files(&zip), Ok(vec![("app.js".to_owned(), 300)]));
+        assert_eq!(files(b"PK"), Err("it is too short to be a zip".to_owned()));
+        assert_eq!(files(&[0; 64]), Err("it has no zip's central directory: it isn't a zip".to_owned()));
+        let cut = [&zip[..10], &zip[zip.len() - 27..]].concat();
+        assert_eq!(files(&cut), Err("its central directory is cut short: it isn't a whole zip".to_owned()));
     }
 
     #[test]

@@ -91,6 +91,12 @@ export interface Function {
    * list. Its secrets' values are never in any answer.
    */
   environment?: Record<string, string>;
+  /** Lambda's description, which a SAM template gives; empty for none. */
+  description?: string;
+  /** Its tags, in the answers of GET /functions/:id, a create and an update. */
+  tags?: Record<string, string>;
+  /** The stack a SAM template's deploy made it in, in the answer of GET /functions/:id; null for none. */
+  stack?: string | null;
   createdAt: string;
   updatedAt: string;
 }

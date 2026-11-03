@@ -91,6 +91,15 @@ export function eventFormatText(func: Pick<Function, 'eventFormat'>): string {
     : "AWS Lambda's event: the input itself";
 }
 
+/** What the page says of a function a SAM template's deploy keeps, in its stack; nothing for another. */
+export function stackText(func: Pick<Function, 'stack'>): string | undefined {
+  if (!func.stack) return undefined;
+  return (
+    `A SAM template's deploy keeps it, in the stack ${func.stack}: its next \`ff deploy\` makes it the template's again, ` +
+    `a change made here undone, and \`ff delete-stack ${func.stack}\` deletes it with the stack.`
+  );
+}
+
 /**
  * What the history says of a value it kept only the start of: it keeps at most
  * 64 KiB of each input, output and error, the personal data of the customer's users.

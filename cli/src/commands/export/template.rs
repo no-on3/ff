@@ -12,10 +12,9 @@ use super::aliases;
 use super::names::{LogicalIds, lambda_names, renamed};
 use super::roles::{self, Role, Target};
 use super::yaml::Yaml;
-use crate::api::types::name_in_arn;
+use crate::api::types::{DEFAULT_MAX_INSTANCES, name_in_arn};
+use crate::cli::Runtime;
 
-/// The instances a function runs at most unless its owner says otherwise: no cap to carry to AWS.
-pub const DEFAULT_MAX_INSTANCES: u32 = 3;
 /// The parameter that turns the schedules on at AWS, off until the move, so that none runs twice.
 pub const SCHEDULES_STATE: &str = "ScheduleState";
 /// What a move does with a function that gets FF's original event, after its name.
@@ -53,11 +52,10 @@ pub struct Template {
 
 /// FF's runtimes as Lambda names them: FF runs Node.js 24 and Python 3.13.
 pub fn lambda_runtime(runtime: &str) -> &str {
-    match runtime {
-        "nodejs" => "nodejs24.x",
-        "python" => "python3.13",
-        other => other,
-    }
+    [Runtime::Nodejs, Runtime::Python]
+        .into_iter()
+        .find(|ours| ours.as_str() == runtime)
+        .map_or(runtime, |ours| ours.lambda())
 }
 
 /// The template of what the export read; `with_values` writes the functions' variables' values,

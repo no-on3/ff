@@ -3,6 +3,7 @@
 //! its text alone; a folder is a package, made with its libraries as `ff package` makes it, and
 //! uploaded only when the account hasn't it.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -85,13 +86,16 @@ pub enum Code<'a> {
     Package(&'a str),
 }
 
-/// What a deploy makes the function: its code and the settings the command names.
+/// What a deploy makes the function: its code and the settings the command names. A template names Lambda's two
+/// more, each kept as it is when none is named: the description, and the dead-letter queue, `Some(None)` for none.
 pub struct Wanted<'a> {
     pub code: Code<'a>,
     pub handler: Option<&'a str>,
     pub runtime: Runtime,
     pub memory: Option<u32>,
     pub timeout: Option<u32>,
+    pub description: Option<&'a str>,
+    pub dead_letter: Option<Option<&'a str>>,
 }
 
 fn runs_package(function: &Function) -> bool {
@@ -129,6 +133,12 @@ pub fn changes(function: &Function, wanted: &Wanted) -> Map<String, Value> {
     if let Some(timeout) = wanted.timeout.filter(|timeout| *timeout != function.timeout) {
         changes.insert("timeout".into(), timeout.into());
     }
+    if let Some(description) = wanted.description.filter(|description| *description != function.description) {
+        changes.insert("description".into(), description.into());
+    }
+    if let Some(queue) = wanted.dead_letter.filter(|queue| *queue != function.dead_letter_target_arn.as_deref()) {
+        changes.insert("deadLetterTargetArn".into(), queue.into());
+    }
     changes
 }
 
@@ -137,6 +147,7 @@ fn changed_fields(changes: &Map<String, Value>) -> Vec<&'static str> {
     [("code", "code"), ("codeSha256", "code"), ("handler", "handler"), ("runtime", "runtime")]
         .into_iter()
         .chain([("memory", "memory"), ("timeout", "timeout"), ("environment", "environment")])
+        .chain([("description", "description"), ("deadLetterTargetArn", "dead-letter queue"), ("tags", "tags")])
         .filter(|(field, _)| changes.contains_key(*field))
         .map(|(_, said)| said)
         .collect()
@@ -245,10 +256,10 @@ struct Deployed<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Published {
-    version: FunctionVersion,
+pub struct Published {
+    pub version: FunctionVersion,
     /// False when nothing changed since the last version, which Lambda answers with.
-    new: bool,
+    pub new: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     alias: Option<FunctionAlias>,
     /// What the alias was and is, for people.
@@ -256,13 +267,18 @@ struct Published {
     alias_text: Option<String>,
 }
 
-/// With --publish, a version of the function as deployed, and the alias pointed at it.
-fn publish_deployed(client: &Client, function: &Function, args: &DeployArgs) -> Result<Option<Published>, Error> {
-    if !args.publish {
+/// A version of the function as deployed when asked, and the alias, if one is named, pointed at it.
+pub fn publish_deployed(
+    client: &Client,
+    function: &Function,
+    publish: bool,
+    alias: Option<&str>,
+) -> Result<Option<Published>, Error> {
+    if !publish {
         return Ok(None);
     }
     let (version, new) = publish_version(client, &function.id, None)?;
-    let (alias, alias_text) = match &args.alias {
+    let (alias, alias_text) = match alias {
         Some(name) => {
             let route = AliasRoute { version: version.version.clone(), also: None };
             let (alias, before) = set_alias(client, &function.id, name, &route, None)?;
@@ -275,7 +291,7 @@ fn publish_deployed(client: &Client, function: &Function, args: &DeployArgs) -> 
 }
 
 /// `version 3 published`, then the alias's line.
-fn published_text(published: &Published) -> String {
+pub fn published_text(published: &Published) -> String {
     let mut text = if published.new {
         format!("\nversion {} published", published.version.version)
     } else {
@@ -290,17 +306,26 @@ fn published_text(published: &Published) -> String {
     text
 }
 
-/// What one deploy is about: the function's name, what it should be, and its package.
-struct Deploy<'a> {
-    name: String,
-    wanted: Wanted<'a>,
-    environment: Option<env::Variables>,
-    package: Option<&'a Package>,
+/// What one deploy is about: the function's name, what it should be, and its package. Variables and tags named
+/// replace them all, as on Lambda; none named keeps them.
+pub struct Deploy<'a> {
+    pub name: String,
+    pub wanted: Wanted<'a>,
+    pub environment: Option<env::Variables>,
+    pub tags: Option<&'a BTreeMap<String, String>>,
+    pub package: Option<&'a Package>,
     /// What the code comes from, as the command named it.
-    source: &'a Path,
+    pub source: &'a Path,
 }
 
+/// What a deploy did to the function: created, updated or unchanged, the fields changed, and the function after.
+pub type Applied<'a> = (&'a str, Vec<&'a str>, Function);
+
 pub fn run(args: DeployArgs, context: &Context) -> Result<(), Error> {
+    if super::stack::is_template(&args.path) {
+        return super::stack::deploy(&args, context);
+    }
+    super::stack::stack_flags(&args)?;
     let environment = (!args.env.is_empty()).then(|| env::variables(&args.env)).transpose()?;
     if args.path.is_dir() {
         return run_folder(&args, environment, context);
@@ -328,8 +353,10 @@ pub fn run(args: DeployArgs, context: &Context) -> Result<(), Error> {
         runtime,
         memory: args.memory,
         timeout: args.timeout,
+        description: None,
+        dead_letter: None,
     };
-    let deploy = Deploy { name, wanted, environment, package: None, source: &args.path };
+    let deploy = Deploy { name, wanted, environment, tags: None, package: None, source: &args.path };
     let existing = find(&client, &deploy.name)?;
     finish(&client, context, &deploy, existing, &args)
 }
@@ -379,8 +406,10 @@ fn run_folder(args: &DeployArgs, environment: Option<env::Variables>, context: &
         runtime: package.runtime,
         memory: args.memory,
         timeout: args.timeout,
+        description: None,
+        dead_letter: None,
     };
-    let deploy = Deploy { name, wanted, environment, package: Some(&package), source: &args.path };
+    let deploy = Deploy { name, wanted, environment, tags: None, package: Some(&package), source: &args.path };
     finish(&client, context, &deploy, existing, args)
 }
 
@@ -394,33 +423,10 @@ fn finish(
 ) -> Result<(), Error> {
     let started = Instant::now();
     let mut uploaded = false;
-    let (action, changed, function) = match existing {
-        Some(function) => update(client, context, function, deploy, &mut uploaded)?,
-        None => create(client, context, deploy, &mut uploaded)?,
-    };
-    let seconds = (started.elapsed().as_secs_f64() * 10.0).round() / 10.0;
-
-    let function = if args.min_instances.is_some() || args.max_instances.is_some() {
-        let mut body = Map::new();
-        if let Some(min) = args.min_instances {
-            body.insert("minInstances".into(), min.into());
-        }
-        if let Some(max) = args.max_instances {
-            body.insert("maxInstances".into(), max.into());
-        }
-        let scaling: Scaling =
-            client.json(&Call::put(format!("/functions/{}/scaling-config", function.id), Value::Object(body)))?;
-        Function {
-            min_instances: scaling.min_instances,
-            max_instances: scaling.max_instances,
-            scale_to_zero: scaling.scale_to_zero,
-            ..function
-        }
-    } else {
-        function
-    };
-
-    let published = publish_deployed(client, &function, args)?;
+    let (action, changed, function) = apply(client, context, deploy, existing, &mut uploaded)?;
+    let seconds = seconds_since(started);
+    let function = set_instances(client, function, args.min_instances, args.max_instances)?;
+    let published = publish_deployed(client, &function, args.publish, args.alias.as_deref())?;
     let package = deploy.package.map(|package| PackageSent {
         code_sha256: &package.code_sha256,
         code_size: package.zip.len() as u64,
@@ -457,13 +463,54 @@ fn finish(
     })
 }
 
-/// The function made; when another deploy took the name meanwhile, that function updated.
-fn create<'a>(
+/// Seconds since a start, to a tenth, as a deploy says them.
+pub fn seconds_since(started: Instant) -> f64 {
+    (started.elapsed().as_secs_f64() * 10.0).round() / 10.0
+}
+
+/// The function made, or updated with what changed when there is one; `uploaded` says whether the package went up.
+pub fn apply<'a>(
     client: &Client,
     context: &Context,
     deploy: &Deploy,
+    existing: Option<Function>,
     uploaded: &mut bool,
-) -> Result<(&'a str, Vec<&'a str>, Function), Error> {
+) -> Result<Applied<'a>, Error> {
+    match existing {
+        Some(function) => update(client, context, function, deploy, uploaded),
+        None => create(client, context, deploy, uploaded),
+    }
+}
+
+/// The instances it keeps running and the most it runs, those named set, the function answered as it is then.
+pub fn set_instances(
+    client: &Client,
+    function: Function,
+    min: Option<u32>,
+    max: Option<u32>,
+) -> Result<Function, Error> {
+    if min.is_none() && max.is_none() {
+        return Ok(function);
+    }
+    let mut body = Map::new();
+    if let Some(min) = min {
+        body.insert("minInstances".into(), min.into());
+    }
+    if let Some(max) = max {
+        body.insert("maxInstances".into(), max.into());
+    }
+    let scaling: Scaling =
+        client.json(&Call::put(format!("/functions/{}/scaling-config", function.id), Value::Object(body)))?;
+    Ok(Function {
+        min_instances: scaling.min_instances,
+        max_instances: scaling.max_instances,
+        scale_to_zero: scaling.scale_to_zero,
+        ..function
+    })
+}
+
+/// The function made; when another deploy took the name meanwhile, that function updated.
+fn create<'a>(client: &Client, context: &Context, deploy: &Deploy, uploaded: &mut bool) -> Result<Applied<'a>, Error> {
     let wanted = &deploy.wanted;
     let memory = wanted.memory.unwrap_or(DEFAULT_MEMORY);
     let timeout = wanted.timeout.unwrap_or(DEFAULT_TIMEOUT);
@@ -478,6 +525,15 @@ fn create<'a>(
     }
     if let Some(environment) = &deploy.environment {
         body["environment"] = json!(environment);
+    }
+    if let Some(description) = wanted.description.filter(|description| !description.is_empty()) {
+        body["description"] = description.into();
+    }
+    if let Some(Some(queue)) = wanted.dead_letter {
+        body["deadLetterTargetArn"] = queue.into();
+    }
+    if let Some(tags) = deploy.tags.filter(|tags| !tags.is_empty()) {
+        body["tags"] = json!(tags);
     }
     if let Some(package) = deploy.package {
         *uploaded = provide(client, context.out, package)?;
@@ -499,20 +555,23 @@ fn create<'a>(
     }
 }
 
-/// The function updated with what changed, or left as it is. Variables given replace them all,
-/// as on Lambda; their values are read first, as the list of functions doesn't hold them.
+/// The function updated with what changed, or left as it is. Variables and tags given replace them all, as on
+/// Lambda; theirs are read first, as the list of functions doesn't hold them.
 fn update<'a>(
     client: &Client,
     context: &Context,
     function: Function,
     deploy: &Deploy,
     uploaded: &mut bool,
-) -> Result<(&'a str, Vec<&'a str>, Function), Error> {
+) -> Result<Applied<'a>, Error> {
     let mut changes = changes(&function, &deploy.wanted);
-    if let Some(environment) = &deploy.environment {
-        let current = env::current(&client.json::<Function>(&Call::get(format!("/functions/{}", function.id)))?);
-        if &current != environment {
+    if deploy.environment.is_some() || deploy.tags.is_some() {
+        let current = client.json::<Function>(&Call::get(format!("/functions/{}", function.id)))?;
+        if let Some(environment) = deploy.environment.as_ref().filter(|wanted| **wanted != env::current(&current)) {
             changes.insert("environment".into(), json!(environment));
+        }
+        if let Some(tags) = deploy.tags.filter(|wanted| Some(*wanted) != current.tags.as_ref()) {
+            changes.insert("tags".into(), json!(tags));
         }
     }
     if changes.is_empty() {
@@ -568,7 +627,15 @@ mod tests {
     }
 
     fn inline<'a>(code: &'a str, runtime: Runtime) -> Wanted<'a> {
-        Wanted { code: Code::Inline(code), handler: None, runtime, memory: None, timeout: None }
+        Wanted {
+            code: Code::Inline(code),
+            handler: None,
+            runtime,
+            memory: None,
+            timeout: None,
+            description: None,
+            dead_letter: None,
+        }
     }
 
     #[test]
@@ -649,9 +716,7 @@ mod tests {
         let package = |code_sha256, handler| Wanted {
             code: Code::Package(code_sha256),
             handler: Some(handler),
-            runtime: Runtime::Python,
-            memory: None,
-            timeout: None,
+            ..inline("", Runtime::Python)
         };
 
         assert!(changes(&packaged(), &package("zip=", "app.main")).is_empty());
@@ -689,9 +754,8 @@ mod tests {
             &Wanted {
                 code: Code::Package("new="),
                 handler: Some("app.handler"),
-                runtime: Runtime::Nodejs,
                 memory: Some(256),
-                timeout: None,
+                ..inline("", Runtime::Nodejs)
             },
         );
 

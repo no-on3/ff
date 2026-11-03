@@ -10,10 +10,8 @@ use serde_json::Value;
 
 use super::{Finding, Level};
 use crate::commands::export::template::lambda_runtime;
+use crate::sam::parameters::SAMCONFIG;
 use crate::sam::{self, Template, parameters, resolve, subset};
-
-/// The SAM CLI's settings, beside the template, whose `sam deploy` values a template's parameters take.
-pub const SAMCONFIG: &str = "samconfig.toml";
 
 /// The names SAM looks for a template by, in a project's folder.
 pub const NAMES: [&str; 2] = ["template.yaml", "template.yml"];
@@ -173,12 +171,14 @@ fn given(folder: &Path, overrides: Option<&[(String, String)]>) -> Result<(Vec<(
     }
     let path = folder.join(SAMCONFIG);
     let Ok(text) = std::fs::read_to_string(&path) else { return Ok((Vec::new(), SAMCONFIG.to_owned())) };
-    parameters::samconfig(&text).map(|given| (given, SAMCONFIG.to_owned())).map_err(|why| Finding {
-        file: SAMCONFIG.to_owned(),
-        line: None,
-        level: Level::Error,
-        check: "samconfig",
-        message: format!("the SAM CLI can't read it for `sam deploy`: {why}"),
+    parameters::samconfig(&text).map(|config| (config.parameter_overrides, SAMCONFIG.to_owned())).map_err(|why| {
+        Finding {
+            file: SAMCONFIG.to_owned(),
+            line: None,
+            level: Level::Error,
+            check: "samconfig",
+            message: format!("the SAM CLI can't read it for `sam deploy`: {why}"),
+        }
     })
 }
 

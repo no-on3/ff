@@ -1,0 +1,37 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: {{name}}, a SAM application that ff deploy puts on FF and sam deploy on AWS, as it is
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, prod]
+
+Globals:
+  Function:
+    Runtime: {{runtime}}
+    MemorySize: 128
+    Timeout: 10
+
+Resources:
+  HelloFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: hello/
+      Handler: app.handler
+      Description: !Sub Says hello, in ${Stage}
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+      AutoPublishAlias: live
+      FunctionUrlConfig:
+        AuthType: NONE
+
+Outputs:
+  HelloUrl:
+    Description: Where the function answers, its alias live's address
+    Value: !GetAtt HelloFunctionUrl.FunctionUrl
+  HelloFunctionName:
+    Description: The function's name, which ff logs and ff invoke take
+    Value: !Ref HelloFunction

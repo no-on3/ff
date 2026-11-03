@@ -10,7 +10,9 @@
 # function is kept, in ERROR, with its error. A second account finds none of the first's. A function's versions
 # and aliases: published by ff deploy --publish and by ff publish, called as name:alias and name:version, an alias
 # moved with a share of its calls and rolled back, its own URL, a schedule through it, a version it names kept. Then
-# ff init for both runtimes, its folder run locally, deployed and invoked; folders deployed as
+# ff init for both runtimes, its folder run locally, deployed and invoked; a SAM application of ff init's deployed as a
+# stack with a second function, again unchanged, then without it, after asking, a variable with a secret's name refused,
+# and ff delete-stack; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
@@ -451,6 +453,54 @@ for runtime in python nodejs; do
 done
 }
 section_def init section_init backend budget=35
+
+section_stacks() {
+section "a SAM template as a stack: ff init --template sam, deployed with a second function, then without it, ff delete-stack"
+(cd "$work" && rm -rf cli-sam && "$ff_bin" init cli-sam --runtime nodejs --template sam >"$work/out" 2>"$work/err")
+check "ff init --template sam makes its template, samconfig.toml naming the stack, its code, an event and a README" \
+  ".gitignore README.md events/event.json hello/app.mjs samconfig.toml template.yaml" \
+  "$(cd "$work/cli-sam" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | paste -sd' ')"
+app="$work/cli-sam"
+# ff in the application's folder, where samconfig.toml names the stack.
+in_app() { (cd "$app" && ff "$@"); }
+# The same application with a second function, which the deploy after the next no longer has.
+awk '/^Outputs:/ { print "  ReportsFunction:\n    Type: AWS::Serverless::Function\n    Properties:\n      FunctionName: cli-sam-reports\n      CodeUri: hello/\n      Handler: app.handler\n      ReservedConcurrentExecutions: 2\n      Tags:\n        team: reports\n" } { print }' \
+  "$app/template.yaml" >"$app/with-reports.yaml"
+in_app deploy with-reports.yaml --output json
+hello="$(out | jq -r '.outputs[] | select(.name == "HelloFunctionName") | .value')"
+check "ff deploy makes each function of the template, the stack samconfig.toml names, its outputs resolved" \
+  "0 created HelloFunction 1, created ReportsFunction - true" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.version // "-")") | join(", ")') $([[ $hello =~ ^cli-sam-HelloFunction-[A-Z0-9]{12}$ ]] && echo true || echo false)"
+ff invoke "$hello:live" --http GET "/?name=Stack"
+check "the function answers at its alias's URL, with the template's variable" "0 HTTP 200 Hello Stack dev" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.message) \(.stage)"')"
+ff get cli-sam-reports --output json
+check "each function is the stack's, as ff get says, with its settings from the template" "0 cli-sam 2 reports" "$(code) $(out | jq -r '"\(.stack) \(.maxInstances) \(.tags.team)"')"
+in_app deploy with-reports.yaml --output json
+check "deployed again, nothing changes" "0 unchanged HelloFunction 1, unchanged ReportsFunction -" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.version // "-")") | join(", ")')"
+echo "token-$account_a" | ff secrets set "$hello" API_TOKEN
+sed 's/^          STAGE: !Ref Stage$/&\n          API_TOKEN: in-the-template/' "$app/template.yaml" >"$app/with-secret.yaml"
+in_app deploy with-secret.yaml --yes
+check "a variable with the name of one of the function's secrets is refused, at its line, before any change" "2 true" \
+  "$(code) $(err | grep "^with-secret.yaml:[0-9]*: HelloFunction: API_TOKEN is a secret of $hello's, which stays with \`ff secrets\`" >/dev/null && echo true || echo false)"
+in_app deploy template.yaml --parameter-overrides Stage=prod
+check "what the template no longer has is deleted after asking, which a script says with --yes" \
+  "2 error: ff deploy asks first, and there is no terminal to ask in: say --yes" "$(code) $(err | tail -1)"
+in_app deploy template.yaml --parameter-overrides Stage=prod --yes --output json
+check "with --yes, the function changed and published, the one the template no longer has deleted" \
+  "0 updated HelloFunction environment,description 2 ReportsFunction" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.changed | join(",")) \(.version)") | join(", ")') $(out | jq -r '.deleted | map(.logicalId) | join(" ")')"
+ff get cli-sam-reports
+check "which is gone" "3" "$(code)"
+ff invoke "$hello:live" --http GET "/?name=Stack"
+check "and the alias's URL runs the new version" "0 HTTP 200 Hello Stack prod" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.message) \(.stage)"')"
+in_app delete-stack --yes
+check "ff delete-stack deletes the stack samconfig.toml names, with what it made" "0 deleted the function $hello (HelloFunction) deleted the stack cli-sam" \
+  "$(code) $(out | paste -sd' ')"
+ff get "$hello"
+check "its function with it" "3" "$(code)"
+}
+section_def stacks section_stacks backend budget=60
 
 section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"

@@ -92,23 +92,28 @@ pub enum Format {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Make a function's folder: its handler, an event to call it with, and a README; or an app's Terraform project
+    /// Make a function's folder: its handler, an event to call it with, and a README; or an app's Terraform project, or
+    /// a SAM application
     Init {
-        /// The function's name, and its folder's; a Terraform project's, which names its resources
+        /// The function's name, and its folder's; a Terraform project's, which names its resources; a SAM
+        /// application's, its stack's
         name: String,
 
-        /// Its runtime; a Terraform project's functions'
+        /// Its runtime; a Terraform project's or a SAM application's functions'
         #[arg(long, value_enum)]
         runtime: Runtime,
 
-        /// What to make: a function's folder; or a Terraform project, FF's provider block with the endpoints of the
-        /// FF logged in to and four modules (a function with its URL, a queue worker, a bucket that runs a function,
-        /// a site), which apply on FF and, with only the provider block changed, on AWS
+        /// What to make: a function's folder; a Terraform project, FF's provider block with the endpoints of the FF
+        /// logged in to and four modules (a function with its URL, a queue worker, a bucket that runs a function, a
+        /// site), which apply on FF and, with only the provider block changed, on AWS; or a SAM application, a
+        /// template of one function with its alias and its URL and samconfig.toml naming the stack, which ff deploy
+        /// puts on FF and sam deploy on AWS
         #[arg(long, value_enum, default_value = "function")]
         template: Template,
     },
 
-    /// Create a function from a file or a folder, or update the function of that name with what changed
+    /// Create a function from a file or a folder, or update the function of that name with what changed; or deploy a SAM
+    /// template's functions as a stack, as `sam deploy` does
     Deploy(DeployArgs),
 
     /// Make a function's folder a zip with its libraries, as AWS Lambda takes one; ff deploy makes its own
@@ -157,6 +162,16 @@ pub enum Command {
     Delete {
         /// The function's name
         name: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Delete a stack a SAM template's deploy made, with what it made, as `sam delete` does
+    DeleteStack {
+        /// The stack's name [default: samconfig.toml's stack_name, in this folder]
+        name: Option<String>,
 
         /// Don't ask first: a script must say it
         #[arg(long, short)]
@@ -330,7 +345,7 @@ pub enum Command {
 
 #[derive(Args)]
 pub struct DeployArgs {
-    /// The function's file, its code alone: .ts, .js or .cjs for Node.js, .py for Python; or its folder, which ff packages with its libraries
+    /// The function's file, its code alone: .ts, .js or .cjs for Node.js, .py for Python; or its folder, which ff packages with its libraries; or a SAM template, .yaml or .yml, `sam build`'s .aws-sam/build/template.yaml among them
     pub path: PathBuf,
 
     /// Its name, else the file's without its extension, or for function.ts or .py, its folder's; a folder's own
@@ -376,6 +391,19 @@ pub struct DeployArgs {
     /// With --publish, point this alias at the new version, making it if the function hasn't it
     #[arg(long, requires = "publish", value_name = "NAME")]
     pub alias: Option<String>,
+
+    /// A template's stack [default: samconfig.toml's stack_name]
+    #[arg(long, value_name = "NAME")]
+    pub stack_name: Option<String>,
+
+    /// A template's parameters' values, as `sam deploy` takes them, in place of samconfig.toml's; one not given keeps
+    /// the stack's last value, else its Default
+    #[arg(long, num_args = 1.., value_name = "KEY=VALUE")]
+    pub parameter_overrides: Vec<String>,
+
+    /// Delete what a template no longer has without asking: a script must say it
+    #[arg(long, short)]
+    pub yes: bool,
 }
 
 /// How a folder's libraries go into its package.
@@ -510,6 +538,14 @@ impl Runtime {
             Runtime::Python => "python",
         }
     }
+
+    /// The runtime as Lambda names it, which a template writes and an export writes for AWS.
+    pub const fn lambda(self) -> &'static str {
+        match self {
+            Runtime::Nodejs => "nodejs24.x",
+            Runtime::Python => "python3.13",
+        }
+    }
 }
 
 /// What `ff init` makes.
@@ -517,6 +553,7 @@ impl Runtime {
 pub enum Template {
     Function,
     Terraform,
+    Sam,
 }
 
 impl Template {
@@ -524,6 +561,7 @@ impl Template {
         match self {
             Template::Function => "function",
             Template::Terraform => "terraform",
+            Template::Sam => "sam",
         }
     }
 }

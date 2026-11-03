@@ -13,6 +13,8 @@ use super::{Template, text_of};
 /// account has on AWS.
 pub const TYPES: [&str; 4] = ["String", "Number", "CommaDelimitedList", "List<Number>"];
 
+/// The SAM CLI's settings, beside the template, whose `sam deploy` values a template's parameters take.
+pub const SAMCONFIG: &str = "samconfig.toml";
 /// samconfig.toml's environment, which `sam deploy` reads with no `--config-env`.
 const SAMCONFIG_ENVIRONMENT: &str = "default";
 
@@ -68,20 +70,40 @@ pub fn overrides(given: &[String]) -> Result<Vec<(String, String)>, String> {
     Ok(values)
 }
 
-/// samconfig.toml's values for `sam deploy`: its default environment's `deploy` parameters' `parameter_overrides`,
-/// else its `global` ones', a string or a list of strings.
-pub fn samconfig(text: &str) -> Result<Vec<(String, String)>, String> {
+/// What samconfig.toml gives `sam deploy`.
+#[derive(Debug, Default, PartialEq)]
+pub struct Samconfig {
+    /// `stack_name`.
+    pub stack_name: Option<String>,
+    /// `parameter_overrides`, a string or a list of strings, each read as `--parameter-overrides` reads it.
+    pub parameter_overrides: Vec<(String, String)>,
+}
+
+/// samconfig.toml's settings for `sam deploy`, each its default environment's `deploy` parameters', else its `global`
+/// ones'.
+pub fn samconfig(text: &str) -> Result<Samconfig, String> {
     let document: toml_edit::DocumentMut = text.parse().map_err(|error| format!("it isn't TOML: {error}"))?;
-    let found = ["deploy", "global"].into_iter().find_map(|command| {
-        document.get(SAMCONFIG_ENVIRONMENT)?.get(command)?.get("parameters")?.get("parameter_overrides")
-    });
-    let Some(item) = found else { return Ok(Vec::new()) };
-    let given = match (item.as_str(), item.as_array()) {
-        (Some(text), _) => vec![text.to_owned()],
-        (_, Some(list)) => list.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect(),
-        _ => return Err("parameter_overrides is a string, or a list of strings".to_owned()),
+    let setting = |key: &str| {
+        ["deploy", "global"]
+            .into_iter()
+            .find_map(|command| document.get(SAMCONFIG_ENVIRONMENT)?.get(command)?.get("parameters")?.get(key))
     };
-    overrides(&given).map_err(|error| format!("parameter_overrides: {error}"))
+    let stack_name = match setting("stack_name") {
+        None => None,
+        Some(item) => Some(item.as_str().ok_or("stack_name is a string")?.to_owned()),
+    };
+    let parameter_overrides = match setting("parameter_overrides") {
+        None => Vec::new(),
+        Some(item) => {
+            let given = match (item.as_str(), item.as_array()) {
+                (Some(text), _) => vec![text.to_owned()],
+                (_, Some(list)) => list.iter().filter_map(|value| value.as_str().map(str::to_owned)).collect(),
+                _ => return Err("parameter_overrides is a string, or a list of strings".to_owned()),
+            };
+            overrides(&given).map_err(|error| format!("parameter_overrides: {error}"))?
+        }
+    };
+    Ok(Samconfig { stack_name, parameter_overrides })
 }
 
 /// The parameters' values, and what CloudFormation would refuse of them.
@@ -213,18 +235,28 @@ mod tests {
     }
 
     #[test]
-    fn samconfigs_deploy_values_else_its_globals_a_string_or_a_list() {
+    fn samconfigs_stack_name_and_values_its_deploy_ones_else_its_globals_a_string_or_a_list() {
         let deploy = "version = 0.1\n[default.global.parameters]\nstack_name = \"shop\"\nparameter_overrides = \"A=1\"\n\
                       [default.deploy.parameters]\nparameter_overrides = [\"Stage=prod\", \"Memory=512\"]\n\
                       [other.deploy.parameters]\nparameter_overrides = \"Stage=test\"\n";
-        assert_eq!(samconfig(deploy), Ok(pairs(&[("Stage", "prod"), ("Memory", "512")])));
+        assert_eq!(
+            samconfig(deploy),
+            Ok(Samconfig {
+                stack_name: Some("shop".into()),
+                parameter_overrides: pairs(&[("Stage", "prod"), ("Memory", "512")])
+            })
+        );
         assert_eq!(
             samconfig("[default.global.parameters]\nparameter_overrides = \"A=1 B=2\"\n"),
-            Ok(pairs(&[("A", "1"), ("B", "2")]))
+            Ok(Samconfig { stack_name: None, parameter_overrides: pairs(&[("A", "1"), ("B", "2")]) })
         );
         // sam init's: a stack's name and no values.
-        assert_eq!(samconfig("version = 0.1\n[default.global.parameters]\nstack_name = \"hello\"\n"), Ok(vec![]));
+        assert_eq!(
+            samconfig("version = 0.1\n[default.global.parameters]\nstack_name = \"hello\"\n"),
+            Ok(Samconfig { stack_name: Some("hello".into()), parameter_overrides: vec![] })
+        );
         assert!(samconfig("[default.deploy.parameters]\nparameter_overrides = 3\n").is_err());
+        assert_eq!(samconfig("[default.deploy.parameters]\nstack_name = 3\n"), Err("stack_name is a string".into()));
         assert!(samconfig("[default\n").unwrap_err().starts_with("it isn't TOML"));
     }
 

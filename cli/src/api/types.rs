@@ -1,9 +1,14 @@
 //! The API's records as ff reads them, and the lookups every command on a function starts with.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::{Call, Client};
 use crate::error::{Error, Kind};
+
+/// The instances a function runs at most unless its owner says otherwise, FF's default.
+pub const DEFAULT_MAX_INSTANCES: u32 = 3;
 
 /// A function, as `GET /functions` and `GET /functions/:id` answer it.
 #[derive(Clone, Debug, Deserialize)]
@@ -39,6 +44,18 @@ pub struct Function {
     /// Its variables, in `GET /functions/:id` only.
     #[serde(default)]
     pub environment: Option<serde_json::Map<String, serde_json::Value>>,
+    /// What it is for, as Lambda's Description: empty for none, and from an API before it.
+    #[serde(default)]
+    pub description: String,
+    /// The queue its asynchronous calls go to once they failed every try, by its ARN, as Lambda's DeadLetterConfig.
+    #[serde(default)]
+    pub dead_letter_target_arn: Option<String>,
+    /// Its tags, in `GET /functions/:id` only.
+    #[serde(default)]
+    pub tags: Option<BTreeMap<String, String>>,
+    /// The stack it is in, as `ff deploy` made it from a template: none for none, and from an API before stacks.
+    #[serde(default)]
+    pub stack: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -73,6 +90,15 @@ pub struct FunctionView<'a> {
     pub code_sha256: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub description: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dead_letter_target_arn: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<&'a BTreeMap<String, String>>,
+    /// The stack a SAM template's deploy made it in, if one did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack: Option<&'a str>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
 }
@@ -101,10 +127,37 @@ impl Function {
             code_size: self.code_size(),
             code_sha256: self.code_sha256.as_deref(),
             environment: self.environment.as_ref(),
+            description: &self.description,
+            dead_letter_target_arn: self.dead_letter_target_arn.as_deref(),
+            tags: self.tags.as_ref(),
+            stack: self.stack.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
         }
     }
+}
+
+/// A resource of a stack: its logical ID and type, as the template names them, and the FF resource it made, by name, a
+/// version's or an alias's after its function's and a colon; none for what FF keeps without effect.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StackResource {
+    pub logical_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub physical_id: Option<String>,
+}
+
+/// A stack, FF's record of what `ff deploy` made of a SAM template, as `GET /stacks/:name` answers it: its parameters'
+/// values, a `NoEcho` one's left out.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stack {
+    pub name: String,
+    pub template_sha256: String,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
+    pub resources: Vec<StackResource>,
 }
 
 /// One call of a function, as the API keeps it.

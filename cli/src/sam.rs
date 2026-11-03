@@ -7,9 +7,11 @@
 //! against cfn-flip, AWS's own converter (`hack/spikes/sam-yaml`). A mapping's keys come in serde_json's order, not the
 //! template's: where the template's order matters, its values' lines give it. What the template means is the
 //! modules': [`subset`], what of it FF's `ff deploy` takes; [`parameters`], its parameters' values; [`resolve`], the
-//! Globals merged and the intrinsics resolved, as SAM and CloudFormation do.
+//! Globals merged and the intrinsics resolved, as SAM and CloudFormation do; [`plan`], its functions as `ff deploy`
+//! makes them and what a deploy deletes of the stack's last.
 
 pub mod parameters;
+pub mod plan;
 pub mod resolve;
 pub mod subset;
 

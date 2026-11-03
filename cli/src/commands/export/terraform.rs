@@ -13,8 +13,8 @@ use super::aliases;
 use super::hcl::{Block, Hcl, file, literal};
 use super::names::{ResourceNames, lambda_names};
 use super::roles::{self, Target};
-use super::template::{DEFAULT_MAX_INSTANCES, Parameter, lambda_runtime};
-use crate::api::types::name_in_arn;
+use super::template::{Parameter, lambda_runtime};
+use crate::api::types::{DEFAULT_MAX_INSTANCES, name_in_arn};
 
 /// The AWS provider the files take, and OpenTofu's or Terraform's version.
 const PROVIDER: &str = "~> 6.0";
