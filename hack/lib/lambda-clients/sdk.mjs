@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 // AWS's SDK for JavaScript v3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the
 // endpoint, the region and the key are given. A function through its life: made, waited for, listed, its code and its
-// settings changed, each change waited for, tagged, invoked, a version and an alias, a URL, refused as Lambda refuses, deleted; an operation FF doesn't offer
+// settings changed, each change waited for, tagged, invoked, a version and an alias, a URL, a queue's mapping, refused as Lambda refuses, deleted; an operation FF doesn't offer
 // yet refused once, by its name, though the client retries by default. One JSON line per check,
 // {client, want, got, what}, for hack/e2e.sh.
 //   MODULES=<folder with node_modules> ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> \
-//   CODE=<zip> CODE_SHA=<its CodeSha256> NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> node sdk.mjs
+//   CODE=<zip> CODE_SHA=<its CodeSha256> NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> \
+//   QUEUE_ARN=<a queue of the account, none reading it> node sdk.mjs
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
 const require = createRequire(`${process.env.MODULES}/`);
 const lambda = require('@aws-sdk/client-lambda');
-const { ENDPOINT, KEY, SECRET, ROLE, CODE, CODE_SHA, NEW_CODE, NEW_CODE_SHA, OTHER_FUNCTION } = process.env;
+const { ENDPOINT, KEY, SECRET, ROLE, CODE, CODE_SHA, NEW_CODE, NEW_CODE_SHA, OTHER_FUNCTION, QUEUE_ARN } = process.env;
 const client = new lambda.LambdaClient({ endpoint: ENDPOINT, region: 'tn-tunis-1', credentials: { accessKeyId: KEY, secretAccessKey: SECRET }, maxAttempts: 1 });
 const FunctionName = 'e2e-sdk';
 /** The waiters as Lambda's tools use them, every second or two, for up to two minutes. */
@@ -141,6 +142,17 @@ await check('ok', 'CreateFunctionUrlConfig, then GetFunctionUrlConfig, UpdateFun
     [read.FunctionUrl === made.FunctionUrl, made.AuthType, changed.AuthType, changed.Cors.AllowOrigins, listed.length, listed[0] === made.FunctionUrl],
     [true, 'NONE', 'NONE', ['https://shop.example.tn'], 1, true],
   );
+});
+await check('ok', 'CreateEventSourceMapping on a queue of the account, then GetEventSourceMapping, UpdateEventSourceMapping, ListEventSourceMappings and DeleteEventSourceMapping', async () => {
+  const made = await send(lambda.CreateEventSourceMappingCommand, { FunctionName, EventSourceArn: QUEUE_ARN, BatchSize: 5 });
+  const read = await send(lambda.GetEventSourceMappingCommand, { UUID: made.UUID });
+  const changed = await send(lambda.UpdateEventSourceMappingCommand, { UUID: made.UUID, Enabled: false });
+  const listed = (await send(lambda.ListEventSourceMappingsCommand, { FunctionName })).EventSourceMappings.map((mapping) => mapping.UUID);
+  const deleted = await send(lambda.DeleteEventSourceMappingCommand, { UUID: made.UUID });
+  await refusedAs(() => send(lambda.GetEventSourceMappingCommand, { UUID: made.UUID }), 'ResourceNotFoundException');
+  // LastModified is a date in seconds, as Lambda's: read as milliseconds, it would be in 1970.
+  const recent = Math.abs(made.LastModified.getTime() - Date.now()) < 600_000;
+  return expect([made.State, made.BatchSize, read.EventSourceArn, changed.State, listed, deleted.State, recent], ['Enabled', 5, QUEUE_ARN, 'Disabled', [made.UUID], 'Deleting', true]);
 });
 await check('ok', 'TagResource, ListTags and UntagResource on its ARN', async () => {
   const { FunctionArn } = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });

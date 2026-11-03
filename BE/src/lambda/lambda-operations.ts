@@ -8,11 +8,12 @@ import { invalidParameterValue } from './lambda-error';
 
 /**
  * Where an operation's function is named: in its path, in its JSON body's
- * FunctionName, in its query's FunctionName (none naming the account's), as a
- * tag's resource, by its ARN in the path; or nowhere: the account's
- * operations, and a mapping's, whose function its record names.
+ * FunctionName, the function there or the one it makes (CreateFunction's), in
+ * its query's FunctionName (none naming the account's), as a tag's resource,
+ * by its ARN in the path; or nowhere: the account's operations, and a
+ * mapping's, whose function its record names.
  */
-export type NamedIn = 'path' | 'body' | 'query' | 'resource' | 'account' | 'mapping';
+export type NamedIn = 'path' | 'body' | 'created' | 'query' | 'resource' | 'account' | 'mapping';
 
 /** One of Lambda's operations, as its API reference has it: its method and dated path, and what a key needs to make it. */
 export interface LambdaOperation {
@@ -60,7 +61,7 @@ const operation = (
  */
 export const LAMBDA_OPERATIONS: readonly LambdaOperation[] = [
   // Functions.
-  operation('POST', '/2015-03-31/functions/?', 'CreateFunction', 'write', 'body', { maxBodyBytes: CODE_BODY_BYTES }),
+  operation('POST', '/2015-03-31/functions/?', 'CreateFunction', 'write', 'created', { maxBodyBytes: CODE_BODY_BYTES }),
   operation('GET', '/2015-03-31/functions/?', 'ListFunctions', 'read', 'account'),
   operation('GET', `/2015-03-31/functions/${F}`, 'GetFunction', 'read', 'path'),
   operation('DELETE', `/2015-03-31/functions/${F}`, 'DeleteFunction', 'write', 'path'),
@@ -249,7 +250,7 @@ export interface LambdaCaller {
   region: string;
   key: ActiveKey;
   plan: PlanView;
-  /** The function a path or a tag's resource names, found in the key's account, and the version or the alias after its name. */
+  /** The function a path, a body or a tag's resource names, found in the key's account. */
   function_?: Function;
   /** The function a request names, as named, its qualifier from its name or from the query's Qualifier; none for the account's operations and a mapping's. */
   named?: { name: string; qualifier?: string };
@@ -273,7 +274,7 @@ export type LambdaHandler = (call: LambdaCall, caller: LambdaCaller) => Promise<
 /** An operation's answer of 200, its document Lambda's JSON. */
 export const ok = (document: unknown): LambdaAnswer => ({ status: 200, document });
 
-/** The function the front door found where the request's path or its tag's resource names one. */
+/** The function the front door found where the request's path, its body or its tag's resource names one. */
 export function namedFunction(caller: LambdaCaller): Function {
   if (!caller.function_) throw new Error('The front door finds the function a path names before its operation runs');
   return caller.function_;

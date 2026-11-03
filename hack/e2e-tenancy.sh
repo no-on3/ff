@@ -1117,6 +1117,18 @@ $(lambda_with "${lambda_b[@]}" get-function-url-config --function-name "$arn_a" 
 $(lambda_with "${lambda_b[@]}" update-function-url-config --function-name l5-a:live --auth-type NONE) \
 $(lambda_with "${lambda_b[@]}" list-function-url-configs --function-name "$arn_a") $(lambda_with "${lambda_b[@]}" delete-function-url-config --function-name l5-a) \
 $([ "$(urls_of_a)" = "$urls_before_b" ] && echo true || echo false)"
+# A's mapping, made through FF's API, as A's key reads it before B's attempts and after.
+mapping_of_a() { lambda_with "${lambda_a[@]}" get-event-source-mapping --uuid "$mapping_a" --query '[State, BatchSize, FunctionArn]'; }
+mapping_before_b="$(mapping_of_a)"
+check "  ... nor reads, changes or deletes its queue's mapping, nor lists it by A's function or A's queue, nor maps A's function: A's as it was, disabled" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException 0 0 refused ResourceNotFoundException true Disabled" \
+  "$(lambda_with "${lambda_b[@]}" get-event-source-mapping --uuid "$mapping_a") \
+$(lambda_with "${lambda_b[@]}" update-event-source-mapping --uuid "$mapping_a" --enabled) \
+$(lambda_with "${lambda_b[@]}" delete-event-source-mapping --uuid "$mapping_a") \
+$(lambda_with "${lambda_b[@]}" list-event-source-mappings --function-name "$arn_a" --query 'length(EventSourceMappings)') \
+$(lambda_with "${lambda_b[@]}" list-event-source-mappings --event-source-arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a" --query 'length(EventSourceMappings)') \
+$(lambda_with "${lambda_b[@]}" create-event-source-mapping --function-name "$arn_a" --event-source-arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a") \
+$([ "$(mapping_of_a)" = "$mapping_before_b" ] && echo true || echo false) $(mapping_of_a | awk '{print $1}')"
 check "  ... nor reads its tags, nor tags it, nor untags it, by its ARN" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" list-tags --resource "$arn_a") $(lambda_with "${lambda_b[@]}" tag-resource --resource "$arn_a" --tags owner=b) \
 $(lambda_with "${lambda_b[@]}" untag-resource --resource "$arn_a" --tag-keys owner)"

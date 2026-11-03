@@ -8,7 +8,7 @@ import { LambdaUpdateFields } from '../functions/functions.service';
 import { PLATFORM_LIMITS, PlanView } from '../plans/plan-limits';
 import { tagsProblem } from '../tags/tag-rules';
 import { invalidParameterValue } from './lambda-error';
-import { defined, isObject, refuseUnknownFields, said } from './lambda-fields';
+import { defined, isEmpty, isObject, refuseUnknownFields, said } from './lambda-fields';
 import { LAMBDA_RUNTIMES } from './lambda-functions';
 import { LambdaCaller } from './lambda-operations';
 import { tagsOf } from './lambda-tags';
@@ -100,10 +100,6 @@ export interface CodeChange {
   dryRun: boolean;
   revisionId?: string;
 }
-
-/** Sent with nothing in it: absent, null, false, empty, or an object of such, as the tools send a setting left at its default. */
-const isEmpty = (value: unknown): boolean =>
-  value === undefined || value === null || value === false || value === '' || (Array.isArray(value) && value.length === 0) || (isObject(value) && Object.values(value).every(isEmpty));
 
 /**
  * A whole number from `min` to `max`, Lambda's bounds, and within the plan's,

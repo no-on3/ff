@@ -792,6 +792,58 @@ as_maker aws_lambda delete-function --function-name e2e-urled >/dev/null
 }
 section_def lambda_urls section_lambda_urls lambda_changes budget=45
 
+section_lambda_mappings() {
+section "Lambda's event source mappings with the AWS CLI: a function reading a queue of its account through its alias, its batches in SQS's event, read, listed, changed, disabled, deleted; refused as Lambda refuses"
+mapped_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-mapped"
+mapped_queue="arn:aws:sqs:tn-tunis-1:$ver:e2e-mapped-orders"
+as_ver POST /queues '{"name": "e2e-mapped-orders", "visibilityTimeout": 30}' >/dev/null
+lambda_zip "$work/mapped.zip" 'export const handler = async (event) => { console.log("batch", event.Records.map((record) => record.body).join(",")); return {}; };' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-mapped --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/mapped.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-mapped >/dev/null 2>&1 || true
+as_maker aws_lambda create-alias --function-name e2e-mapped --name reader --function-version 1 >/dev/null
+mapped_id="$(as_ver GET '/functions?name=e2e-mapped' | jq -r '.[0].id')"
+created="$(as_maker aws_lambda create-event-source-mapping --function-name e2e-mapped:reader --event-source-arn "$mapped_queue" \
+  --batch-size 5 --function-response-types ReportBatchItemFailures)"
+mapping_uuid="$(jq -r .UUID <<<"$created")"
+check "CreateEventSourceMapping: the function reads the queue through its alias, 5 a batch, partial batch responses, Enabled at once" \
+  "$mapped_queue $mapped_arn:reader 5 ReportBatchItemFailures Enabled arn:aws:lambda:tn-tunis-1:$ver:event-source-mapping:$mapping_uuid" \
+  "$(jq -r '"\(.EventSourceArn) \(.FunctionArn) \(.BatchSize) \(.FunctionResponseTypes[0]) \(.State) \(.EventSourceMappingArn)"' <<<"$created")"
+for n in 1 2 3; do as_ver POST /queues/e2e-mapped-orders/messages "{\"body\": \"order $n\"}" >/dev/null; done
+read_bodies=''
+for _ in $(seq 30); do
+  read_bodies="$(as_ver GET "/functions/$mapped_id/invocations" | jq -r '[.invocations[] | select(.source == "sqs") | .input.Records[].body] | sort | join(",")')"
+  [ "$read_bodies" = 'order 1,order 2,order 3' ] && break
+  sleep 1
+done
+check "  ... its messages handed to version 1 through the alias, in SQS's event, each once" 'order 1,order 2,order 3 reader' \
+  "$read_bodies $(as_ver GET "/functions/$mapped_id/invocations" | jq -r '[.invocations[] | select(.source == "sqs") | .alias] | unique | join(",")')"
+check "GetEventSourceMapping reads it; ListEventSourceMappings lists it by the function and its alias, and by the queue" \
+  "$mapping_uuid $mapping_uuid $mapping_uuid" \
+  "$(as_reader get-event-source-mapping --uuid "$mapping_uuid" | jq -r .UUID) \
+$(as_reader list-event-source-mappings --function-name e2e-mapped:reader | jq -r '[.EventSourceMappings[].UUID] | join(",")') \
+$(as_reader list-event-source-mappings --event-source-arn "$mapped_queue" | jq -r '[.EventSourceMappings[].UUID] | join(",")')"
+check "UpdateEventSourceMapping: 10 a batch, disabled; then \$LATEST reads it, by the function's name alone" \
+  "10 Disabled $mapped_arn" \
+  "$(as_maker aws_lambda update-event-source-mapping --uuid "$mapping_uuid" --batch-size 10 --no-enabled | jq -r '"\(.BatchSize) \(.State)"') \
+$(as_maker aws_lambda update-event-source-mapping --uuid "$mapping_uuid" --function-name e2e-mapped | jq -r .FunctionArn)"
+check "refused as Lambda refuses: a second mapping of the queue, a stream's ARN, a stream's setting, a mapping the account hasn't, a key that may only read" \
+  "refused ResourceConflictException refused InvalidParameterValueException refused InvalidParameterValueException refused ResourceNotFoundException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda create-event-source-mapping --function-name e2e-mapped --event-source-arn "$mapped_queue") \
+$(outcome as_maker aws_lambda create-event-source-mapping --function-name e2e-mapped --event-source-arn "arn:aws:kinesis:tn-tunis-1:$ver:stream/orders") \
+$(outcome as_maker aws_lambda update-event-source-mapping --uuid "$mapping_uuid" --maximum-retry-attempts 2) \
+$(outcome as_reader get-event-source-mapping --uuid 6c2a1e8b-7d4c-4a9e-8f1a-2b3c4d5e6f70) \
+$(outcome as_reader delete-event-source-mapping --uuid "$mapping_uuid")"
+check "  ... in Lambda's words" "Please update or delete the existing mapping with UUID $mapping_uuid The resource you requested does not exist." \
+  "$(outcome as_maker aws_lambda create-event-source-mapping --function-name e2e-mapped --event-source-arn "$mapped_queue" >/dev/null; grep -oE 'Please update or delete the existing mapping with UUID [0-9a-f-]+' "$work/aws.err") \
+$(outcome as_reader get-event-source-mapping --uuid 6c2a1e8b-7d4c-4a9e-8f1a-2b3c4d5e6f70 >/dev/null; grep -oE 'The resource you requested does not exist\.' "$work/aws.err")"
+check "DeleteEventSourceMapping: answered Deleting, then gone" "Deleting refused ResourceNotFoundException" \
+  "$(as_maker aws_lambda delete-event-source-mapping --uuid "$mapping_uuid" | jq -r .State) $(outcome as_reader get-event-source-mapping --uuid "$mapping_uuid")"
+as_maker aws_lambda delete-function --function-name e2e-mapped >/dev/null
+as_ver DELETE /queues/e2e-mapped-orders >/dev/null
+}
+section_def lambda_mappings section_lambda_mappings lambda_changes budget=35
+
 section_lambda_invoke() {
 section "Lambda's Invoke with the AWS CLI: the function's answer as it returned it, the version that ran, the call's log with LogType Tail, the ClientContext in Node.js and Python; an error and a timeout as the call's outcome; Event and DryRun; refused as Lambda refuses"
 invoker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-invoker", "functions": ["e2e-invoked", "e2e-invoked-py", "e2e-invoked-broken"], "functionAccess": "invoke"}')"
@@ -870,7 +922,7 @@ as_ver DELETE "/storage-keys/$(jq -r .id <<<"$invoker")" >/dev/null
 section_def lambda_invoke section_lambda_invoke lambda_changes budget=60
 
 section_lambda_sdks() {
-section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, refused as Lambda refuses, deleted"
+section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, a queue's mapping, refused as Lambda refuses, deleted"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0014 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
 lambda_clients="$FF_REPO_ROOT/hack/.cache/lambda-clients"
@@ -887,10 +939,15 @@ clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$make
   return { code: "v2", event, clientContext: context.clientContext ?? null };
 };')"
   OTHER_FUNCTION=e2e-versioned)
-env "${clients_env[@]}" MODULES="$lambda_clients/node_modules" node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
-client_checks "$work/lambda-sdk.jsonl" 14
-env "${clients_env[@]}" "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
-client_checks "$work/lambda-boto3.jsonl" 14
+# A queue for each client's mapping, so that one left by a client that failed refuses nothing to the other.
+for queue_of in sdk boto3; do as_ver POST /queues "{\"name\": \"e2e-$queue_of-orders\"}" >/dev/null; done
+env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-sdk-orders" MODULES="$lambda_clients/node_modules" \
+  node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
+client_checks "$work/lambda-sdk.jsonl" 15
+env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-boto3-orders" \
+  "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
+client_checks "$work/lambda-boto3.jsonl" 15
+for queue_of in sdk boto3; do as_ver DELETE "/queues/e2e-$queue_of-orders" >/dev/null; done
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60
 

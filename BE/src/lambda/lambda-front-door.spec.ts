@@ -27,35 +27,22 @@ import { ActiveKey, EXPIRED, StorageDirectory } from '../storage/storage-directo
 import { CODE_LINK_MS, LambdaCodeLinks } from './lambda-code-links';
 import { LambdaFrontDoor } from './lambda-front-door';
 import { LambdaCall, LambdaCaller, LambdaHandler, LambdaOperations, operationOf } from './lambda-operations';
-import { ACCOUNT, REGION } from './test-fixtures';
+import { ACCOUNT, REGION, accessKey } from './test-fixtures';
 
 const ARN = `arn:aws:lambda:${REGION}:${ACCOUNT}:function`;
 
-const key = (id: string, more: Partial<ActiveKey>): ActiveKey => ({
-  id,
-  accountId: ACCOUNT,
-  name: null,
-  functionId: null,
-  buckets: null,
-  queues: null,
-  functions: null,
-  functionAccess: null,
-  readOnly: false,
-  secret: `${id.toLowerCase()}-secret`,
-  ...more,
-});
-const WRITER = key('AKFFWRITERAAAAAAAAAA', { name: 'deploy', functions: ['*'], functionAccess: 'write' });
-const READER = key('AKFFREADERAAAAAAAAAA', { name: 'reader', functions: ['orders'], functionAccess: 'read' });
-const INVOKER = key('AKFFINVOKERAAAAAAAAA', { functions: ['orders'], functionAccess: 'invoke' });
+const WRITER = accessKey('AKFFWRITERAAAAAAAAAA', { name: 'deploy', functions: ['*'], functionAccess: 'write' });
+const READER = accessKey('AKFFREADERAAAAAAAAAA', { name: 'reader', functions: ['orders'], functionAccess: 'read' });
+const INVOKER = accessKey('AKFFINVOKERAAAAAAAAA', { functions: ['orders'], functionAccess: 'invoke' });
 /** A key to the account's buckets, queues and mail, as every key made before keys reached functions. */
-const STORAGE = key('AKFFSTORAGEAAAAAAAAA', {});
-const FUNCTION_KEY = key('AKFFFUNCTIONAAAAAAAA', { functionId: 'f-billing' });
-const OTHERS = key('AKFFOTHERSAAAAAAAAAA', { accountId: '000000000002', name: 'deploy', functions: ['*'], functionAccess: 'write' });
+const STORAGE = accessKey('AKFFSTORAGEAAAAAAAAA');
+const FUNCTION_KEY = accessKey('AKFFFUNCTIONAAAAAAAA', { functionId: 'f-billing' });
+const OTHERS = accessKey('AKFFOTHERSAAAAAAAAAA', { accountId: '000000000002', name: 'deploy', functions: ['*'], functionAccess: 'write' });
 /** A function's key past its end, which the directory says so of. */
 const PAST = 'AKFFPASTAAAAAAAAAAAA';
 
 /** The spike's own key, made up, which its recordings are signed with, in the account its ARNs name. */
-const SPIKE = key('AKFFSPIKELAMBDA23456', { accountId: '123456789012', functions: ['*'], functionAccess: 'write', secret: 'the-spike-s-own-secret-not-a-real-one' });
+const SPIKE = accessKey('AKFFSPIKELAMBDA23456', { accountId: '123456789012', functions: ['*'], functionAccess: 'write', secret: 'the-spike-s-own-secret-not-a-real-one' });
 
 const fn = (accountId: string, name: string): Function => Object.assign(new Function(), { id: `f-${name}`, accountId, name });
 
@@ -313,7 +300,7 @@ describe("Lambda's endpoint (L1)", () => {
   });
 
   describe("a key's level with the function", () => {
-    beforeEach(() => build('GetFunction', 'Invoke', 'DeleteFunction', 'CreateFunction', 'ListFunctions', 'TagResource', 'ListEventSourceMappings', 'GetEventSourceMapping'));
+    beforeEach(() => build('GetFunction', 'Invoke', 'DeleteFunction', 'CreateFunction', 'ListFunctions', 'TagResource', 'ListEventSourceMappings', 'GetEventSourceMapping', 'CreateEventSourceMapping'));
     const status = async (method: string, target: string, as: ActiveKey, body = '') => {
       const answer = await send(method, target, { as, body });
       return answer.status === 200 ? 200 : `${answer.status} ${String(answer.body.message)}`;
@@ -358,10 +345,13 @@ describe("Lambda's endpoint (L1)", () => {
       expect(await status('POST', '/2015-03-31/functions', WRITER, '{}')).toBe('400 FunctionName is required.');
       expect(await status('GET', '/2015-03-31/event-source-mappings/?FunctionName=billing', READER)).toBe("403 The access key reader (AKFFREADERAAAAAAAAAA) doesn't reach the function billing.");
       expect(await status('GET', '/2015-03-31/event-source-mappings/', READER)).toBe(200);
+      expect(await status('POST', '/2015-03-31/event-source-mappings/', WRITER, JSON.stringify({ FunctionName: 'orders:live' }))).toBe(200);
+      expect(await status('POST', '/2015-03-31/event-source-mappings/', WRITER, JSON.stringify({ FunctionName: 'nothing' }))).toBe(`404 Function not found: ${ARN}:nothing`);
       expect(await status('POST', `/2017-03-31/tags/${encodeURIComponent(`${ARN}:orders`)}`, WRITER, '{"Tags":{}}')).toBe(200);
       expect(await status('POST', '/2017-03-31/tags/orders', WRITER, '{"Tags":{}}')).toBe("400 The resource must be a function's ARN, arn:aws:lambda:<region>:<account>:function:<name>, not orders.");
-      // A creation names a function that doesn't exist yet: only the operations that name one by its path find it.
-      expect(calls.map(({ caller }) => caller.function_?.id ?? null)).toEqual([null, null, 'f-orders']);
+      // A function's creation names one that doesn't exist yet, and a list's query names one to filter by: the others find theirs.
+      expect(calls.map(({ caller }) => caller.function_?.id ?? null)).toEqual([null, null, 'f-orders', 'f-orders']);
+      expect(calls[2].caller.named).toEqual({ name: 'orders', qualifier: 'live' });
     });
 
     it('lets a mapping\'s operations ask what the key may do with the function its record names', async () => {
@@ -401,8 +391,8 @@ describe("Lambda's endpoint (L1)", () => {
       const target = '/2015-03-31/functions/orders%3Alive';
 
       expect(refusal(await raw('GET', target, {}))).toEqual([403, 'MissingAuthenticationTokenException', 'Missing Authentication Token']);
-      expect(refusal(await send('GET', target, { as: key('AKFFUNKNOWNAAAAAAAAA', {}) }))).toEqual([403, 'UnrecognizedClientException', 'The security token included in the request is invalid.']);
-      expect(refusal(await send('GET', target, { as: key(PAST, {}) }))).toEqual([403, 'ExpiredTokenException', 'The security token included in the request is expired']);
+      expect(refusal(await send('GET', target, { as: accessKey('AKFFUNKNOWNAAAAAAAAA') }))).toEqual([403, 'UnrecognizedClientException', 'The security token included in the request is invalid.']);
+      expect(refusal(await send('GET', target, { as: accessKey(PAST) }))).toEqual([403, 'ExpiredTokenException', 'The security token included in the request is expired']);
       expect(refusal(await send('GET', target, { secret: 'another' }))[1]).toBe('InvalidSignatureException');
       expect(refusal(await send('GET', target, { escapePath: false }))[1]).toBe('InvalidSignatureException');
       expect(refusal(await send('GET', target, { sessionToken: 'a-token' }))).toEqual([403, 'UnrecognizedClientException', 'The security token included in the request is invalid.']);

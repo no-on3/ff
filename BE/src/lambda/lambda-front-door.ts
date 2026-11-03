@@ -13,15 +13,15 @@ import { FunctionNamed, parseFunctionName, qualifiedFunctionArn } from '../funct
 import { FunctionsService } from '../functions/functions.service';
 import { PlansService } from '../plans/plans.service';
 import { countWrite } from '../plans/rate-limits';
-import { functionAccessOf, keyLabel, mayUse, reachesAnyFunction } from '../storage/key-reach';
-import { ActiveKey, EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
-import { FunctionAccess } from '../storage/storage-key.entity';
+import { mayUse, reachesAnyFunction } from '../storage/key-reach';
+import { EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
 import {
   LambdaError,
   accessDenied,
   expiredToken,
   invalidParameterValue,
   invalidRequestContent,
+  keyCannot,
   lambdaErrorOf,
   missingAuthenticationToken,
   notOffered,
@@ -33,11 +33,9 @@ import {
   unrecognizedClient,
 } from './lambda-error';
 import { CODE_LINK_PATH, LambdaCodeLinks } from './lambda-code-links';
-import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaOperation, LambdaOperations, PAYLOAD_BYTES, laterOperationOf, operationOf } from './lambda-operations';
+import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaOperations, PAYLOAD_BYTES, laterOperationOf, operationOf } from './lambda-operations';
 import { checkLambdaSignature, readLambdaSignature } from './lambda-signature';
 
-/** What a level lets a key do with a function, as a refusal says it. */
-const DOES: Record<FunctionAccess, string> = { read: 'read', invoke: 'invoke', write: 'change' };
 
 /** A body past its operation's limit, or a client gone before it ended: Lambda's words, the operation's limit named. */
 const bodyRefusals = (operation: string | undefined): BodyRefusals => ({
@@ -203,12 +201,12 @@ export class LambdaFrontDoor implements OnModuleDestroy {
     const { operation } = call;
     const named = namedBy(call);
     if (!named) {
-      if (!reachesAnyFunction(caller.key)) throw cannot(caller.key, operation);
+      if (!reachesAnyFunction(caller.key)) throw keyCannot(caller.key, operation);
       return;
     }
-    if (!caller.mayUse(named.name, operation.access)) throw cannot(caller.key, operation, named.name);
+    if (!caller.mayUse(named.name, operation.access)) throw keyCannot(caller.key, operation, named.name);
     caller.named = { name: named.name, ...(named.qualifier ? { qualifier: named.qualifier } : {}) };
-    if (operation.namedIn !== 'path' && operation.namedIn !== 'resource') return;
+    if (operation.namedIn !== 'path' && operation.namedIn !== 'resource' && operation.namedIn !== 'body') return;
     const missing = () => resourceNotFound(`Function not found: ${qualifiedFunctionArn(named.region ?? this.region, named.accountId ?? caller.accountId, named.name, named.qualifier)}`);
     // Another account's function, or another region's, is one this account doesn't have.
     if ((named.accountId && named.accountId !== caller.accountId) || (named.region && named.region !== this.region)) throw missing();
@@ -249,6 +247,7 @@ function namedBy({ operation, groups, query, input }: LambdaCall): FunctionNamed
       if (value === undefined) return null;
       break;
     case 'body':
+    case 'created':
       value = input.FunctionName;
       if (value === undefined) throw invalidParameterValue('FunctionName is required.');
       break;
@@ -271,16 +270,4 @@ function namedBy({ operation, groups, query, input }: LambdaCall): FunctionNamed
   }
   const qualifier = named.qualifier ?? (asked && asked !== '$LATEST' ? asked : undefined);
   return { ...named, ...(qualifier ? { qualifier } : {}) };
-}
-
-/** The key may not make the operation: with that function, at that level, or with the account's functions at all. */
-function cannot(key: ActiveKey, operation: LambdaOperation, name?: string): LambdaError {
-  const label = keyLabel(key);
-  if (key.functionId !== null) {
-    return accessDenied(`A function's own key invokes its account's functions and does nothing else with them: ${operation.name} needs an access key that may ${DOES[operation.access]} them.`);
-  }
-  if (name === undefined) return accessDenied(`The access key ${label} reaches no function: ${operation.name} needs a key that does.`);
-  const access = functionAccessOf(key, name);
-  if (!access) return accessDenied(`The access key ${label} doesn't reach the function ${name}.`);
-  return accessDenied(`The access key ${label} may ${DOES[access]} the function ${name}, not ${DOES[operation.access]} it.`);
 }

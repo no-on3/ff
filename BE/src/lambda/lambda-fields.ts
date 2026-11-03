@@ -10,6 +10,10 @@ export const said = (value: unknown): string => (typeof value === 'string' ? val
 
 export const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/** Sent with nothing in it: absent, null, false, empty, or an object of such, as the tools send a setting left at its default. */
+export const isEmpty = (value: unknown): boolean =>
+  value === undefined || value === null || value === false || value === '' || (Array.isArray(value) && value.length === 0) || (isObject(value) && Object.values(value).every(isEmpty));
+
 /** A field an operation doesn't take: refused, never ignored. */
 export function refuseUnknownFields(input: Record<string, unknown>, operation: string, taken: ReadonlySet<string>): void {
   const unknown = Object.keys(input).find((field) => !taken.has(field));

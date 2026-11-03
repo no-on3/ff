@@ -117,7 +117,7 @@ export class LambdaUrls implements LambdaHandlers {
   private async list({ query, operation }: LambdaCall, caller: LambdaCaller): Promise<LambdaAnswer> {
     const function_ = unqualifiedFunction(caller, operation.name);
     const urls = await this.urls.list(caller.accountId, function_.id);
-    const { page, nextMarker } = pageOf(query, urls, (url) => [url.alias], operation.name, URL_PAGE_MAX);
+    const { page, nextMarker } = pageOf(query, urls, (url) => [url.alias], operation.name, { most: URL_PAGE_MAX });
     return ok({
       FunctionUrlConfigs: page.map((url) => urlConfiguration(url, this.arnOf(caller, url.alias ?? undefined))),
       ...(nextMarker !== undefined ? { NextMarker: nextMarker } : {}),

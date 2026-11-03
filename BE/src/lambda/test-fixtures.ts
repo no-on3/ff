@@ -2,6 +2,7 @@
 import { HttpException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import { plan } from '../plans/test-fixtures';
+import { ActiveKey } from '../storage/storage-directory.service';
 import { LambdaError, lambdaErrorOf } from './lambda-error';
 import { LambdaCall, LambdaCaller, operationOf } from './lambda-operations';
 
@@ -29,6 +30,21 @@ export const TERRAFORM = {
 
 /** What the AWS CLI sends with only what create-function requires. */
 export const CLI = { FunctionName: 'orders', Runtime: 'python3.13', Role: ROLE, Handler: 'app.handler', Code: { ZipFile: ZIP.toString('base64') } };
+
+/** An access key of the account, that reaches nothing unless `more` says so. */
+export const accessKey = (id: string, more: Partial<ActiveKey> = {}): ActiveKey => ({
+  id,
+  accountId: ACCOUNT,
+  name: null,
+  functionId: null,
+  buckets: null,
+  queues: null,
+  functions: null,
+  functionAccess: null,
+  readOnly: false,
+  secret: `${id.toLowerCase()}-secret`,
+  ...more,
+});
 
 /** A request as the front door hands it to its operation: the operation its method and its path name, its query, its JSON body. */
 export function lambdaCall(method: string, target: string, input: Record<string, unknown> = {}): LambdaCall {

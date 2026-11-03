@@ -2,6 +2,9 @@ import { HttpException } from '@nestjs/common';
 import { functionArn } from '../functions/arns';
 import { ChangeUnderWayException } from '../functions/change-under-way';
 import { FunctionStatus } from '../functions/entities/function.entity';
+import { functionAccessOf, keyLabel } from '../storage/key-reach';
+import { ActiveKey } from '../storage/storage-directory.service';
+import { FunctionAccess } from '../storage/storage-key.entity';
 
 /**
  * An error as AWS Lambda answers it, in its REST JSON protocol (ADR 0014): an
@@ -51,6 +54,21 @@ export const unknownOperation = (message: string) => new LambdaError(400, 'Unkno
 /** One of Lambda's operations FF doesn't offer yet, named, and what FF offers instead, where it does. */
 export const notOffered = (operation: string, instead?: string) =>
   unknownOperation(`FF doesn't offer ${operation} of Lambda's API yet.${instead ? ` ${instead}` : ''}`);
+/** What a level lets a key do with a function, as a refusal says it. */
+const DOES: Record<FunctionAccess, string> = { read: 'read', invoke: 'invoke', write: 'change' };
+
+/** The key may not make the operation: with that function, at that level, or with the account's functions at all. */
+export function keyCannot(key: ActiveKey, operation: { name: string; access: FunctionAccess }, name?: string): LambdaError {
+  const label = keyLabel(key);
+  if (key.functionId !== null) {
+    return accessDenied(`A function's own key invokes its account's functions and does nothing else with them: ${operation.name} needs an access key that may ${DOES[operation.access]} them.`);
+  }
+  if (name === undefined) return accessDenied(`The access key ${label} reaches no function: ${operation.name} needs a key that does.`);
+  const access = functionAccessOf(key, name);
+  if (!access) return accessDenied(`The access key ${label} doesn't reach the function ${name}.`);
+  return accessDenied(`The access key ${label} may ${DOES[access]} the function ${name}, not ${DOES[operation.access]} it.`);
+}
+
 export const serviceException = () => new LambdaError(500, 'ServiceException', 'The AWS Lambda service encountered an internal error.');
 
 /** Lambda's name for each refusal of FF's API that its services give: the same status, the same message. */
