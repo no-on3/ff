@@ -16,6 +16,7 @@ use super::functions::confirmed;
 use super::queues;
 use super::schedule::{self, Schedule};
 use super::secrets::Secrets;
+use super::sites;
 use super::url::FunctionUrl;
 use super::{Context, account, async_config};
 use crate::api::types::{Function, LATEST, Stack, StackResource, find, name_in_arn};
@@ -24,7 +25,9 @@ use crate::cli::{DeployArgs, Runtime};
 use crate::error::{Error, Kind};
 use crate::package::{self, Options, Package};
 use crate::sam::parameters::{self, SAMCONFIG, Samconfig};
-use crate::sam::plan::{self, ALIAS, EVENT_INVOKE_CONFIG, Known, MAPPING, Made, Place, QUEUE, RULE, SCHEDULE, URL};
+use crate::sam::plan::{
+    self, ALIAS, BUCKET, EVENT_INVOKE_CONFIG, Known, MAPPING, Made, Place, QUEUE, RULE, SCHEDULE, Target, URL,
+};
 use crate::sam::resolve::FUNCTION;
 use crate::sam::{self, Template, subset};
 
@@ -212,10 +215,26 @@ struct QueueDeployed {
     changed: Vec<String>,
 }
 
+/// What the deploy did to one of the template's buckets.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BucketDeployed {
+    logical_id: String,
+    name: String,
+    /// created, updated or unchanged.
+    action: &'static str,
+    /// tags, site, notifications.
+    changed: Vec<&'static str>,
+    /// Its site's address, when it is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StackDeployed {
     stack: String,
+    buckets: Vec<BucketDeployed>,
     queues: Vec<QueueDeployed>,
     functions: Vec<FunctionDeployed>,
     deleted: Vec<StackResource>,
@@ -391,12 +410,37 @@ fn ensure_mappings(
 }
 
 /// What the template names that the account has to have, said before any change: each schedule's expression as FF's
-/// own parser reads it, each queue a function reads and each dead-letter queue, but the template's own queues.
+/// own parser reads it, each queue a function reads, each dead-letter queue, and each function and queue a bucket
+/// tells, but the template's own.
 fn check_named(client: &Client, deployment: &plan::Plan, problems: &mut Problems) -> Result<(), Error> {
     let made: BTreeSet<&str> = deployment.queues.iter().map(|queue| queue.name.as_str()).collect();
     let missing = |queue: &str| -> Result<bool, Error> {
         Ok(!made.contains(queue) && client.json_if_any::<Value>(&Call::get(format!("/queues/{queue}")))?.is_none())
     };
+    let functions_made: BTreeSet<&str> = deployment.functions.iter().map(|function| function.name.as_str()).collect();
+    for bucket in &deployment.buckets {
+        for notification in &bucket.notifications {
+            let name = notification.destination();
+            let (absent, what, makes) = match notification.target {
+                Target::Queue => (missing(name)?, "queue", format!("`ff queues create {name}`")),
+                Target::Function => (
+                    !functions_made.contains(name) && find(client, name)?.is_none(),
+                    "function",
+                    format!("`ff deploy` of its code as {name}"),
+                ),
+            };
+            if absent {
+                problems.at(
+                    &notification.at,
+                    &format!(
+                        "{}: the notification {} tells the {what} {name}, which the account hasn't: a {what} of the \
+                         template, or {makes}, makes it",
+                        bucket.id, notification.id
+                    ),
+                );
+            }
+        }
+    }
     for queue in &deployment.queues {
         let Some(dead_letter) = queue.dead_letter() else { continue };
         if missing(dead_letter)? {
@@ -484,6 +528,49 @@ fn ensure_queue(
     Ok(deployed("updated", changed))
 }
 
+/// The bucket as the template says: made with its tags, or its tags replaced when they differ; and its site.
+fn ensure_bucket(client: &Client, bucket: &plan::Bucket, existing: Option<&Value>) -> Result<BucketDeployed, Error> {
+    let mut changed = Vec::new();
+    let action = match existing {
+        None => {
+            let mut body = json!({ "name": bucket.name });
+            if !bucket.tags.is_empty() {
+                body["tags"] = json!(bucket.tags);
+            }
+            client.json::<Value>(&Call::post("/buckets", body))?;
+            "created"
+        }
+        Some(existing) => {
+            let tags: BTreeMap<String, String> = serde_json::from_value(existing["tags"].clone()).unwrap_or_default();
+            if tags != bucket.tags {
+                client
+                    .json::<Value>(&Call::patch(format!("/buckets/{}", bucket.name), json!({ "tags": bucket.tags })))?;
+                changed.push("tags");
+            }
+            "unchanged"
+        }
+    };
+    let website = bucket.website.as_ref().map(|site| (site.index_document.as_str(), site.error_document.as_deref()));
+    let (site, site_changed) = sites::ensure(client, &bucket.name, website)?;
+    if site_changed && existing.is_some() {
+        changed.push("site");
+    }
+    let action = if action == "unchanged" && !changed.is_empty() { "updated" } else { action };
+    Ok(BucketDeployed { logical_id: bucket.id.clone(), name: bucket.name.clone(), action, changed, site })
+}
+
+/// The bucket's notifications as the template says, put whole when they differ from the bucket's: once its functions
+/// are made, which FF's API wants there. Whether they did.
+fn ensure_notifications(client: &Client, bucket: &plan::Bucket) -> Result<bool, Error> {
+    let path = format!("/buckets/{}/notifications", bucket.name);
+    let wanted = bucket.notification_configuration();
+    if client.json::<Value>(&Call::get(path.clone()))? == wanted {
+        return Ok(false);
+    }
+    client.json::<Value>(&Call::put(path, wanted))?;
+    Ok(true)
+}
+
 /// The settings of its asynchronous calls as FF's API answers them, Lambda's fields alone, those unset left out.
 fn event_invoke_fields(config: &Value) -> Value {
     let mut fields = serde_json::Map::new();
@@ -516,20 +603,44 @@ fn ensure_event_invoke_config(client: &Client, function: &Function, wanted: &Val
     Ok(true)
 }
 
-/// Whether a resource of the stack is a queue, and the queue's or the function's name it is or is of.
-fn owner(resource: &StackResource) -> (bool, &str) {
-    (resource.kind == QUEUE, plan::function_of(resource))
+/// What a resource of the stack is or is of, by name: a function, a queue or a bucket.
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum Owner<'a> {
+    Function(&'a str),
+    Queue(&'a str),
+    Bucket(&'a str),
 }
 
-/// Deletes what a resource of the stack made, unless it is gone already: a queue, or what is a function's.
+fn owner(resource: &StackResource) -> Owner<'_> {
+    let name = plan::function_of(resource);
+    match resource.kind.as_str() {
+        QUEUE => Owner::Queue(name),
+        BUCKET => Owner::Bucket(name),
+        _ => Owner::Function(name),
+    }
+}
+
+/// Deletes what a resource of the stack made, unless it is gone already: a queue, a bucket that is empty, as
+/// CloudFormation deletes one, or what is a function's.
 fn delete_resource(client: &Client, resource: &StackResource) -> Result<(), Error> {
     let call = match (resource.kind.as_str(), resource.physical_id.as_deref()) {
         (QUEUE, Some(name)) => Some(Call::delete(format!("/queues/{name}"))),
+        (BUCKET, Some(name)) => Some(Call::delete(format!("/buckets/{name}"))),
         _ => function_deletion(client, resource)?,
     };
     let Some(call) = call else { return Ok(()) };
     match client.done(&call) {
         Err(error) if error.status == Some(404) => Ok(()),
+        Err(error) if error.status == Some(409) && resource.kind == BUCKET => {
+            let (name, id) = (plan::function_of(resource), &resource.logical_id);
+            Err(Error::new(
+                Kind::Failed,
+                format!(
+                    "The bucket {name} ({id}) isn't empty, and CloudFormation deletes a bucket that is: empty it, or \
+                     delete it with `ff buckets delete {name} --force`, then run this again"
+                ),
+            ))
+        }
         done => done,
     }
 }
@@ -681,6 +792,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
         account: &account.id,
         sqs_endpoint: &aws.sqs_endpoint,
         sqs_function_endpoint,
+        s3_endpoint: &aws.s3_endpoint,
     };
     let last: Option<Stack> = client.json_if_any(&Call::get(format!("/stacks/{stack_name}")))?;
     let last_resources = last.as_ref().map(|stack| stack.resources.as_slice()).unwrap_or_default();
@@ -705,9 +817,10 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     for name in &values.unknown {
         context.out.warn(&format!("{from} gives {name}, which the template has no parameter for: ff deploy passes it over, as `sam deploy` does"));
     }
-    // Each function and queue may need a name CloudFormation's way, with a random suffix.
+    // Each function, queue and bucket may need a name CloudFormation's way, with a random suffix.
     let named_in_template = template.value.get("Resources").and_then(Value::as_object).map_or(0, |resources| {
-        resources.values().filter(|resource| [FUNCTION, QUEUE].iter().any(|kind| resource["Type"] == *kind)).count()
+        let named = [FUNCTION, QUEUE, BUCKET];
+        resources.values().filter(|resource| named.iter().any(|kind| resource["Type"] == *kind)).count()
     });
     let mut suffixes = suffixes(named_in_template)?;
     let planned = plan::plan(&template, &values.values, &place, last_resources, &at.folder, &mut || {
@@ -725,16 +838,34 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     problems.refusal()?;
     let mut problems = Problems { file: file.clone(), template: &template, found: Vec::new() };
 
-    let ours = |name: &str| {
-        last_resources.iter().any(|resource| resource.kind == FUNCTION && resource.physical_id.as_deref() == Some(name))
+    let ours = |kind: &str, name: &str| {
+        last_resources.iter().any(|resource| resource.kind == kind && resource.physical_id.as_deref() == Some(name))
     };
+    // A resource of the template's name that the account has outside the stack, which the deploy doesn't take over.
+    let taken = |problems: &mut Problems, id: &str, what: &str, name: &str, property: &str, delete: &str| {
+        problems.at(
+            &format!("/Resources/{id}"),
+            &format!(
+                "{id}: the account has a {what} {name} outside the stack: ff deploy doesn't take it over; give {id} \
+                 another {property}, or delete that {what} with `{delete} {name}`"
+            ),
+        );
+    };
+    let mut existing_buckets = Vec::new();
+    for bucket in &deployment.buckets {
+        let found: Option<Value> = client.json_if_any(&Call::get(format!("/buckets/{}", bucket.name)))?;
+        if found.is_some() && !ours(BUCKET, &bucket.name) {
+            taken(&mut problems, &bucket.id, "bucket", &bucket.name, "BucketName", "ff buckets delete");
+        }
+        existing_buckets.push(found);
+    }
     let mut existing = Vec::new();
     for function in &deployment.functions {
         let found = find(&client, &function.name)?;
         let id = &function.id;
         let name = &function.name;
         match &found {
-            Some(other) if !ours(name.as_str()) => {
+            Some(other) if !ours(FUNCTION, name.as_str()) => {
                 let answer: Function = client.json(&Call::get(format!("/functions/{}", other.id)))?;
                 let whose = match &answer.stack {
                     Some(stack) => format!("the stack {stack}'s"),
@@ -768,18 +899,8 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     let mut existing_queues = Vec::new();
     for queue in &deployment.queues {
         let found: Option<queues::Queue> = client.json_if_any(&Call::get(format!("/queues/{}", queue.name)))?;
-        let ours = last_resources
-            .iter()
-            .any(|resource| resource.kind == QUEUE && resource.physical_id.as_deref() == Some(queue.name.as_str()));
-        if found.is_some() && !ours {
-            let (id, name) = (&queue.id, &queue.name);
-            problems.at(
-                &format!("/Resources/{id}"),
-                &format!(
-                    "{id}: the account has a queue {name} outside the stack: ff deploy doesn't take it over; give {id} \
-                     another QueueName, or delete that queue with `ff queues delete {name}`"
-                ),
-            );
+        if found.is_some() && !ours(QUEUE, &queue.name) {
+            taken(&mut problems, &queue.id, "queue", &queue.name, "QueueName", "ff queues delete");
         }
         existing_queues.push(found);
     }
@@ -803,21 +924,25 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
             .result(&json!({ "stack": stack_name, "deployed": false }), || "Nothing deployed".to_owned());
     }
 
-    // What the stack has that is still there, by the queue or the function it is: the record starts from it.
+    // What the stack has that is still there, by the function, the queue or the bucket it is: the record starts from
+    // it.
     let mut still_there = BTreeSet::new();
     let named = last_resources.iter().filter(|resource| resource.physical_id.is_some()).map(owner);
-    for (is_queue, name) in named.collect::<BTreeSet<_>>() {
-        let there = match is_queue {
-            true => {
-                deployment.queues.iter().any(|queue| queue.name == name)
-                    || client.json_if_any::<Value>(&Call::get(format!("/queues/{name}")))?.is_some()
+    let there = |path: String| -> Result<bool, Error> { Ok(client.json_if_any::<Value>(&Call::get(path))?.is_some()) };
+    for owned in named.collect::<BTreeSet<_>>() {
+        let is_there = match owned {
+            Owner::Queue(name) => {
+                deployment.queues.iter().any(|queue| queue.name == name) || there(format!("/queues/{name}"))?
             }
-            false => {
+            Owner::Bucket(name) => {
+                deployment.buckets.iter().any(|bucket| bucket.name == name) || there(format!("/buckets/{name}"))?
+            }
+            Owner::Function(name) => {
                 deployment.functions.iter().any(|function| function.name == name) || find(&client, name)?.is_some()
             }
         };
-        if there {
-            still_there.insert((is_queue, name));
+        if is_there {
+            still_there.insert(owned);
         }
     }
     let template_sha256 = sha256_hex(text.as_bytes());
@@ -839,7 +964,16 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     }
 
     let started = Instant::now();
-    // The queues first, each dead-letter queue before those that use it: the functions read them and send to them.
+    // The buckets first, a name another account has refused before anything else is made, their sites with them.
+    let mut buckets_deployed = Vec::new();
+    for (bucket, existing) in deployment.buckets.iter().zip(&existing_buckets) {
+        buckets_deployed.push(ensure_bucket(&client, bucket, existing.as_ref())?);
+        record.keep(&[bucket.resource()]);
+        if existing.is_none() {
+            record.save()?;
+        }
+    }
+    // Then the queues, each dead-letter queue before those that use it: the functions read them and send to them.
     let mut queues_deployed = Vec::new();
     for (queue, existing) in deployment.queues.iter().zip(&existing_queues) {
         queues_deployed.push(ensure_queue(&client, queue, existing.as_ref())?);
@@ -947,19 +1081,29 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
             url,
         });
     }
+    // The buckets' notifications once the functions they call are made, before what the template no longer has goes.
+    for (bucket, deployed) in deployment.buckets.iter().zip(&mut buckets_deployed) {
+        if ensure_notifications(&client, bucket)? && deployed.action != "created" {
+            deployed.changed.push("notifications");
+            deployed.action = "updated";
+        }
+    }
     for resource in &removed.deleted {
         delete_resource(&client, resource)?;
     }
     // What its template said to retain is the account's from now on, as a stack CloudFormation updates leaves it.
     Record { template_sha256, parameters, resources: next, ..record }.save()?;
 
-    let queues_made = deployment.queues.iter().map(|queue| (queue.id.clone(), queue.name.clone())).collect();
+    let by_id = |id: &String, name: &String| (id.clone(), name.clone());
     let known = Known {
-        place: &place,
-        values: &values.values,
         functions: made,
-        queues: queues_made,
-        queue_endpoint: place.sqs_endpoint,
+        queues: deployment.queues.iter().map(|queue| by_id(&queue.id, &queue.name)).collect(),
+        buckets: deployment.buckets.iter().map(|bucket| by_id(&bucket.id, &bucket.name)).collect(),
+        sites: buckets_deployed
+            .iter()
+            .filter_map(|bucket| Some((bucket.logical_id.clone(), bucket.site.clone()?)))
+            .collect(),
+        ..Known::new(&place, &values.values, place.sqs_endpoint)
     };
     let outputs = plan::outputs(&template, &known);
     let seconds = deploy::seconds_since(started);
@@ -967,6 +1111,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     let plan::Removed { deleted, kept } = removed;
     let document = StackDeployed {
         stack: stack_name.clone(),
+        buckets: buckets_deployed,
         queues: queues_deployed,
         functions: deployed,
         deleted,
@@ -975,18 +1120,20 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     };
     context.out.result(&document, || {
         let mut lines = vec![format!("{stack_name}: deployed in {seconds} s")];
+        let changed = |action: &str, changed: String| match action {
+            "updated" => format!(", changed: {changed}"),
+            _ => String::new(),
+        };
+        for bucket in &document.buckets {
+            let changed = changed(bucket.action, bucket.changed.join(", "));
+            lines.push(format!("{} the bucket {} ({}){changed}", bucket.action, bucket.name, bucket.logical_id));
+        }
         for queue in &document.queues {
-            let changed = match queue.action {
-                "updated" => format!(", changed: {}", queue.changed.join(", ")),
-                _ => String::new(),
-            };
+            let changed = changed(queue.action, queue.changed.join(", "));
             lines.push(format!("{} the queue {} ({}){changed}", queue.action, queue.name, queue.logical_id));
         }
         for function in &document.functions {
-            let changed = match function.action {
-                "updated" => format!(", changed: {}", function.changed.join(", ")),
-                _ => String::new(),
-            };
+            let changed = changed(function.action, function.changed.join(", "));
             let version = function.version.as_deref().map(|version| format!(", version {version}")).unwrap_or_default();
             lines.push(format!("{} {} ({}){changed}{version}", function.action, function.name, function.logical_id));
         }

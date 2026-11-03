@@ -68,19 +68,29 @@ fn list_shows_each_bucket_what_it_held_and_its_address() {
 }
 
 #[test]
-fn get_says_what_it_held_at_its_last_measure_and_where_aws_tools_reach_it() {
-    let api = Server::start(vec![Reply::json(200, measured("photos")), Reply::json(200, bucket("fresh"))]);
+fn get_says_what_it_held_at_its_last_measure_its_tags_and_where_aws_tools_reach_it() {
+    let mut photos = measured("photos");
+    photos["tags"] = json!({ "team": "shop", "stage": "prod" });
+    let api = Server::start(vec![
+        Reply::json(200, photos.clone()),
+        Reply::json(200, bucket("fresh")),
+        Reply::json(200, photos),
+    ]);
     let dir = with_key(&api.url);
 
     ff(&dir).args(["buckets", "get", "photos"]).assert().success().stdout(
-        "photos\nstatus    active\nheld      154 MB, 1204 objects, as measured at 2026-10-23 09:00 UTC\nendpoint  https://s3.example.tn\n\
-         address   https://photos.s3.example.tn (and https://s3.example.tn/photos path-style)\nregion    tn-tunis-1\ncreated   2026-10-23 06:35:00 UTC\n",
+        "photos\nstatus    active\nheld      154 MB, 1204 objects, as measured at 2026-10-23 09:00 UTC\ntags      stage=prod, team=shop\n\
+         endpoint  https://s3.example.tn\naddress   https://photos.s3.example.tn (and https://s3.example.tn/photos path-style)\n\
+         region    tn-tunis-1\ncreated   2026-10-23 06:35:00 UTC\n",
     );
     ff(&dir)
         .args(["buckets", "get", "fresh"])
         .assert()
         .success()
         .stdout(predicate::str::contains("held      not measured yet: within the hour\n"));
+    let answer = ff(&dir).args(["buckets", "get", "photos", "--output", "json"]).assert().success();
+    let printed: Value = serde_json::from_slice(&answer.get_output().stdout).unwrap();
+    assert_eq!(printed["tags"], json!({ "team": "shop", "stage": "prod" }));
 }
 
 #[test]

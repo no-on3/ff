@@ -10,6 +10,11 @@ pub fn in_words<T: AsRef<str>>(items: &[T]) -> String {
     }
 }
 
+/// Tags as they read: `team=shop, stage=prod`, by key.
+pub fn tags(tags: &std::collections::BTreeMap<String, String>) -> String {
+    tags.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join(", ")
+}
+
 /// Rows under their headers, each column as wide as its widest cell, two spaces apart; the last
 /// column isn't padded.
 pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {

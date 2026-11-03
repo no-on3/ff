@@ -87,8 +87,7 @@ pub fn get(name: &str, context: &Context) -> Result<(), Error> {
             lines.push(format!("environment  {}", environment.keys().cloned().collect::<Vec<_>>().join(", ")));
         }
         if let Some(tags) = function.tags.as_ref().filter(|tags| !tags.is_empty()) {
-            let tags: Vec<String> = tags.iter().map(|(key, value)| format!("{key}={value}")).collect();
-            lines.push(format!("tags         {}", tags.join(", ")));
+            lines.push(format!("tags         {}", crate::table::tags(tags)));
         }
         if let Some(queue) = &function.dead_letter_target_arn {
             lines.push(format!("dead letters {queue}"));

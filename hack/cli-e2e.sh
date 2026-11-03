@@ -12,8 +12,9 @@
 # moved with a share of its calls and rolled back, its own URL, a schedule through it, a version it names kept. Then
 # ff init for both runtimes, its folder run locally, deployed and invoked; ff init's SAM application, sam init's hello
 # world with a URL for its API, deployed as a stack, called and deleted with ff delete-stack, and sam init's own refused at
-# its Api event; a stack with an alias and a second function, again unchanged, then without it, after asking, a variable
-# with a secret's name refused, and ff delete-stack; folders deployed as
+# its Api event; a stack with an alias, a second function, queues and a bucket's site and notifications, again
+# unchanged, then without them, after asking, a variable with a secret's name refused, and ff delete-stack, stopped by
+# the bucket's files; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
@@ -456,7 +457,7 @@ done
 section_def init section_init backend budget=35
 
 section_stacks() {
-section "SAM templates as stacks: ff init --template sam deployed and called at its URL, sam init's own refused, a stack deployed with a second function and events, then without them, ff delete-stack"
+section "SAM templates as stacks: ff init --template sam deployed and called at its URL, sam init's own refused, a stack deployed with a second function, events, queues and a bucket's site and notifications, then without them, ff delete-stack"
 (cd "$work" && rm -rf cli-sam && "$ff_bin" init cli-sam --runtime nodejs --template sam >"$work/out" 2>"$work/err")
 check "ff init --template sam makes sam init's hello world as FF takes it: its template, code, event and test, samconfig.toml naming the stack" \
   ".gitignore README.md events/event.json hello-world/app.mjs hello-world/package.json samconfig.toml template.yaml tests/unit/test-handler.mjs" \
@@ -484,9 +485,10 @@ in_folder "$work/sam-init" deploy template.yaml --stack-name sam-init
 check "sam init's own hello world is refused, each problem at its line, its Api event's naming FunctionUrlConfig and HttpApi" "2 true true" \
   "$(code) $(err | head -1 | grep '^error: ff deploy changed nothing: the template has [0-9]* problems$' >/dev/null && echo true || echo false) $(err | grep "^template.yaml:25: HelloWorldFunction's event HelloWorld: an Api event makes an API Gateway REST API, which FF hasn't: the function's FunctionUrlConfig gives it a URL, and HttpApi events, all of one function, go to that URL$" >/dev/null && echo true || echo false)"
 
-# A stack of the suite's own: a parameter from samconfig.toml, an alias and its URL, and, in with-reports.yaml, a
-# second function, whose HttpApi event gives it a URL and whose DeletionPolicy retains it, a queue with its dead-letter
-# queue, and the first's Schedule and SQS events, which the deploy after the next no longer has.
+# A stack of the suite's own: a parameter from samconfig.toml, an alias and its URL, a bucket, and, in
+# with-reports.yaml, a second function, whose HttpApi event gives it a URL, whose S3 event the bucket tells and whose
+# DeletionPolicy retains it, a queue with its dead-letter queue, the first's Schedule and SQS events, and the bucket's
+# tags, site and notification to the queue, which the deploy after the next no longer has.
 stack="$work/cli-stack"
 rm -rf "$stack" && mkdir -p "$stack/src"
 cat >"$stack/src/app.mjs" <<'EOF'
@@ -519,6 +521,10 @@ Resources:
       AutoPublishAlias: live
       FunctionUrlConfig:
         AuthType: NONE
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: cli-stack-uploads
 
 Outputs:
   HelloUrl:
@@ -543,6 +549,16 @@ cat >"$stack/more-resources.yaml" <<'EOF'
           Properties:
             Path: /reports
             Method: get
+        Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref UploadsBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: reports/
   JobsQueue:
     Type: AWS::SQS::Queue
     Properties:
@@ -562,8 +578,21 @@ cat >"$stack/more-resources.yaml" <<'EOF'
 EOF
 awk -v more="$stack/more-resources.yaml" '/^Outputs:/ { while ((getline line < more) > 0) print line } { print }' \
   "$stack/template.yaml" >"$stack/with-reports.yaml"
-printf '  JobsUrl:\n    Value: !Ref JobsQueue\n' >>"$stack/with-reports.yaml"
+printf '  JobsUrl:\n    Value: !Ref JobsQueue\n  UploadsSite:\n    Value: !GetAtt UploadsBucket.WebsiteURL\n' >>"$stack/with-reports.yaml"
+printf '  UploadsDomain:\n    Value: !GetAtt UploadsBucket.DomainName\n' >>"$stack/with-reports.yaml"
 sed -i 's/^          STAGE: !Ref Stage$/&\n          JOBS_URL: !Ref JobsQueue/' "$stack/with-reports.yaml"
+cat >"$stack/uploads-bucket.yaml" <<'EOF'
+      Tags:
+        - Key: team
+          Value: uploads
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectRemoved:*
+            Queue: !GetAtt JobsQueue.Arn
+EOF
+sed -i "/^      BucketName: cli-stack-uploads$/r $stack/uploads-bucket.yaml" "$stack/with-reports.yaml"
 cat >"$stack/hello-events.yaml" <<'EOF'
       Events:
         Nightly:
@@ -578,20 +607,31 @@ cat >"$stack/hello-events.yaml" <<'EOF'
             BatchSize: 5
 EOF
 sed -i "/^      AutoPublishAlias: live$/r $stack/hello-events.yaml" "$stack/with-reports.yaml"
-# broken.yaml: an expression FF's schedules don't take, queues the account hasn't, and a name another queue has.
+# broken.yaml: an expression FF's schedules don't take, queues the account hasn't, a function's and the bucket's, and
+# names another queue and another bucket have.
 sed -e 's/cron(0 2 \* \* ? \*)/cron(0 2 * * *)/' \
   -e 's/Queue: !GetAtt JobsQueue.Arn/Queue: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:cli-stack-missing/' \
   -e 's/deadLetterTargetArn: !GetAtt JobsFailedQueue.Arn/deadLetterTargetArn: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:cli-stack-gone/' \
-  -e 's/QueueName: cli-stack-jobs-failed/QueueName: cli-stack-taken/' "$stack/with-reports.yaml" >"$stack/broken.yaml"
+  -e 's/QueueName: cli-stack-jobs-failed/QueueName: cli-stack-taken/' \
+  -e 's/BucketName: cli-stack-uploads/BucketName: cli-stack-taken/' "$stack/with-reports.yaml" >"$stack/broken.yaml"
 ff queues create cli-stack-taken
+ff buckets create cli-stack-taken
 in_folder "$stack" deploy broken.yaml
+# refused <message>: whether ff deploy said it at a line of broken.yaml.
+refused() { err | sed -n 's/^broken\.yaml:[0-9][0-9]*: //p' | grep -F -x -- "$1" >/dev/null && echo true || echo false; }
 check "an expression FF's schedules wouldn't take, queues the account hasn't and a queue's name taken outside the stack are refused at their lines, before any change" "2 true true true true" \
-  "$(code) $(err | grep "^broken.yaml:[0-9]*: HelloFunction: event Nightly's Schedule cron(0 2 \* \* \*): cron() takes six fields, minutes hours day-of-month month day-of-week year; got 5$" >/dev/null && echo true || echo false) $(err | grep "^broken.yaml:[0-9]*: HelloFunction: event Jobs reads the queue cli-stack-missing, which the account hasn't: \`ff queues create cli-stack-missing\` makes it$" >/dev/null && echo true || echo false) $(err | grep "^broken.yaml:[0-9]*: JobsQueue: RedrivePolicy's dead-letter queue cli-stack-gone, which the account hasn't: a queue of the template, or \`ff queues create cli-stack-gone\`, makes it$" >/dev/null && echo true || echo false) $(err | grep "^broken.yaml:[0-9]*: JobsFailedQueue: the account has a queue cli-stack-taken outside the stack: ff deploy doesn't take it over; give JobsFailedQueue another QueueName, or delete that queue with \`ff queues delete cli-stack-taken\`$" >/dev/null && echo true || echo false)"
+  "$(code) $(refused "HelloFunction: event Nightly's Schedule cron(0 2 * * *): cron() takes six fields, minutes hours day-of-month month day-of-week year; got 5") $(refused "HelloFunction: event Jobs reads the queue cli-stack-missing, which the account hasn't: \`ff queues create cli-stack-missing\` makes it") $(refused "JobsQueue: RedrivePolicy's dead-letter queue cli-stack-gone, which the account hasn't: a queue of the template, or \`ff queues create cli-stack-gone\`, makes it") $(refused "JobsFailedQueue: the account has a queue cli-stack-taken outside the stack: ff deploy doesn't take it over; give JobsFailedQueue another QueueName, or delete that queue with \`ff queues delete cli-stack-taken\`")"
+check "  ... as are a queue a bucket tells that the account hasn't, and a bucket's name taken outside the stack" "true true" \
+  "$(refused "UploadsBucket: the notification UploadsBucketQueue1 tells the queue cli-stack-missing, which the account hasn't: a queue of the template, or \`ff queues create cli-stack-missing\`, makes it") $(refused "UploadsBucket: the account has a bucket cli-stack-taken outside the stack: ff deploy doesn't take it over; give UploadsBucket another BucketName, or delete that bucket with \`ff buckets delete cli-stack-taken\`")"
 ff queues delete cli-stack-taken --yes
+ff buckets delete cli-stack-taken --yes
 in_folder "$stack" deploy with-reports.yaml --output json
 hello="$(out | jq -r '.outputs[] | select(.name == "HelloFunctionName") | .value')"
 jobs_url="$(out | jq -r '.outputs[] | select(.name == "JobsUrl") | .value')"
 queues_made="$(out | jq -r '.queues | map("\(.action) \(.logicalId)") | join(", ")')"
+buckets_made="$(out | jq -r '.buckets | map("\(.action) \(.logicalId)") | join(", ")')"
+uploads_site="$(out | jq -r '.outputs[] | select(.name == "UploadsSite") | .value')"
+uploads_domain="$(out | jq -r '.outputs[] | select(.name == "UploadsDomain") | .value')"
 check "ff deploy makes each function of the template, its alias's version published, its outputs resolved" \
   "0 created HelloFunction 1, created ReportsFunction - true" \
   "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.version // "-")") | join(", ")') $([[ $hello =~ ^cli-stack-HelloFunction-[A-Z0-9]{12}$ ]] && echo true || echo false)"
@@ -599,6 +639,14 @@ ff queues get cli-stack-jobs --output json
 check "and each queue before them, the dead-letter queue first, with the template's attributes and tags; an output gives its public URL" \
   "created JobsFailedQueue, created JobsQueue 0 60 cli-stack-jobs-failed 3 jobs http://localhost:$sqs_port/$account_a/cli-stack-jobs" \
   "$queues_made $(code) $(out | jq -r '"\(.visibilityTimeout) \(.redrivePolicy.deadLetterTargetArn | split(":") | last) \(.redrivePolicy.maxReceiveCount) \(.tags.team)"') $jobs_url"
+ff buckets get cli-stack-uploads --output json
+check "and each bucket first, with its tags, a site; outputs give the site's address and the bucket's domain" \
+  "created UploadsBucket 0 uploads http://cli-stack-uploads.site.localhost:$website_port cli-stack-uploads.s3.localhost:$storage_port" \
+  "$buckets_made $(code) $(out | jq -r .tags.team) $uploads_site $uploads_domain"
+ff buckets notifications cli-stack-uploads --output json
+check "whose notifications are its own configuration's and its function's S3 event, put once the function is made" \
+  "0 ReportsFunctionUpload cli-stack-reports s3:ObjectCreated:* reports/, UploadsBucketQueue1 cli-stack-jobs s3:ObjectRemoved:*" \
+  "$(code) $(out | jq -r '(.lambdaFunctionConfigurations + .queueConfigurations) | map([.id, ((.lambdaFunctionArn // .queueArn) | split(":") | last), (.events | join(",")), (.filter.key.filterRules[0].value // empty)] | join(" ")) | join(", ")')"
 ff invoke "$hello:live" --http GET "/?name=Stack"
 check "the function answers at its alias's URL, with samconfig.toml's value of the parameter and the URL it reaches its queue at, in the cluster" \
   "0 HTTP 200 Hello Stack dev http://$cluster_gateway:$sqs_port/$account_a/cli-stack-jobs" \
@@ -614,8 +662,12 @@ check "an SQS event has the alias read the queue, five messages a call" "0 cli-s
 ff invoke cli-stack-reports --http GET /reports
 check "and the function of an HttpApi event answers its route at its URL" "0 HTTP 200 Hello world" "$(code) $(out | head -1) $(out | tail -1 | jq -r .message)"
 in_folder "$stack" deploy with-reports.yaml --output json
-check "deployed again, nothing changes" "0 unchanged HelloFunction 1, unchanged ReportsFunction - unchanged JobsFailedQueue, unchanged JobsQueue" \
-  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.version // "-")") | join(", ")') $(out | jq -r '.queues | map("\(.action) \(.logicalId)") | join(", ")')"
+check "deployed again, nothing changes" "0 unchanged HelloFunction 1, unchanged ReportsFunction - unchanged JobsFailedQueue, unchanged JobsQueue unchanged UploadsBucket" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.version // "-")") | join(", ")') $(out | jq -r '.queues | map("\(.action) \(.logicalId)") | join(", ")') $(out | jq -r '.buckets | map("\(.action) \(.logicalId)") | join(", ")')"
+mkdir -p "$stack/site" && printf '<!doctype html><title>cli stack site</title>' >"$stack/site/index.html"
+ff sites deploy cli-stack-uploads "$stack/site"
+check "ff sites deploy fills the template's site, which answers at the address its output gave" "0 200 cli stack site" \
+  "$(code) $(curl -s -o "$work/page.html" -w '%{http_code}' "$uploads_site/") $(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$work/page.html")"
 echo "token-$account_a" | ff secrets set "$hello" API_TOKEN
 sed 's/^          STAGE: !Ref Stage$/&\n          API_TOKEN: in-the-template/' "$stack/template.yaml" >"$stack/with-secret.yaml"
 in_folder "$stack" deploy with-secret.yaml --yes
@@ -625,9 +677,9 @@ in_folder "$stack" deploy template.yaml --parameter-overrides Stage=prod
 check "what the template no longer has is deleted after asking, which a script says with --yes" \
   "2 error: ff deploy asks first, and there is no terminal to ask in: say --yes" "$(code) $(err | tail -1)"
 in_folder "$stack" deploy template.yaml --parameter-overrides Stage=prod --yes --output json
-check "with --yes, the function changed and published, the events and the queues the template no longer has deleted, the function it retained kept" \
-  "0 updated HelloFunction environment,description 2 HelloFunctionNightly HelloFunctionJobs JobsFailedQueue JobsQueue kept ReportsFunction" \
-  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.changed | join(",")) \(.version)") | join(", ")') $(out | jq -r '.deleted | map(.logicalId) | join(" ")') kept $(out | jq -r '.kept | map(.logicalId) | join(" ")')"
+check "with --yes, the function changed and published, the events and the queues the template no longer has deleted, the function it retained kept, the bucket's tags, site and notifications gone" \
+  "0 updated HelloFunction environment,description 2 HelloFunctionNightly HelloFunctionJobs JobsFailedQueue JobsQueue kept ReportsFunction updated UploadsBucket tags,site,notifications" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.changed | join(",")) \(.version)") | join(", ")') $(out | jq -r '.deleted | map(.logicalId) | join(" ")') kept $(out | jq -r '.kept | map(.logicalId) | join(" ")') $(out | jq -r '.buckets | map("\(.action) \(.logicalId) \(.changed | join(","))") | join(", ")')"
 ff get cli-stack-reports --output json
 check "which stays in the account, in no stack, as CloudFormation leaves it; the schedule, the queue's reader and the queues are gone" "0 none 0 0 0" \
   "$(code) $(out | jq -r '.stack // "none"') $(ff schedule list "$hello" --output json; out | jq length) $(ff event-sources list --function "$hello" --output json; out | jq length) $(ff queues list --output json; out | jq '[.[] | select(.name | startswith("cli-stack"))] | length')"
@@ -635,8 +687,14 @@ ff delete cli-stack-reports --yes
 ff invoke "$hello:live" --http GET "/?name=Stack"
 check "and the alias's URL runs the new version" "0 HTTP 200 Hello Stack prod" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.message) \(.stage)"')"
 in_folder "$stack" delete-stack --yes
-check "ff delete-stack deletes the stack with what it made, its function with its alias and URL" \
-  "0 deleted the function $hello (HelloFunction) deleted the stack cli-stack" "$(code) $(out | paste -sd' ')"
+check "ff delete-stack stops at a bucket with files, as CloudFormation does, saying how to go on" \
+  "3 error: The bucket cli-stack-uploads (UploadsBucket) isn't empty, and CloudFormation deletes a bucket that is: empty it, or delete it with \`ff buckets delete cli-stack-uploads --force\`, then run this again" \
+  "$(code) $(err | tail -1)"
+ff buckets delete cli-stack-uploads --force --yes
+in_folder "$stack" delete-stack --yes
+check "then deletes the stack with what it made, its function with its alias and URL" \
+  "0 deleted the function $hello (HelloFunction) deleted the bucket cli-stack-uploads (UploadsBucket) deleted the stack cli-stack" \
+  "$(code) $(out | paste -sd' ')"
 ff get "$hello"
 check "which is gone" "3" "$(code)"
 }

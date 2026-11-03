@@ -1,6 +1,7 @@
-//! A template's functions as `ff deploy` makes them (ADR 0016): each one's name, code, settings and events, read from
-//! its properties with the Globals merged and the intrinsics resolved; the resources the stack keeps for each; what a
-//! deploy deletes of the stack's last; and the template's outputs once FF knows what they name.
+//! A template's functions, queues and buckets as `ff deploy` makes them (ADR 0016): each one's name and settings, a
+//! function's code and events, read from its properties with the Globals merged and the intrinsics resolved; the
+//! resources the stack keeps for each; what a deploy deletes of the stack's last; and the template's outputs once FF
+//! knows what they name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use crate::api::types::{
     DEFAULT_MAX_INSTANCES, DeletionPolicy, REPORT_BATCH_ITEM_FAILURES, StackResource, name_in_arn,
 };
 use crate::cli::Runtime;
-use crate::config::{is_function_name, is_queue_name};
+use crate::config::{EVENT_TYPES, is_bucket_name, is_function_name, is_queue_name};
 
 /// The resources SAM makes of a function that a stack keeps, by their CloudFormation types.
 pub const URL: &str = "AWS::Lambda::Url";
@@ -29,6 +30,10 @@ pub const MAPPING: &str = "AWS::Lambda::EventSourceMapping";
 pub const QUEUE: &str = "AWS::SQS::Queue";
 /// A queue's policy, kept without effect: on FF a queue's own account sends to it.
 pub const QUEUE_POLICY: &str = "AWS::SQS::QueuePolicy";
+pub const BUCKET: &str = "AWS::S3::Bucket";
+/// A bucket's policy, kept without effect: on FF a bucket's own account reaches it, and its website configuration
+/// alone makes its files public.
+pub const BUCKET_POLICY: &str = "AWS::S3::BucketPolicy";
 /// What the stack keeps of a function besides the function, named after it: each goes with it.
 const OF_A_FUNCTION: [&str; 6] = [URL, ALIAS, EVENT_INVOKE_CONFIG, RULE, SCHEDULE, MAPPING];
 
@@ -42,6 +47,11 @@ const QUEUE_ATTRIBUTES: [(&str, &str, i64, i64, &str, u32); 5] = [
     ("ReceiveMessageWaitTimeSeconds", "receiveMessageWaitTimeSeconds", 0, 20, "seconds", 0),
 ];
 
+/// The most notification configurations a bucket keeps, and the most characters of an object's key, which a filter's
+/// value, an index document and an error document have at most, as S3's.
+const MOST_NOTIFICATIONS: usize = 100;
+const MOST_KEY: usize = 1024;
+
 /// Lambda's defaults, which a template's functions get, as on AWS.
 const DEFAULT_MEMORY: u32 = 128;
 const DEFAULT_TIMEOUT: u32 = 3;
@@ -51,14 +61,16 @@ const DEFAULT_BATCH_SIZE: u32 = 10;
 const SUFFIX_CHARACTERS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 pub const SUFFIX_LENGTH: usize = 12;
 
-/// What the deploy is for: the stack, FF's region and the account, which the pseudo parameters and the ARNs give, and
-/// FF's SQS endpoint, which a queue's URL is under, the public one and the one functions reach inside the cluster.
+/// What the deploy is for: the stack, FF's region and the account, which the pseudo parameters and the ARNs give;
+/// FF's SQS endpoint, which a queue's URL is under, the public one and the one functions reach inside the cluster; and
+/// its S3 endpoint, which a bucket's domain is under.
 pub struct Place<'a> {
     pub stack: &'a str,
     pub region: &'a str,
     pub account: &'a str,
     pub sqs_endpoint: &'a str,
     pub sqs_function_endpoint: &'a str,
+    pub s3_endpoint: &'a str,
 }
 
 impl Place<'_> {
@@ -77,6 +89,24 @@ impl Place<'_> {
         let prefix = self.queue_arn("");
         arn.strip_prefix(&prefix).filter(|name| !name.is_empty() && !name.contains(':'))
     }
+
+    /// The function an ARN names, with its alias or version after a colon, when it is one of the account's in FF's
+    /// region.
+    fn function_of<'a>(&self, arn: &'a str) -> Option<&'a str> {
+        let prefix = self.arn("");
+        arn.strip_prefix(&prefix).filter(|name| !name.is_empty() && name.split(':').count() <= 2)
+    }
+
+    /// The host a bucket is reached at, its name before FF's S3 endpoint's: its DomainName.
+    pub fn bucket_domain(&self, name: &str) -> String {
+        let host = self.s3_endpoint.split_once("://").map_or(self.s3_endpoint, |(_, host)| host);
+        format!("{name}.{}", host.trim_end_matches('/'))
+    }
+}
+
+/// A bucket's ARN, which names no region and no account, as S3's.
+pub fn bucket_arn(name: &str) -> String {
+    format!("arn:aws:s3:::{name}")
 }
 
 /// A function's URL as its FunctionUrlConfig asks: who may call it, and its CORS as FF's API takes it.
@@ -171,6 +201,114 @@ impl Queue {
     }
 }
 
+/// Where a bucket's notification sends its events: a function, called without waiting, or a queue.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Target {
+    Function,
+    Queue,
+}
+
+/// One of a bucket's notification configurations, as FF's API takes it.
+#[derive(Debug, PartialEq)]
+pub struct Notification {
+    /// `PhotosLambda1`, `PhotosQueue1`: the bucket's own, by their order; `ResizerUpload`: a function's S3 event's.
+    pub id: String,
+    pub target: Target,
+    /// The function's ARN, its alias's under AutoPublishAlias, or the queue's.
+    pub arn: String,
+    /// S3's event types, as FF's API takes them.
+    pub events: Vec<String>,
+    pub prefix: Option<String>,
+    pub suffix: Option<String>,
+    /// Where the template says it: a JSON pointer, for a problem.
+    pub at: String,
+}
+
+impl Notification {
+    /// The function or the queue it sends to, by name, without an alias.
+    pub fn destination(&self) -> &str {
+        match self.target {
+            Target::Function => self.arn.split(':').nth(6).unwrap_or_default(),
+            Target::Queue => name_in_arn(&self.arn),
+        }
+    }
+
+    /// Whether it could take an event the other takes too, which S3 refuses as ambiguous: an event type in common, or
+    /// one the other's wildcard, and prefixes and suffixes that a key could have both of.
+    fn overlaps(&self, other: &Notification) -> bool {
+        let covers = |wild: &str, other: &str| wild.ends_with(":*") && other.starts_with(&wild[..wild.len() - 1]);
+        let types = |a: &String, b: &String| a == b || covers(a, b) || covers(b, a);
+        let events = self.events.iter().any(|a| other.events.iter().any(|b| types(a, b)));
+        let both = |a: &Option<String>, b: &Option<String>, along: fn(&str, &str) -> bool| match (a, b) {
+            (Some(a), Some(b)) => along(a, b) || along(b, a),
+            _ => true,
+        };
+        events
+            && both(&self.prefix, &other.prefix, |a, b| a.starts_with(b))
+            && both(&self.suffix, &other.suffix, |a, b| a.ends_with(b))
+    }
+
+    /// As FF's API takes it and answers it: its filter's prefix before its suffix, no filter without either.
+    fn configuration(&self) -> Value {
+        let mut configuration = Map::new();
+        configuration.insert("id".into(), self.id.clone().into());
+        let field = if self.target == Target::Function { "lambdaFunctionArn" } else { "queueArn" };
+        configuration.insert(field.into(), self.arn.clone().into());
+        configuration.insert("events".into(), json!(self.events));
+        let rules: Vec<Value> = [("prefix", &self.prefix), ("suffix", &self.suffix)]
+            .into_iter()
+            .filter_map(|(name, value)| Some(json!({ "name": name, "value": value.as_ref()? })))
+            .collect();
+        if !rules.is_empty() {
+            configuration.insert("filter".into(), json!({ "key": { "filterRules": rules } }));
+        }
+        Value::Object(configuration)
+    }
+}
+
+/// A bucket's site, as its WebsiteConfiguration says: what a folder's path answers, and what a path with no file does.
+#[derive(Debug, PartialEq)]
+pub struct Website {
+    pub index_document: String,
+    pub error_document: Option<String>,
+}
+
+/// A bucket of the template, as FF's API takes it.
+#[derive(Debug, PartialEq)]
+pub struct Bucket {
+    pub id: String,
+    pub name: String,
+    pub tags: BTreeMap<String, String>,
+    /// Its NotificationConfiguration's, then its functions' S3 events, which SAM writes into it.
+    pub notifications: Vec<Notification>,
+    pub website: Option<Website>,
+    pub policies: Policies,
+}
+
+impl Bucket {
+    /// What the stack keeps of it.
+    pub fn resource(&self) -> StackResource {
+        StackResource {
+            logical_id: self.id.clone(),
+            kind: BUCKET.to_owned(),
+            physical_id: Some(self.name.clone()),
+            deletion_policy: self.policies.deletion,
+        }
+    }
+
+    /// Its notifications as FF's API takes them and answers them, the functions' then the queues'.
+    pub fn notification_configuration(&self) -> Value {
+        let of = |target: Target| -> Vec<Value> {
+            self.notifications
+                .iter()
+                .filter(|notification| notification.target == target)
+                .map(Notification::configuration)
+                .collect()
+        };
+        json!({ "lambdaFunctionConfigurations": of(Target::Function), "queueConfigurations": of(Target::Queue) })
+    }
+}
+
 /// A function of the template, as FF makes it.
 #[derive(Debug, PartialEq)]
 pub struct Function {
@@ -206,10 +344,7 @@ pub struct Function {
 impl Function {
     /// `orders`, or `orders:live` with an alias, which SAM gives the URL and the asynchronous settings of.
     pub fn qualified(&self) -> String {
-        match &self.alias {
-            Some(alias) => format!("{}:{alias}", self.name),
-            None => self.name.clone(),
-        }
+        qualified(&self.name, self.alias.as_deref())
     }
 
     /// The instances it keeps running and the most it runs: the template's, else none kept and FF's default most.
@@ -249,6 +384,15 @@ impl Function {
     }
 }
 
+/// `orders`, or `orders:live` with an alias, which SAM gives a function's URL, its asynchronous settings and its S3
+/// events.
+fn qualified(name: &str, alias: Option<&str>) -> String {
+    match alias {
+        Some(alias) => format!("{name}:{alias}"),
+        None => name.to_owned(),
+    }
+}
+
 /// The logical ID SAM gives a function's alias: the function's, `Alias`, and the alias's letters and digits, as a
 /// logical ID holds no other character.
 pub fn alias_id(function: &str, alias: &str) -> String {
@@ -256,12 +400,13 @@ pub fn alias_id(function: &str, alias: &str) -> String {
     format!("{function}Alias{alias}")
 }
 
-/// The template's functions and queues, in its order but each dead-letter queue before the queues that use it, and
-/// what FF keeps without effect, the permissions and the queues' policies.
+/// The template's functions, queues and buckets, in its order but each dead-letter queue before the queues that use
+/// it, and what FF keeps without effect, the permissions and the queues' and the buckets' policies.
 #[derive(Debug)]
 pub struct Plan {
     pub functions: Vec<Function>,
     pub queues: Vec<Queue>,
+    pub buckets: Vec<Bucket>,
     pub without_effect: Vec<StackResource>,
 }
 
@@ -269,7 +414,9 @@ impl Plan {
     /// What the stack keeps once the deploy is done.
     pub fn resources(&self) -> Vec<StackResource> {
         let functions = self.functions.iter().flat_map(Function::resources);
-        functions.chain(self.queues.iter().map(Queue::resource)).chain(self.without_effect.iter().cloned()).collect()
+        let queues = self.queues.iter().map(Queue::resource);
+        let buckets = self.buckets.iter().map(Bucket::resource);
+        functions.chain(queues).chain(buckets).chain(self.without_effect.iter().cloned()).collect()
     }
 
     /// The UpdateReplacePolicy of each resource the deploy makes, by logical ID: what becomes of the one it replaces.
@@ -279,7 +426,9 @@ impl Plan {
             function.resources().into_iter().map(move |resource| (resource.logical_id, policy))
         };
         let of_a_queue = |queue: &Queue| (queue.id.clone(), queue.policies.update_replace);
-        self.functions.iter().flat_map(of_a_function).chain(self.queues.iter().map(of_a_queue)).collect()
+        let of_a_bucket = |bucket: &Bucket| (bucket.id.clone(), bucket.policies.update_replace);
+        let functions = self.functions.iter().flat_map(of_a_function);
+        functions.chain(self.queues.iter().map(of_a_queue)).chain(self.buckets.iter().map(of_a_bucket)).collect()
     }
 }
 
@@ -295,11 +444,6 @@ pub fn generated_name(stack: &str, id: &str, suffix: &str, most: usize) -> Strin
     format!("{stack_part}-{id_part}-{suffix}")
 }
 
-/// The subset's resources and events that `ff deploy` doesn't make yet: what is outside the subset its check refuses.
-/// An S3 event comes with the buckets, as SAM writes it in its bucket's notifications.
-const RESOURCES_NEXT: [&str; 2] = ["AWS::S3::Bucket", "AWS::S3::BucketPolicy"];
-const EVENTS_NEXT: [&str; 1] = ["S3"];
-
 /// A random suffix for a name, from 12 random bytes, letters and digits as CloudFormation's.
 pub fn suffix(random: &[u8; SUFFIX_LENGTH]) -> String {
     random.iter().map(|byte| SUFFIX_CHARACTERS[usize::from(*byte) % SUFFIX_CHARACTERS.len()] as char).collect()
@@ -307,12 +451,16 @@ pub fn suffix(random: &[u8; SUFFIX_LENGTH]) -> String {
 
 /// What FF knows of the template's names: the parameters' values, the pseudo parameters, each function's name, its
 /// ARN and its alias's, after the deploy its URL and the version it published; each queue's name, by logical ID, its
-/// ARN and its URL under `queue_endpoint`, the public one or the one functions reach.
+/// ARN and its URL under `queue_endpoint`, the public one or the one functions reach; each bucket's name, its ARN and
+/// its domain, and after the deploy its site's address.
 pub struct Known<'a> {
     pub place: &'a Place<'a>,
     pub values: &'a BTreeMap<String, Value>,
     pub functions: BTreeMap<String, Made>,
     pub queues: BTreeMap<String, String>,
+    pub buckets: BTreeMap<String, String>,
+    /// Each site's address, by its bucket's logical ID: its WebsiteURL, which FF's API gives once the site is made.
+    pub sites: BTreeMap<String, String>,
     pub queue_endpoint: &'a str,
 }
 
@@ -325,7 +473,20 @@ pub struct Made {
     pub version: Option<String>,
 }
 
-impl Known<'_> {
+impl<'a> Known<'a> {
+    /// What FF knows before the deploy: the values and the place, none of the template's names yet.
+    pub fn new(place: &'a Place<'a>, values: &'a BTreeMap<String, Value>, queue_endpoint: &'a str) -> Self {
+        Known {
+            place,
+            values,
+            functions: BTreeMap::new(),
+            queues: BTreeMap::new(),
+            buckets: BTreeMap::new(),
+            sites: BTreeMap::new(),
+            queue_endpoint,
+        }
+    }
+
     /// What `Ref name`, or with an attribute `Fn::GetAtt name.attribute`, gives, if FF knows it.
     pub fn get(&self, name: &str, attribute: Option<&str>) -> Option<Value> {
         let place = self.place;
@@ -356,6 +517,15 @@ impl Known<'_> {
                 None | Some("QueueUrl") => Some(format!("{}/{}/{queue}", self.queue_endpoint, place.account).into()),
                 Some("Arn") => Some(place.queue_arn(queue).into()),
                 Some("QueueName") => Some(queue.clone().into()),
+                Some(_) => None,
+            };
+        }
+        if let Some(bucket) = self.buckets.get(name) {
+            return match attribute {
+                None => Some(bucket.clone().into()),
+                Some("Arn") => Some(bucket_arn(bucket).into()),
+                Some("DomainName" | "RegionalDomainName") => Some(place.bucket_domain(bucket).into()),
+                Some("WebsiteURL") => self.sites.get(name).cloned().map(Value::from),
                 Some(_) => None,
             };
         }
@@ -411,21 +581,37 @@ pub fn flag(value: &Value) -> Option<bool> {
     }
 }
 
-/// A property's path in words, for a message: `Timeout`, `Environment.Variables`, or an event's `event Jobs's
-/// BatchSize`.
+/// A property's path in words, for a message: `Timeout`, `Environment.Variables`, a list's item `Rules[0].Name`, or
+/// an event's `event Jobs's BatchSize`.
 fn said(path: &str) -> String {
     let mut parts = path.split('/');
     match (parts.next(), parts.next(), parts.next()) {
         (Some("Events"), Some(event), Some("Properties")) => {
-            let rest: Vec<&str> = parts.collect();
+            let rest = dotted(parts);
             let event = format!("event {event}");
             match rest.is_empty() {
                 true => event,
-                false => possessive(&event, &rest.join(".")),
+                false => possessive(&event, &rest),
             }
         }
-        _ => path.replace('/', "."),
+        _ => dotted(path.split('/')),
     }
+}
+
+/// A path's parts written as CloudFormation's messages write them: `Filter.S3Key.Rules[0].Name`.
+fn dotted<'p>(parts: impl Iterator<Item = &'p str>) -> String {
+    let mut said = String::new();
+    for part in parts {
+        if part.bytes().all(|byte| byte.is_ascii_digit()) {
+            said.push_str(&format!("[{part}]"));
+        } else {
+            if !said.is_empty() {
+                said.push('.');
+            }
+            said.push_str(part);
+        }
+    }
+    said
 }
 
 /// `Orders' event`, `Jobs's BatchSize`: what an owner has.
@@ -467,13 +653,16 @@ impl<'a> Reading<'a> {
         self.problems.push((format!("{}/{path}", self.pointer), format!("{}: {message}", self.id)));
     }
 
-    /// The value at a path of the properties, `/` apart, once FF knows it all; else none, the problem said.
+    /// The value at a path of the properties, `/` apart, a list's items by their index, known or not.
+    fn at(&self, path: &str) -> Option<&'a Value> {
+        let (first, rest) = path.split_once('/').unwrap_or((path, ""));
+        let value = self.properties.get(first)?;
+        if rest.is_empty() { Some(value) } else { value.pointer(&format!("/{rest}")) }
+    }
+
+    /// The value at a path of the properties once FF knows it all; else none, the problem said.
     fn known(&mut self, path: &str) -> Option<Value> {
-        let mut value = self.properties.get(path.split('/').next()?)?;
-        for key in path.split('/').skip(1) {
-            value = value.get(key)?;
-        }
-        let value = value.clone();
+        let value = self.at(path)?.clone();
         match unresolved(&value) {
             Some(what) => {
                 self.problem(
@@ -492,9 +681,7 @@ impl<'a> Reading<'a> {
 
     /// Whether the properties have a value at the path, known or not.
     fn has(&self, path: &str) -> bool {
-        let mut keys = path.split('/');
-        let first = keys.next().and_then(|key| self.properties.get(key));
-        keys.try_fold(first, |value, key| Some(value?.get(key))).flatten().is_some()
+        self.at(path).is_some()
     }
 
     fn text(&mut self, path: &str) -> Option<String> {
@@ -636,16 +823,19 @@ fn is_schedule_name(name: &str) -> bool {
         && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
-/// A function's events that FF makes: its schedules, the queues it reads, and whether HttpApi routes go to it.
+/// A function's events that FF makes: its schedules, the queues it reads, whether HttpApi routes go to it, and the
+/// notifications its S3 events give a bucket of the template, by the bucket's name.
 #[derive(Default)]
 struct Events {
     schedules: Vec<Schedule>,
     mappings: Vec<Mapping>,
     http_api: bool,
+    s3: Vec<(String, Notification)>,
 }
 
-/// The function's events, each read from its Properties: what ff deploy makes of the subset's.
-fn events(reading: &mut Reading, place: &Place) -> Events {
+/// The function's events, each read from its Properties: what ff deploy makes of the subset's. `arn` is the
+/// function's, its alias's under AutoPublishAlias, which a bucket's notification calls.
+fn events(reading: &mut Reading, place: &Place, arn: &str) -> Events {
     let mut events = Events::default();
     let properties = reading.properties;
     let Some(all) = properties.get("Events").and_then(Value::as_object) else { return events };
@@ -676,10 +866,109 @@ fn events(reading: &mut Reading, place: &Place) -> Events {
                 events.mappings.push(mapping);
             }
             Some("HttpApi") => events.http_api = true,
+            Some("S3") => events.s3.extend(s3_event(reading, event, &at, arn)),
             _ => {}
         }
     }
     events
+}
+
+/// An S3 event: a bucket of the template calling the function, a notification SAM writes into the bucket's, which the
+/// subset's check has the Bucket's `!Ref` name; with it, the bucket's name.
+fn s3_event(reading: &mut Reading, event: &str, at: &str, arn: &str) -> Option<(String, Notification)> {
+    let bucket = reading.needed(&format!("{at}/Bucket"), "!Ref of a bucket of the template");
+    let events = event_types(reading, &format!("{at}/Events"));
+    let filter = key_filter(reading, &format!("{at}/Filter"));
+    let (prefix, suffix) = filter?;
+    let notification = Notification {
+        id: format!("{}{event}", reading.id),
+        target: Target::Function,
+        arn: arn.to_owned(),
+        events: events?,
+        prefix,
+        suffix,
+        at: format!("{}/{at}", reading.pointer),
+    };
+    Some((bucket?, notification))
+}
+
+/// S3's event types at a path, one or a list of them, each one FF's buckets send.
+fn event_types(reading: &mut Reading, path: &str) -> Option<Vec<String>> {
+    let value = match reading.has(path) {
+        true => reading.known(path)?,
+        false => {
+            reading.needed(path, "S3's events, such as s3:ObjectCreated:*");
+            return None;
+        }
+    };
+    let listed: Option<Vec<String>> = match &value {
+        Value::String(event) => Some(vec![event.clone()]),
+        Value::Array(events) if !events.is_empty() => {
+            events.iter().map(|event| event.as_str().map(str::to_owned)).collect()
+        }
+        _ => None,
+    };
+    let Some(listed) = listed else {
+        reading.problem(path, format!("{} is one of S3's events or a list of them", said(path)));
+        return None;
+    };
+    let refused: Vec<&String> = listed.iter().filter(|event| !EVENT_TYPES.contains(&event.as_str())).collect();
+    if let Some(event) = refused.first() {
+        reading
+            .problem(path, format!("{} {event}: an event FF's buckets send: {}", said(path), EVENT_TYPES.join(", ")));
+        return None;
+    }
+    let mut events = Vec::new();
+    for event in listed {
+        if !events.contains(&event) {
+            events.push(event);
+        }
+    }
+    Some(events)
+}
+
+/// A notification's Filter: its S3Key's Rules, a prefix and a suffix, each once at most, as S3's; neither without one.
+fn key_filter(reading: &mut Reading, at: &str) -> Option<(Option<String>, Option<String>)> {
+    let rules_at = format!("{at}/S3Key/Rules");
+    if !reading.has(&rules_at) {
+        return Some((None, None));
+    }
+    let rules = reading.known(&rules_at)?;
+    let Some(rules) = rules.as_array() else {
+        reading.problem(&rules_at, format!("{} is a list of a Name and a Value each", said(&rules_at)));
+        return None;
+    };
+    let (mut prefix, mut suffix, mut complete) = (None, None, true);
+    for (index, rule) in rules.iter().enumerate() {
+        let rule_at = format!("{rules_at}/{index}");
+        let name = rule.get("Name").and_then(text).map(|name| name.to_ascii_lowercase());
+        let value = rule.get("Value").and_then(text);
+        let (slot, which) = match name.as_deref() {
+            Some("prefix") => (&mut prefix, "prefix"),
+            Some("suffix") => (&mut suffix, "suffix"),
+            _ => {
+                reading.problem(
+                    &rule_at,
+                    format!("{} is a Name, prefix or suffix, and its Value, as S3's", said(&rule_at)),
+                );
+                complete = false;
+                continue;
+            }
+        };
+        let problem = match value {
+            _ if slot.is_some() => Some(format!("{} is a second {which}: S3 takes one of each", said(&rule_at))),
+            Some(value) if (1..=MOST_KEY).contains(&value.chars().count()) => {
+                *slot = Some(value);
+                None
+            }
+            _ => Some(format!("{}'s Value has 1 to {MOST_KEY} characters, as S3's", said(&rule_at))),
+        };
+        if let Some(problem) = problem {
+            reading.problem(&rule_at, problem);
+            complete = false;
+        }
+    }
+    complete.then_some((prefix, suffix))
 }
 
 /// A Schedule event, EventBridge's rule, or a ScheduleV2 event, EventBridge Scheduler's schedule: on FF either is one
@@ -818,7 +1107,15 @@ fn mapping(reading: &mut Reading, event: &str, at: &str, place: &Place) -> Optio
     })
 }
 
-fn function(reading: &mut Reading, name: String, folder: &Path, place: &Place, policies: Policies) -> Option<Function> {
+/// A function of the template as FF makes it; the notifications its S3 events give the template's buckets in `s3`.
+fn function(
+    reading: &mut Reading,
+    name: String,
+    folder: &Path,
+    place: &Place,
+    policies: Policies,
+    s3: &mut Vec<(String, Notification)>,
+) -> Option<Function> {
     let code = reading.text("CodeUri");
     if let Some(given) = &code
         && !is_code(&folder.join(given))
@@ -871,7 +1168,8 @@ fn function(reading: &mut Reading, name: String, folder: &Path, place: &Place, p
         true => reading.number("ProvisionedConcurrencyConfig/ProvisionedConcurrentExecutions", 0, 1000, "instances"),
         false => None,
     };
-    let events = events(reading, place);
+    let mut events = events(reading, place, &place.arn(&qualified(&name, alias.as_deref())));
+    s3.append(&mut events.s3);
     let url = match reading.known("FunctionUrlConfig") {
         Some(config) => {
             let auth_type =
@@ -950,7 +1248,8 @@ fn event_invoke_config(reading: &mut Reading, config: &Value) -> Value {
 }
 
 /// How the template's resources of a type are named on FF: the property that names one, what it is in words, the rule
-/// its name keeps, and the most characters a name has, CloudFormation's included.
+/// its name keeps, the most characters a name has, CloudFormation's included, and whether CloudFormation writes its
+/// names in lower case, as it does a bucket's.
 struct Naming {
     kind: &'static str,
     property: &'static str,
@@ -958,6 +1257,7 @@ struct Naming {
     valid: fn(&str) -> bool,
     rule: &'static str,
     most: usize,
+    lower_case: bool,
 }
 
 const FUNCTIONS: Naming = Naming {
@@ -967,6 +1267,7 @@ const FUNCTIONS: Naming = Naming {
     valid: is_function_name,
     rule: "1 to 64 letters, digits, hyphens or underscores, as Lambda's",
     most: 64,
+    lower_case: false,
 };
 
 const QUEUES: Naming = Naming {
@@ -976,6 +1277,18 @@ const QUEUES: Naming = Naming {
     valid: is_queue_name,
     rule: "1 to 80 letters, digits, hyphens or underscores, as SQS's",
     most: 80,
+    lower_case: false,
+};
+
+const BUCKETS: Naming = Naming {
+    kind: BUCKET,
+    property: "BucketName",
+    what: "bucket",
+    valid: is_bucket_name,
+    rule: "3 to 63 lower-case letters, digits and hyphens, a letter or a digit first and last, as S3's, without dots \
+           on FF",
+    most: 63,
+    lower_case: true,
 };
 
 /// Each resource's name: its own property's, else the one the stack's last deploy gave it, else one CloudFormation's
@@ -989,7 +1302,7 @@ fn names(
     suffix: &mut dyn FnMut() -> String,
     problems: &mut Problems,
 ) -> BTreeMap<String, String> {
-    let Naming { kind, property, what, valid, rule, most } = naming;
+    let Naming { kind, property, what, valid, rule, most, lower_case } = naming;
     let mut names = BTreeMap::new();
     for id in ids {
         let pointer = format!("/Resources/{id}/Properties/{property}");
@@ -1000,11 +1313,24 @@ fn names(
                 problems.push((pointer, format!("{id}: {property} {value}: {rule}, known before the deploy")));
                 continue;
             }
-            None => last
-                .iter()
-                .find(|resource| resource.logical_id == *id && resource.kind == *kind)
-                .and_then(|resource| resource.physical_id.clone())
-                .unwrap_or_else(|| generated_name(known.place.stack, id, &suffix(), *most)),
+            None => {
+                let kept = last.iter().find(|resource| resource.logical_id == *id && resource.kind == *kind);
+                match kept.and_then(|resource| resource.physical_id.clone()) {
+                    Some(name) => name,
+                    None => {
+                        let made = generated_name(known.place.stack, id, &suffix(), *most);
+                        let made = if *lower_case { made.to_ascii_lowercase() } else { made };
+                        if !valid(&made) {
+                            problems.push((
+                                format!("/Resources/{id}"),
+                                format!("{id}: CloudFormation's way names it {made}, which is no {what}'s name: {rule}; give it a {property}"),
+                            ));
+                            continue;
+                        }
+                        made
+                    }
+                }
+            }
         };
         if let Some((other, _)) = names.iter().find(|(_, taken)| **taken == name) {
             problems.push((pointer, format!("{id}: {property} {name} is {other}'s too: a {what}'s name is its own")));
@@ -1105,8 +1431,155 @@ fn dead_letters_first(queues: Vec<Queue>, problems: &mut Problems) -> Vec<Queue>
     ordered.into_iter().map(|(_, queue)| queue).collect()
 }
 
-/// The template's functions as FF makes them, from its folder, its parameters' values and the stack's last deploy; or
-/// every problem found, each at its pointer. `suffix` gives a new name's random part.
+/// A bucket of the template as FF's API takes it: its tags, its NotificationConfiguration's functions and queues of the
+/// account, and its site.
+fn bucket(reading: &mut Reading, name: String, place: &Place, policies: Policies) -> Option<Bucket> {
+    let tags = if reading.has("Tags") { reading.tag_list("Tags") } else { BTreeMap::new() };
+    let mut complete = true;
+    let mut notifications = Vec::new();
+    let kinds = [
+        ("LambdaConfigurations", Target::Function, "Function", "Lambda"),
+        ("QueueConfigurations", Target::Queue, "Queue", "Queue"),
+    ];
+    for (key, target, field, short) in kinds {
+        let path = format!("NotificationConfiguration/{key}");
+        if !reading.has(&path) {
+            continue;
+        }
+        let Some(listed) = reading.known(&path) else {
+            complete = false;
+            continue;
+        };
+        let Some(listed) = listed.as_array() else {
+            reading.problem(&path, format!("{} is a list of configurations", said(&path)));
+            complete = false;
+            continue;
+        };
+        let mut own: Vec<Notification> = Vec::new();
+        for index in 0..listed.len() {
+            let at = format!("{path}/{index}");
+            let events = event_types(reading, &format!("{at}/Event"));
+            let arn_at = format!("{at}/{field}");
+            let (what, wanted) = match target {
+                Target::Function => ("function", place.arn("<name>")),
+                Target::Queue => ("queue", place.queue_arn("<name>")),
+            };
+            let arn = reading.needed(&arn_at, &format!("the {what}'s ARN")).filter(|arn| {
+                let of_the_account = match target {
+                    Target::Function => place.function_of(arn).is_some(),
+                    Target::Queue => place.queue_of(arn).is_some(),
+                };
+                if !of_the_account {
+                    reading.problem(
+                        &arn_at,
+                        format!("{} {arn}: the ARN of a {what} of the account, {wanted}", said(&arn_at)),
+                    );
+                }
+                of_the_account
+            });
+            let filter = key_filter(reading, &format!("{at}/Filter"));
+            let (Some(events), Some(arn), Some((prefix, suffix))) = (events, arn, filter) else {
+                complete = false;
+                continue;
+            };
+            // CloudFormation takes one event a configuration, where S3's API takes a list: those of one destination
+            // and one filter are one configuration on FF.
+            match own.iter_mut().find(|other| (&other.arn, &other.prefix, &other.suffix) == (&arn, &prefix, &suffix)) {
+                Some(same) => {
+                    for event in events {
+                        if !same.events.contains(&event) {
+                            same.events.push(event);
+                        }
+                    }
+                }
+                None => own.push(Notification {
+                    id: format!("{}{short}{}", reading.id, own.len() + 1),
+                    target,
+                    arn,
+                    events,
+                    prefix,
+                    suffix,
+                    at: format!("{}/{at}", reading.pointer),
+                }),
+            }
+        }
+        notifications.extend(own);
+    }
+    let website = match reading.has("WebsiteConfiguration") {
+        true => {
+            let website = website(reading);
+            complete &= website.is_some();
+            website
+        }
+        false => None,
+    };
+    complete.then(|| Bucket { id: reading.id.to_owned(), name, tags, notifications, website, policies })
+}
+
+/// A bucket's WebsiteConfiguration: its IndexDocument, a name without a slash, and its ErrorDocument, an object's key.
+fn website(reading: &mut Reading) -> Option<Website> {
+    let index_at = "WebsiteConfiguration/IndexDocument";
+    let error_at = "WebsiteConfiguration/ErrorDocument";
+    let index = reading.needed(index_at, "the name a folder's path answers, such as index.html");
+    let index = index.filter(|index| {
+        let fine = (1..=MOST_KEY).contains(&index.chars().count()) && !index.contains('/');
+        if !fine {
+            let message = format!(
+                "{} {index}: a name of 1 to {MOST_KEY} characters without a slash, such as index.html, as S3's",
+                said(index_at)
+            );
+            reading.problem(index_at, message);
+        }
+        fine
+    });
+    let error = match reading.has(error_at) {
+        true => {
+            let error = reading.text(error_at);
+            let error = error.filter(|error| {
+                let fine = (1..=MOST_KEY).contains(&error.chars().count());
+                if !fine {
+                    reading.problem(
+                        error_at,
+                        format!("{} is an object's key, 1 to {MOST_KEY} characters", said(error_at)),
+                    );
+                }
+                fine
+            });
+            Some(error?)
+        }
+        false => None,
+    };
+    Some(Website { index_document: index?, error_document: error })
+}
+
+/// A bucket's notifications refused as S3 refuses them: more than it keeps, or two that could take one event.
+fn check_notifications(bucket: &Bucket, problems: &mut Problems) {
+    let (id, notifications) = (&bucket.id, &bucket.notifications);
+    if notifications.len() > MOST_NOTIFICATIONS {
+        problems.push((
+            format!("/Resources/{id}/Properties/NotificationConfiguration"),
+            format!(
+                "{id}: {} notifications, its own and its functions' S3 events: S3 keeps {MOST_NOTIFICATIONS} at most",
+                notifications.len()
+            ),
+        ));
+    }
+    for (index, one) in notifications.iter().enumerate() {
+        for other in notifications[index + 1..].iter().filter(|other| one.overlaps(other)) {
+            problems.push((
+                other.at.clone(),
+                format!(
+                    "{id}: the notifications {} and {} could both take one event, which S3 refuses as ambiguous: \
+                     give them events, prefixes or suffixes that don't overlap",
+                    one.id, other.id
+                ),
+            ));
+        }
+    }
+}
+
+/// The template's functions, queues and buckets as FF makes them, from its folder, its parameters' values and the
+/// stack's last deploy; or every problem found, each at its pointer. `suffix` gives a new name's random part.
 pub fn plan(
     template: &Template,
     values: &BTreeMap<String, Value>,
@@ -1126,9 +1599,9 @@ pub fn plan(
         ids.sort_by_key(|id| template.line(&format!("/Resources/{id}")));
         ids
     };
-    let (ids, queue_ids) = (of_type(FUNCTION), of_type(QUEUE));
+    let (ids, queue_ids, bucket_ids) = (of_type(FUNCTION), of_type(QUEUE), of_type(BUCKET));
     let mut without_effect = Vec::new();
-    for kind in [PERMISSION, QUEUE_POLICY] {
+    for kind in [PERMISSION, QUEUE_POLICY, BUCKET_POLICY] {
         without_effect.extend(of_type(kind).into_iter().map(|id| StackResource {
             deletion_policy: Policies::of(&resources[&id]).deletion,
             logical_id: id,
@@ -1137,38 +1610,10 @@ pub fn plan(
         }));
     }
     let mut problems = Problems::new();
-    for (id, resource) in &resources {
-        let kind = resource.get("Type").and_then(Value::as_str).unwrap_or("");
-        if RESOURCES_NEXT.contains(&kind) {
-            problems.push((
-                format!("/Resources/{id}"),
-                format!(
-                    "{id}: ff deploy makes a template's functions, their events and its queues so far: its {kind} comes next"
-                ),
-            ));
-        }
-        let events = resource.pointer("/Properties/Events").and_then(Value::as_object).into_iter().flatten();
-        let next = events.filter_map(|(name, event)| {
-            event.get("Type").and_then(Value::as_str).filter(|kind| EVENTS_NEXT.contains(kind)).map(|kind| (name, kind))
-        });
-        for (name, kind) in next {
-            problems.push((
-                format!("/Resources/{id}/Properties/Events/{name}"),
-                format!(
-                    "{id}: event {name}, of type {kind}, comes with a template's buckets, which ff deploy makes next"
-                ),
-            ));
-        }
-    }
-    let mut known = Known {
-        place,
-        values,
-        functions: BTreeMap::new(),
-        queues: BTreeMap::new(),
-        queue_endpoint: place.sqs_function_endpoint,
-    };
+    let mut known = Known::new(place, values, place.sqs_function_endpoint);
     let function_names = names(&FUNCTIONS, &merged, &ids, &known, last, suffix, &mut problems);
     known.queues = names(&QUEUES, &merged, &queue_ids, &known, last, suffix, &mut problems);
+    known.buckets = names(&BUCKETS, &merged, &bucket_ids, &known, last, suffix, &mut problems);
     for id in &ids {
         let Some(name) = function_names.get(id) else { continue };
         let alias = merged
@@ -1180,10 +1625,12 @@ pub fn plan(
     let resolved = known.resolve(&merged);
     let empty = Map::new();
     let mut functions = Vec::new();
+    let mut s3_events = Vec::new();
     for id in &ids {
         let Some(name) = function_names.get(id) else { continue };
         let mut reading = Reading::of(&resolved, &empty, id, "the function");
-        let function = function(&mut reading, name.clone(), folder, place, Policies::of(&resources[id]));
+        let policies = Policies::of(&resources[id]);
+        let function = function(&mut reading, name.clone(), folder, place, policies, &mut s3_events);
         problems.append(&mut reading.problems);
         functions.extend(function);
     }
@@ -1196,13 +1643,33 @@ pub fn plan(
         queues.extend(queue);
     }
     let queues = dead_letters_first(queues, &mut problems);
-    if problems.is_empty() { Ok(Plan { functions, queues, without_effect }) } else { Err(problems) }
+    let mut buckets = Vec::new();
+    for id in &bucket_ids {
+        let Some(name) = known.buckets.get(id) else { continue };
+        let mut reading = Reading::of(&resolved, &empty, id, "the bucket");
+        let bucket = bucket(&mut reading, name.clone(), place, Policies::of(&resources[id]));
+        problems.append(&mut reading.problems);
+        buckets.extend(bucket);
+    }
+    // An S3 event's Bucket is one of the template's, which the subset's check says otherwise.
+    for (name, notification) in s3_events {
+        if let Some(bucket) = buckets.iter_mut().find(|bucket| bucket.name == name) {
+            bucket.notifications.push(notification);
+        }
+    }
+    for bucket in &buckets {
+        check_notifications(bucket, &mut problems);
+    }
+    match problems.is_empty() {
+        true => Ok(Plan { functions, queues, buckets, without_effect }),
+        false => Err(problems),
+    }
 }
 
 /// What the stack's last deploy made that this one doesn't, a function's own resources going with it.
 #[derive(Debug, Default, PartialEq)]
 pub struct Removed {
-    /// Each to delete, a URL first, then a function, the queues last.
+    /// Each to delete, a URL first, then a function, then a bucket, the queues last.
     pub deleted: Vec<StackResource>,
     /// Each its template said to retain, left in the account, out of the stack.
     pub kept: Vec<StackResource>,
@@ -1227,8 +1694,9 @@ pub fn removed(
         .filter(|resource| resource.kind == FUNCTION)
         .filter_map(|resource| resource.physical_id.as_deref())
         .collect();
-    // The queues last, a function reading one or sending to it what it failed.
-    let order = [URL, EVENT_INVOKE_CONFIG, RULE, SCHEDULE, MAPPING, ALIAS, FUNCTION, QUEUE];
+    // The buckets and the queues last, a function reading a queue or sending to it what it failed, and a bucket
+    // telling one of its events.
+    let order = [URL, EVENT_INVOKE_CONFIG, RULE, SCHEDULE, MAPPING, ALIAS, FUNCTION, BUCKET, QUEUE];
     let rank = |kind: &str| order.iter().position(|of| *of == kind).unwrap_or(0);
     let mut removed: Vec<StackResource> = gone
         .into_iter()
@@ -1262,6 +1730,7 @@ pub fn in_words(resource: &StackResource) -> String {
         RULE | SCHEDULE => format!("{function}'s schedule {named}"),
         MAPPING => format!("{function}'s reading of the queue {named}"),
         QUEUE => format!("the queue {id}"),
+        BUCKET => format!("the bucket {id}"),
         other => format!("the {other} {id}"),
     };
     format!("{what} ({})", resource.logical_id)
@@ -1305,6 +1774,7 @@ mod tests {
         account: "000000000001",
         sqs_endpoint: "https://sqs.ffunc.cloud",
         sqs_function_endpoint: "http://10.43.0.251:3003",
+        s3_endpoint: "https://s3.ffunc.cloud",
     };
 
     fn folder() -> tempfile::TempDir {
@@ -1526,8 +1996,6 @@ Resources:
         assert_eq!(
             problems,
             [
-                (format!("{props}/Events/Uploads"), "Orders: event Uploads, of type S3, comes with a template's buckets, which ff deploy makes next".to_owned()),
-                ("/Resources/Uploads".to_owned(), "Uploads: ff deploy makes a template's functions, their events and its queues so far: its AWS::S3::Bucket comes next".to_owned()),
                 ("/Resources/Twin/Properties/FunctionName".to_owned(), "Twin: FunctionName orders is Orders's too: a function's name is its own".to_owned()),
                 (format!("{props}/CodeUri"), "Orders: CodeUri nowhere: there is no folder or .zip there".to_owned()),
                 (format!("{props}/Timeout"), "Orders: Timeout 901: a whole number of seconds from 1 to 900".to_owned()),
@@ -1750,11 +2218,8 @@ Resources:
         // An output gives a queue's public URL, which a client outside the cluster sends to.
         let values = BTreeMap::new();
         let known = Known {
-            place: &PLACE,
-            values: &values,
-            functions: BTreeMap::new(),
             queues: plan.queues.iter().map(|queue| (queue.id.clone(), queue.name.clone())).collect(),
-            queue_endpoint: PLACE.sqs_endpoint,
+            ..Known::new(&PLACE, &values, PLACE.sqs_endpoint)
         };
         assert_eq!(
             outputs(&read(WITH_QUEUES).unwrap(), &known),
@@ -1862,6 +2327,242 @@ Resources:
             resource("Jobs", QUEUE, Some("jobs")),
         ];
         assert_eq!(removed, Removed { deleted: deleted.into(), kept: [retained("Kept", QUEUE, Some("kept"))].into() });
+    }
+
+    /// A template's buckets, a fixture `sam validate --lint` takes.
+    const WITH_BUCKETS: &str = include_str!("testdata/buckets.yaml");
+
+    #[test]
+    fn makes_a_templates_buckets_their_sites_and_their_notifications_their_functions_s3_events_among_them() {
+        let plan = planned(WITH_BUCKETS, &[], &[]).unwrap();
+
+        // Named in the template's order: the function, the queue, then the bucket, in lower case as CloudFormation's.
+        let (resizer, removed_queue, photos) =
+            ("shop-Resizer-SUFFIX000001", "shop-Removed-SUFFIX000002", "shop-photos-suffix000003");
+        let queue_arn = format!("arn:aws:sqs:tn-tunis-1:000000000001:{removed_queue}");
+        let configurations = "/Resources/Photos/Properties/NotificationConfiguration/QueueConfigurations";
+        let rule = |name: &str, value: &str| json!({ "name": name, "value": value });
+        assert_eq!(
+            plan.buckets,
+            [
+                Bucket {
+                    id: "Site".into(),
+                    name: "shop-site".into(),
+                    tags: BTreeMap::new(),
+                    notifications: Vec::new(),
+                    website: Some(Website {
+                        index_document: "index.html".into(),
+                        error_document: Some("404.html".into())
+                    }),
+                    policies: Policies::default(),
+                },
+                Bucket {
+                    id: "Photos".into(),
+                    name: photos.into(),
+                    tags: [("team".to_owned(), "shop".to_owned())].into(),
+                    notifications: vec![
+                        // Two configurations of one queue and no filter: one configuration of two events.
+                        Notification {
+                            id: "PhotosQueue1".into(),
+                            target: Target::Queue,
+                            arn: queue_arn.clone(),
+                            events: vec![
+                                "s3:ObjectRemoved:Delete".into(),
+                                "s3:ObjectRemoved:DeleteMarkerCreated".into()
+                            ],
+                            prefix: None,
+                            suffix: None,
+                            at: format!("{configurations}/0"),
+                        },
+                        Notification {
+                            id: "PhotosQueue2".into(),
+                            target: Target::Queue,
+                            arn: queue_arn.clone(),
+                            events: vec!["s3:ObjectCreated:*".into()],
+                            prefix: None,
+                            suffix: Some(".tmp".into()),
+                            at: format!("{configurations}/2"),
+                        },
+                        // The function's S3 event calls its alias, as SAM's.
+                        Notification {
+                            id: "ResizerUpload".into(),
+                            target: Target::Function,
+                            arn: format!("arn:aws:lambda:tn-tunis-1:000000000001:function:{resizer}:live"),
+                            events: vec!["s3:ObjectCreated:*".into()],
+                            prefix: Some("uploads/".into()),
+                            suffix: Some(".jpg".into()),
+                            at: "/Resources/Resizer/Properties/Events/Upload/Properties".into(),
+                        },
+                    ],
+                    website: None,
+                    policies: Policies::default(),
+                },
+            ]
+        );
+        assert_eq!(plan.buckets[1].notifications[2].destination(), resizer);
+        assert_eq!(
+            plan.buckets[1].notification_configuration(),
+            json!({
+                "lambdaFunctionConfigurations": [{
+                    "id": "ResizerUpload",
+                    "lambdaFunctionArn": format!("arn:aws:lambda:tn-tunis-1:000000000001:function:{resizer}:live"),
+                    "events": ["s3:ObjectCreated:*"],
+                    "filter": { "key": { "filterRules": [rule("prefix", "uploads/"), rule("suffix", ".jpg")] } },
+                }],
+                "queueConfigurations": [
+                    {
+                        "id": "PhotosQueue1",
+                        "queueArn": queue_arn,
+                        "events": ["s3:ObjectRemoved:Delete", "s3:ObjectRemoved:DeleteMarkerCreated"],
+                    },
+                    {
+                        "id": "PhotosQueue2",
+                        "queueArn": queue_arn,
+                        "events": ["s3:ObjectCreated:*"],
+                        "filter": { "key": { "filterRules": [rule("suffix", ".tmp")] } },
+                    },
+                ],
+            })
+        );
+        let [function] = &plan.functions[..] else { panic!("{plan:?}") };
+        let variables = [("SITE", "shop-site"), ("SITE_DOMAIN", "shop-site.s3.ffunc.cloud")];
+        assert_eq!(function.environment, variables.map(|(name, value)| (name.to_owned(), value.to_owned())).into());
+        assert_eq!(
+            plan.resources(),
+            [
+                resource("Resizer", FUNCTION, Some(resizer)),
+                resource("ResizerAliaslive", ALIAS, Some(&format!("{resizer}:live"))),
+                resource("Removed", QUEUE, Some(removed_queue)),
+                resource("Site", BUCKET, Some("shop-site")),
+                resource("Photos", BUCKET, Some(photos)),
+                resource("RemovedPolicy", QUEUE_POLICY, None),
+                resource("SitePolicy", BUCKET_POLICY, None),
+            ]
+        );
+        // The site's address is FF's API's, once the deploy made it.
+        let values = BTreeMap::new();
+        let known = Known {
+            buckets: plan.buckets.iter().map(|bucket| (bucket.id.clone(), bucket.name.clone())).collect(),
+            sites: [("Site".to_owned(), "https://shop-site.site.ffunc.cloud".to_owned())].into(),
+            ..Known::new(&PLACE, &values, PLACE.sqs_endpoint)
+        };
+        assert_eq!(
+            outputs(&read(WITH_BUCKETS).unwrap(), &known),
+            [
+                Output {
+                    name: "SiteUrl".into(),
+                    value: "https://shop-site.site.ffunc.cloud".into(),
+                    description: Some("Where the site answers".into()),
+                },
+                Output { name: "PhotosArn".into(), value: format!("arn:aws:s3:::{photos}").into(), description: None },
+                Output {
+                    name: "PhotosDomain".into(),
+                    value: format!("{photos}.s3.ffunc.cloud").into(),
+                    description: None
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn says_what_ff_cant_make_of_a_bucket_at_its_property_and_which_of_its_notifications_overlap() {
+        let template = "\
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Dotted:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: shop.site
+  Photos:
+    Type: AWS::S3::Bucket
+    Properties:
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectRestore:Post
+            Function: arn:aws:lambda:us-east-1:123456789012:function:elsewhere
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:*
+            Queue: arn:aws:sqs:tn-tunis-1:000000000001:jobs
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: a/
+                  - Name: prefix
+                    Value: b/
+                  - Name: middle
+                    Value: x
+      WebsiteConfiguration:
+        IndexDocument: pages/index.html
+  Uploads:
+    Type: AWS::S3::Bucket
+    Properties:
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectCreated:Put
+            Queue: arn:aws:sqs:tn-tunis-1:000000000001:jobs
+            Filter: {S3Key: {Rules: [{Name: prefix, Value: uploads/}]}}
+  Resizer:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: resizer
+      CodeUri: orders
+      Handler: index.handler
+      Runtime: nodejs24.x
+      Events:
+        Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref Uploads
+            Events: [s3:ObjectCreated:*]
+            Filter: {S3Key: {Rules: [{Name: Prefix, Value: uploads/photos/}]}}
+        Gone:
+          Type: S3
+          Properties:
+            Bucket: !Ref Uploads
+            Events: s3:ObjectGone
+";
+        let problems = planned(template, &[], &[]).unwrap_err();
+
+        let sent = EVENT_TYPES.join(", ");
+        let photos = "/Resources/Photos/Properties";
+        let lambda = format!("{photos}/NotificationConfiguration/LambdaConfigurations/0");
+        let queue = format!("{photos}/NotificationConfiguration/QueueConfigurations/0");
+        assert_eq!(
+            problems,
+            [
+                ("/Resources/Dotted/Properties/BucketName".to_owned(), "Dotted: BucketName shop.site: 3 to 63 lower-case letters, digits and hyphens, a letter or a digit first and last, as S3's, without dots on FF, known before the deploy".to_owned()),
+                ("/Resources/Resizer/Properties/Events/Gone/Properties/Events".to_owned(), format!("Resizer: event Gone's Events s3:ObjectGone: an event FF's buckets send: {sent}")),
+                (format!("{lambda}/Event"), format!("Photos: NotificationConfiguration.LambdaConfigurations[0].Event s3:ObjectRestore:Post: an event FF's buckets send: {sent}")),
+                (format!("{lambda}/Function"), "Photos: NotificationConfiguration.LambdaConfigurations[0].Function arn:aws:lambda:us-east-1:123456789012:function:elsewhere: the ARN of a function of the account, arn:aws:lambda:tn-tunis-1:000000000001:function:<name>".to_owned()),
+                (format!("{queue}/Filter/S3Key/Rules/1"), "Photos: NotificationConfiguration.QueueConfigurations[0].Filter.S3Key.Rules[1] is a second prefix: S3 takes one of each".to_owned()),
+                (format!("{queue}/Filter/S3Key/Rules/2"), "Photos: NotificationConfiguration.QueueConfigurations[0].Filter.S3Key.Rules[2] is a Name, prefix or suffix, and its Value, as S3's".to_owned()),
+                (format!("{photos}/WebsiteConfiguration/IndexDocument"), "Photos: WebsiteConfiguration.IndexDocument pages/index.html: a name of 1 to 1024 characters without a slash, such as index.html, as S3's".to_owned()),
+                // A prefix that starts with another's, and a wildcard of the other's event: both take uploads/photos/a.jpg.
+                ("/Resources/Resizer/Properties/Events/Upload/Properties".to_owned(), "Uploads: the notifications UploadsQueue1 and ResizerUpload could both take one event, which S3 refuses as ambiguous: give them events, prefixes or suffixes that don't overlap".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn deletes_a_templates_buckets_after_its_functions_and_before_its_queues() {
+        let last = [
+            resource("Photos", BUCKET, Some("photos")),
+            resource("Removed", QUEUE, Some("removed")),
+            resource("Resizer", FUNCTION, Some("resizer")),
+            retained("Site", BUCKET, Some("site")),
+            resource("SitePolicy", BUCKET_POLICY, None),
+        ];
+
+        let removed = removed(&last, &[], &BTreeMap::new());
+
+        let deleted = [
+            resource("Resizer", FUNCTION, Some("resizer")),
+            resource("Photos", BUCKET, Some("photos")),
+            resource("Removed", QUEUE, Some("removed")),
+        ];
+        assert_eq!(removed, Removed { deleted: deleted.into(), kept: [retained("Site", BUCKET, Some("site"))].into() });
+        assert_eq!(in_words(&removed.deleted[1]), "the bucket photos (Photos)");
     }
 
     #[test]
@@ -2001,11 +2702,8 @@ Resources:
             version: Some("3".into()),
         };
         let known = Known {
-            place: &PLACE,
-            values: &values,
             functions: [("Orders".to_owned(), made)].into(),
-            queues: BTreeMap::new(),
-            queue_endpoint: PLACE.sqs_endpoint,
+            ..Known::new(&PLACE, &values, PLACE.sqs_endpoint)
         };
 
         assert_eq!(

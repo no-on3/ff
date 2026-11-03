@@ -541,6 +541,7 @@ mod tests {
                 account: "000000000001",
                 sqs_endpoint: "https://sqs.ffunc.cloud",
                 sqs_function_endpoint: "http://10.43.0.251:3003",
+                s3_endpoint: "https://s3.ffunc.cloud",
             };
             let planned = plan::plan(&template, &values.values, &place, &[], &folder, &mut || "ABCDEFGHIJKL".into());
             let [function] = &planned.unwrap().functions[..] else { panic!("one function") };

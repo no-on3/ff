@@ -8,20 +8,9 @@ use serde_json::{Map, Value, json};
 use super::Context;
 use crate::api::types::qualified_name_in_arn;
 use crate::api::{Call, Client};
+use crate::config::EVENT_TYPES;
 use crate::error::{Error, Kind};
 use crate::table::table;
-
-/// S3's event types a bucket of FF's sends, as the API takes them.
-pub const EVENT_TYPES: [&str; 8] = [
-    "s3:ObjectCreated:*",
-    "s3:ObjectCreated:Put",
-    "s3:ObjectCreated:Post",
-    "s3:ObjectCreated:Copy",
-    "s3:ObjectCreated:CompleteMultipartUpload",
-    "s3:ObjectRemoved:*",
-    "s3:ObjectRemoved:Delete",
-    "s3:ObjectRemoved:DeleteMarkerCreated",
-];
 
 /// Where a new configuration's events go.
 pub enum Destination<'a> {
