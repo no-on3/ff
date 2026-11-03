@@ -6,9 +6,9 @@ that changes nothing; `ff doctor template.yaml` names the same pieces as warning
 [getting-started guide](getting-started.md#sam-templates) shows the commands, and [ADR 0016](adr/0016-sam-templates.md)
 the choices behind the subset.
 
-The functions of a template, their URLs, aliases and asynchronous settings are deployed today. Queues, buckets and a
-function's events are in the subset, which `ff doctor` reads, and come to `ff deploy` next: until then it refuses them,
-saying so.
+The functions of a template are deployed today, with their URLs, aliases, asynchronous settings and
+[events](#events), an `S3` event aside. Queues and buckets are in the subset, which `ff doctor` reads, and come to
+`ff deploy` next, `S3` events with them: until then it refuses them, saying so.
 
 ## `sam init`'s hello world
 
@@ -97,12 +97,29 @@ can't know before the deploy, such as a function's URL in another function's var
 | `DeadLetterQueue` | A queue of the account, `Type: SQS`: FF has no SNS topics |
 | `Architectures`, `Tracing`, `PackageType` | FF's one value each: `x86_64`, `PassThrough` or `Disabled`, `Zip` |
 | `Policies`, `Role`, `PermissionsBoundary`, `RolePath`, `AssumeRolePolicyDocument` | Read and left for AWS: on FF, a function's own key stands for its role, and reaches its account |
-| `Events` | `Schedule`, `ScheduleV2`, `SQS`, `S3` and `HttpApi` whose routes all go to the function, next. An `Api` event is outside, as above |
+| `Events` | `Schedule`, `ScheduleV2`, `SQS`, and `HttpApi` whose routes all go to the function, as [Events](#events) says; `S3`, next. An `Api` event is outside, as above |
 | `Layers` | Outside: the libraries go in the function's package |
 | `VpcConfig` | Outside: a function reaches its account's buckets, queues and databases without one |
 | `KmsKeyArn`, `CodeSigningConfigArn`, `SnapStart`, `EphemeralStorage`, `LoggingConfig`, `FileSystemConfigs` | Outside: FF seals what it keeps with its own keys, signs no code, starts instances without snapshots, gives 512 MB of `/tmp` and keeps the log as the code writes it, and mounts no file system |
 | `ImageUri`, `ImageConfig`, `InlineCode` | Outside: FF builds a .zip package from the function's folder |
 | `DeploymentPreference` | Outside: FF moves an alias at once |
+
+## Events
+
+| Type | On FF |
+|---|---|
+| `Schedule` | One of the function's schedules, as an EventBridge rule: its `Schedule`, `rate(…)` or `cron(…)`, in UTC, as EventBridge reads it; `Input`, JSON text, the function's event, else EventBridge's Scheduled Event; `State`, `ENABLED` or `DISABLED`, or `Enabled`; `Description`; and `Name`, the schedule's, else the event's key. `RetryPolicy` and `DeadLetterConfig` are outside: FF's schedules run the function, retried as an asynchronous call is |
+| `ScheduleV2` | The same, as EventBridge Scheduler's schedule: its `ScheduleExpression` in UTC, its `ScheduleExpressionTimezone` `UTC` alone; `at(…)`, a run once, is outside |
+| `SQS` | The function reading a queue of the account, which `ff queues create` makes, until templates make theirs: `Queue`, the queue's ARN, `arn:aws:sqs:<region>:<account>:<name>`, which `!Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:<name>` gives; `BatchSize`, `MaximumBatchingWindowInSeconds`, 1 to 300 for over 10 messages, `FunctionResponseTypes`, `ReportBatchItemFailures`, `ScalingConfig`'s `MaximumConcurrency` and `Enabled`, Lambda's defaults where left out. A function reads a queue once, as on Lambda. `FilterCriteria` is outside: the function gets each message |
+| `HttpApi` | Its routes go to the function's URL, made with `AuthType: NONE` if the function has no `FunctionUrlConfig`: each path and method reaches the function, whose code reads them in the event's `rawPath` and `requestContext.http.method`, its `routeKey` `$default`. `TimeoutInMillis` is left, the function's `Timeout` being its own. One function's `HttpApi` events alone, of `PayloadFormatVersion` `2.0`; `ApiId`, `Auth` and `RouteSettings` are outside |
+| `S3` | Next, with the buckets: SAM writes it in its bucket's `NotificationConfiguration` |
+
+An event's `BatchSize`, `MaximumBatchingWindowInSeconds` and `Enabled` are a number and a boolean, not text, as SAM's
+transform takes them, where CloudFormation would take text. With `AutoPublishAlias`, each schedule runs the alias and
+the alias reads each queue, as SAM's events call it. Before
+any change, `ff deploy` reads each expression with FF's own parser and looks for each queue: what it wouldn't take is
+in its one refusal. A schedule or a queue's reader of the function made outside the template, with `ff schedule` or
+`ff event-sources`, stays as it is.
 
 ## Other resources
 
@@ -123,8 +140,8 @@ can't know before the deploy, such as a function's URL in another function's var
 ## The stack FF keeps
 
 A deploy keeps the stack in FF: each logical ID with its type and the FF resource it made, by SAM's names, `<function>`,
-`<function>Url`, `<function>Alias<alias>` and `<function>EventInvokeConfig`, and each permission, kept without
-effect; the template's SHA-256, and the parameters' values, a `NoEcho` one left out. The next deploy changes what the
+`<function>Url`, `<function>Alias<alias>`, `<function>EventInvokeConfig` and `<function><event>`, an event's schedule
+or reading of a queue, and each permission, kept without effect; the template's SHA-256, and the parameters' values, a `NoEcho` one left out. The next deploy changes what the
 template changed and deletes, after asking (`--yes` in a script), what it no longer has, last, as CloudFormation cleans
 up. `ff get` and the console name a function's stack, and `ff delete-stack` deletes it with what it made.
 

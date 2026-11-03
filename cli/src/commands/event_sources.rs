@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::{function_named, name_in_arn, qualified_name_in_arn, split_qualified};
+use crate::api::types::{
+    REPORT_BATCH_ITEM_FAILURES, function_named, name_in_arn, qualified_name_in_arn, split_qualified,
+};
 use crate::api::{Call, Client};
 use crate::error::Error;
 use crate::table::{table, time};
@@ -23,7 +25,7 @@ pub(super) struct ScalingConfig {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct EventSource {
-    uuid: String,
+    pub(super) uuid: String,
     pub(super) event_source_arn: String,
     pub(super) function_arn: String,
     pub(super) batch_size: u32,
@@ -33,6 +35,18 @@ pub(super) struct EventSource {
     pub(super) state: String,
     state_transition_reason: String,
     last_modified: String,
+}
+
+impl EventSource {
+    /// Whether a call's answer names the messages that failed, as ReportBatchItemFailures asks.
+    pub(super) fn reports_failures(&self) -> bool {
+        self.function_response_types.iter().any(|kind| kind == REPORT_BATCH_ITEM_FAILURES)
+    }
+}
+
+/// FunctionResponseTypes as Lambda's API takes them: ReportBatchItemFailures, or none.
+pub(super) fn response_types(report: bool) -> Value {
+    if report { json!([REPORT_BATCH_ITEM_FAILURES]) } else { json!([]) }
 }
 
 /// What `add` and `update` set, as their flags give them.
@@ -64,10 +78,7 @@ fn body_of(settings: &Settings) -> Result<Map<String, Value>, Error> {
         );
     }
     if let Some(report) = settings.report_batch_item_failures {
-        body.insert(
-            "functionResponseTypes".into(),
-            if report { json!(["ReportBatchItemFailures"]) } else { json!([]) },
-        );
+        body.insert("functionResponseTypes".into(), response_types(report));
     }
     if let Some(maximum) = settings.max_concurrency {
         body.insert("scalingConfig".into(), maximum.map(|n| json!({ "maximumConcurrency": n })).unwrap_or(Value::Null));
@@ -85,7 +96,7 @@ fn text(mapping: &EventSource) -> String {
         1 => "a window of 1 second".to_owned(),
         seconds => format!("a window of {seconds} seconds"),
     };
-    let failures = if mapping.function_response_types.iter().any(|kind| kind == "ReportBatchItemFailures") {
+    let failures = if mapping.reports_failures() {
         "the answer naming the messages that failed"
     } else {
         "a call that fails keeping its whole batch"
@@ -146,6 +157,11 @@ fn checked_uuid(uuid: &str) -> Result<&str, Error> {
     }
 }
 
+/// The queues a function reads.
+pub(super) fn of_function(client: &Client, function_id: &str) -> Result<Vec<EventSource>, Error> {
+    client.json(&Call::get(format!("/functions/{function_id}/event-sources")))
+}
+
 /// The ARN the API gives the account's queue of that name, which says so when the account has none.
 fn queue_arn(client: &Client, queue: &str) -> Result<String, Error> {
     let found: Value = client.json(&Call::get(format!("/queues/{queue}")))?;
@@ -182,9 +198,7 @@ pub fn list(function: Option<&str>, queue: Option<&str>, context: &Context) -> R
     }
     let client = Client::new(&context.settings()?)?;
     let mut mappings: Vec<EventSource> = match function {
-        Some(name) => {
-            client.json(&Call::get(format!("/functions/{}/event-sources", function_named(&client, name)?.id)))?
-        }
+        Some(name) => of_function(&client, &function_named(&client, name)?.id)?,
         None => client.json(&Call::get("/event-sources"))?,
     };
     if let Some(queue) = queue {

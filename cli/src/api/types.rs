@@ -272,6 +272,9 @@ pub struct Plan {
 /// `$LATEST`, the function as it is: what a call, an alias, a schedule or a queue reader runs when it names no version.
 pub const LATEST: &str = "$LATEST";
 
+/// Lambda's one function response type for SQS: the call's answer names the messages that failed.
+pub const REPORT_BATCH_ITEM_FAILURES: &str = "ReportBatchItemFailures";
+
 /// A version, as `GET /functions/:id/versions` lists it: the function as it was published, which never changes.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

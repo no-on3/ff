@@ -1,6 +1,6 @@
-//! A template's functions as `ff deploy` makes them (ADR 0016): each one's name, code and settings, read from its
-//! properties with the Globals merged and the intrinsics resolved; the resources the stack keeps for each; what a deploy
-//! deletes of the stack's last; and the template's outputs once FF knows what they name.
+//! A template's functions as `ff deploy` makes them (ADR 0016): each one's name, code, settings and events, read from
+//! its properties with the Globals merged and the intrinsics resolved; the resources the stack keeps for each; what a
+//! deploy deletes of the stack's last; and the template's outputs once FF knows what they name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use super::Template;
 use super::resolve::{self, FUNCTION};
-use crate::api::types::{DEFAULT_MAX_INSTANCES, StackResource};
+use crate::api::types::{DEFAULT_MAX_INSTANCES, REPORT_BATCH_ITEM_FAILURES, StackResource};
 use crate::cli::Runtime;
 use crate::config::is_function_name;
 
@@ -19,10 +19,17 @@ pub const ALIAS: &str = "AWS::Lambda::Alias";
 pub const EVENT_INVOKE_CONFIG: &str = "AWS::Lambda::EventInvokeConfig";
 /// Kept without effect: on FF a function's URL and its account's buckets and queues call it with no permission.
 pub const PERMISSION: &str = "AWS::Lambda::Permission";
+/// What SAM makes of a function's events: a Schedule event's EventBridge rule and a ScheduleV2 event's schedule, both
+/// one of the function's schedules on FF, and an SQS event's mapping, the function reading the queue.
+pub const RULE: &str = "AWS::Events::Rule";
+pub const SCHEDULE: &str = "AWS::Scheduler::Schedule";
+pub const MAPPING: &str = "AWS::Lambda::EventSourceMapping";
 
 /// Lambda's defaults, which a template's functions get, as on AWS.
 const DEFAULT_MEMORY: u32 = 128;
 const DEFAULT_TIMEOUT: u32 = 3;
+/// The messages of one call of an SQS event, as Lambda's default; over it, Lambda wants a batching window.
+const DEFAULT_BATCH_SIZE: u32 = 10;
 /// What a random suffix of a name CloudFormation makes holds, and how long it is.
 const SUFFIX_CHARACTERS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 pub const SUFFIX_LENGTH: usize = 12;
@@ -46,6 +53,42 @@ impl Place<'_> {
 pub struct Url {
     pub auth_type: String,
     pub cors: Option<Value>,
+}
+
+/// A Schedule or ScheduleV2 event: one of the function's schedules, as FF's API takes it.
+#[derive(Debug, PartialEq)]
+pub struct Schedule {
+    /// The event's key, which the logical ID SAM gives its resource ends with.
+    pub event: String,
+    /// RULE for a Schedule event, SCHEDULE for a ScheduleV2 one.
+    pub kind: &'static str,
+    /// Its Name, else the event's key: the function's schedule of that name.
+    pub name: String,
+    pub expression: String,
+    pub description: Option<String>,
+    /// Its Input's JSON; none, EventBridge's Scheduled Event.
+    pub input: Option<Value>,
+    pub enabled: bool,
+}
+
+/// An SQS event: the function reading one of the account's queues, as FF's API takes it.
+#[derive(Debug, PartialEq)]
+pub struct Mapping {
+    /// The event's key, which the logical ID SAM gives its mapping ends with.
+    pub event: String,
+    pub queue_arn: String,
+    pub batch_size: u32,
+    pub batching_window: u32,
+    pub report_batch_item_failures: bool,
+    pub max_concurrency: Option<u32>,
+    pub enabled: bool,
+}
+
+impl Mapping {
+    /// The queue's name, the end of its ARN.
+    pub fn queue(&self) -> &str {
+        self.queue_arn.rsplit(':').next().unwrap_or_default()
+    }
 }
 
 /// A function of the template, as FF makes it.
@@ -73,6 +116,10 @@ pub struct Function {
     pub event_invoke_config: Option<Value>,
     /// DeadLetterQueue's TargetArn.
     pub dead_letter: Option<String>,
+    /// Its Schedule and ScheduleV2 events.
+    pub schedules: Vec<Schedule>,
+    /// Its SQS events.
+    pub mappings: Vec<Mapping>,
 }
 
 impl Function {
@@ -90,8 +137,8 @@ impl Function {
         (min, self.reserved.unwrap_or(DEFAULT_MAX_INSTANCES.max(min)))
     }
 
-    /// The resources the stack keeps of it, named as SAM names them: the function, its URL, its alias and its
-    /// asynchronous calls' settings.
+    /// The resources the stack keeps of it, named as SAM names them: the function, its URL, its alias, its
+    /// asynchronous calls' settings, and its events' schedules and mappings, each named after the function by FF.
     pub fn resources(&self) -> Vec<StackResource> {
         let resource = |logical_id: String, kind: &str, physical_id: String| StackResource {
             logical_id,
@@ -109,6 +156,12 @@ impl Function {
         if self.event_invoke_config.is_some() {
             resources.push(resource(format!("{id}EventInvokeConfig"), EVENT_INVOKE_CONFIG, self.name.clone()));
         }
+        let of_an_event = |event: &str, kind: &str, named: &str| {
+            resource(format!("{id}{event}"), kind, format!("{}:{named}", self.name))
+        };
+        resources
+            .extend(self.schedules.iter().map(|schedule| of_an_event(&schedule.event, schedule.kind, &schedule.name)));
+        resources.extend(self.mappings.iter().map(|mapping| of_an_event(&mapping.event, MAPPING, mapping.queue())));
         resources
     }
 }
@@ -152,9 +205,10 @@ pub fn generated_name(stack: &str, id: &str, suffix: &str) -> String {
 }
 
 /// The subset's resources and events that `ff deploy` doesn't make yet: what is outside the subset its check refuses.
+/// An S3 event comes with the buckets, as SAM writes it in its bucket's notifications.
 const RESOURCES_NEXT: [&str; 4] =
     ["AWS::SQS::Queue", "AWS::SQS::QueuePolicy", "AWS::S3::Bucket", "AWS::S3::BucketPolicy"];
-const EVENTS_NEXT: [&str; 5] = ["Schedule", "ScheduleV2", "SQS", "S3", "HttpApi"];
+const EVENTS_NEXT: [&str; 1] = ["S3"];
 
 /// A random suffix for a name, from 12 random bytes, letters and digits as CloudFormation's.
 pub fn suffix(random: &[u8; SUFFIX_LENGTH]) -> String {
@@ -246,6 +300,38 @@ fn whole(value: &Value) -> Option<i64> {
     }
 }
 
+/// A boolean, as CloudFormation takes one: true or false, or text of one.
+pub fn flag(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(flag) => Some(*flag),
+        Value::String(text) if text.eq_ignore_ascii_case("true") => Some(true),
+        Value::String(text) if text.eq_ignore_ascii_case("false") => Some(false),
+        _ => None,
+    }
+}
+
+/// A property's path in words, for a message: `Timeout`, `Environment.Variables`, or an event's `event Jobs's
+/// BatchSize`.
+fn said(path: &str) -> String {
+    let mut parts = path.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some("Events"), Some(event), Some("Properties")) => {
+            let rest: Vec<&str> = parts.collect();
+            let event = format!("event {event}");
+            match rest.is_empty() {
+                true => event,
+                false => possessive(&event, &rest.join(".")),
+            }
+        }
+        _ => path.replace('/', "."),
+    }
+}
+
+/// `Orders' event`, `Jobs's BatchSize`: what an owner has.
+fn possessive(owner: &str, what: &str) -> String {
+    format!("{owner}{} {what}", if owner.ends_with('s') { "'" } else { "'s" })
+}
+
 /// What an unresolved value is, for a message: the intrinsic FF couldn't resolve.
 fn unresolved(value: &Value) -> Option<String> {
     match value {
@@ -280,10 +366,9 @@ impl Reading<'_> {
         let value = value.clone();
         match unresolved(&value) {
             Some(what) => {
-                let said = path.replace('/', ".");
                 self.problem(
                     path,
-                    format!("{said} holds {what}, which ff deploy doesn't know before it makes the function"),
+                    format!("{} holds {what}, which ff deploy doesn't know before it makes the function", said(path)),
                 );
                 None
             }
@@ -291,13 +376,54 @@ impl Reading<'_> {
         }
     }
 
+    /// Whether the properties have a value at the path, known or not.
+    fn has(&self, path: &str) -> bool {
+        let mut keys = path.split('/');
+        let first = keys.next().and_then(|key| self.properties.get(key));
+        keys.try_fold(first, |value, key| Some(value?.get(key))).flatten().is_some()
+    }
+
     fn text(&mut self, path: &str) -> Option<String> {
         let value = self.known(path)?;
         let found = text(&value);
         if found.is_none() {
-            self.problem(path, format!("{} is text, as CloudFormation takes it", path.replace('/', ".")));
+            self.problem(path, format!("{} is text, as CloudFormation takes it", said(path)));
         }
         found
+    }
+
+    /// Text CloudFormation needs: the problem said when there is none, `what` saying what it is.
+    fn needed(&mut self, path: &str, what: &str) -> Option<String> {
+        if self.has(path) {
+            return self.text(path);
+        }
+        let (owner, name) = path.rsplit_once('/').map_or(("", path), |(owner, name)| (owner, name));
+        let needs = match owner {
+            "" => format!("{name} is needed: {what}"),
+            _ => format!("{} needs its {name}: {what}", said(owner)),
+        };
+        self.problem(path, needs);
+        None
+    }
+
+    /// A boolean of an event, which SAM's transform takes as true or false alone, where CloudFormation takes text too.
+    fn flag(&mut self, path: &str) -> Option<bool> {
+        let value = self.known(path)?;
+        let found = value.as_bool();
+        if found.is_none() {
+            self.problem(path, format!("{} {value}: true or false, as SAM's transform takes it, not text", said(path)));
+        }
+        found
+    }
+
+    /// A whole number of an event, which SAM's transform takes as a number alone, within bounds.
+    fn sam_number(&mut self, path: &str, least: i64, most: i64, unit: &str) -> Option<u32> {
+        let value = self.known(path)?;
+        if !value.is_number() {
+            self.problem(path, format!("{} {value}: a number, as SAM's transform takes it, not text", said(path)));
+            return None;
+        }
+        self.number(path, least, most, unit)
     }
 
     /// A whole number within bounds, saying them otherwise.
@@ -306,8 +432,7 @@ impl Reading<'_> {
         match whole(&value).filter(|number| (least..=most).contains(number)) {
             Some(number) => u32::try_from(number).ok(),
             None => {
-                let said = path.replace('/', ".");
-                self.problem(path, format!("{said} {value}: a whole number of {unit} from {least} to {most}"));
+                self.problem(path, format!("{} {value}: a whole number of {unit} from {least} to {most}", said(path)));
                 None
             }
         }
@@ -317,7 +442,7 @@ impl Reading<'_> {
     fn texts(&mut self, path: &str) -> BTreeMap<String, String> {
         let Some(value) = self.known(path) else { return BTreeMap::new() };
         let Some(map) = value.as_object() else {
-            self.problem(path, format!("{} is a mapping of names to values", path.replace('/', ".")));
+            self.problem(path, format!("{} is a mapping of names to values", said(path)));
             return BTreeMap::new();
         };
         let mut texts = BTreeMap::new();
@@ -328,7 +453,7 @@ impl Reading<'_> {
                 }
                 None => self.problem(
                     &format!("{path}/{name}"),
-                    format!("{}'s {name} is text, a number or a boolean", path.replace('/', ".")),
+                    format!("{} is text, a number or a boolean", possessive(&said(path), name)),
                 ),
             }
         }
@@ -363,7 +488,204 @@ fn is_code(path: &Path) -> bool {
     path.is_dir() || (path.is_file() && path.extension().is_some_and(|extension| extension == "zip"))
 }
 
-fn function(reading: &mut Reading, name: String, folder: &Path) -> Option<Function> {
+/// The property of a schedule's event that holds its expression: a Schedule event's Schedule, a ScheduleV2 event's
+/// ScheduleExpression.
+pub fn expression_key(kind: &str) -> &'static str {
+    if kind == RULE { "Schedule" } else { "ScheduleExpression" }
+}
+
+/// An EventBridge rule's name, which FF's schedules take: 1 to 64 letters, digits, '.', '-' and '_'.
+fn is_schedule_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+/// A function's events that FF makes: its schedules, the queues it reads, and whether HttpApi routes go to it.
+#[derive(Default)]
+struct Events {
+    schedules: Vec<Schedule>,
+    mappings: Vec<Mapping>,
+    http_api: bool,
+}
+
+/// The function's events, each read from its Properties: what ff deploy makes of the subset's.
+fn events(reading: &mut Reading, place: &Place) -> Events {
+    let mut events = Events::default();
+    let properties = reading.properties;
+    let Some(all) = properties.get("Events").and_then(Value::as_object) else { return events };
+    for (event, value) in all {
+        let at = format!("Events/{event}/Properties");
+        match value.get("Type").and_then(Value::as_str) {
+            Some(kind @ ("Schedule" | "ScheduleV2")) => {
+                let Some(schedule) = schedule(reading, event, kind, &at) else { continue };
+                if let Some(other) = events.schedules.iter().find(|other| other.name == schedule.name) {
+                    let message = format!(
+                        "event {event}'s schedule {} is event {}'s too: a function's schedule has a name of its own",
+                        schedule.name, other.event
+                    );
+                    reading.problem(&at, message);
+                }
+                events.schedules.push(schedule);
+            }
+            Some("SQS") => {
+                let Some(mapping) = mapping(reading, event, &at, place) else { continue };
+                if let Some(other) = events.mappings.iter().find(|other| other.queue_arn == mapping.queue_arn) {
+                    let message = format!(
+                        "event {event} reads the queue {}, as event {} does: Lambda has a function read a queue once",
+                        mapping.queue(),
+                        other.event
+                    );
+                    reading.problem(&format!("{at}/Queue"), message);
+                }
+                events.mappings.push(mapping);
+            }
+            Some("HttpApi") => events.http_api = true,
+            _ => {}
+        }
+    }
+    events
+}
+
+/// A Schedule event, EventBridge's rule, or a ScheduleV2 event, EventBridge Scheduler's schedule: on FF either is one
+/// of the function's schedules, its expression in UTC.
+fn schedule(reading: &mut Reading, event: &str, kind: &str, at: &str) -> Option<Schedule> {
+    let kind = if kind == "Schedule" { RULE } else { SCHEDULE };
+    let expression_key = expression_key(kind);
+    let expression = reading.needed(&format!("{at}/{expression_key}"), "rate(…) or cron(…), as EventBridge's");
+    if let Some(once) = expression.as_deref().filter(|expression| expression.trim_start().starts_with("at(")) {
+        reading.problem(
+            &format!("{at}/{expression_key}"),
+            format!(
+                "event {event}'s {expression_key} {once} runs once, which FF's schedules don't: rate(…) or cron(…)"
+            ),
+        );
+    }
+    let name = match reading.has(&format!("{at}/Name")) {
+        true => reading.text(&format!("{at}/Name"))?,
+        false => event.to_owned(),
+    };
+    if !is_schedule_name(&name) {
+        reading.problem(
+            &format!("{at}/Name"),
+            format!(
+                "event {event}'s schedule {name}: a schedule's name, its Name or else the event's key, is 1 to 64 \
+                 letters, digits, '.', '-' and '_', as EventBridge's"
+            ),
+        );
+    }
+    let description = match reading.has(&format!("{at}/Description")) {
+        true => reading.text(&format!("{at}/Description")),
+        false => None,
+    };
+    if description.as_ref().is_some_and(|description| description.chars().count() > 512) {
+        reading.problem(&format!("{at}/Description"), format!("event {event}'s Description: 512 characters at most"));
+    }
+    let input = match reading.has(&format!("{at}/Input")) {
+        true => reading.text(&format!("{at}/Input")).and_then(|input| match serde_json::from_str(&input) {
+            Ok(input) => Some(input),
+            Err(error) => {
+                let message = format!("event {event}'s Input is JSON text, as EventBridge's: {error}");
+                reading.problem(&format!("{at}/Input"), message);
+                None
+            }
+        }),
+        false => None,
+    };
+    let state = format!("{at}/State");
+    let enabled = match (reading.has(&state), reading.has(&format!("{at}/Enabled"))) {
+        (true, true) => {
+            reading.problem(&state, format!("event {event} has State and Enabled: SAM takes one or the other"));
+            true
+        }
+        (true, false) => match reading.text(&state).as_deref() {
+            Some("ENABLED") => true,
+            Some("DISABLED") => false,
+            Some(other) => {
+                reading.problem(&state, format!("event {event}'s State {other}: ENABLED or DISABLED"));
+                true
+            }
+            None => true,
+        },
+        (false, true) => reading.flag(&format!("{at}/Enabled")).unwrap_or(true),
+        (false, false) => true,
+    };
+    Some(Schedule {
+        event: event.to_owned(),
+        kind,
+        name,
+        expression: expression?.trim().to_owned(),
+        description,
+        input,
+        enabled,
+    })
+}
+
+/// An SQS event: the function reading a queue of the account in FF's region, as Lambda's mapping.
+fn mapping(reading: &mut Reading, event: &str, at: &str, place: &Place) -> Option<Mapping> {
+    let queue_at = format!("{at}/Queue");
+    let queue_arn = reading.needed(&queue_at, "the queue's ARN")?;
+    let prefix = format!("arn:aws:sqs:{}:{}:", place.region, place.account);
+    let named = queue_arn.strip_prefix(&prefix).is_some_and(|name| !name.is_empty() && !name.contains(':'));
+    if !named {
+        reading.problem(
+            &queue_at,
+            format!("event {event}'s Queue {queue_arn}: the ARN of a queue of the account, {prefix}<name>"),
+        );
+    }
+    let number = |reading: &mut Reading, key: &str, least: i64, most: i64, unit: &str, default: u32| {
+        let path = format!("{at}/{key}");
+        if reading.has(&path) { reading.sam_number(&path, least, most, unit) } else { Some(default) }
+    };
+    let batch_size = number(reading, "BatchSize", 1, 10_000, "messages", DEFAULT_BATCH_SIZE);
+    let batching_window = number(reading, "MaximumBatchingWindowInSeconds", 0, 300, "seconds", 0);
+    if let (Some(batch), Some(0)) = (batch_size, batching_window)
+        && batch > DEFAULT_BATCH_SIZE
+    {
+        reading.problem(
+            &format!("{at}/BatchSize"),
+            format!(
+                "event {event}'s BatchSize {batch}: over {DEFAULT_BATCH_SIZE} needs a \
+                 MaximumBatchingWindowInSeconds of 1 to 300, as Lambda's"
+            ),
+        );
+    }
+    let types_at = format!("{at}/FunctionResponseTypes");
+    let report_batch_item_failures = match reading.has(&types_at) {
+        true => {
+            let types = reading.known(&types_at);
+            let listed = types.as_ref().and_then(Value::as_array).filter(|types| {
+                types.len() <= 1 && types.iter().all(|kind| kind.as_str() == Some(REPORT_BATCH_ITEM_FAILURES))
+            });
+            if types.is_some() && listed.is_none() {
+                reading.problem(
+                    &types_at,
+                    format!("event {event}'s FunctionResponseTypes: [{REPORT_BATCH_ITEM_FAILURES}] or none, Lambda's for SQS"),
+                );
+            }
+            listed.is_some_and(|types| !types.is_empty())
+        }
+        false => false,
+    };
+    let max_concurrency = match reading.has(&format!("{at}/ScalingConfig/MaximumConcurrency")) {
+        true => reading.number(&format!("{at}/ScalingConfig/MaximumConcurrency"), 2, 1000, "batches"),
+        false => None,
+    };
+    let enabled = match reading.has(&format!("{at}/Enabled")) {
+        true => reading.flag(&format!("{at}/Enabled")).unwrap_or(true),
+        false => true,
+    };
+    Some(Mapping {
+        event: event.to_owned(),
+        queue_arn,
+        batch_size: batch_size?,
+        batching_window: batching_window?,
+        report_batch_item_failures,
+        max_concurrency,
+        enabled,
+    })
+}
+
+fn function(reading: &mut Reading, name: String, folder: &Path, place: &Place) -> Option<Function> {
     let code = reading.text("CodeUri");
     if let Some(given) = &code
         && !is_code(&folder.join(given))
@@ -416,6 +738,7 @@ fn function(reading: &mut Reading, name: String, folder: &Path) -> Option<Functi
         true => reading.number("ProvisionedConcurrencyConfig/ProvisionedConcurrentExecutions", 0, 1000, "instances"),
         false => None,
     };
+    let events = events(reading, place);
     let url = match reading.known("FunctionUrlConfig") {
         Some(config) => {
             let auth_type =
@@ -429,6 +752,8 @@ fn function(reading: &mut Reading, name: String, folder: &Path) -> Option<Functi
             let cors = config.get("Cors").and_then(Value::as_object).map(cors);
             auth_type.map(|auth_type| Url { auth_type: auth_type.to_owned(), cors })
         }
+        // An HttpApi's routes go to the function's URL, which anyone may call, as the API's routes have no Auth.
+        None if events.http_api => Some(Url { auth_type: "NONE".to_owned(), cors: None }),
         None => None,
     };
     let event_invoke_config = reading.known("EventInvokeConfig").map(|config| event_invoke_config(reading, &config));
@@ -453,6 +778,8 @@ fn function(reading: &mut Reading, name: String, folder: &Path) -> Option<Functi
         url,
         event_invoke_config,
         dead_letter,
+        schedules: events.schedules,
+        mappings: events.mappings,
     })
 }
 
@@ -554,17 +881,19 @@ pub fn plan(
         if RESOURCES_NEXT.contains(&kind) {
             problems.push((
                 format!("/Resources/{id}"),
-                format!("{id}: ff deploy makes a template's functions so far: its {kind} comes with queues and buckets, next"),
+                format!("{id}: ff deploy makes a template's functions and their events so far: its {kind} comes next"),
             ));
         }
         let events = resource.pointer("/Properties/Events").and_then(Value::as_object).into_iter().flatten();
-        let next = events.filter(|(_, event)| {
-            event.get("Type").and_then(Value::as_str).is_some_and(|kind| EVENTS_NEXT.contains(&kind))
+        let next = events.filter_map(|(name, event)| {
+            event.get("Type").and_then(Value::as_str).filter(|kind| EVENTS_NEXT.contains(kind)).map(|kind| (name, kind))
         });
-        for (name, _) in next {
+        for (name, kind) in next {
             problems.push((
                 format!("/Resources/{id}/Properties/Events/{name}"),
-                format!("{id}: ff deploy makes a template's functions so far: their events, {name} among them, come with queues and buckets, next"),
+                format!(
+                    "{id}: event {name}, of type {kind}, comes with a template's buckets, which ff deploy makes next"
+                ),
             ));
         }
     }
@@ -586,7 +915,7 @@ pub fn plan(
             resolved.pointer(&format!("/Resources/{id}/Properties")).and_then(Value::as_object).unwrap_or(&empty);
         let mut reading =
             Reading { id, properties, pointer: format!("/Resources/{id}/Properties"), problems: Vec::new() };
-        let function = function(&mut reading, name.clone(), folder);
+        let function = function(&mut reading, name.clone(), folder, place);
         problems.append(&mut reading.problems);
         functions.extend(function);
     }
@@ -594,9 +923,11 @@ pub fn plan(
 }
 
 /// What the stack's last deploy made that this one doesn't, by type and FF resource: each to delete, a URL first and a
-/// function last, a function's own resources going with it.
+/// function last, a function's own resources going with it. A Schedule event's rule and a ScheduleV2 event's schedule
+/// are one schedule of the function on FF: an event that changes from one to the other keeps it.
 pub fn removed(last: &[StackResource], next: &[StackResource]) -> Vec<StackResource> {
-    let identity = |resource: &StackResource| Some((resource.kind.clone(), resource.physical_id.clone()?));
+    let on_ff = |kind: &str| if kind == RULE { SCHEDULE.to_owned() } else { kind.to_owned() };
+    let identity = |resource: &StackResource| Some((on_ff(&resource.kind), resource.physical_id.clone()?));
     let kept: BTreeSet<(String, String)> = next.iter().filter_map(identity).collect();
     let gone: Vec<&StackResource> =
         last.iter().filter(|resource| identity(resource).is_some_and(|identity| !kept.contains(&identity))).collect();
@@ -605,7 +936,8 @@ pub fn removed(last: &[StackResource], next: &[StackResource]) -> Vec<StackResou
         .filter(|resource| resource.kind == FUNCTION)
         .filter_map(|resource| resource.physical_id.as_deref())
         .collect();
-    let rank = |kind: &str| [URL, EVENT_INVOKE_CONFIG, ALIAS, FUNCTION].iter().position(|of| *of == kind).unwrap_or(0);
+    let order = [URL, EVENT_INVOKE_CONFIG, RULE, SCHEDULE, MAPPING, ALIAS, FUNCTION];
+    let rank = |kind: &str| order.iter().position(|of| *of == kind).unwrap_or(0);
     let mut removed: Vec<StackResource> = gone
         .into_iter()
         .filter(|resource| resource.kind == FUNCTION || !functions_gone.contains(function_of(resource)))
@@ -624,11 +956,14 @@ pub fn function_of(resource: &StackResource) -> &str {
 /// A resource of the stack in words, for a question and a report: `the function orders (Orders)`.
 pub fn in_words(resource: &StackResource) -> String {
     let id = resource.physical_id.as_deref().unwrap_or("");
+    let (function, named) = id.split_once(':').unwrap_or((id, ""));
     let what = match resource.kind.as_str() {
         FUNCTION => format!("the function {id}"),
         URL => format!("{id}'s URL"),
         ALIAS => format!("the alias {id}"),
         EVENT_INVOKE_CONFIG => format!("{id}'s asynchronous calls' settings"),
+        RULE | SCHEDULE => format!("{function}'s schedule {named}"),
+        MAPPING => format!("{function}'s reading of the queue {named}"),
         other => format!("the {other} {id}"),
     };
     format!("{what} ({})", resource.logical_id)
@@ -790,6 +1125,8 @@ Outputs:
                     "destinationConfig": { "onFailure": { "destination": "arn:aws:lambda:tn-tunis-1:000000000001:function:shop-reports" } }
                 })),
                 dead_letter: None,
+                schedules: vec![],
+                mappings: vec![],
             }
         );
         assert_eq!(
@@ -850,10 +1187,11 @@ Resources:
           OnFailure:
             Type: SQS
       Events:
-        Hourly:
-          Type: Schedule
+        Uploads:
+          Type: S3
           Properties:
-            Schedule: rate(1 hour)
+            Bucket: !Ref Uploads
+            Events: s3:ObjectCreated:*
   Twin:
     Type: AWS::Serverless::Function
     Properties:
@@ -870,8 +1208,8 @@ Resources:
         assert_eq!(
             problems,
             [
-                (format!("{props}/Events/Hourly"), "Orders: ff deploy makes a template's functions so far: their events, Hourly among them, come with queues and buckets, next".to_owned()),
-                ("/Resources/Queue".to_owned(), "Queue: ff deploy makes a template's functions so far: its AWS::SQS::Queue comes with queues and buckets, next".to_owned()),
+                (format!("{props}/Events/Uploads"), "Orders: event Uploads, of type S3, comes with a template's buckets, which ff deploy makes next".to_owned()),
+                ("/Resources/Queue".to_owned(), "Queue: ff deploy makes a template's functions and their events so far: its AWS::SQS::Queue comes next".to_owned()),
                 ("/Resources/Twin/Properties/FunctionName".to_owned(), "Twin: FunctionName orders is Orders's too: a function's name is its own".to_owned()),
                 (format!("{props}/CodeUri"), "Orders: CodeUri nowhere: there is no folder or .zip there".to_owned()),
                 (format!("{props}/Timeout"), "Orders: Timeout 901: a whole number of seconds from 1 to 900".to_owned()),
@@ -883,28 +1221,187 @@ Resources:
         );
     }
 
+    /// A function's events, a fixture `sam validate --lint` takes.
+    const EVENTS: &str = include_str!("testdata/events.yaml");
+
+    #[test]
+    fn makes_a_functions_schedules_and_the_queues_it_reads_of_its_events_and_its_http_api_routes_its_url() {
+        let plan = planned(EVENTS, &[], &[("Jobs", "jobs")]).unwrap();
+
+        let [orders, api] = &plan.functions[..] else { panic!("{plan:?}") };
+        assert_eq!(
+            orders.schedules,
+            [
+                Schedule {
+                    event: "Hourly".into(),
+                    kind: SCHEDULE,
+                    name: "orders-hourly".into(),
+                    expression: "rate(1 hour)".into(),
+                    description: None,
+                    input: None,
+                    enabled: false,
+                },
+                Schedule {
+                    event: "Nightly".into(),
+                    kind: RULE,
+                    name: "Nightly".into(),
+                    expression: "cron(0 2 * * ? *)".into(),
+                    description: Some("The night's report".into()),
+                    input: Some(json!({ "report": "daily" })),
+                    enabled: true,
+                },
+            ]
+        );
+        let jobs = Mapping {
+            event: "Jobs".into(),
+            queue_arn: "arn:aws:sqs:tn-tunis-1:000000000001:jobs".into(),
+            batch_size: 100,
+            batching_window: 5,
+            report_batch_item_failures: true,
+            max_concurrency: Some(2),
+            enabled: false,
+        };
+        assert_eq!(orders.mappings, [jobs]);
+        assert_eq!(orders.url, None);
+        // Lambda's defaults where the event says nothing.
+        let failed = Mapping {
+            event: "Failed".into(),
+            queue_arn: "arn:aws:sqs:tn-tunis-1:000000000001:failed".into(),
+            batch_size: 10,
+            batching_window: 0,
+            report_batch_item_failures: false,
+            max_concurrency: None,
+            enabled: true,
+        };
+        assert_eq!((api.mappings.as_slice(), api.schedules.is_empty()), ([failed].as_slice(), true));
+        assert_eq!(api.url, Some(Url { auth_type: "NONE".into(), cors: None }));
+        assert_eq!(
+            plan.resources(),
+            [
+                resource("Orders", FUNCTION, Some("orders")),
+                resource("OrdersAliaslive", ALIAS, Some("orders:live")),
+                resource("OrdersHourly", SCHEDULE, Some("orders:orders-hourly")),
+                resource("OrdersNightly", RULE, Some("orders:Nightly")),
+                resource("OrdersJobs", MAPPING, Some("orders:jobs")),
+                resource("Api", FUNCTION, Some("orders-api")),
+                resource("ApiUrl", URL, Some("orders-api")),
+                resource("ApiFailed", MAPPING, Some("orders-api:failed")),
+            ]
+        );
+    }
+
+    #[test]
+    fn says_what_ff_cant_make_of_an_event_at_its_property() {
+        let template = "\
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Orders:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: orders
+      CodeUri: orders
+      Handler: index.handler
+      Runtime: nodejs24.x
+      Events:
+        Once:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: at(2026-12-01T08:00:00)
+        Bad:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 day)
+            Name: a/b
+            Input: '{not json'
+            State: PAUSED
+        Twin:
+          Type: Schedule
+          Properties:
+            Schedule: rate(2 days)
+            Name: Once
+        Empty:
+          Type: Schedule
+          Properties: {}
+        Elsewhere:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:eu-west-3:123456789012:jobs
+            BatchSize: 50
+            FunctionResponseTypes: [Other]
+        Jobs:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:tn-tunis-1:000000000001:jobs
+        Typed:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:tn-tunis-1:000000000001:typed
+            BatchSize: '5'
+        Again:
+          Type: SQS
+          Properties:
+            Queue: arn:aws:sqs:tn-tunis-1:000000000001:jobs
+            Enabled: maybe
+";
+        let problems = planned(template, &[], &[]).unwrap_err();
+
+        let events = "/Resources/Orders/Properties/Events";
+        let expected = [
+            ("Again/Properties/Enabled", "event Again's Enabled \"maybe\": true or false, as SAM's transform takes it, not text"),
+            ("Bad/Properties/Name", "event Bad's schedule a/b: a schedule's name, its Name or else the event's key, is 1 to 64 letters, digits, '.', '-' and '_', as EventBridge's"),
+            ("Bad/Properties/Input", "event Bad's Input is JSON text, as EventBridge's: key must be a string at line 1 column 2"),
+            ("Bad/Properties/State", "event Bad's State PAUSED: ENABLED or DISABLED"),
+            ("Elsewhere/Properties/Queue", "event Elsewhere's Queue arn:aws:sqs:eu-west-3:123456789012:jobs: the ARN of a queue of the account, arn:aws:sqs:tn-tunis-1:000000000001:<name>"),
+            ("Elsewhere/Properties/BatchSize", "event Elsewhere's BatchSize 50: over 10 needs a MaximumBatchingWindowInSeconds of 1 to 300, as Lambda's"),
+            ("Elsewhere/Properties/FunctionResponseTypes", "event Elsewhere's FunctionResponseTypes: [ReportBatchItemFailures] or none, Lambda's for SQS"),
+            ("Empty/Properties/Schedule", "event Empty needs its Schedule: rate(…) or cron(…), as EventBridge's"),
+            ("Jobs/Properties/Queue", "event Jobs reads the queue jobs, as event Again does: Lambda has a function read a queue once"),
+            ("Once/Properties/ScheduleExpression", "event Once's ScheduleExpression at(2026-12-01T08:00:00) runs once, which FF's schedules don't: rate(…) or cron(…)"),
+            ("Twin/Properties", "event Twin's schedule Once is event Once's too: a function's schedule has a name of its own"),
+            ("Typed/Properties/BatchSize", "event Typed's BatchSize \"5\": a number, as SAM's transform takes it, not text"),
+        ]
+        .map(|(at, message)| (format!("{events}/{at}"), format!("Orders: {message}")));
+        assert_eq!(problems, expected);
+    }
+
     #[test]
     fn deletes_what_the_last_deploy_made_and_this_one_doesnt_a_url_first_a_function_last_with_its_own() {
         let last = [
             resource("Orders", FUNCTION, Some("orders")),
             resource("OrdersUrl", URL, Some("orders")),
             resource("OrdersAliaslive", ALIAS, Some("orders:live")),
+            resource("OrdersNightly", RULE, Some("orders:nightly")),
+            resource("OrdersJobs", MAPPING, Some("orders:jobs")),
             resource("Old", FUNCTION, Some("old")),
             resource("OldUrl", URL, Some("old")),
+            resource("OldHourly", SCHEDULE, Some("old:hourly")),
             resource("Allow", PERMISSION, None),
         ];
+        // The Schedule event made a ScheduleV2 one of the same name: the same schedule on FF, kept.
         let next = [
             resource("Orders", FUNCTION, Some("orders")),
             resource("OrdersUrl", URL, Some("orders:live")),
             resource("OrdersAliaslive", ALIAS, Some("orders:live")),
+            resource("OrdersNightly", SCHEDULE, Some("orders:nightly")),
         ];
 
         let removed = removed(&last, &next);
 
-        assert_eq!(removed, [resource("OrdersUrl", URL, Some("orders")), resource("Old", FUNCTION, Some("old"))]);
+        assert_eq!(
+            removed,
+            [
+                resource("OrdersUrl", URL, Some("orders")),
+                resource("OrdersJobs", MAPPING, Some("orders:jobs")),
+                resource("Old", FUNCTION, Some("old")),
+            ]
+        );
         assert_eq!(
             removed.iter().map(in_words).collect::<Vec<_>>(),
-            ["orders's URL (OrdersUrl)", "the function old (Old)"]
+            ["orders's URL (OrdersUrl)", "orders's reading of the queue jobs (OrdersJobs)", "the function old (Old)"]
+        );
+        assert_eq!(
+            in_words(&resource("OrdersNightly", RULE, Some("orders:nightly"))),
+            "orders's schedule nightly (OrdersNightly)"
         );
     }
 

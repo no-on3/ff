@@ -1,6 +1,6 @@
-//! `ff deploy template.yaml` and `ff delete-stack`: a SAM template's functions made on FF as `sam deploy` makes them
-//! on AWS (ADR 0016), and the stack kept in FF's API, what each logical ID made, so that the next deploy changes what
-//! the template changed and deletes what it no longer has, after asking.
+//! `ff deploy template.yaml` and `ff delete-stack`: a SAM template's functions and their events made on FF as
+//! `sam deploy` makes them on AWS (ADR 0016), and the stack kept in FF's API, what each logical ID made, so that the
+//! next deploy changes what the template changed and deletes what it no longer has, after asking.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -10,17 +10,19 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use super::deploy::{self, Code, Deploy, Wanted};
+use super::event_sources::{self, EventSource};
 use super::functions::confirmed;
+use super::schedule::{self, Schedule};
 use super::secrets::Secrets;
 use super::url::FunctionUrl;
 use super::{Context, account, async_config};
-use crate::api::types::{Function, Stack, StackResource, find};
+use crate::api::types::{Function, LATEST, Stack, StackResource, find, name_in_arn};
 use crate::api::{Call, Client};
 use crate::cli::{DeployArgs, Runtime};
 use crate::error::{Error, Kind};
 use crate::package::{self, Options, Package};
 use crate::sam::parameters::{self, SAMCONFIG, Samconfig};
-use crate::sam::plan::{self, ALIAS, EVENT_INVOKE_CONFIG, Known, Made, Place, URL};
+use crate::sam::plan::{self, ALIAS, EVENT_INVOKE_CONFIG, Known, MAPPING, Made, Place, RULE, SCHEDULE, URL};
 use crate::sam::resolve::FUNCTION;
 use crate::sam::{self, Template, subset};
 
@@ -219,11 +221,8 @@ fn given_values(template: &Template, last: Option<&Stack>, given: Vec<(String, S
 
 /// The values the stack keeps for the next deploy: each parameter's but a NoEcho one's, a list's items apart by commas.
 fn kept_values(template: &Template, values: &BTreeMap<String, Value>) -> BTreeMap<String, String> {
-    let no_echo = |name: &str| {
-        template.value.pointer(&format!("/Parameters/{name}/NoEcho")).is_some_and(|flag| {
-            flag.as_bool() == Some(true) || flag.as_str().is_some_and(|text| text.eq_ignore_ascii_case("true"))
-        })
-    };
+    let no_echo =
+        |name: &str| template.value.pointer(&format!("/Parameters/{name}/NoEcho")).and_then(plan::flag) == Some(true);
     values
         .iter()
         .filter(|(name, _)| !no_echo(name))
@@ -280,6 +279,135 @@ fn ensure_url(
     }
 }
 
+/// What a schedule or a queue reader runs: the function's alias with AutoPublishAlias, as SAM's events call it; else
+/// the function as it is.
+fn runs(alias: Option<&str>) -> &str {
+    alias.unwrap_or(LATEST)
+}
+
+/// The function's schedules as its Schedule and ScheduleV2 events say, by name: made, changed, or kept; and whether
+/// any changed. A schedule of the function the template doesn't name stays.
+fn ensure_schedules(
+    client: &Client,
+    function: &Function,
+    alias: Option<&str>,
+    wanted: &[plan::Schedule],
+) -> Result<bool, Error> {
+    if wanted.is_empty() {
+        return Ok(false);
+    }
+    let current = schedule::schedules(client, &function.id)?;
+    let path = format!("/functions/{}/schedules", function.id);
+    let mut changed = false;
+    for schedule in wanted {
+        let input = schedule.input.clone().unwrap_or(Value::Null);
+        let as_wanted = |existing: &Schedule| {
+            existing.expression == schedule.expression
+                && existing.description == schedule.description
+                && existing.input == input
+                && existing.enabled == schedule.enabled
+                && existing.qualifier.as_deref() == alias
+        };
+        let body = json!({
+            "name": schedule.name,
+            "expression": schedule.expression,
+            "description": schedule.description,
+            "input": input,
+            "enabled": schedule.enabled,
+            "qualifier": runs(alias),
+        });
+        let call = match current.iter().find(|existing| existing.name == schedule.name) {
+            Some(existing) if as_wanted(existing) => continue,
+            Some(existing) => Call::put(format!("{path}/{}", existing.id), body),
+            None => Call::post(path.clone(), body),
+        };
+        client.json::<Schedule>(&call)?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// Whether a mapping reads its queue as the SQS event says.
+fn mapping_as_wanted(existing: &EventSource, wanted: &plan::Mapping, alias: Option<&str>) -> bool {
+    existing.batch_size == wanted.batch_size
+        && existing.maximum_batching_window_in_seconds == wanted.batching_window
+        && existing.reports_failures() == wanted.report_batch_item_failures
+        && existing.scaling_config.as_ref().map(|config| config.maximum_concurrency) == wanted.max_concurrency
+        && (existing.state == "Enabled") == wanted.enabled
+        // A qualified function's ARN has its version or alias after the name.
+        && existing.function_arn.split(':').nth(7) == alias
+}
+
+/// The queues the function reads as its SQS events say, each by its ARN: mappings made, changed, or kept; and whether
+/// any changed. A mapping of the function the template doesn't name stays.
+fn ensure_mappings(
+    client: &Client,
+    function: &Function,
+    alias: Option<&str>,
+    wanted: &[plan::Mapping],
+) -> Result<bool, Error> {
+    if wanted.is_empty() {
+        return Ok(false);
+    }
+    let current = event_sources::of_function(client, &function.id)?;
+    let mut changed = false;
+    for mapping in wanted {
+        let mut body = json!({
+            "batchSize": mapping.batch_size,
+            "maximumBatchingWindowInSeconds": mapping.batching_window,
+            "functionResponseTypes": event_sources::response_types(mapping.report_batch_item_failures),
+            "scalingConfig": mapping.max_concurrency.map(|most| json!({ "maximumConcurrency": most })),
+            "enabled": mapping.enabled,
+            "qualifier": runs(alias),
+        });
+        let call = match current.iter().find(|existing| existing.event_source_arn == mapping.queue_arn) {
+            Some(existing) if mapping_as_wanted(existing, mapping, alias) => continue,
+            Some(existing) => Call::patch(format!("/event-sources/{}", existing.uuid), body),
+            None => {
+                body["eventSourceArn"] = mapping.queue_arn.clone().into();
+                Call::post(format!("/functions/{}/event-sources", function.id), body)
+            }
+        };
+        client.json::<EventSource>(&call)?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// What the functions' events name that the account has to have, said before any change: each schedule's expression
+/// as FF's own parser reads it, and each queue a function reads.
+fn check_events(client: &Client, functions: &[plan::Function], problems: &mut Problems) -> Result<(), Error> {
+    for function in functions {
+        let id = &function.id;
+        for schedule in &function.schedules {
+            let key = plan::expression_key(schedule.kind);
+            match schedule::next_runs(client, &schedule.expression) {
+                Err(error) if error.status == Some(400) => problems.at(
+                    &format!("/Resources/{id}/Properties/Events/{}/Properties/{key}", schedule.event),
+                    &format!("{id}: event {}'s {key} {}: {}", schedule.event, schedule.expression, error.message),
+                ),
+                done => {
+                    done?;
+                }
+            }
+        }
+        for mapping in &function.mappings {
+            let queue = mapping.queue();
+            if client.json_if_any::<Value>(&Call::get(format!("/queues/{queue}")))?.is_none() {
+                problems.at(
+                    &format!("/Resources/{id}/Properties/Events/{}/Properties/Queue", mapping.event),
+                    &format!(
+                        "{id}: event {} reads the queue {queue}, which the account hasn't: `ff queues create {queue}` \
+                         makes it",
+                        mapping.event
+                    ),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The settings of its asynchronous calls as FF's API answers them, Lambda's fields alone, those unset left out.
 fn event_invoke_fields(config: &Value) -> Value {
     let mut fields = serde_json::Map::new();
@@ -316,14 +444,26 @@ fn ensure_event_invoke_config(client: &Client, function: &Function, wanted: &Val
 /// alias, or its asynchronous calls' settings.
 fn delete_resource(client: &Client, resource: &StackResource) -> Result<(), Error> {
     let Some(function) = find(client, plan::function_of(resource))? else { return Ok(()) };
-    let qualifier = resource.physical_id.as_deref().and_then(|id| id.split_once(':')).map(|(_, qualifier)| qualifier);
+    // What follows the function's name: an alias's, a schedule's or a queue's.
+    let named = resource.physical_id.as_deref().and_then(|id| id.split_once(':')).map(|(_, named)| named);
     let id = &function.id;
-    let call = match (resource.kind.as_str(), qualifier) {
+    let call = match (resource.kind.as_str(), named) {
         (FUNCTION, _) => Call::delete(format!("/functions/{id}")),
         (URL, None) => Call::delete(format!("/functions/{id}/url")),
         (URL, Some(alias)) => Call::delete(format!("/functions/{id}/url")).query("qualifier", alias),
         (ALIAS, Some(alias)) => Call::delete(format!("/functions/{id}/aliases/{alias}")),
         (EVENT_INVOKE_CONFIG, _) => Call::delete(format!("/functions/{id}/event-invoke-config")),
+        (RULE | SCHEDULE, Some(name)) => {
+            let schedules = schedule::schedules(client, id)?;
+            let Some(schedule) = schedules.into_iter().find(|schedule| schedule.name == name) else { return Ok(()) };
+            Call::delete(format!("/functions/{id}/schedules/{}", schedule.id))
+        }
+        (MAPPING, Some(queue)) => {
+            let mappings = event_sources::of_function(client, id)?;
+            let found = mappings.into_iter().find(|mapping| name_in_arn(&mapping.event_source_arn) == queue);
+            let Some(mapping) = found else { return Ok(()) };
+            Call::delete(format!("/event-sources/{}", mapping.uuid))
+        }
         _ => return Ok(()),
     };
     match client.done(&call) {
@@ -515,6 +655,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
         }
         existing.push(found);
     }
+    check_events(&client, &deployment.functions, &mut problems)?;
     let next = deployment.resources();
     let removed = plan::removed(last_resources, &next);
     let (built, indexes) = packages(&deployment.functions, &at, args, &mut problems, context)?;
@@ -631,6 +772,12 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
             && ensure_event_invoke_config(&client, &answer, config)?
         {
             changed.push("asynchronous calls");
+        }
+        if ensure_schedules(&client, &answer, function.alias.as_deref(), &function.schedules)? {
+            changed.push("schedules");
+        }
+        if ensure_mappings(&client, &answer, function.alias.as_deref(), &function.mappings)? {
+            changed.push("queues read");
         }
         record.keep(&resources);
         let version = published.map(|published| published.version.version);
@@ -796,6 +943,44 @@ mod tests {
             event_invoke_fields(&answered),
             json!({ "maximumRetryAttempts": 1, "destinationConfig": { "onFailure": { "destination": "arn:q" } } })
         );
+    }
+
+    #[test]
+    fn a_mapping_is_as_wanted_by_its_settings_its_state_and_the_alias_its_functions_arn_names() {
+        let mapping = |function_arn: &str, state: &str, scaling: Value| -> EventSource {
+            serde_json::from_value(json!({
+                "uuid": "6c2a1e8b-7d4c-4a9e-8f1a-2b3c4d5e6f70",
+                "eventSourceArn": "arn:aws:sqs:tn-tunis-1:000000000001:jobs",
+                "functionArn": function_arn,
+                "batchSize": 100,
+                "maximumBatchingWindowInSeconds": 5,
+                "functionResponseTypes": ["ReportBatchItemFailures"],
+                "scalingConfig": scaling,
+                "state": state,
+                "stateTransitionReason": "USER_INITIATED",
+                "lastModified": "2026-11-03T10:00:00Z",
+            }))
+            .unwrap()
+        };
+        let arn = "arn:aws:lambda:tn-tunis-1:000000000001:function:orders";
+        let wanted = plan::Mapping {
+            event: "Jobs".into(),
+            queue_arn: "arn:aws:sqs:tn-tunis-1:000000000001:jobs".into(),
+            batch_size: 100,
+            batching_window: 5,
+            report_batch_item_failures: true,
+            max_concurrency: Some(2),
+            enabled: true,
+        };
+        let most = json!({ "maximumConcurrency": 2 });
+
+        assert!(mapping_as_wanted(&mapping(&format!("{arn}:live"), "Enabled", most.clone()), &wanted, Some("live")));
+        assert!(!mapping_as_wanted(&mapping(arn, "Enabled", most.clone()), &wanted, Some("live")));
+        assert!(!mapping_as_wanted(&mapping(&format!("{arn}:live"), "Enabled", most.clone()), &wanted, None));
+        assert!(!mapping_as_wanted(&mapping(&format!("{arn}:live"), "Disabled", most), &wanted, Some("live")));
+        assert!(!mapping_as_wanted(&mapping(&format!("{arn}:live"), "Enabled", Value::Null), &wanted, Some("live")));
+        let unlimited = plan::Mapping { max_concurrency: None, ..wanted };
+        assert!(mapping_as_wanted(&mapping(arn, "Enabled", Value::Null), &unlimited, None));
     }
 
     #[test]

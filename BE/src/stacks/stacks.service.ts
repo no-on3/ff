@@ -20,8 +20,19 @@ const OWN: Readonly<Record<string, Kind>> = {
   'AWS::S3::Bucket': 'bucket',
 };
 
-/** The types whose resource is a function's: its physical ID is the function's name, then a version's or an alias's after a colon. */
-const OF_A_FUNCTION: ReadonlySet<string> = new Set(['AWS::Lambda::Url', 'AWS::Lambda::Alias', 'AWS::Lambda::Version', 'AWS::Lambda::EventInvokeConfig']);
+/**
+ * The types whose resource is a function's: its physical ID is the function's name, then a version's, an alias's, a schedule's or a queue's after a
+ * colon. A Schedule or ScheduleV2 event's resource is one of the function's schedules, an SQS event's the function reading the queue.
+ */
+const OF_A_FUNCTION: ReadonlySet<string> = new Set([
+  'AWS::Lambda::Url',
+  'AWS::Lambda::Alias',
+  'AWS::Lambda::Version',
+  'AWS::Lambda::EventInvokeConfig',
+  'AWS::Events::Rule',
+  'AWS::Scheduler::Schedule',
+  'AWS::Lambda::EventSourceMapping',
+]);
 
 /** The types a function of its own is made by. */
 export const FUNCTION_TYPES = Object.keys(OWN).filter((type) => OWN[type] === 'function');

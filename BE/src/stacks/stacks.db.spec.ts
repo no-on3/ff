@@ -127,6 +127,9 @@ run('stacks, in FF\'s database (L2)', () => {
           { logicalId: 'Photos', type: 'AWS::S3::Bucket', physicalId: 'their-photos' },
           { logicalId: 'Live', type: 'AWS::Lambda::Alias', physicalId: 'nowhere:live' },
           { logicalId: 'Url', type: 'AWS::Lambda::Url', physicalId: 'orders' },
+          { logicalId: 'OrdersJobs', type: 'AWS::Lambda::EventSourceMapping', physicalId: 'orders:jobs' },
+          { logicalId: 'MissingNightly', type: 'AWS::Events::Rule', physicalId: 'nowhere:nightly' },
+          { logicalId: 'MissingHourly', type: 'AWS::Scheduler::Schedule', physicalId: 'nowhere:hourly' },
         ]),
       ),
     );
@@ -137,6 +140,8 @@ run('stacks, in FF\'s database (L2)', () => {
       'Missing: the account has no function named "nowhere"',
       'Photos: the account has no bucket named "their-photos"',
       'Live: the account has no function named "nowhere"',
+      'MissingNightly: the account has no function named "nowhere"',
+      'MissingHourly: the account has no function named "nowhere"',
     ]);
     expect(await query(`SELECT count(*)::int AS n FROM stacks`)).toEqual([{ n: 0 }]);
   });

@@ -998,11 +998,13 @@ mod tests {
             .collect()
     }
 
-    /// The fixtures: `sam init`'s hello worlds, the small app the SAM spike deployed, `ff export`'s own template.
+    /// The fixtures: `sam init`'s hello worlds, the small app the SAM spike deployed, `ff export`'s own template, and
+    /// the plan's events.
     const HELLO_NODE: &str = include_str!("testdata/hello-node.yaml");
     const HELLO_PYTHON: &str = include_str!("testdata/hello-python.yaml");
     const SMALL_APP: &str = include_str!("../../../hack/spikes/lambda/sam/template.yaml");
     const EXPORTED: &str = include_str!("../commands/export/testdata/shop-template.yaml");
+    const EVENTS: &str = include_str!("testdata/events.yaml");
 
     #[test]
     fn sam_inits_hello_worlds_are_outside_by_their_api_its_outputs_and_nodes_runtime() {
@@ -1039,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn the_small_app_is_outside_by_its_runtime_alone_and_the_exports_template_is_in_it() {
+    fn the_small_app_is_outside_by_its_runtime_alone_and_the_exports_template_and_the_events_are_in_it() {
         assert_eq!(
             problems(SMALL_APP),
             [
@@ -1048,6 +1050,7 @@ mod tests {
         );
         assert_eq!(problems(&SMALL_APP.replace("nodejs22.x", "nodejs24.x")), Vec::<String>::new());
         assert_eq!(problems(EXPORTED), Vec::<String>::new());
+        assert_eq!(problems(EVENTS), Vec::<String>::new());
     }
 
     #[test]
