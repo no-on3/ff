@@ -155,13 +155,14 @@ REPORT RequestId: <id>	Duration: 12.34 ms	Billed Duration: 13 ms	Memory Size: 12
 
 A worker replaced after `Runtime.OutOfMemory` is logged as `function worker crashed; restarting`, with the request ID, as on the Node.js runtime. **Environment variables are never logged.**
 
-**A call's output comes before its `END`,** as the log collector needs it to give each line its call's request ID ([ADR 0005](../../docs/adr/0005-log-pipeline.md)). The worker's stdout and stderr are pipes that the main process reads, each on a thread of its own, and forwards as they come (`ff_runtime/output.py`), as the Node.js runtime's main thread forwards its worker's:
+**A call's output comes before its `END`,** as the log collector needs it to give each line its call's request ID ([ADR 0005](../../docs/adr/0005-log-pipeline.md)). The worker's stdout and stderr are pipes that the main process reads, each on a thread of its own, and forwards line by line (`ff_runtime/output.py`), as the Node.js runtime's main thread forwards its worker's:
 - **The end of a call's output is marked.** Before it sends a call's result, the worker flushes `sys.stdout` and `sys.stderr` and writes an end-of-call marker to each, with the call's request ID; the main process takes the markers out of what it forwards, and writes `END` and `REPORT` once both have come.
 - **It waits a second at most,** for markers that a blocked or closed stream holds up, and, when the worker is stopped at a timeout or has died, for its streams to end: what the call wrote before comes ahead of the timeout's line and `END`. `Duration` stops when the result comes, so the wait is never billed.
-- **A line left open,** by `sys.stdout.write` without a newline, is ended before the runtime's next line, so that `START`, `END`, `REPORT` and the JSON lines always start a line.
+- **Both streams merged line by line.** The worker runs unbuffered, so a line can come in parts, a `print`'s text before its newline: a line a stream left open is held until its end, so that the other stream's lines never split it in a log that reads both, and written as it is past 16 KB, as the container's runtime splits a longer line too.
+- **A line left open,** by `sys.stdout.write` without a newline, is ended before the runtime's next line, or when the worker's stream ends, so that `START`, `END`, `REPORT` and the JSON lines always start a line.
 - **Lines written after the handler returned,** by a thread it left running, come after `END`, as on Lambda.
 
-**A call's log, given back.** With `X-FF-Log-Type: Tail`, the answer carries `X-FF-Log-Result`: the base64 of the call's last 4 KB of log, from its `START` to its `REPORT`, which the backend gives back as Lambda's `X-Amz-Log-Result` for `Invoke` with `LogType` `Tail`; the log store has a line only seconds after it is written. The runtime keeps what it writes while the call runs, its own lines and the call's on both streams, merged line by line: a line one stream left open waits for its end, so that the other's lines don't split it, and the runtime's next line ends it.
+**A call's log, given back.** With `X-FF-Log-Type: Tail`, the answer carries `X-FF-Log-Result`: the base64 of the call's last 4 KB of log, from its `START` to its `REPORT`, which the backend gives back as Lambda's `X-Amz-Log-Result` for `Invoke` with `LogType` `Tail`; the log store has a line only seconds after it is written. The runtime keeps what it writes while the call runs, its own lines and the call's on both streams, merged line by line as above.
 
 ## What changed in v3
 

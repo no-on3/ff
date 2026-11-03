@@ -760,44 +760,55 @@ class WhatLambdasCallerAsksFor(RuntimeTest):
             self.assertEqual((res.status, res.json["errorType"], res.json["errorMessage"]), (400, "InvalidRequestContentException", message))
 
 
-class LogTailMerging(unittest.TestCase):
-    """The log of a call a caller of Lambda's Invoke asks for: both streams merged line by line, its last 4 KB."""
+class OutputMerging(unittest.TestCase):
+    """The worker's two streams and the runtime's lines, merged line by line as the container's log reads them, and
+    as the log of a call a caller of Lambda's Invoke asks for keeps them, its last 4 KB."""
 
-    @staticmethod
-    def text_of(tail):
-        return base64.b64decode(tail.base64()).decode()
+    def setUp(self):
+        from ff_runtime.output import LogTail, Output
+        self.written = []  # (fd, data) as written, in order: one log reading both streams
+        self.output = Output(write=lambda fd, data: self.written.append((fd, bytes(data))) or len(data))
+        self.tail = LogTail()
+        self.output.keep_tail(self.tail)
+
+    def log(self):
+        return b"".join(data for _, data in self.written).decode()
+
+    def tail_text(self):
+        return base64.b64decode(self.tail.base64()).decode()
 
     def test_keeps_a_line_written_in_parts_whole_the_other_stream_s_lines_after_it(self):
-        from ff_runtime.output import LogTail
-        tail = LogTail()
+        # Unbuffered, the worker's print writes its text, then its newline, and the pipe may give them apart.
+        self.output.line("START")
+        self.output.forward("stdout", b"line 3")
+        self.output.forward("stderr", b"an error\n")
+        self.output.forward("stdout", b"\nthree, ")
+        self.output.forward("stdout", b"four\n")
+        self.output.line("END")
 
-        tail.line(b"START\n")
-        tail.add("stdout", b"one, ")
-        tail.add("stderr", b"an error\n")
-        tail.add("stdout", b"two\nthree, ")
-        tail.add("stdout", b"four\n")
-        tail.line(b"END\n")
+        self.assertEqual(self.log(), "START\nan error\nline 3\nthree, four\nEND\n")
+        self.assertEqual(self.tail_text(), self.log())
+        self.assertEqual([fd for fd, _ in self.written], [1, 2, 1, 1, 1])
 
-        self.assertEqual(self.text_of(tail), "START\nan error\none, two\nthree, four\nEND\n")
+    def test_ends_the_lines_the_streams_left_open_before_the_runtime_s_own_and_at_the_stream_s_end(self):
+        self.output.forward("stdout", b"open on stdout")
+        self.output.forward("stderr", b"open on stderr")
+        self.output.line("END")
+        self.output.forward("stderr", b"the worker's last words")
+        self.output.end_stream("stderr")
+        self.output.line("REPORT")
 
-    def test_ends_the_lines_the_streams_left_open_before_the_runtime_s_own(self):
-        from ff_runtime.output import LogTail
-        tail = LogTail()
+        self.assertEqual(self.log(), "open on stdout\nopen on stderr\nEND\nthe worker's last words\nREPORT\n")
+        self.assertEqual(self.tail_text(), self.log())
 
-        tail.add("stdout", b"open on stdout")
-        tail.add("stderr", b"open on stderr")
-        tail.line(b"END\n")
-        tail.line(b"REPORT\n")
-
-        self.assertEqual(self.text_of(tail), "open on stdout\nopen on stderr\nEND\nREPORT\n")
-
-    def test_gives_back_the_last_4_kb_of_a_line_left_open_as_of_the_others(self):
-        from ff_runtime.output import LOG_TAIL_BYTES, LogTail
-        tail = LogTail()
-
-        tail.add("stdout", b"x" * (3 * LOG_TAIL_BYTES))
-        tail.line(b"END\n")
-        kept = base64.b64decode(tail.base64())
+    def test_writes_a_line_left_open_past_its_bound_as_it_is_and_gives_back_the_last_4_kb(self):
+        from ff_runtime.output import HELD_LINE_BYTES, LOG_TAIL_BYTES
+        self.output.forward("stdout", b"x" * (3 * LOG_TAIL_BYTES))
+        self.assertEqual(self.written, [])  # held, within its bound
+        self.output.forward("stdout", b"x" * HELD_LINE_BYTES)
+        self.assertEqual(len(self.log()), 3 * LOG_TAIL_BYTES + HELD_LINE_BYTES)  # past it, written as it is
+        self.output.line("END")
+        kept = base64.b64decode(self.tail.base64())
 
         self.assertEqual(len(kept), LOG_TAIL_BYTES)
         self.assertEqual(kept, b"x" * (LOG_TAIL_BYTES - len(b"\nEND\n")) + b"\nEND\n")
