@@ -2306,6 +2306,11 @@ check "its record: a timeout, billed the function's timeout" "timeout 3000" \
   "$(q "SELECT u.status, u.billed_ms FROM usage_records u JOIN function_invocations i ON i.id = u.request_id
           WHERE i.function_id = '$meter_id' AND i.status = 'TIMEOUT'")"
 
+# A function whose change the backend stops during, below: usage_lost reads how the change ended.
+stopped_id="$(http POST /functions "$(jq -n --arg code "$meter" '{name: "e2e-stopped", runtime: "nodejs", code: $code, memory: 128, timeout: 3}')" | jq -r .id)"
+check "a function to stop a change of is created" 201 "$(status)"
+stopped_image="$(code_image_of "$stopped_id")"
+
 # A call lost: the backend is killed while it waits for the answer.
 be_pid="${e2e_pids[${#e2e_pids[@]}-1]}"
 (http POST "/functions/$meter_id/invoke" '{"input":{"sleepMs":2500}}' >/dev/null 2>&1 || true) &
@@ -2320,6 +2325,12 @@ check "a slow call is running" true "$([ -n "$lost" ] && echo true || echo false
 kill -9 "$be_pid"
 e2e_gone "$be_pid"
 wait "$call_pid" 2>/dev/null || true
+# A change stopped with the backend, mid-rollout: the function's record as it was, its Deployment rolling out an image
+# that never comes, and the change under way for 10 minutes, past its bound (twice the 90 s a rollout waits, and a
+# minute). The restarted backend takes it over at its start.
+kubectl -n "$tenant_ns" patch deployment "fn-$stopped_id" \
+  -p "{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\":\"code\",\"image\":{\"reference\":\"${stopped_image%@*}@sha256:$(printf '1%.0s' $(seq 1 64))\"}}]}}}}" >/dev/null
+sql "UPDATE functions SET update_status = 'InProgress', update_started_at = now() - interval '10 minutes' WHERE id = '$stopped_id'"
 # Restarted at once, as a supervisor would, with a 1 s cold-start limit. Its reaper marks the call LOST once the longest
 # a call can take has passed (2 × 3 s + the 1 s cold-start limit + 30 s), at the next run of the minute: read after the
 # alarms' section, whose minutes pass meanwhile (usage_lost).
@@ -2416,7 +2427,7 @@ http DELETE "/functions/$alarmed_id" >/dev/null
 section_def alarms section_alarms backend budget=185
 
 section_usage_lost() {
-section "usage records: the call lost, marked LOST by the restarted backend, read once its minute has passed"
+section "usage records: the call lost, marked LOST by the restarted backend, read once its minute has passed; the change it stopped during, ended"
 # The reaper's minute has passed in the alarms' section; run alone, it is waited for, as long as before.
 state=""
 for _ in $(seq 1 120); do
@@ -2430,6 +2441,19 @@ check "the history says why" "Lost: the backend restarted during the call, so it
   "$(http GET "/functions/$meter_id/invocations" | jq -r --arg id "$lost" '.invocations[] | select(.id == $id) | .error')"
 check "one record per invocation, none without one" "5 5" \
   "$(q "SELECT (SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'), (SELECT count(*) FROM usage_records WHERE function_id = '$meter_id')")"
+# The change stopped with the backend, taken over at the restarted one's start; run alone, waited for.
+stopped_state=""
+for _ in $(seq 1 120); do
+  stopped_state="$(q "SELECT status, update_status FROM functions WHERE id = '$stopped_id'")"
+  [ "$stopped_state" != "ACTIVE InProgress" ] && break
+  sleep 1
+done
+check "the change the backend stopped during: taken over by the restarted backend, the function's version rolled out again, which serves" \
+  "ACTIVE Failed $stopped_image true" \
+  "$stopped_state $(code_image_of "$stopped_id") $(kubectl -n "$tenant_ns" rollout status deployment "fn-$stopped_id" --timeout=120s >/dev/null 2>&1 && echo true || echo false)"
+check "  ... the change Failed, saying why, in the audit log by FF" \
+  "The backend stopped during this change, which was undone: the version before it is still live. Send the change again.|system" \
+  "$(q "SELECT update_reason FROM functions WHERE id = '$stopped_id'")|$(q "SELECT actor FROM audit_log WHERE resource = 'function:$stopped_id' AND action = 'function.update' AND details->>'outcome' LIKE 'stopped by the backend%'")"
 }
 section_def usage_lost section_usage_lost usage_records budget=5
 

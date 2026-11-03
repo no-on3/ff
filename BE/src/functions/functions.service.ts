@@ -21,6 +21,7 @@ import { ObjectStoreService, StoredObjectMissingError } from '../object-store/ob
 import { jsonBytes } from '../common/byte-limits';
 import { describeError } from '../common/describe-error';
 import { withJobLock } from '../database/job-lock';
+import { readyTimeoutMs } from '../orchestrator/ready-timeout';
 import {
   FunctionRuntimeError,
   FunctionThrottledError,
@@ -428,7 +429,7 @@ export class FunctionsService {
   }
 
   private readyTimeoutMs(): number {
-    return this.configService.get<number>('orchestrator.readyTimeoutSeconds', 90) * 1000;
+    return readyTimeoutMs(this.configService);
   }
 
   /** How long a change holds its function at most: past that, it was stopped, and another may take the function. */
@@ -1056,8 +1057,9 @@ export class FunctionsService {
   /**
    * Scales a function that can't serve to zero: the idle sweep only scales ACTIVE
    * functions, so a pod that never becomes ready would hold the quota for good.
+   * A failure is only logged.
    */
-  private async releaseInstances(function_: Function): Promise<void> {
+  async releaseInstances(function_: Function): Promise<void> {
     try {
       await this.orchestrator.scale(function_, 0);
     } catch (error) {

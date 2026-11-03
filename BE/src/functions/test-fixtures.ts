@@ -13,6 +13,7 @@ import { InlinePackage, inlinePackage } from './inline-package';
 import { codeRepository, pushCodeImage } from '../packages/code-images.service';
 import type { CodeImagesService } from '../packages/code-images.service';
 import { FunctionKeys } from '../storage/function-keys.service';
+import type { FunctionRef, FunctionWorkload, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
 import type { PackagesService } from '../packages/packages.service';
 import { Registry } from '../packages/registry';
 
@@ -239,4 +240,78 @@ export function clusterImages(): [PackagesService, CodeImagesService] {
     },
   };
   return [packages as unknown as PackagesService, images as unknown as CodeImagesService];
+}
+
+/**
+ * The cluster as L2's specs read and write it, in place of Kubernetes: each
+ * Deployment's instances, what its template holds, and its pods'; and what was
+ * asked of it.
+ */
+export class StandInCluster {
+  readonly deployments = new Map<string, WorkloadInstances>();
+  /** Pods told to stop, by function: the revision each still runs with. */
+  readonly stopping = new Map<string, string[]>();
+  /** What was asked, in order: `renew <name>`, `wait <name>`, `scale <name> <instances>`. */
+  readonly asked: string[] = [];
+  /** A function whose rollouts the cluster refuses. */
+  refusing?: string;
+
+  static nameOf(fn: Pick<FunctionWorkload, 'id' | 'version'>): string {
+    return fn.version === undefined ? fn.id : `${fn.id}-v${fn.version}`;
+  }
+
+  /** The Deployment of the workload, as the workload's template makes it. */
+  hold(fn: FunctionWorkload, desired = 1): void {
+    this.deployments.set(StandInCluster.nameOf(fn), {
+      functionId: fn.id,
+      version: fn.version,
+      desired,
+      ready: desired,
+      revision: fn.environment?.revision,
+      codeImage: fn.codeImage,
+    });
+  }
+
+  of(fn: Pick<FunctionWorkload, 'id' | 'version'>): WorkloadInstances | undefined {
+    return this.deployments.get(StandInCluster.nameOf(fn));
+  }
+
+  orchestrator(): Orchestrator {
+    const refuse = (fn: FunctionRef) => {
+      if (fn.id === this.refusing) throw new Error('the API server is down');
+    };
+    return {
+      deploy: async (fn: FunctionWorkload) => {
+        refuse(fn);
+        this.hold(fn);
+      },
+      update: async (fn: FunctionWorkload) => {
+        refuse(fn);
+        this.hold(fn, this.of(fn)?.desired ?? 1);
+      },
+      deployVersion: async (fn: FunctionWorkload) => this.hold(fn),
+      labelLatest: async () => undefined,
+      waitUntilReady: async (fn: FunctionWorkload) => void this.asked.push(`wait ${StandInCluster.nameOf(fn)}`),
+      workloads: async (fn?: FunctionRef) => [...this.deployments.values()].filter((held) => !fn || held.functionId === fn.id),
+      scale: async (fn: FunctionWorkload, instances: number) => {
+        const held = this.of(fn);
+        if (!held) throw new Error(`deployments.apps "${StandInCluster.nameOf(fn)}" not found`);
+        Object.assign(held, { desired: instances, ready: instances });
+        this.asked.push(`scale ${StandInCluster.nameOf(fn)} ${instances}`);
+      },
+      // Each Deployment's pods run what its template holds; those told to stop, what they had.
+      podRevisions: async (fn: FunctionRef) => [
+        ...[...this.deployments.values()].filter((held) => held.functionId === fn.id).flatMap((held) => Array<string>(held.desired).fill(held.revision ?? '')),
+        ...(this.stopping.get(fn.id) ?? []),
+      ],
+      renewEnvironment: async (fn: FunctionWorkload) => {
+        refuse(fn);
+        const held = this.of(fn);
+        if (!held) return false;
+        this.asked.push(`renew ${StandInCluster.nameOf(fn)}`);
+        this.hold(fn, held.desired);
+        return true;
+      },
+    } as unknown as Orchestrator;
+  }
 }

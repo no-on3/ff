@@ -31,6 +31,7 @@ import { FunctionAliasesService } from './aliases.service';
 import { FunctionVersionsController } from './versions.controller';
 import { FunctionVersionsService } from './versions.service';
 import { FunctionKeyRenewal } from './key-renewal.service';
+import { StoppedChanges } from './stopped-changes.service';
 
 @Module({
   imports: [
@@ -51,7 +52,7 @@ import { FunctionKeyRenewal } from './key-renewal.service';
     QueuesModule,
   ],
   controllers: [FunctionsController, EventInvokeConfigController, FunctionVersionsController, FunctionAliasesController],
-  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionKeyRenewal],
+  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionKeyRenewal, StoppedChanges],
   // Lambda's endpoint reads versions and aliases as FF's API does.
   exports: [FunctionsService, FunctionVersionsService, FunctionAliasesService],
 })

@@ -19,7 +19,7 @@ import { AuditService } from '../audit/audit.service';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
-import { FunctionRef, FunctionWorkload, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
+import { FunctionWorkload } from '../orchestrator/orchestrator.types';
 import { onePlan } from '../plans/test-fixtures';
 import { Bucket } from '../storage/bucket.entity';
 import { FunctionKeys } from '../storage/function-keys.service';
@@ -32,66 +32,11 @@ import { Function, Runtime } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { FunctionsService } from './functions.service';
 import { FunctionKeyRenewal } from './key-renewal.service';
-import { noPackages } from './test-fixtures';
+import { StandInCluster, noPackages } from './test-fixtures';
 import { FunctionVersionsService } from './versions.service';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '400000000031';
-
-/** The cluster as the renewal reads and writes it: each Deployment's instances, what its template holds, and its pods'. */
-class StandInCluster {
-  readonly deployments = new Map<string, WorkloadInstances>();
-  /** Pods told to stop, by function: the revision each still runs with. */
-  readonly stopping = new Map<string, string[]>();
-  /** What was asked, in order: `renew <name>`, `wait <name>`. */
-  readonly asked: string[] = [];
-  /** A function whose rollout the cluster refuses. */
-  refusing?: string;
-
-  static nameOf(fn: Pick<FunctionWorkload, 'id' | 'version'>): string {
-    return fn.version === undefined ? fn.id : `${fn.id}-v${fn.version}`;
-  }
-
-  /** The Deployment of the workload, as the workload's template makes it. */
-  hold(fn: FunctionWorkload, desired = 1): void {
-    this.deployments.set(StandInCluster.nameOf(fn), {
-      functionId: fn.id,
-      version: fn.version,
-      desired,
-      ready: desired,
-      revision: fn.environment?.revision,
-      codeImage: fn.codeImage,
-    });
-  }
-
-  of(fn: Pick<FunctionWorkload, 'id' | 'version'>): WorkloadInstances | undefined {
-    return this.deployments.get(StandInCluster.nameOf(fn));
-  }
-
-  orchestrator(): Orchestrator {
-    return {
-      deploy: async (fn: FunctionWorkload) => this.hold(fn),
-      update: async (fn: FunctionWorkload) => this.hold(fn, this.of(fn)?.desired ?? 1),
-      deployVersion: async (fn: FunctionWorkload) => this.hold(fn),
-      labelLatest: async () => undefined,
-      waitUntilReady: async (fn: FunctionWorkload) => void this.asked.push(`wait ${StandInCluster.nameOf(fn)}`),
-      workloads: async () => [...this.deployments.values()],
-      // Each Deployment's pods run what its template holds; those told to stop, what they had.
-      podRevisions: async (fn: FunctionRef) => [
-        ...[...this.deployments.values()].filter((held) => held.functionId === fn.id).flatMap((held) => Array<string>(held.desired).fill(held.revision ?? '')),
-        ...(this.stopping.get(fn.id) ?? []),
-      ],
-      renewEnvironment: async (fn: FunctionWorkload) => {
-        if (fn.id === this.refusing) throw new Error('the API server is down');
-        const held = this.of(fn);
-        if (!held) return false;
-        this.asked.push(`renew ${StandInCluster.nameOf(fn)}`);
-        this.hold(fn, held.desired);
-        return true;
-      },
-    } as unknown as Orchestrator;
-  }
-}
 
 run("the renewal of functions' keys (L2)", () => {
   let db: ScratchDatabase;
