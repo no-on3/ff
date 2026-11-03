@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // AWS's SDK for JavaScript v3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the
 // endpoint, the region and the key are given. A function through its life: made, waited for, listed, its code and its
-// settings changed, each change waited for, tagged, refused as Lambda refuses, deleted. One JSON line per check,
+// settings changed, each change waited for, tagged, refused as Lambda refuses, deleted; an operation FF doesn't offer
+// yet refused once, by its name, though the client retries by default. One JSON line per check,
 // {client, want, got, what}, for hack/e2e.sh.
 //   MODULES=<folder with node_modules> ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> \
 //   CODE=<zip> CODE_SHA=<its CodeSha256> NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> node sdk.mjs
@@ -105,6 +106,28 @@ await check('ok', 'refused as the SDK names Lambda\'s errors: a runtime FF lacks
   const lacking = { FunctionName: 'e2e-sdk-22', Runtime: 'nodejs22.x', Role: ROLE, Handler: 'index.handler', Code: { ZipFile: readFileSync(CODE) } };
   await refusedAs(() => send(lambda.CreateFunctionCommand, lacking), 'InvalidParameterValueException');
   return refusedAs(() => send(lambda.GetFunctionCommand, { FunctionName: 'e2e-sdk-missing' }), 'ResourceNotFoundException');
+});
+await check('ok', "operations FF doesn't offer yet are UnknownOperationException, named, sent once by a client that retries by default", async () => {
+  // The SDK's own retries, three attempts, where the client above makes one.
+  const retrying = new lambda.LambdaClient({ endpoint: ENDPOINT, region: 'tn-tunis-1', credentials: { accessKeyId: KEY, secretAccessKey: SECRET } });
+  const refused = [];
+  for (const [Command, input] of [
+    [lambda.ListLayersCommand, {}],
+    [lambda.GetLayerVersionByArnCommand, { Arn: 'arn:aws:lambda:tn-tunis-1:000000000000:layer:shared:1' }],
+    [lambda.PutProvisionedConcurrencyConfigCommand, { FunctionName, Qualifier: '1', ProvisionedConcurrentExecutions: 1 }],
+  ]) {
+    try {
+      await retrying.send(new Command(input));
+      refused.push('accepted');
+    } catch (error) {
+      refused.push(`${error.name} ${error.$metadata?.attempts} ${error.message.split('.')[0]}`);
+    }
+  }
+  return expect(refused, [
+    "UnknownOperationException 1 FF doesn't offer ListLayers of Lambda's API yet",
+    "UnknownOperationException 1 FF doesn't offer GetLayerVersionByArn of Lambda's API yet",
+    "UnknownOperationException 1 FF doesn't offer PutProvisionedConcurrencyConfig of Lambda's API yet",
+  ]);
 });
 await check('ok', 'DeleteFunction deletes it: GetFunction then ResourceNotFoundException', async () => {
   await send(lambda.DeleteFunctionCommand, { FunctionName });

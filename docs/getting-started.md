@@ -888,6 +888,39 @@ hack/k8s/app-database.sh down                               # afterwards: the da
 
 **In production** the database, the cache, the queue, the buckets and the mail are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on; the receipts go from a domain of yours, proved by its records, once FF's operator lets the account out of the sandbox. The same folder runs on AWS Lambda with an RDS database, an ElastiCache cache, an SQS queue, S3 buckets and SES, its page on S3 behind CloudFront: `ff package` writes its zip, the function's role gives the clients their credentials, and the export kit has the queue and its mapping ([`data/sqs.md`](../cli/templates/export/data/sqs.md)), the page ([`data/s3-website.md`](../cli/templates/export/data/s3-website.md)), the cache ([`data/elasticache.md`](../cli/templates/export/data/elasticache.md)) and the mail ([`data/ses.md`](../cli/templates/export/data/ses.md)).
 
+### Functions through Lambda's API
+
+AWS's CLI, its SDKs and Terraform's provider make and change functions on FF as on AWS Lambda, with only the endpoint changed ([ADR 0014](adr/0014-lambda-api.md)). The backend answers Lambda's API, its JSON at its dated paths, on a port of its own, `FF_LAMBDA_PORT` (3006), at `FF_LAMBDA_BASE` (`http://localhost:3006`; in production `https://lambda.<domain>`). Each request is signed with Signature Version 4 for `lambda` by one of the account's access keys that names functions ("An access key", under "Files in buckets", above): at `read` it lists and reads them, at `invoke` it calls them too, at `write` it makes, changes and deletes them, each change counted against the plan's changes a minute with FF's API's (`TooManyRequestsException` past them, with `Retry-After`). Another account's function answers as one that doesn't exist. A function's pods get `AWS_ENDPOINT_URL_LAMBDA` with a key of their own, which invokes the account's functions and does nothing else.
+
+```bash
+eval "$(ff keys create --name deployer --function '*' --function-access write | grep '^export ')"   # AWS_ENDPOINT_URL_LAMBDA among the seven
+aws lambda create-function --function-name hello --runtime nodejs24.x --handler index.handler \
+  --role arn:aws:iam::123456789012:role/hello --zip-file fileb://hello.zip    # State Pending; the role kept, without effect
+aws lambda wait function-active-v2 --function-name hello
+aws lambda update-function-code --function-name hello --zip-file fileb://hello.zip   # LastUpdateStatus InProgress, then Successful
+aws lambda list-functions
+```
+
+**41 operations,** those AWS's tools call, as [the spike](../hack/spikes/lambda/README.md) recorded them:
+- answering now: functions, `CreateFunction`, `GetFunction`, `GetFunctionConfiguration`, `ListFunctions`, `UpdateFunctionCode`, `UpdateFunctionConfiguration`, `DeleteFunction` and `GetFunctionCodeSigningConfig`, which answers that there is none, FF signing no code; tags, `TagResource`, `UntagResource` and `ListTags`; and `GetAccountSettings`, the plan's limits and what the account uses;
+- taken, and answering that FF doesn't offer them yet until they are built, FF's API and `ff` doing each meanwhile: `Invoke`; versions and aliases, `PublishVersion`, `ListVersionsByFunction`, `CreateAlias`, `GetAlias`, `UpdateAlias`, `DeleteAlias` and `ListAliases`; function URLs, `CreateFunctionUrlConfig`, `GetFunctionUrlConfig`, `UpdateFunctionUrlConfig`, `DeleteFunctionUrlConfig` and `ListFunctionUrlConfigs`; event source mappings, for SQS, `CreateEventSourceMapping`, `GetEventSourceMapping`, `UpdateEventSourceMapping`, `DeleteEventSourceMapping` and `ListEventSourceMappings`; async settings, `PutFunctionEventInvokeConfig`, `UpdateFunctionEventInvokeConfig`, `GetFunctionEventInvokeConfig`, `DeleteFunctionEventInvokeConfig` and `ListFunctionEventInvokeConfigs`; permissions, `AddPermission`, `RemovePermission` and `GetPolicy`; concurrency, `PutFunctionConcurrency`, `GetFunctionConcurrency` and `DeleteFunctionConcurrency`.
+
+**The 47 others refused, for later.** Each of Lambda's other operations, as its model has them, answers `400 UnknownOperationException`, naming it and saying FF doesn't offer it yet, and what FF offers instead where it does; every client shows it at once and none tries again:
+
+```bash
+aws lambda list-layers
+# An error occurred (UnknownOperationException) when calling the ListLayers operation: FF doesn't offer ListLayers of Lambda's API yet. A function's zip carries its libraries.
+```
+
+- layers: `ListLayers`, `ListLayerVersions`, `PublishLayerVersion`, `GetLayerVersion`, `GetLayerVersionByArn`, `DeleteLayerVersion`, `AddLayerVersionPermission`, `GetLayerVersionPolicy` and `RemoveLayerVersionPermission`, a function's zip carrying its libraries ("Functions with dependencies", above);
+- provisioned concurrency: `PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `DeleteProvisionedConcurrencyConfig` and `ListProvisionedConcurrencyConfigs`, a function's `minInstances` keeping instances warm ("Scaling", above);
+- invoking otherwise: `InvokeWithResponseStream`, and `InvokeAsync`, which AWS deprecated for `Invoke` with `InvocationType` `Event`;
+- code signing's own operations: `CreateCodeSigningConfig`, `GetCodeSigningConfig`, `UpdateCodeSigningConfig`, `DeleteCodeSigningConfig`, `ListCodeSigningConfigs`, `ListFunctionsByCodeSigningConfig`, `PutFunctionCodeSigningConfig` and `DeleteFunctionCodeSigningConfig`;
+- runtime management, `GetRuntimeManagementConfig` and `PutRuntimeManagementConfig`, and recursion's detection, `GetFunctionRecursionConfig` and `PutFunctionRecursionConfig`;
+- AWS's additions of 2025 and 2026: capacity providers, `CreateCapacityProvider`, `GetCapacityProvider`, `UpdateCapacityProvider`, `DeleteCapacityProvider`, `ListCapacityProviders` and `ListFunctionVersionsByCapacityProvider`, and a function's scaling on them, `GetFunctionScalingConfig` and `PutFunctionScalingConfig`; durable executions, `ListDurableExecutionsByFunction`, `GetDurableExecution`, `GetDurableExecutionHistory`, `GetDurableExecutionState`, `CheckpointDurableExecution`, `StopDurableExecution`, `SendDurableExecutionCallbackSuccess`, `SendDurableExecutionCallbackFailure` and `SendDurableExecutionCallbackHeartbeat`; resource-based policies, `PutResourcePolicy`, `GetResourcePolicy` and `DeleteResourcePolicy`.
+
+A request that is none of Lambda's operations answers the same, with its method and its path. Each refusal comes once the request's key is known to be good, so that an unsigned request learns nothing. The list follows Lambda's model as botocore 1.43.118 has it ([`BE/src/lambda/lambda-api-model`](../BE/src/lambda/lambda-api-model/operations.json)); the backend's tests check that each of its operations reaches its own name, and that this section names each one.
+
 ### Moving to AWS: ff export
 
 FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's, its mail SES's: an account moves to AWS with its code as it is. `ff export` writes what the move needs in a new folder, from the account's own resources, with `functions:read` and the other services' reads, and `usage:read` for its estimate:

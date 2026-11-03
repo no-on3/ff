@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # boto3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the endpoint, the region
 # and the key are given. A function through its life: made, waited for, listed, its code and its settings changed,
-# each change waited for, tagged, refused as Lambda refuses, deleted. One JSON line per check, {client, want, got,
-# what}, for hack/e2e.sh.
+# each change waited for, tagged, refused as Lambda refuses, deleted; an operation FF doesn't offer yet refused once, by
+# its name, though boto3 retries by default. One JSON line per check, {client, want, got, what}, for hack/e2e.sh.
 #   ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> CODE=<zip> CODE_SHA=<its CodeSha256> \
 #   NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> python boto3_checks.py
 import json
@@ -101,6 +101,24 @@ def refusals():
     return refused_as(lambda: client.get_function(FunctionName="e2e-boto3-missing"), "ResourceNotFoundException")
 
 
+def not_offered():
+    """boto3's own retries, up to four more of an error it retries: none of these."""
+    refused = []
+    for run in (lambda: client.list_layers(),
+                lambda: client.get_layer_version_by_arn(Arn="arn:aws:lambda:tn-tunis-1:000000000000:layer:shared:1"),
+                lambda: client.put_provisioned_concurrency_config(FunctionName=NAME, Qualifier="1", ProvisionedConcurrentExecutions=1)):
+        try:
+            run()
+            refused.append("accepted")
+        except Exception as error:  # noqa: BLE001 - the refusal is the result
+            response = getattr(error, "response", {})
+            refused.append(f"{response.get('Error', {}).get('Code')} {response.get('ResponseMetadata', {}).get('RetryAttempts')} "
+                           f"{response.get('Error', {}).get('Message', '').split('.')[0]}")
+    return expect(refused, ["UnknownOperationException 0 FF doesn't offer ListLayers of Lambda's API yet",
+                            "UnknownOperationException 0 FF doesn't offer GetLayerVersionByArn of Lambda's API yet",
+                            "UnknownOperationException 0 FF doesn't offer PutProvisionedConcurrencyConfig of Lambda's API yet"])
+
+
 def deleted():
     client.delete_function(FunctionName=NAME)
     return refused_as(lambda: client.get_function(FunctionName=NAME), "ResourceNotFoundException")
@@ -115,4 +133,5 @@ check("ok", "a RevisionId read before those changes is PreconditionFailedExcepti
       lambda: refused_as(lambda: client.update_function_configuration(FunctionName=NAME, Timeout=12, RevisionId=state.get("revision")), "PreconditionFailedException"))
 check("ok", "TagResource, ListTags and UntagResource on its ARN", tags)
 check("ok", "refused as boto3 names Lambda's errors: a runtime FF lacks, a function the account hasn't", refusals)
+check("ok", "operations FF doesn't offer yet are UnknownOperationException, named, sent once by a client that retries by default", not_offered)
 check("ok", "DeleteFunction deletes it: GetFunction then ResourceNotFoundException", deleted)

@@ -24,6 +24,7 @@ import {
   invalidRequestContent,
   lambdaErrorOf,
   missingAuthenticationToken,
+  notOffered,
   requestEntityTooLarge,
   resourceNotFound,
   serviceException,
@@ -32,15 +33,15 @@ import {
   unrecognizedClient,
 } from './lambda-error';
 import { CODE_LINK_PATH, LambdaCodeLinks } from './lambda-code-links';
-import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaOperation, LambdaOperations, PAYLOAD_BYTES, operationOf } from './lambda-operations';
+import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaOperation, LambdaOperations, PAYLOAD_BYTES, laterOperationOf, operationOf } from './lambda-operations';
 import { checkLambdaSignature, readLambdaSignature } from './lambda-signature';
 
 /** What a level lets a key do with a function, as a refusal says it. */
 const DOES: Record<FunctionAccess, string> = { read: 'read', invoke: 'invoke', write: 'change' };
 
 /** A body past its operation's limit, or a client gone before it ended: Lambda's words, the operation's limit named. */
-const bodyRefusals = (operation: LambdaOperation | null): BodyRefusals => ({
-  tooLarge: (limit) => requestEntityTooLarge(limit, operation?.name ?? 'requested'),
+const bodyRefusals = (operation: string | undefined): BodyRefusals => ({
+  tooLarge: (limit) => requestEntityTooLarge(limit, operation ?? 'requested'),
   incomplete: () => invalidRequestContent('The client went before its request ended.'),
 });
 
@@ -128,7 +129,10 @@ export class LambdaFrontDoor implements OnModuleDestroy {
     const method = request.method ?? 'GET';
     const { rawPath, rawQuery } = requestTarget(request.url);
     const route = operationOf(method, rawPath);
-    const body = await readBody(request, route?.operation.maxBodyBytes ?? PAYLOAD_BYTES, bodyRefusals(route?.operation ?? null));
+    // One of Lambda's other operations is named in its refusal, its body read to Lambda's own limit for it.
+    const later = route ? null : laterOperationOf(method, rawPath, rawQuery);
+    const limited = route?.operation ?? later;
+    const body = await readBody(request, limited?.maxBodyBytes ?? PAYLOAD_BYTES, bodyRefusals(limited?.name));
     // A link to a function's code, which GetFunction gave: unsigned, its token the proof.
     const link = method === 'GET' ? CODE_LINK_PATH.exec(rawPath) : null;
     if (link) return this.code(link[1]);
@@ -142,6 +146,7 @@ export class LambdaFrontDoor implements OnModuleDestroy {
     const account = await this.directory.account(key.accountId);
     if (!account || account.status !== AccountStatus.ACTIVE) throw accessDenied(`The account is ${account?.status ?? 'gone'}: its functions answer no key.`);
     // What FF doesn't offer, named as asked, once the key is known to be good: an unsigned request learns nothing.
+    if (later) throw notOffered(later.name, later.instead);
     if (!route) throw unknownOperation(`FF doesn't offer this operation of Lambda's API yet: ${method} ${rawPath}.`);
     const { operation, groups } = route;
     const query = new URLSearchParams(rawQuery);
@@ -162,7 +167,7 @@ export class LambdaFrontDoor implements OnModuleDestroy {
       if (wait !== undefined) throw tooManyRequests(`Rate exceeded: the ${caller.plan.name} plan allows ${caller.plan.limits.writesPerMinute} changes per minute.`, wait);
     }
     const handler = this.operations.handler(operation.name);
-    if (!handler) throw unknownOperation(`FF doesn't offer ${operation.name} of Lambda's API yet.`);
+    if (!handler) throw notOffered(operation.name);
     // What FF's services record of the change names the key, its address and the request, as FF's API's do.
     return withRequestContext({ requestId, actor: caller.actor, ...(caller.ip ? { ip: caller.ip } : {}) }, () => handler(call, caller));
   }

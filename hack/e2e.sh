@@ -528,6 +528,19 @@ check "the CLI's waiter function-active-v2 finds it active" accepted "$(outcome 
 check "a function the account hasn't, and a version its function hasn't, are ResourceNotFoundException" \
   "refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(outcome as_reader get-function --function-name e2e-missing) $(outcome as_reader get-function --function-name e2e-versioned --qualifier 7)"
+# not_offered <aws lambda command> <arguments…>: how many requests the CLI sent, as its debug log counts them, then the
+# operation it called and the one FF's refusal names; the CLI's words in $work/not-offered-<command>.err.
+not_offered() {
+  local err="$work/not-offered-$1.err"
+  as_reader "$@" --debug >/dev/null 2>"$err" || true # refused, as each should be
+  echo "$(grep -c 'Sending http request' "$err") $(sed -nE "s/.*\(UnknownOperationException\) when calling the ([A-Za-z]+) operation: FF doesn't offer ([A-Za-z]+) of Lambda's API yet\..*/\1 \2/p" "$err" | tail -1)"
+}
+check "Lambda's operations FF doesn't offer yet are UnknownOperationException naming the one called, a request each, which the CLI doesn't send again" \
+  "1 ListLayers ListLayers 1 GetLayerVersionByArn GetLayerVersionByArn 1 PutProvisionedConcurrencyConfig PutProvisionedConcurrencyConfig" \
+  "$(not_offered list-layers) $(not_offered get-layer-version-by-arn --arn "arn:aws:lambda:tn-tunis-1:$ver:layer:shared:1") \
+$(not_offered put-provisioned-concurrency-config --function-name e2e-versioned --qualifier live --provisioned-concurrent-executions 1)"
+check "  ... saying what FF offers instead, where it does" "FF doesn't offer ListLayers of Lambda's API yet. A function's zip carries its libraries." \
+  "$(grep -oE "FF doesn't offer ListLayers .*" "$work/not-offered-list-layers.err" | tail -1)"
 }
 section_def lambda_reads section_lambda_reads versions budget=25
 
@@ -686,9 +699,9 @@ clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$make
   NEW_CODE="$work/sdks-v2.zip" NEW_CODE_SHA="$(lambda_zip "$work/sdks-v2.zip" 'export const handler = async () => ({ code: "v2" });')"
   OTHER_FUNCTION=e2e-versioned)
 env "${clients_env[@]}" MODULES="$lambda_clients/node_modules" node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
-client_checks "$work/lambda-sdk.jsonl" 9
+client_checks "$work/lambda-sdk.jsonl" 10
 env "${clients_env[@]}" "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
-client_checks "$work/lambda-boto3.jsonl" 9
+client_checks "$work/lambda-boto3.jsonl" 10
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60
 

@@ -48,6 +48,9 @@ export const tooManyRequests = (message: string, retryAfterSeconds: number) =>
   new LambdaError(429, 'TooManyRequestsException', message, { Reason: 'CallerRateLimitExceeded' }, { 'retry-after': String(retryAfterSeconds) });
 /** An operation FF doesn't offer: 400, which no client tries again. */
 export const unknownOperation = (message: string) => new LambdaError(400, 'UnknownOperationException', message);
+/** One of Lambda's operations FF doesn't offer yet, named, and what FF offers instead, where it does. */
+export const notOffered = (operation: string, instead?: string) =>
+  unknownOperation(`FF doesn't offer ${operation} of Lambda's API yet.${instead ? ` ${instead}` : ''}`);
 export const serviceException = () => new LambdaError(500, 'ServiceException', 'The AWS Lambda service encountered an internal error.');
 
 /** Lambda's name for each refusal of FF's API that its services give: the same status, the same message. */

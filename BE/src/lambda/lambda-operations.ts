@@ -106,6 +106,109 @@ export const LAMBDA_OPERATIONS: readonly LambdaOperation[] = [
   operation('GET', '/2016-08-19/account-settings/?', 'GetAccountSettings', 'read', 'account'),
 ];
 
+/**
+ * One of Lambda's other operations, which FF doesn't offer yet: what tells it
+ * in a request, so that its refusal names it, and what FF offers instead,
+ * where it does.
+ */
+export interface LaterOperation {
+  name: string;
+  method: LambdaOperation['method'];
+  path: RegExp;
+  /** The query's parameter and value that tell it from the other operation at its path, as Lambda's model has them. */
+  query?: [string, string];
+  /** The most its body holds: Lambda's own, so that a large one is refused by its name too. */
+  maxBodyBytes: number;
+  /** What FF offers instead, said after the refusal. */
+  instead?: string;
+}
+
+/** One segment of a path, as sent: a name or an ARN, escaped. */
+const S = '[^/]+';
+
+const later = (
+  method: LaterOperation['method'],
+  path: string,
+  name: string,
+  more: Partial<Pick<LaterOperation, 'query' | 'maxBodyBytes' | 'instead'>> = {},
+): LaterOperation => ({ name, method, path: new RegExp(`^${path}/?$`), maxBodyBytes: PAYLOAD_BYTES, ...more });
+
+const LAYERS = { instead: "A function's zip carries its libraries." };
+const WARM = { instead: "FF keeps a function's instances warm with its minInstances, in FF's API (PUT /functions/{id}/scaling-config)." };
+
+/**
+ * Lambda's other operations, as its model has them (botocore's, beside the
+ * specs in lambda-api-model): each answers that FF doesn't offer it yet,
+ * naming it, as ADR 0014 (2) says. Where two share a path, the one its query
+ * tells comes first.
+ */
+export const LATER_OPERATIONS: readonly LaterOperation[] = [
+  // Layers.
+  later('GET', '/2018-10-31/layers', 'GetLayerVersionByArn', { query: ['find', 'LayerVersion'], ...LAYERS }),
+  later('GET', '/2018-10-31/layers', 'ListLayers', LAYERS),
+  later('GET', `/2018-10-31/layers/${S}/versions`, 'ListLayerVersions', LAYERS),
+  later('POST', `/2018-10-31/layers/${S}/versions`, 'PublishLayerVersion', { maxBodyBytes: CODE_BODY_BYTES, ...LAYERS }),
+  later('GET', `/2018-10-31/layers/${S}/versions/${S}`, 'GetLayerVersion', LAYERS),
+  later('DELETE', `/2018-10-31/layers/${S}/versions/${S}`, 'DeleteLayerVersion', LAYERS),
+  later('POST', `/2018-10-31/layers/${S}/versions/${S}/policy`, 'AddLayerVersionPermission', LAYERS),
+  later('GET', `/2018-10-31/layers/${S}/versions/${S}/policy`, 'GetLayerVersionPolicy', LAYERS),
+  later('DELETE', `/2018-10-31/layers/${S}/versions/${S}/policy/${S}`, 'RemoveLayerVersionPermission', LAYERS),
+  // Provisioned concurrency.
+  later('GET', `/2019-09-30/functions/${S}/provisioned-concurrency`, 'ListProvisionedConcurrencyConfigs', { query: ['List', 'ALL'], ...WARM }),
+  later('GET', `/2019-09-30/functions/${S}/provisioned-concurrency`, 'GetProvisionedConcurrencyConfig', WARM),
+  later('PUT', `/2019-09-30/functions/${S}/provisioned-concurrency`, 'PutProvisionedConcurrencyConfig', WARM),
+  later('DELETE', `/2019-09-30/functions/${S}/provisioned-concurrency`, 'DeleteProvisionedConcurrencyConfig', WARM),
+  // Invoking otherwise.
+  later('POST', `/2021-11-15/functions/${S}/response-streaming-invocations`, 'InvokeWithResponseStream'),
+  later('POST', `/2014-11-13/functions/${S}/invoke-async`, 'InvokeAsync', { instead: 'AWS deprecated it for Invoke, with InvocationType Event.' }),
+  // Code signing's own operations: GetFunctionCodeSigningConfig answers that a function has none.
+  later('PUT', `/2020-06-30/functions/${S}/code-signing-config`, 'PutFunctionCodeSigningConfig'),
+  later('DELETE', `/2020-06-30/functions/${S}/code-signing-config`, 'DeleteFunctionCodeSigningConfig'),
+  later('POST', '/2020-04-22/code-signing-configs', 'CreateCodeSigningConfig'),
+  later('GET', '/2020-04-22/code-signing-configs', 'ListCodeSigningConfigs'),
+  later('GET', `/2020-04-22/code-signing-configs/${S}`, 'GetCodeSigningConfig'),
+  later('PUT', `/2020-04-22/code-signing-configs/${S}`, 'UpdateCodeSigningConfig'),
+  later('DELETE', `/2020-04-22/code-signing-configs/${S}`, 'DeleteCodeSigningConfig'),
+  later('GET', `/2020-04-22/code-signing-configs/${S}/functions`, 'ListFunctionsByCodeSigningConfig'),
+  // Runtime management, and recursion's detection.
+  later('GET', `/2021-07-20/functions/${S}/runtime-management-config`, 'GetRuntimeManagementConfig'),
+  later('PUT', `/2021-07-20/functions/${S}/runtime-management-config`, 'PutRuntimeManagementConfig'),
+  later('GET', `/2024-08-31/functions/${S}/recursion-config`, 'GetFunctionRecursionConfig'),
+  later('PUT', `/2024-08-31/functions/${S}/recursion-config`, 'PutFunctionRecursionConfig'),
+  // AWS's additions of 2025: capacity providers, a function's scaling on them, durable executions.
+  later('POST', '/2025-11-30/capacity-providers', 'CreateCapacityProvider'),
+  later('GET', '/2025-11-30/capacity-providers', 'ListCapacityProviders'),
+  later('GET', `/2025-11-30/capacity-providers/${S}`, 'GetCapacityProvider'),
+  later('PUT', `/2025-11-30/capacity-providers/${S}`, 'UpdateCapacityProvider'),
+  later('DELETE', `/2025-11-30/capacity-providers/${S}`, 'DeleteCapacityProvider'),
+  later('GET', `/2025-11-30/capacity-providers/${S}/function-versions`, 'ListFunctionVersionsByCapacityProvider'),
+  later('GET', `/2025-11-30/functions/${S}/function-scaling-config`, 'GetFunctionScalingConfig'),
+  later('PUT', `/2025-11-30/functions/${S}/function-scaling-config`, 'PutFunctionScalingConfig'),
+  later('GET', `/2025-12-01/functions/${S}/durable-executions`, 'ListDurableExecutionsByFunction'),
+  later('GET', `/2025-12-01/durable-executions/${S}`, 'GetDurableExecution'),
+  later('GET', `/2025-12-01/durable-executions/${S}/history`, 'GetDurableExecutionHistory'),
+  later('GET', `/2025-12-01/durable-executions/${S}/state`, 'GetDurableExecutionState'),
+  later('POST', `/2025-12-01/durable-executions/${S}/checkpoint`, 'CheckpointDurableExecution'),
+  later('POST', `/2025-12-01/durable-executions/${S}/stop`, 'StopDurableExecution'),
+  later('POST', `/2025-12-01/durable-execution-callbacks/${S}/succeed`, 'SendDurableExecutionCallbackSuccess'),
+  later('POST', `/2025-12-01/durable-execution-callbacks/${S}/fail`, 'SendDurableExecutionCallbackFailure'),
+  later('POST', `/2025-12-01/durable-execution-callbacks/${S}/heartbeat`, 'SendDurableExecutionCallbackHeartbeat'),
+  // And of 2026: resource-based policies.
+  later('PUT', `/2026-07-09/resource-policy/${S}`, 'PutResourcePolicy'),
+  later('GET', `/2026-07-09/resource-policy/${S}`, 'GetResourcePolicy'),
+  later('DELETE', `/2026-07-09/resource-policy/${S}`, 'DeleteResourcePolicy'),
+];
+
+/** Which of Lambda's other operations a request makes, by its method, its path as sent and its query; null for none of Lambda's. */
+export function laterOperationOf(method: string, rawPath: string, rawQuery: string): LaterOperation | null {
+  const query = new URLSearchParams(rawQuery);
+  return (
+    LATER_OPERATIONS.find(
+      (candidate) => candidate.method === method && candidate.path.test(rawPath) && (!candidate.query || query.get(candidate.query[0]) === candidate.query[1]),
+    ) ?? null
+  );
+}
+
 /** The operation a request makes, by its method and its path as sent, and the path's groups, escapes decoded; null for one FF doesn't offer. */
 export function operationOf(method: string, rawPath: string): { operation: LambdaOperation; groups: string[] } | null {
   for (const candidate of LAMBDA_OPERATIONS) {

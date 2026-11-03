@@ -215,10 +215,34 @@ describe("Lambda's endpoint (L1)", () => {
       expect(answer.headers['content-type']).toBe('application/json');
     });
 
-    it("an operation it doesn't offer, by its method and its path, once the key is known to be good", async () => {
-      expect(refusal(await send('GET', '/2018-10-31/layers'))).toEqual([400, 'UnknownOperationException', "FF doesn't offer this operation of Lambda's API yet: GET /2018-10-31/layers."]);
+    it("one of Lambda's other operations, by its name, once the key is known to be good, and what FF offers instead where it does", async () => {
+      expect(refusal(await send('GET', '/2018-10-31/layers'))).toEqual([
+        400,
+        'UnknownOperationException',
+        "FF doesn't offer ListLayers of Lambda's API yet. A function's zip carries its libraries.",
+      ]);
+      expect(refusal(await send('PUT', '/2024-08-31/functions/orders/recursion-config', { body: '{"RecursiveLoop": "Allow"}' }))).toEqual([
+        400,
+        'UnknownOperationException',
+        "FF doesn't offer PutFunctionRecursionConfig of Lambda's API yet.",
+      ]);
+      expect(refusal(await send('PUT', '/2019-09-30/functions/orders/provisioned-concurrency?Qualifier=live', { body: '{"ProvisionedConcurrentExecutions": 2}' }))[2]).toBe(
+        "FF doesn't offer PutProvisionedConcurrencyConfig of Lambda's API yet. FF keeps a function's instances warm with its minInstances, in FF's API (PUT /functions/{id}/scaling-config).",
+      );
       // Unsigned, it is a request without a signature first: an unsigned request learns nothing.
       expect(refusal(await raw('GET', '/2018-10-31/layers', {}))[1]).toBe('MissingAuthenticationTokenException');
+    });
+
+    it('one of two at a path, by its query, as Lambda tells them', async () => {
+      const arn = encodeURIComponent(`arn:aws:lambda:${REGION}:${ACCOUNT}:layer:shared:1`);
+
+      expect(refusal(await send('GET', `/2018-10-31/layers?find=LayerVersion&Arn=${arn}`))[2]).toMatch(/^FF doesn't offer GetLayerVersionByArn of Lambda's API yet\./);
+      expect(refusal(await send('GET', '/2019-09-30/functions/orders/provisioned-concurrency?List=ALL'))[2]).toMatch(/^FF doesn't offer ListProvisionedConcurrencyConfigs /);
+      expect(refusal(await send('GET', '/2019-09-30/functions/orders/provisioned-concurrency?Qualifier=live'))[2]).toMatch(/^FF doesn't offer GetProvisionedConcurrencyConfig /);
+    });
+
+    it("a request that is none of Lambda's operations, by its method and its path", async () => {
+      expect(refusal(await send('GET', '/2018-10-31/layerz'))).toEqual([400, 'UnknownOperationException', "FF doesn't offer this operation of Lambda's API yet: GET /2018-10-31/layerz."]);
     });
 
     it('an operation it has, given the function as named: by its name, its ARN or its partial ARN, its qualifier from the name or the query', async () => {
@@ -413,6 +437,13 @@ describe("Lambda's endpoint (L1)", () => {
       ]);
       expect(refusal(await raw('PUT', '/2015-03-31/functions/orders/configuration', { 'content-length': String(6 * 1024 * 1024 + 1) }))[2]).toBe(
         'Request must be smaller than 6291456 bytes for the UpdateFunctionConfiguration operation',
+      );
+      // One of Lambda's other operations, at Lambda's limit for it, so that a layer's zip is refused by its name.
+      expect(refusal(await raw('POST', '/2018-10-31/layers/shared/versions', { 'content-length': '69905068' }))[2]).toBe(
+        'Request must be smaller than 69905067 bytes for the PublishLayerVersion operation',
+      );
+      expect(refusal(await raw('POST', '/2018-10-31/layerz', { 'content-length': String(6 * 1024 * 1024 + 1) }))[2]).toBe(
+        'Request must be smaller than 6291456 bytes for the requested operation',
       );
     });
 
