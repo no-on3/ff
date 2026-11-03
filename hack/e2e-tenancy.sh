@@ -1149,6 +1149,14 @@ check "  ... nor creates a function in A's account by an ARN of A's, nor with co
   "$(lambda_with "${lambda_b[@]}" create-function --function-name "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-b-made" "${made_by_b[@]}" --code S3Bucket=l5-b-code,S3Key=code.zip) \
 $(lambda_with "${lambda_b[@]}" create-function --function-name l5-b-made "${made_by_b[@]}" --code S3Bucket=l5-photos-a,S3Key=code.zip) \
 $(as_a GET '/functions?name=l5-b-made' | jq length) $(as_b GET '/functions?name=l5-b-made' | jq length)"
+# Both refused before the code is read: the ARN's account first, then the queue in B's own account.
+check "  ... nor gives a function of B's A's queue as its dead-letter queue, by A's ARN or under B's, which is no queue of B's: nothing made" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException The account has no queue named l5-orders-a 0" \
+  "$(lambda_with "${lambda_b[@]}" create-function --function-name l5-b-made "${made_by_b[@]}" --code S3Bucket=l5-b-code,S3Key=code.zip \
+    --dead-letter-config "TargetArn=arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a") \
+$(lambda_with "${lambda_b[@]}" create-function --function-name l5-b-made "${made_by_b[@]}" --code S3Bucket=l5-b-code,S3Key=code.zip \
+    --dead-letter-config "TargetArn=arn:aws:sqs:tn-tunis-1:$account_b:l5-orders-a") \
+$(grep -oE 'The account has no queue named [a-z0-9-]+' "$work/lambda.err") $(as_b GET '/functions?name=l5-b-made' | jq length)"
 # A's function as A's key reads it before B's attempts: its revision, its timeout, its code.
 seen_by_a() { lambda_with "${lambda_a[@]}" get-function-configuration --function-name l5-a --query '[RevisionId, Timeout, CodeSha256]'; }
 before_b="$(seen_by_a)"

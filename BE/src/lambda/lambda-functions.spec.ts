@@ -44,6 +44,7 @@ const fn = (name: string, more: Partial<Function> = {}): Function =>
     updateStartedAt: null,
     description: '',
     role: null,
+    deadLetterTargetArn: null,
     revisionId: `rev-${name}`,
     updatedAt: UPDATED,
     ...more,
@@ -152,13 +153,15 @@ describe("Lambda's reads of functions (L1)", () => {
       expect(lambdaTime(new Date('2026-01-02T03:04:05.000Z'))).toBe('2026-01-02T03:04:05.000+0000');
     });
 
-    it("shows the description and the role that CreateFunction kept, a version its function's role", () => {
+    it("shows the description, the role and the dead-letter queue that CreateFunction kept, a version its function's role and queue", () => {
       const role = `arn:aws:iam::${ACCOUNT}:role/orders`;
-      const made = fn('orders', { description: 'Takes orders', role });
+      const queue = `arn:aws:sqs:${REGION}:${ACCOUNT}:failed-orders`;
+      const made = fn('orders', { description: 'Takes orders', role, deadLetterTargetArn: queue });
 
-      expect(latestConfiguration(made, REGION)).toMatchObject({ Description: 'Takes orders', Role: role });
-      expect(versionConfiguration(made, version('orders', 1))).toMatchObject({ Description: 'version 1', Role: role });
+      expect(latestConfiguration(made, REGION)).toMatchObject({ Description: 'Takes orders', Role: role, DeadLetterConfig: { TargetArn: queue } });
+      expect(versionConfiguration(made, version('orders', 1))).toMatchObject({ Description: 'version 1', Role: role, DeadLetterConfig: { TargetArn: queue } });
       expect(versionConfiguration(fn('orders'), version('orders', 1))).not.toHaveProperty('Role');
+      expect(latestConfiguration(fn('orders'), REGION)).not.toHaveProperty('DeadLetterConfig');
     });
 
     it('says a deploy under way is Pending, and one that failed Failed with its diagnosis, as the waiters read them', () => {

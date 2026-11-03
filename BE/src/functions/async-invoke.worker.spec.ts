@@ -5,6 +5,7 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError, OrchestratorError } from '../orchestrator/orchestrator.errors';
 import { plan } from '../plans/test-fixtures';
 import { ClaimedEvent } from '../queues/queue-store';
+import { messageSize } from '../queues/sqs-messages';
 import { LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES } from './async-invoke';
 import { AsyncInvokeWorker } from './async-invoke.worker';
 import { InvocationSource } from './entities/function-invocation.entity';
@@ -566,5 +567,66 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
 
     expect([customerQueues.send.mock.calls.length, queues.deleteEvent.mock.calls.length, configs.destinationQueue.mock.calls.length]).toEqual([0, 1, 0]);
     expect(warnings).toHaveBeenCalledWith("The record of asynchronous call req-1 of function fn-1 was not delivered: FF turned the account's databases, buckets and queues off");
+  });
+
+  describe("a function's dead-letter queue", () => {
+    const DEAD_LETTERS_ARN = `arn:aws:sqs:tn-tunis-1:${ACCOUNT}:dead-orders`;
+    const deadOrders = { ...failedOrders, id: 'queue-2', name: 'dead-orders' };
+    const tooOld = (values: Partial<ClaimedEvent> = {}) => event({ sentAt: later(-6 * 3600 - 1), ...values });
+
+    beforeEach(() => functions.findOne.mockResolvedValue({ ...fn, deadLetterTargetArn: DEAD_LETTERS_ARN }));
+
+    it("takes a call whose retries are used up, its event as it was sent with Lambda's attributes beside it, in the transaction that deletes it and hands its record on", async () => {
+      configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: QUEUE_ARN });
+      configs.destinationQueue.mockImplementation(async (_account: string, arn: string) => (arn === QUEUE_ARN ? failedOrders : deadOrders));
+      functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'no stock for order 42'), invocation: {} });
+
+      await tick(event({ receiveCount: 3, attributes: { failures: 2, throttles: 0, settled: 2 } }));
+
+      expect([queues.deleteEventAnd.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([1, 0]);
+      const sent = customerQueues.send.mock.calls.map(([queue, [message], , manager]) => ({ queue: (queue as { name: string }).name, manager, message: message as Record<string, unknown> }));
+      expect(sent.map(({ queue, manager }) => [queue, manager])).toEqual([
+        ['failed-orders', 'the transaction'],
+        ['dead-orders', 'the transaction'],
+      ]);
+      const messageAttributes = {
+        RequestID: { DataType: 'String', StringValue: 'req-1' },
+        ErrorCode: { DataType: 'Number', StringValue: '200' },
+        ErrorMessage: { DataType: 'String', StringValue: 'no stock for order 42' },
+      };
+      expect(sent[1].message).toEqual({
+        messageId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        body: '{"order":42}',
+        meta: { messageAttributes, senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders` },
+        sizeBytes: messageSize('{"order":42}', messageAttributes),
+        delaySeconds: 0,
+      });
+      // Each a request Lambda makes to SQS.
+      expect(counts.count.mock.calls.map(([use]) => (use as { queueName: string }).queueName)).toEqual(['failed-orders', 'dead-orders']);
+    });
+
+    it('takes a call too old, its request ID alone beside it when no attempt answered; never a call that succeeded', async () => {
+      configs.destinationQueue.mockResolvedValue(deadOrders);
+
+      await tick(tooOld());
+      await tick(event({ id: '8', requestId: 'req-2' }));
+
+      expect(customerQueues.send.mock.calls.map(([, [message]]) => (message as { meta: unknown }).meta)).toEqual([
+        { messageAttributes: { RequestID: { DataType: 'String', StringValue: 'req-1' } }, senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders` },
+      ]);
+      expect([queues.deleteEventAnd.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([1, 1]);
+    });
+
+    it("deletes the event all the same when its queue is gone or the event over the queue's largest message, saying so, as no destination's failure", async () => {
+      configs.destinationQueue.mockResolvedValueOnce(undefined).mockResolvedValueOnce({ ...deadOrders, maximumMessageSize: 1024 });
+
+      await tick(tooOld());
+      await tick(tooOld({ id: '8', requestId: 'req-2', body: JSON.stringify({ order: 'x'.repeat(2000) }) }));
+
+      expect([customerQueues.send.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 2]);
+      expect(warnings).toHaveBeenCalledWith(`Asynchronous call req-1 of function fn-1 was not sent to its dead-letter queue: ${DEAD_LETTERS_ARN} is no queue of the account any more`);
+      expect(warnings).toHaveBeenCalledWith(expect.stringMatching(/^Asynchronous call req-2 of function fn-1 was not sent to its dead-letter queue: its event is \d+ bytes, over the queue's maximum message size of 1024$/));
+      expect(asyncCounts.count.mock.calls.filter(([use]) => (use as { destinationFailures?: number }).destinationFailures)).toEqual([]);
+    });
   });
 });

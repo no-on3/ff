@@ -65,6 +65,8 @@ interface Settings {
   description: string;
   /** The role CreateFunction was given, none for a function made through FF's API. */
   role?: string | null;
+  /** The function's dead-letter queue, which its versions follow too. */
+  deadLetterTargetArn?: string | null;
   variables?: Record<string, string>;
 }
 
@@ -79,6 +81,7 @@ function settingsOf(settings: Settings): Record<string, unknown> {
     MemorySize: settings.memory,
     CodeSha256: settings.codeSha256,
     ...(settings.variables && Object.keys(settings.variables).length > 0 ? { Environment: { Variables: settings.variables } } : {}),
+    ...(settings.deadLetterTargetArn ? { DeadLetterConfig: { TargetArn: settings.deadLetterTargetArn } } : {}),
     // X-Ray isn't FF's: calls pass a trace header through, as Lambda's PassThrough does.
     TracingConfig: { Mode: 'PassThrough' },
     PackageType: 'Zip',
@@ -103,12 +106,12 @@ export function latestConfiguration(function_: Function, region: string, variabl
   };
 }
 
-/** A version's configuration: what was published, which never changes, so always Active; the role is its function's. */
-export function versionConfiguration(function_: Pick<Function, 'name' | 'role'>, version: FunctionVersionView): Record<string, unknown> {
+/** A version's configuration: what was published, which never changes, so always Active; the role and the dead-letter queue are its function's. */
+export function versionConfiguration(function_: Pick<Function, 'name' | 'role' | 'deadLetterTargetArn'>, version: FunctionVersionView): Record<string, unknown> {
   return {
     FunctionName: function_.name,
     FunctionArn: version.functionArn,
-    ...settingsOf({ ...version, name: function_.name, role: function_.role, variables: version.environment }),
+    ...settingsOf({ ...version, name: function_.name, role: function_.role, deadLetterTargetArn: function_.deadLetterTargetArn, variables: version.environment }),
     LastModified: lambdaTime(new Date(version.createdAt)),
     Version: version.version,
     RevisionId: version.revisionId,

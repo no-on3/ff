@@ -7,9 +7,11 @@ import { DTO_VALIDATION } from '../common/validation';
 import { ChangeUnderWayException, revisionMoved } from '../functions/change-under-way';
 import { CreateFunctionDto } from '../functions/dto/create-function.dto';
 import { UpdateFunctionDto } from '../functions/dto/update-function.dto';
+import { EventInvokeConfigService } from '../functions/event-invoke-config.service';
 import { FunctionsService, StartedChange, WhenLive } from '../functions/functions.service';
 import { FunctionVersionsService } from '../functions/versions.service';
 import { PackagesService } from '../packages/packages.service';
+import { parseQueueArn } from '../queues/sqs-attributes';
 import { reachesBucket } from '../storage/key-reach';
 import { StorageDirectory } from '../storage/storage-directory.service';
 import { StoreBuckets } from '../storage/store-buckets';
@@ -44,6 +46,7 @@ export class LambdaFunctionChanges implements LambdaHandlers {
     private readonly tags: ResourceTagsService,
     private readonly directory: StorageDirectory,
     private readonly store: StoreBuckets,
+    private readonly configs: EventInvokeConfigService,
   ) {}
 
   readonly handlers: Record<string, LambdaHandler> = {
@@ -58,9 +61,11 @@ export class LambdaFunctionChanges implements LambdaHandlers {
     const request = createFunctionRequest(input, caller);
     // Before the code is stored: a name taken is refused at once, as Lambda's.
     if ((await this.functions.findAll(caller.accountId, request.fields.name)).length > 0) throw resourceConflict(`Function already exist: ${request.fields.name}`);
+    await this.refuseMissingQueue(caller.accountId, request.deadLetterTargetArn);
     const codeSha256 = await this.storedCode(request.code, caller);
     const dto = (await this.validation.transform({ ...request.fields, codeSha256 }, { type: 'body', metatype: CreateFunctionDto })) as CreateFunctionDto;
-    const started = await this.functions.startCreate(caller.accountId, dto, { description: request.description, role: request.role });
+    const { description, role, deadLetterTargetArn } = request;
+    const started = await this.functions.startCreate(caller.accountId, dto, { description, role, deadLetterTargetArn });
     if (request.tags) await this.tags.tagFunction(caller.accountId, started.function_.id, request.tags);
     this.rollOut(started, caller.accountId, request.publish);
     return { status: 201, document: latestConfiguration(started.function_, caller.region, started.environment.variables) };
@@ -71,6 +76,7 @@ export class LambdaFunctionChanges implements LambdaHandlers {
     this.noNul.transform(input, { type: 'body' });
     const function_ = namedFunction(caller);
     const request = updateConfigurationRequest(input, caller, function_);
+    await this.refuseMissingQueue(caller.accountId, request.lambda.deadLetterTargetArn);
     const dto = (await this.validation.transform(request.fields, { type: 'body', metatype: UpdateFunctionDto })) as UpdateFunctionDto;
     return this.answer(await this.functions.startUpdate(caller.accountId, function_.id, dto, request.lambda), caller, false);
   }
@@ -97,10 +103,16 @@ export class LambdaFunctionChanges implements LambdaHandlers {
     return this.answer(started, caller, request.publish);
   }
 
+  /** The dead-letter queue a request names, there in the account before anything changes. */
+  private async refuseMissingQueue(accountId: string, arn: string | null | undefined): Promise<void> {
+    if (!arn || (await this.configs.destinationQueue(accountId, arn))) return;
+    throw invalidParameterValue(`The account has no queue named ${parseQueueArn(arn)?.name}: DeadLetterConfig's TargetArn names one of its queues.`);
+  }
+
   /**
    * An update's answer: at once, its last update InProgress, while a new
    * version rolls out after it; once saved, Successful, when the change is of
-   * the record alone (a description, a role).
+   * the record alone (a description, a role, a dead-letter queue).
    */
   private async answer(started: StartedChange, caller: LambdaCaller, publish: boolean): Promise<LambdaAnswer> {
     if (!started.rollsOut) {

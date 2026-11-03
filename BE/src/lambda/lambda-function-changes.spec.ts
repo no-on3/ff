@@ -2,12 +2,14 @@
  * L1: Lambda's changes of functions over FF's: the code sent or read from the
  * account's bucket; CreateFunction answered at once, Pending, and the updates
  * InProgress, the rollout after; a change while another runs refused in
- * Lambda's words; a function or one of its versions deleted.
+ * Lambda's words; a dead-letter queue found in the account first; a function
+ * or one of its versions deleted.
  */
 import { BadRequestException, Logger } from '@nestjs/common';
 import { Readable } from 'node:stream';
 import { Function, FunctionStatus, PackageType, Runtime, UpdateStatus } from '../functions/entities/function.entity';
 import { ChangeUnderWayException } from '../functions/change-under-way';
+import { EventInvokeConfigService } from '../functions/event-invoke-config.service';
 import { FunctionsService, WhenLive } from '../functions/functions.service';
 import { FunctionVersionsService } from '../functions/versions.service';
 import { PackagesService } from '../packages/packages.service';
@@ -66,6 +68,9 @@ describe("Lambda's changes of functions (L1)", () => {
   const tags = { tagFunction: jest.fn() };
   const directory = { bucket: jest.fn(), account: jest.fn() };
   const store = { object: jest.fn() };
+  const configs = { destinationQueue: jest.fn() };
+  const QUEUE = `arn:aws:sqs:${REGION}:${ACCOUNT}:failed-orders`;
+  const NO_QUEUE = [400, 'InvalidParameterValueException', "The account has no queue named failed-orders-gone: DeadLetterConfig's TargetArn names one of its queues."];
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -78,6 +83,7 @@ describe("Lambda's changes of functions (L1)", () => {
     directory.bucket.mockResolvedValue({ name: 'builds', accountId: ACCOUNT, storeName: 'b-1234' });
     directory.account.mockResolvedValue({ id: ACCOUNT, storageDisabledAt: null });
     store.object.mockImplementation(async () => ({ body: Readable.from([ZIP]), length: ZIP.length }));
+    configs.destinationQueue.mockImplementation(async (_account: string, arn: string) => (arn === QUEUE ? { name: 'failed-orders' } : undefined));
     changes = new LambdaFunctionChanges(
       functions as unknown as FunctionsService,
       versions as unknown as FunctionVersionsService,
@@ -85,6 +91,7 @@ describe("Lambda's changes of functions (L1)", () => {
       tags as unknown as ResourceTagsService,
       directory as unknown as StorageDirectory,
       store as unknown as StoreBuckets,
+      configs as unknown as EventInvokeConfigService,
     );
   });
 
@@ -165,6 +172,15 @@ describe("Lambda's changes of functions (L1)", () => {
     expect(packages.upload).not.toHaveBeenCalled();
   });
 
+  it('keeps a dead-letter queue of the account, found there before the code is stored', async () => {
+    expect(await refused(create({ ...CLI, DeadLetterConfig: { TargetArn: `${QUEUE}-gone` } }))).toEqual(NO_QUEUE);
+    expect(packages.upload).not.toHaveBeenCalled();
+
+    await create({ ...CLI, DeadLetterConfig: { TargetArn: QUEUE } });
+    expect(configs.destinationQueue).toHaveBeenLastCalledWith(ACCOUNT, QUEUE);
+    expect(functions.startCreate).toHaveBeenCalledWith(ACCOUNT, expect.anything(), { description: '', role: ROLE, deadLetterTargetArn: QUEUE });
+  });
+
   it("refuses text with a NUL character, which FF's database can't keep", async () => {
     expect(await refused(create({ ...CLI, Description: 'a\u0000b' }))).toEqual([400, 'InvalidParameterValueException', 'Description must not contain the NUL character (U+0000)']);
   });
@@ -230,6 +246,22 @@ describe("Lambda's changes of functions (L1)", () => {
 
     expect(functions.startUpdate).toHaveBeenCalledWith(ACCOUNT, 'f-orders', {}, { description: 'Takes orders', role, revisionId: 'rev-1' });
     expect(answer.document).toMatchObject({ Description: 'Takes orders', LastUpdateStatus: 'Successful' });
+  });
+
+  it('changes the dead-letter queue at once, an empty TargetArn removing it; a queue not in the account refused before anything changes', async () => {
+    for (const sent of [QUEUE, '']) {
+      started({}, false);
+      rollOut.mockResolvedValueOnce({ ...active, environment: { STAGE: 'spike' } });
+      await configure({ DeadLetterConfig: { TargetArn: sent } });
+    }
+
+    expect(functions.startUpdate.mock.calls.map(([, , fields, lambda]) => [fields, lambda])).toEqual([
+      [{}, { deadLetterTargetArn: QUEUE }],
+      [{}, { deadLetterTargetArn: null }],
+    ]);
+    expect(configs.destinationQueue).toHaveBeenCalledTimes(1);
+    expect(await refused(configure({ DeadLetterConfig: { TargetArn: `${QUEUE}-gone` } }))).toEqual(NO_QUEUE);
+    expect(functions.startUpdate).toHaveBeenCalledTimes(2);
   });
 
   it("refuses a change while another runs in Lambda's words, which the tools wait on: an update in progress, or a function Pending", async () => {

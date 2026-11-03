@@ -4,6 +4,7 @@ import {
   LAMBDA_RETRY_POLICY,
   afterAttempt,
   attemptsOf,
+  deadLetterAttributes,
   invocationRecord,
   isRecorded,
   keptResponse,
@@ -118,6 +119,27 @@ describe('asynchronous calls, as AWS Lambda retries them (L1)', () => {
 
       expect(kept).toEqual({ statusCode: 200, functionError: 'Unhandled', executedVersion: '2', payload: { errorType: 'Error', errorMessage: 'y'.repeat(4096) } });
       expect([lastResponseOf({ lastResponse: kept }), lastResponseOf(null), lastResponseOf({ lastResponse: { statusCode: 'x' } })]).toEqual([kept, undefined, undefined]);
+    });
+  });
+
+  describe("what Lambda puts beside an event in a dead-letter queue", () => {
+    const requestId = { DataType: 'String', StringValue: 'req-1' };
+
+    it("names the request, and the last attempt's status and the first kilobyte of its error, cut between characters", () => {
+      const response = { statusCode: 200, functionError: 'Unhandled' as const, payload: { errorType: 'Error', errorMessage: `${'x'.repeat(1023)}é and more` } };
+
+      expect(deadLetterAttributes('req-1', response)).toEqual({
+        RequestID: requestId,
+        ErrorCode: { DataType: 'Number', StringValue: '200' },
+        ErrorMessage: { DataType: 'String', StringValue: 'x'.repeat(1023) },
+      });
+      expect(deadLetterAttributes('req-1', { statusCode: 429, payload: { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded' } }).ErrorMessage.StringValue).toBe('Rate exceeded');
+    });
+
+    it("gives the error's type for an empty message, as SQS takes no empty value, and the request alone when no attempt answered", () => {
+      expect(deadLetterAttributes('req-1', { statusCode: 200, payload: { errorType: 'TypeError', errorMessage: '' } }).ErrorMessage.StringValue).toBe('TypeError');
+      expect(deadLetterAttributes('req-1', { statusCode: 500, payload: null }).ErrorMessage.StringValue).toBe('Error');
+      expect(deadLetterAttributes('req-1', undefined)).toEqual({ RequestID: requestId });
     });
   });
 

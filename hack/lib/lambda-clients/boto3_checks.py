@@ -155,6 +155,16 @@ def async_settings():
     return expect([changed["MaximumRetryAttempts"], changed["MaximumEventAgeInSeconds"], read["MaximumRetryAttempts"], listed, recent], [0, 600, 0, [put["FunctionArn"]], True])
 
 
+def dead_letter_queue():
+    queue = env["QUEUE_ARN"]
+    changed = client.update_function_configuration(FunctionName=NAME, DeadLetterConfig={"TargetArn": queue})
+    read = client.get_function_configuration(FunctionName=NAME)
+    client.update_function_configuration(FunctionName=NAME, DeadLetterConfig={"TargetArn": ""})
+    removed = client.get_function_configuration(FunctionName=NAME)
+    return expect([changed["DeadLetterConfig"]["TargetArn"], changed["LastUpdateStatus"], read["DeadLetterConfig"]["TargetArn"], "DeadLetterConfig" in removed],
+                  [queue, "Successful", queue, False])
+
+
 def tags():
     arn = client.get_function_configuration(FunctionName=NAME)["FunctionArn"]
     client.tag_resource(Resource=arn, Tags={"team": "shop"})
@@ -207,6 +217,7 @@ check("ok", "CreateEventSourceMapping on a queue of the account, then GetEventSo
       mappings)
 check("ok", "PutFunctionEventInvokeConfig, then UpdateFunctionEventInvokeConfig, GetFunctionEventInvokeConfig, ListFunctionEventInvokeConfigs and DeleteFunctionEventInvokeConfig",
       async_settings)
+check("ok", "UpdateFunctionConfiguration with a DeadLetterConfig of a queue of the account, at once, read back; an empty TargetArn removing it", dead_letter_queue)
 check("ok", "TagResource, ListTags and UntagResource on its ARN", tags)
 check("ok", "refused as boto3 names Lambda's errors: a runtime FF lacks, a function the account hasn't", refusals)
 check("ok", "operations FF doesn't offer yet are UnknownOperationException, named, sent once by a client that retries by default", not_offered)

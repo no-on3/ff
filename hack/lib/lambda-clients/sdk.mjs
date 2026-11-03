@@ -164,6 +164,13 @@ await check('ok', 'PutFunctionEventInvokeConfig, then UpdateFunctionEventInvokeC
   const recent = Math.abs(put.LastModified.getTime() - Date.now()) < 600_000;
   return expect([changed.MaximumRetryAttempts, changed.MaximumEventAgeInSeconds, read.MaximumRetryAttempts, listed, recent], [0, 600, 0, [put.FunctionArn], true]);
 });
+await check('ok', 'UpdateFunctionConfiguration with a DeadLetterConfig of a queue of the account, at once, read back; an empty TargetArn removing it', async () => {
+  const set = await send(lambda.UpdateFunctionConfigurationCommand, { FunctionName, DeadLetterConfig: { TargetArn: QUEUE_ARN } });
+  const read = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });
+  await send(lambda.UpdateFunctionConfigurationCommand, { FunctionName, DeadLetterConfig: { TargetArn: '' } });
+  const removed = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });
+  return expect([set.DeadLetterConfig?.TargetArn, set.LastUpdateStatus, read.DeadLetterConfig?.TargetArn, removed.DeadLetterConfig ?? 'none'], [QUEUE_ARN, 'Successful', QUEUE_ARN, 'none']);
+});
 await check('ok', 'TagResource, ListTags and UntagResource on its ARN', async () => {
   const { FunctionArn } = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });
   await send(lambda.TagResourceCommand, { Resource: FunctionArn, Tags: { team: 'shop' } });

@@ -845,10 +845,23 @@ as_ver DELETE /queues/e2e-mapped-orders >/dev/null
 section_def lambda_mappings section_lambda_mappings lambda_changes budget=35
 
 section_lambda_async() {
-section "Lambda's settings of a function's asynchronous calls with the AWS CLI: put, a failed call's record in a queue of the account, changed, read, listed, deleted; a version's refused, as FF keeps one for the function"
+section "Lambda's settings of a function's asynchronous calls with the AWS CLI: put, a failed call's record in a queue of the account, its event in the function's dead-letter queue, changed, read, listed, deleted; a version's refused, as FF keeps one for the function"
 async_set_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-async-set"
 async_failed="arn:aws:sqs:tn-tunis-1:$ver:e2e-async-failed"
+async_dead="arn:aws:sqs:tn-tunis-1:$ver:e2e-async-dead"
 as_ver POST /queues '{"name": "e2e-async-failed"}' >/dev/null
+as_ver POST /queues '{"name": "e2e-async-dead"}' >/dev/null
+# first_from <queue> <jq condition>: the first message of the queue the condition selects, received within a minute; the
+# others received meanwhile come back after the queue's visibility timeout.
+first_from() {
+  local found=''
+  for _ in $(seq 60); do
+    found="$(as_ver POST "/queues/$1/receive" '{"maxMessages": 10}' | jq -c "[.[] | select($2)][0] // empty")"
+    [ -n "$found" ] && break
+    sleep 1
+  done
+  printf '%s' "$found"
+}
 lambda_zip "$work/async-set.zip" 'export const handler = async (event) => { throw new Error(`no stock for order ${event.order}`); };' >/dev/null
 as_maker aws_lambda create-function --function-name e2e-async-set --runtime nodejs24.x --role "$role" --handler index.handler \
   --zip-file "fileb://$work/async-set.zip" --publish >/dev/null
@@ -860,15 +873,28 @@ check "PutFunctionEventInvokeConfig: no retry, a failed call's record to a queue
   "$async_set_arn:\$LATEST 0 $async_failed $(date -u +%Y)" \
   "$(jq -r '"\(.FunctionArn) \(.MaximumRetryAttempts) \(.DestinationConfig.OnFailure.Destination) \(.LastModified[0:4])"' <<<"$put_settings")"
 as_maker aws_lambda invoke --function-name e2e-async-set --invocation-type Event --cli-binary-format raw-in-base64-out --payload '{"order": 7}' /dev/null >/dev/null
-failed_record=''
-for _ in $(seq 60); do
-  failed_record="$(as_ver POST /queues/e2e-async-failed/receive '{"maxMessages": 1}' | jq -c '.[0].body // empty | fromjson')"
-  [ -n "$failed_record" ] && break
-  sleep 1
-done
+failed_record="$(first_from e2e-async-failed '.body | fromjson | .requestPayload.order == 7' | jq -c '.body | fromjson')"
 check "  ... a call that throws, tried once, its record in the queue as Lambda's: RetriesExhausted, the payload, the error" \
   "RetriesExhausted 1 7 Unhandled no stock for order 7" \
   "$(jq -r '"\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.requestPayload.order) \(.responseContext.functionError) \(.responsePayload.errorMessage)"' <<<"$failed_record")"
+dead_config="$(as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config "TargetArn=$async_dead")"
+check "UpdateFunctionConfiguration gives the function a dead-letter queue of the account, at once; its version follows it" \
+  "$async_dead Successful $async_dead $async_dead" \
+  "$(jq -r '"\(.DeadLetterConfig.TargetArn) \(.LastUpdateStatus)"' <<<"$dead_config") \
+$(as_reader get-function-configuration --function-name e2e-async-set | jq -r .DeadLetterConfig.TargetArn) \
+$(as_reader get-function-configuration --function-name e2e-async-set --qualifier 1 | jq -r .DeadLetterConfig.TargetArn)"
+as_maker aws_lambda invoke --function-name e2e-async-set --invocation-type Event --cli-binary-format raw-in-base64-out --payload '{"order": 8}' /dev/null >/dev/null
+dead_letter="$(first_from e2e-async-dead '.body | fromjson | .order == 8')"
+dead_request="$(first_from e2e-async-failed '.body | fromjson | .requestPayload.order == 8' | jq -r '.body | fromjson | .requestContext.requestId')"
+check "  ... a call that throws: its event in the dead-letter queue as it was sent, its record's RequestID beside it, Lambda's ErrorCode and ErrorMessage" \
+  '{"order":8} true Number 200 no stock for order 8' \
+  "$(jq -r --arg id "$dead_request" '"\(.body | fromjson | tojson) \(.attributes.RequestID.stringValue == $id) \(.attributes.ErrorCode.dataType) \(.attributes.ErrorCode.stringValue) \(.attributes.ErrorMessage.stringValue)"' <<<"$dead_letter")"
+check "refused: a dead-letter queue the account lacks, an SNS topic, another account's queue; an empty TargetArn removes it, as on Lambda" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException refused InvalidParameterValueException none" \
+  "$(outcome as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config "TargetArn=arn:aws:sqs:tn-tunis-1:$ver:e2e-no-such-queue") \
+$(outcome as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config "TargetArn=arn:aws:sns:tn-tunis-1:$ver:failed") \
+$(outcome as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config 'TargetArn=arn:aws:sqs:tn-tunis-1:000000000002:other') \
+$(as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config '{"TargetArn": ""}' | jq -r '.DeadLetterConfig.TargetArn // "none"')"
 check "UpdateFunctionEventInvokeConfig changes what it sends, the rest kept; Get reads it; List lists it, the one there is" \
   "0 120 $async_failed 120 $async_set_arn:\$LATEST" \
   "$(as_maker aws_lambda update-function-event-invoke-config --function-name e2e-async-set --maximum-event-age-in-seconds 120 |
@@ -887,6 +913,7 @@ check "DeleteFunctionEventInvokeConfig: gone, read as Lambda says it; the list e
 $(as_reader list-function-event-invoke-configs --function-name e2e-async-set | jq '.FunctionEventInvokeConfigs | length')"
 as_maker aws_lambda delete-function --function-name e2e-async-set >/dev/null
 as_ver DELETE /queues/e2e-async-failed >/dev/null
+as_ver DELETE /queues/e2e-async-dead >/dev/null
 }
 section_def lambda_async section_lambda_async lambda_changes budget=30
 
@@ -989,10 +1016,10 @@ clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$make
 for queue_of in sdk boto3; do as_ver POST /queues "{\"name\": \"e2e-$queue_of-orders\"}" >/dev/null; done
 env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-sdk-orders" MODULES="$lambda_clients/node_modules" \
   node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
-client_checks "$work/lambda-sdk.jsonl" 16
+client_checks "$work/lambda-sdk.jsonl" 17
 env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-boto3-orders" \
   "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
-client_checks "$work/lambda-boto3.jsonl" 16
+client_checks "$work/lambda-boto3.jsonl" 17
 for queue_of in sdk boto3; do as_ver DELETE "/queues/e2e-$queue_of-orders" >/dev/null; done
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60

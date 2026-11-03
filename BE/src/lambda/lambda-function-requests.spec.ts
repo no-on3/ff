@@ -113,10 +113,29 @@ describe("CreateFunction's request, checked (L1)", () => {
     );
     expect(refused({ Layers: ['arn:aws:lambda:tn-tunis-1:000000000001:layer:libs:1'] })).toBe("FF has no layers: put the libraries in the function's zip. Send CreateFunction without Layers.");
     expect(refused({ KMSKeyArn: 'arn:aws:kms:tn-tunis-1:000000000001:key/1' })).toMatch(/^FF seals what it keeps with its own keys/);
-    expect(refused({ DeadLetterConfig: { TargetArn: 'arn:aws:sqs:tn-tunis-1:000000000001:dlq' } })).toBe(
-      "FF doesn't send failed events to a dead-letter queue yet. Send CreateFunction without DeadLetterConfig.",
-    );
     expect(refused({ CapacityProviderConfig: {} })).toBe("FF doesn't take CapacityProviderConfig in CreateFunction.");
+  });
+
+  it("takes DeadLetterConfig's queue of the account, in its region, which the operation finds there; an empty one is none", () => {
+    const queue = `arn:aws:sqs:${REGION}:${ACCOUNT}:failed-orders`;
+    expect(createFunctionRequest({ ...CLI, DeadLetterConfig: { TargetArn: queue } }, CALLER)).toMatchObject({ deadLetterTargetArn: queue });
+    for (const DeadLetterConfig of [{}, { TargetArn: '' }, { TargetArn: null }, null]) {
+      expect(createFunctionRequest({ ...CLI, DeadLetterConfig }, CALLER)).not.toHaveProperty('deadLetterTargetArn');
+    }
+  });
+
+  it("refuses a dead-letter queue that isn't a queue of the account's: an SNS topic, another account's or region's, no ARN, other fields", () => {
+    const refused = (DeadLetterConfig: unknown) => refusal(() => createFunctionRequest({ ...CLI, DeadLetterConfig }, CALLER));
+    const example = `arn:aws:sqs:${REGION}:${ACCOUNT}:<name>`;
+    expect(refused({ TargetArn: `arn:aws:sns:${REGION}:${ACCOUNT}:failed` })).toBe(`FF has no SNS topics: a dead-letter queue is a queue of the account, ${example}.`);
+    expect(refused({ TargetArn: `arn:aws:sqs:${REGION}:000000000002:failed` })).toBe(
+      `DeadLetterConfig's TargetArn must be a queue of this account, in ${REGION}: arn:aws:sqs:${REGION}:${ACCOUNT}:failed.`,
+    );
+    expect(refused({ TargetArn: `arn:aws:sqs:eu-west-1:${ACCOUNT}:failed` })).toMatch(/^DeadLetterConfig's TargetArn must be a queue of this account/);
+    expect(refused({ TargetArn: 'failed' })).toBe(`DeadLetterConfig's TargetArn must be a queue's ARN, ${example}, not failed.`);
+    expect(refused({ TargetArn: 7 })).toBe(`DeadLetterConfig's TargetArn must be a queue's ARN, ${example}, not 7.`);
+    expect(refused({ TargetArn: 'x', Queue: 'failed' })).toBe(`DeadLetterConfig takes TargetArn alone, a queue's ARN: ${example}.`);
+    expect(refused('failed')).toBe(`DeadLetterConfig takes TargetArn alone, a queue's ARN: ${example}.`);
   });
 
   it("refuses a name qualified or of another account, variables and tags that FF's rules refuse", () => {
@@ -145,6 +164,10 @@ describe("UpdateFunctionConfiguration's request, checked (L1)", () => {
       lambda: { description: 'Orders', role: ROLE, revisionId: 'rev-1' },
     });
     expect(change({ Environment: {} })).toEqual({ fields: { environment: {} }, lambda: {} });
+    // An empty TargetArn removes the dead-letter queue, as on Lambda.
+    const queue = `arn:aws:sqs:${REGION}:${ACCOUNT}:failed-orders`;
+    expect(change({ DeadLetterConfig: { TargetArn: queue } })).toEqual({ fields: {}, lambda: { deadLetterTargetArn: queue } });
+    expect(change({ DeadLetterConfig: { TargetArn: '' } })).toEqual({ fields: {}, lambda: { deadLetterTargetArn: null } });
     expect(change({})).toEqual({ fields: {}, lambda: {} });
   });
 

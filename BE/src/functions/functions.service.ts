@@ -126,10 +126,14 @@ export interface CodeImagesRestore {
 /** A function as the API answers it: its record and its variables. Its secrets' values are never part of it. */
 export type FunctionView = Function & { environment: Record<string, string> };
 
-/** What Lambda's operations give a function beside FF's fields: its description, and the role it names, kept with no effect. */
+/**
+ * What Lambda's operations give a function beside FF's fields: its description, the role it names, kept with no
+ * effect, and its dead-letter queue's ARN, null for none.
+ */
 export interface LambdaFields {
   description?: string;
   role?: string;
+  deadLetterTargetArn?: string | null;
 }
 
 /** An update's Lambda fields, and the RevisionId its caller read: refused once another change came since, as Lambda's. */
@@ -374,9 +378,10 @@ interface EndSaving {
 }
 
 /** Lambda's fields an update sends, as the record's changes. */
-const lambdaChanges = ({ description, role }: LambdaFields): LambdaFields => ({
+const lambdaChanges = ({ description, role, deadLetterTargetArn }: LambdaFields): LambdaFields => ({
   ...(description !== undefined ? { description } : {}),
   ...(role !== undefined ? { role } : {}),
+  ...(deadLetterTargetArn !== undefined ? { deadLetterTargetArn } : {}),
 });
 
 /**
@@ -475,6 +480,7 @@ export class FunctionsService {
       accountId,
       description: lambda.description ?? '',
       role: lambda.role ?? null,
+      deadLetterTargetArn: lambda.deadLetterTargetArn ?? null,
       status: FunctionStatus.CREATING,
       updateStatus: UpdateStatus.IN_PROGRESS,
       updateStartedAt: new Date(),

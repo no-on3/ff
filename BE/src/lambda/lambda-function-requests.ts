@@ -6,6 +6,7 @@ import { Function, Runtime } from '../functions/entities/function.entity';
 import { environmentProblems } from '../functions/environment';
 import { LambdaUpdateFields } from '../functions/functions.service';
 import { PLATFORM_LIMITS, PlanView } from '../plans/plan-limits';
+import { parseQueueArn, queueArn } from '../queues/sqs-attributes';
 import { tagsProblem } from '../tags/tag-rules';
 import { invalidParameterValue } from './lambda-error';
 import { defined, isEmpty, isObject, refuseUnknownFields, said } from './lambda-fields';
@@ -41,7 +42,6 @@ const REFUSED: Record<string, string> = {
   FileSystemConfigs: "FF mounts no file system: a function has FF's 512 MB of /tmp.",
   ImageConfig: IMAGES,
   CodeSigningConfigArn: 'FF signs no code.',
-  DeadLetterConfig: "FF doesn't send failed events to a dead-letter queue yet.",
 };
 
 /** The settings at the one value FF has, which a create and an update of the configuration take as that value. */
@@ -63,10 +63,23 @@ const TAKEN: Record<'CreateFunction' | 'UpdateFunctionConfiguration' | 'UpdateFu
     'Environment',
     'Tags',
     'Architectures',
+    'DeadLetterConfig',
     ...ONE_VALUE,
     ...Object.keys(REFUSED),
   ]),
-  UpdateFunctionConfiguration: new Set(['Runtime', 'Role', 'Handler', 'Description', 'Timeout', 'MemorySize', 'Environment', 'RevisionId', ...ONE_VALUE, ...Object.keys(REFUSED)]),
+  UpdateFunctionConfiguration: new Set([
+    'Runtime',
+    'Role',
+    'Handler',
+    'Description',
+    'Timeout',
+    'MemorySize',
+    'Environment',
+    'DeadLetterConfig',
+    'RevisionId',
+    ...ONE_VALUE,
+    ...Object.keys(REFUSED),
+  ]),
   UpdateFunctionCode: new Set(['ZipFile', 'S3Bucket', 'S3Key', 'S3ObjectVersion', 'ImageUri', 'SourceKMSKeyArn', 'Publish', 'DryRun', 'RevisionId', 'Architectures']),
 };
 
@@ -82,6 +95,8 @@ export interface CreateFunctionRequest {
   code: CodeSource;
   description: string;
   role: string;
+  /** The dead-letter queue's ARN, a queue of the account, which the operation finds there before it creates anything. */
+  deadLetterTargetArn?: string;
   tags?: Record<string, string>;
   publish: boolean;
 }
@@ -201,6 +216,25 @@ interface Settings {
   variables?: Record<string, string>;
 }
 
+/**
+ * DeadLetterConfig's TargetArn: a queue's ARN, of the account, in its region, as FF keeps it; null for none, as an
+ * empty TargetArn removes it on Lambda. Its queue is found by the operation, which reads the account's queues.
+ */
+function deadLetterOf(sent: unknown, caller: Pick<LambdaCaller, 'accountId' | 'region'>): string | null {
+  const example = queueArn(caller.region, caller.accountId, '<name>');
+  if (sent === null) return null;
+  if (!isObject(sent) || Object.keys(sent).some((field) => field !== 'TargetArn')) throw invalidParameterValue(`DeadLetterConfig takes TargetArn alone, a queue's ARN: ${example}.`);
+  const arn = sent.TargetArn;
+  if (arn === undefined || arn === null || arn === '') return null;
+  if (typeof arn === 'string' && arn.startsWith('arn:aws:sns:')) throw invalidParameterValue(`FF has no SNS topics: a dead-letter queue is a queue of the account, ${example}.`);
+  const named = typeof arn === 'string' ? parseQueueArn(arn) : undefined;
+  if (!named) throw invalidParameterValue(`DeadLetterConfig's TargetArn must be a queue's ARN, ${example}, not ${said(arn)}.`);
+  if (named.accountId !== caller.accountId || named.region !== caller.region) {
+    throw invalidParameterValue(`DeadLetterConfig's TargetArn must be a queue of this account, in ${caller.region}: ${queueArn(caller.region, caller.accountId, named.name)}.`);
+  }
+  return arn as string;
+}
+
 /** Role, as Lambda's model checks it. */
 function roleOf(role: unknown): string {
   if (typeof role !== 'string' || role.length > ROLE_MAX || !IAM_ROLE.test(role)) {
@@ -291,6 +325,7 @@ export function createFunctionRequest(input: Record<string, unknown>, caller: Pi
   const other = Object.keys(input.Code).find((field) => !['ZipFile', 'S3Bucket', 'S3Key', 'ImageUri', 'S3ObjectVersion', 'SourceKMSKeyArn'].includes(field));
   if (other !== undefined) throw invalidParameterValue(`FF doesn't take Code.${other}.`);
   const variables = settings.variables && Object.keys(settings.variables).length > 0 ? settings.variables : undefined;
+  const deadLetterTargetArn = input.DeadLetterConfig === undefined ? null : deadLetterOf(input.DeadLetterConfig, caller);
   return {
     fields: {
       name,
@@ -303,6 +338,7 @@ export function createFunctionRequest(input: Record<string, unknown>, caller: Pi
     code: codeSourceOf(input.Code, 'Code', 'Code.'),
     description: settings.description ?? '',
     role,
+    ...(deadLetterTargetArn ? { deadLetterTargetArn } : {}),
     ...(tags ? { tags } : {}),
     publish,
   };
@@ -311,14 +347,20 @@ export function createFunctionRequest(input: Record<string, unknown>, caller: Pi
 /**
  * UpdateFunctionConfiguration's request, checked as CreateFunction's is, each
  * field optional: what it sends changes, Environment's variables replacing them
- * all; sizes within the plan unless they are the function's own.
+ * all, an empty DeadLetterConfig removing the queue; sizes within the plan
+ * unless they are the function's own.
  */
-export function updateConfigurationRequest(input: Record<string, unknown>, caller: Pick<LambdaCaller, 'plan'>, function_: Pick<Function, 'name' | 'memory' | 'timeout'>): ConfigurationChange {
+export function updateConfigurationRequest(
+  input: Record<string, unknown>,
+  caller: Pick<LambdaCaller, 'plan' | 'accountId' | 'region'>,
+  function_: Pick<Function, 'name' | 'memory' | 'timeout'>,
+): ConfigurationChange {
   refuseOtherSettings(input, function_.name, 'UpdateFunctionConfiguration');
   const { runtime, role, handler, description, memory, timeout, variables } = settingsOf(input, caller.plan, function_);
+  const deadLetterTargetArn = input.DeadLetterConfig === undefined ? undefined : deadLetterOf(input.DeadLetterConfig, caller);
   return {
     fields: defined({ runtime, handler, memory, timeout, environment: variables }),
-    lambda: defined({ description, role, revisionId: revisionIdOf(input) }),
+    lambda: defined({ description, role, deadLetterTargetArn, revisionId: revisionIdOf(input) }),
   };
 }
 
