@@ -1,5 +1,6 @@
 import { IncomingHttpHeaders } from 'node:http';
 import { single } from '../common/http-request';
+import { tagsOf } from './bucket-tagging';
 import { S3Error, malformedXml, notImplemented } from './s3-error';
 import { bucketNameProblem } from './storage-names';
 import { readS3Document } from './xml-reader';
@@ -25,9 +26,9 @@ const illegalLocation = (location: string) =>
  * location, when it gives one, FF's region; the bucket's owner owning every
  * object, without ACLs, as S3's new buckets do; no Object Lock and no
  * directory bucket. A request without a location makes the bucket in FF's
- * region, as FF has no other.
+ * region, as FF has no other. Answers the tags to make it with, checked.
  */
-export function checkCreateBucket(name: string, headers: IncomingHttpHeaders, configuration: string, region: string): void {
+export function checkCreateBucket(name: string, headers: IncomingHttpHeaders, configuration: string, region: string): Record<string, string> {
   const problem = bucketNameProblem(name);
   if (problem) throw invalidBucketName(problem);
   const acl = single(headers['x-amz-acl']);
@@ -41,7 +42,8 @@ export function checkCreateBucket(name: string, headers: IncomingHttpHeaders, co
   if (single(headers['x-amz-bucket-object-lock-enabled'])?.toLowerCase() === 'true') throw notImplemented("FF's buckets have no Object Lock");
   const namespace = single(headers['x-amz-bucket-namespace']);
   if (namespace !== undefined && namespace !== 'global') throw notImplemented("FF's bucket names are unique across FF, as in S3's global namespace");
-  if (configuration.trim() === '') return;
+  let tags: Record<string, string> = {};
+  if (configuration.trim() === '') return tags;
   for (const element of readS3Document(configuration, 'CreateBucketConfiguration').children) {
     const location = element.text.trim();
     if (element.name === 'LocationConstraint') {
@@ -49,9 +51,10 @@ export function checkCreateBucket(name: string, headers: IncomingHttpHeaders, co
     } else if (element.name === 'Location' || element.name === 'Bucket') {
       throw notImplemented("FF's buckets are general purpose buckets: it has no directory buckets");
     } else if (element.name === 'Tags') {
-      throw notImplemented("FF keeps a bucket's tags from PutBucketTagging, not yet from CreateBucket");
+      tags = tagsOf(element.children);
     } else {
       throw malformedXml();
     }
   }
+  return tags;
 }

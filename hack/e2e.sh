@@ -46,8 +46,8 @@
 # AWS's SDK for JavaScript v3, boto3 and the AWS CLI through the S3 front door,
 # only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in
 # parts, presigned URLs, a wrong signature, an expired URL, another account's
-# bucket, a bucket made and deleted as Terraform and the CLI do, with the API's
-# checks); a read-only key, a revoked one, a suspended account and one whose
+# bucket, a bucket made, tagged and deleted as Terraform and the CLI do, with the
+# API's checks); a read-only key, a revoked one, a suspended account and one whose
 # storage is off refused; two functions, AWS's SDK for JavaScript v3 and boto3
 # with no setting at all, writing to the account's bucket with keys of their own
 # and refused another's, a function's key revoked with it; the bucket measured
@@ -1920,10 +1920,10 @@ aws_ff s3 cp s3://e2e-photos/no-such-file.txt "$work/none" --only-show-errors 2>
 head -c $((100 * 1024 * 1024)) /dev/urandom >"$work/big.bin"
 MODULES="$clients/node_modules" ENDPOINT="$s3_endpoint" IP_ENDPOINT="http://127.0.0.1:$storage_port" KEY="$key_id" SECRET="$key_secret" \
   BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" node "$FF_REPO_ROOT/hack/lib/s3-clients/sdk.mjs" >"$work/sdk.jsonl" 2>"$work/sdk.log" || true
-client_checks "$work/sdk.jsonl" 16
+client_checks "$work/sdk.jsonl" 17
 ENDPOINT="$s3_endpoint" KEY="$key_id" SECRET="$key_secret" BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" \
   "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/s3-clients/boto3_checks.py" >"$work/boto3.jsonl" 2>"$work/boto3.log" || true
-client_checks "$work/boto3.jsonl" 13
+client_checks "$work/boto3.jsonl" 14
 aws_ff s3 cp "$work/big.bin" s3://e2e-photos/cli/big.bin --only-show-errors
 aws_ff s3 cp s3://e2e-photos/cli/big.bin "$work/big.out" --only-show-errors
 check "aws: 100 MB up in parts and down again, byte for byte" "104857600 0" \
@@ -1954,6 +1954,10 @@ check "aws: s3 mb makes a bucket in FF's region, as the API shows it, made by th
   "$made_by_cli $(status) $made_region $(env_q "SELECT actor FROM audit_log WHERE action = 'bucket.create' AND resource = 'bucket:e2e-from-cli'")"
 made_store="$(env_q "SELECT store_name FROM buckets WHERE name = 'e2e-from-cli'")"
 aws_ff s3 cp "$work/site/index.html" s3://e2e-from-cli/index.html --only-show-errors
+aws_ff s3api put-bucket-tagging --bucket e2e-from-cli --tagging 'TagSet=[{Key=team,Value=web},{Key=stage,Value=dev}]'
+check "aws: s3api put-bucket-tagging keeps a bucket's tags, read back by get-bucket-tagging, put by the key in the audit log" "stage=dev team=web access_key:$key_id" \
+  "$(aws_ff s3api get-bucket-tagging --bucket e2e-from-cli --query 'TagSet[].[Key,Value]' --output text | sort | tr '\t' = | xargs) \
+$(env_q "SELECT actor FROM audit_log WHERE action = 'bucket.tag' AND resource = 'bucket:e2e-from-cli'")"
 check "aws: s3 rb refuses it with a file, BucketNotEmpty; s3 rb --force empties it, then deletes it, gone from the store too" "refused BucketNotEmpty accepted 404 gone" \
   "$(outcome aws_ff s3 rb s3://e2e-from-cli) $(outcome aws_ff s3 rb s3://e2e-from-cli --force) $(http GET /buckets/e2e-from-cli >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$made_store")"
 check "aws: another account's name, BucketAlreadyExists; another region, IllegalLocationConstraintException; a read-only key, AccessDenied" \

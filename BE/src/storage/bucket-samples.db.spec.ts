@@ -27,6 +27,7 @@ import { onePlan, plan } from '../plans/test-fixtures';
 import { Bucket } from './bucket.entity';
 import { BucketSamplesService } from './bucket-samples.service';
 import { BucketsService } from './buckets.service';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { StoreBuckets } from './store-buckets';
@@ -55,7 +56,7 @@ run("customers' buckets measured every hour (L2, ADR 0009)", () => {
   const samples = () => new BucketSamplesService(db.dataSource, store, plans, new NotificationsService(db.dataSource, {} as AuditService, config), config);
   const unique = (name: string) => `${name}-${randomBytes(4).toString('hex')}`;
   const make = async (accountId: string, name = unique('photos')): Promise<Bucket> => {
-    const buckets = new BucketsService(db.dataSource.getRepository(Bucket), store, onePlan(plan({ buckets: 10 })), new AuditService(db.dataSource.getRepository(AuditEntry)), config);
+    const buckets = new BucketsService(db.dataSource.getRepository(Bucket), store, onePlan(plan({ buckets: 10 })), new AuditService(db.dataSource.getRepository(AuditEntry)), config, {} as ResourceTagsService);
     await buckets.create(accountId, { name });
     return db.dataSource.getRepository(Bucket).findOneByOrFail({ name });
   };

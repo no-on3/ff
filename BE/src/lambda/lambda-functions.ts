@@ -11,7 +11,7 @@ import { invalidParameterValue } from './lambda-error';
 import { LambdaCodeLinks } from './lambda-code-links';
 import { reservedConcurrency } from './lambda-concurrency';
 import { pageOf } from './lambda-pages';
-import { ResourceTagsService } from '../tags/resource-tags.service';
+import { ResourceTagsService, taggedFunction } from '../tags/resource-tags.service';
 import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, namedFunction, ok, qualifiedLookup } from './lambda-operations';
 
 /** FF's two runtimes under Lambda's names (ADR 0014, 7). */
@@ -152,7 +152,7 @@ export class LambdaFunctionReads {
     const { configuration, version } = await this.configuration(caller);
     const location = this.links.linkFor({ accountId: caller.accountId, functionId: function_.id, ...(version !== undefined ? { version } : {}) });
     // The function's tags and its reserved concurrency, whichever version is read, as Lambda's; none, none said.
-    const tags = await this.tags.ofFunction(function_.id);
+    const tags = await this.tags.of(taggedFunction(function_.id));
     const reserved = reservedConcurrency(function_);
     return ok({
       Configuration: configuration,

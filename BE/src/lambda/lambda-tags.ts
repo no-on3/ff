@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { ResourceTagsService } from '../tags/resource-tags.service';
+import { ResourceTagsService, Tagged, taggedFunction } from '../tags/resource-tags.service';
 import { invalidParameterValue } from './lambda-error';
 import { LambdaCaller, LambdaHandler, LambdaHandlers, namedFunction, ok } from './lambda-operations';
 
@@ -14,26 +14,26 @@ export class LambdaTags implements LambdaHandlers {
 
   readonly handlers: Record<string, LambdaHandler> = {
     TagResource: async ({ input }, caller) => {
-      await this.tags.tagFunction(caller.accountId, tagged(caller), tagsOf(input.Tags));
+      await this.tags.tag(caller.accountId, tagged(caller), tagsOf(input.Tags));
       return { status: 204 };
     },
     UntagResource: async ({ query }, caller) => {
       const keys = query.getAll('tagKeys');
       if (keys.length === 0) throw invalidParameterValue('tagKeys is required: the keys of the tags to remove.');
-      await this.tags.untagFunction(caller.accountId, tagged(caller), keys);
+      await this.tags.untag(caller.accountId, tagged(caller), keys);
       return { status: 204 };
     },
-    ListTags: async (_call, caller) => ok({ Tags: await this.tags.ofFunction(tagged(caller)) }),
+    ListTags: async (_call, caller) => ok({ Tags: await this.tags.of(tagged(caller)) }),
   };
 }
 
-/** The ID of the function whose tags a request names: its ARN's, unqualified. */
-function tagged(caller: LambdaCaller): string {
+/** The function whose tags a request names: its ARN's, unqualified. */
+function tagged(caller: LambdaCaller): Tagged {
   const function_ = namedFunction(caller);
   if (caller.named?.qualifier !== undefined) {
     throw invalidParameterValue(`Tags are a function's, not its version's or its alias's: name the function's ARN, without :${caller.named.qualifier}.`);
   }
-  return function_.id;
+  return taggedFunction(function_.id);
 }
 
 /** TagResource's Tags, and CreateFunction's: an object of strings, each a tag's value by its key. */

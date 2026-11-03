@@ -15,7 +15,7 @@ import { FunctionVersionsService } from '../functions/versions.service';
 import { PackagesService } from '../packages/packages.service';
 import { StorageDirectory } from '../storage/storage-directory.service';
 import { StoreBuckets } from '../storage/store-buckets';
-import { ResourceTagsService } from '../tags/resource-tags.service';
+import { ResourceTagsService, taggedFunction } from '../tags/resource-tags.service';
 import { LambdaFunctionChanges } from './lambda-function-changes';
 import { LambdaCaller } from './lambda-operations';
 import { ACCOUNT, CLI, REGION, ROLE, SHA, TERRAFORM, ZIP, lambdaCall, lambdaCaller, refused } from './test-fixtures';
@@ -65,7 +65,7 @@ describe("Lambda's changes of functions (L1)", () => {
       return { created: true, package: { codeSha256: SHA } };
     }),
   };
-  const tags = { tagFunction: jest.fn() };
+  const tags = { tag: jest.fn() };
   const directory = { bucket: jest.fn(), account: jest.fn() };
   const store = { object: jest.fn() };
   const configs = { destinationQueue: jest.fn() };
@@ -118,7 +118,7 @@ describe("Lambda's changes of functions (L1)", () => {
       expect.objectContaining({ name: 'orders', runtime: Runtime.NODEJS, handler: 'index.handler', memory: 128, timeout: 10, environment: { STAGE: 'spike' }, codeSha256: SHA }),
       { description: 'Orders', role: ROLE },
     );
-    expect(tags.tagFunction).toHaveBeenCalledWith(ACCOUNT, 'f-orders', { team: 'spike' });
+    expect(tags.tag).toHaveBeenCalledWith(ACCOUNT, taggedFunction('f-orders'), { team: 'spike' });
     expect(answer.status).toBe(201);
     expect(answer.document).toMatchObject({
       FunctionName: 'orders',

@@ -116,6 +116,19 @@ await check('ok', "CreateBucket in FF's region, virtual-hosted, and HeadBucket t
   const gone = await refusedAs('NotFound', virtual.send(new s3.HeadBucketCommand({ Bucket: name })));
   return expect(`${where} ${full} ${gone}`, `${region} BucketNotEmpty NotFound`);
 });
+await check('ok', "a bucket's tags: CreateBucket's, read by GetBucketTagging; PutBucketTagging's replacing them; none after DeleteBucketTagging, NoSuchTagSet", async () => {
+  const name = `${BUCKET}-sdk-tags`;
+  const tagsOf = async () => (await virtual.send(new s3.GetBucketTaggingCommand({ Bucket: name }))).TagSet.map(({ Key, Value }) => `${Key}=${Value}`).join(',');
+  await virtual.send(new s3.CreateBucketCommand({ Bucket: name, CreateBucketConfiguration: { LocationConstraint: region, Tags: [{ Key: 'team', Value: 'web' }] } }));
+  const made = await tagsOf();
+  await virtual.send(new s3.PutBucketTaggingCommand({ Bucket: name, Tagging: { TagSet: [{ Key: 'stage', Value: 'dev' }, { Key: 'cost centre', Value: '42' }] } }));
+  const replaced = await tagsOf();
+  const refused = await refusedAs('InvalidTag', virtual.send(new s3.PutBucketTaggingCommand({ Bucket: name, Tagging: { TagSet: [{ Key: 'aws:owner', Value: 'x' }] } })));
+  await virtual.send(new s3.DeleteBucketTaggingCommand({ Bucket: name }));
+  const none = await refusedAs('NoSuchTagSet', tagsOf());
+  await virtual.send(new s3.DeleteBucketCommand({ Bucket: name }));
+  return expect(`${made} ${replaced} ${refused} ${none}`, 'team=web cost centre=42,stage=dev InvalidTag NoSuchTagSet');
+});
 await check('ok', "CreateBucket of another account's bucket's name, BucketAlreadyExists; of its own, BucketAlreadyOwnedByYou", async () => {
   const configuration = { LocationConstraint: region };
   const theirs = await refusedAs('BucketAlreadyExists', virtual.send(new s3.CreateBucketCommand({ Bucket: OTHER_BUCKET, CreateBucketConfiguration: configuration })));

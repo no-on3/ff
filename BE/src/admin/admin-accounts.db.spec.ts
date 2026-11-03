@@ -39,6 +39,7 @@ import { AdminCreditsService } from './admin-credits.service';
 import { PlatformSetting } from './platform-setting.entity';
 import { PlatformSettingsService } from './platform-settings.service';
 import { BucketsService } from '../storage/buckets.service';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { Bucket } from '../storage/bucket.entity';
 import { StoreBuckets } from '../storage/store-buckets';
 import { StorageKey } from '../storage/storage-key.entity';
@@ -162,7 +163,7 @@ run('accounts, for operators (L2, P-71)', () => {
             : [],
       } as never,
       // Its buckets' rows and samples are read from the database itself; nothing here makes or empties a bucket in the store.
-      new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' } })),
+      new BucketsService(ds.getRepository(Bucket), {} as StoreBuckets, plans, audit, new ConfigService({ storage: { base: 'https://s3.example.tn', region: 'tn-tunis-1' }, website: { base: 'https://site.example.tn' } }), {} as ResourceTagsService),
       new CustomerQueues(ds, ds.getRepository(Queue)),
       new QueueStore(ds, { count: () => undefined } as never),
       {

@@ -35,7 +35,7 @@
 #     account's key reaches its own account's alone; another's bucket is
 #     AccessDenied, another's queue one that doesn't exist, by its URL or its
 #     name, and its messages stay; a key deletes no other account's bucket
-#     through S3, nor takes its name.
+#     through S3, nor takes its name, nor reads or changes its tags.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -1014,6 +1014,13 @@ check "B's key can neither read, set nor remove A's bucket's site, which A still
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-website --bucket l5-photos-a --website-configuration '{"IndexDocument": {"Suffix": "stolen.html"}}') \
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-website --bucket l5-photos-a) \
 $(site_of as_a l5-photos-a)"
+check "B's key can neither read, set nor remove A's bucket's tags, which A's key put and A still has" \
+  "accepted refused AccessDenied refused AccessDenied refused AccessDenied team=a" \
+  "$(s3_with "$key_a_id" "$key_a_secret" "$storage_port" s3api put-bucket-tagging --bucket l5-photos-a --tagging 'TagSet=[{Key=team,Value=a}]') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-tagging --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-tagging --bucket l5-photos-a --tagging 'TagSet=[{Key=team,Value=b}]') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-tagging --bucket l5-photos-a) \
+$(sql_value "SELECT string_agg(t.key || '=' || t.value, ',') FROM resource_tags t JOIN buckets b ON b.id = t.bucket_id WHERE b.name = 'l5-photos-a'")"
 check "B's key can neither delete A's bucket through S3, AccessDenied, nor take its name, BucketAlreadyExists: it stays A's" \
   "refused AccessDenied refused BucketAlreadyExists $account_a" \
   "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 rb s3://l5-photos-a) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 mb s3://l5-photos-a) \

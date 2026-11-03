@@ -43,6 +43,8 @@ import { STORE_NAME, newAccessKeyId, newSecretAccessKey, newStoreName } from './
 import { StorageRequestCount } from './storage-request-count.entity';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { StoreBuckets } from './store-buckets';
+import { ResourceTag } from '../tags/resource-tag.entity';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { testObjectStore, testStoreClient } from '../object-store/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
@@ -101,6 +103,7 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
     keyUses = new KeyUses(db.dataSource.getRepository(KeyUse));
     // Every account on the beta plan, with credit, and as many requests a second as it sends: the API's checks have their own tests.
     const credit = { admit: async () => undefined } as unknown as CreditService;
+    const audit = new AuditService(db.dataSource.getRepository(AuditEntry));
     const throttler = { increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 }) };
     frontDoor = new S3FrontDoor(
       config,
@@ -115,7 +118,7 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
       {} as BucketWebsitesService,
       keyUses,
       // A plan of three buckets: the account's one, and two more.
-      new BucketsService(buckets, new StoreBuckets(config), onePlan(plan({ buckets: 3 })), new AuditService(db.dataSource.getRepository(AuditEntry)), config),
+      new BucketsService(buckets, new StoreBuckets(config), onePlan(plan({ buckets: 3 })), audit, config, new ResourceTagsService(db.dataSource.getRepository(ResourceTag), audit)),
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });

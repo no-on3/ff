@@ -89,6 +89,9 @@ export type AuditAction =
   | 'bucket.notifications'
   // A bucket's website configuration, set whole or removed, through the S3 front door or FF's API: it makes the bucket a site.
   | 'bucket.website'
+  // A bucket's tags, as S3's: replaced whole, or all removed, through the S3 front door.
+  | 'bucket.tag'
+  | 'bucket.untag'
   // A deploy's own key to a bucket, for an hour: `ff sites deploy` signs its uploads with it.
   | 'bucket.deploy_key'
   | 'storage_key.create'

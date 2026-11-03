@@ -128,6 +128,9 @@ fn s3_action(operation: &str) -> Option<(&'static str, Scope)> {
         "DeleteBucketWebsite" => ("s3:DeleteBucketWebsite", Scope::Bucket),
         "CreateBucket" => ("s3:CreateBucket", Scope::Bucket),
         "DeleteBucket" => ("s3:DeleteBucket", Scope::Bucket),
+        "GetBucketTagging" => ("s3:GetBucketTagging", Scope::Bucket),
+        // S3 allows the removal of a bucket's tags by the action that puts them: it has no other.
+        "PutBucketTagging" | "DeleteBucketTagging" => ("s3:PutBucketTagging", Scope::Bucket),
         "ListBuckets" => ("s3:ListAllMyBuckets", Scope::Account),
         _ => return None,
     })
@@ -424,12 +427,24 @@ mod tests {
     }
 
     #[test]
-    fn a_bucket_made_and_deleted_through_s3_is_allowed_on_the_bucket_itself() {
-        let role = role(&uses(&[("s3", "uploads", "CreateBucket"), ("s3", "uploads", "DeleteBucket")]), &[]);
+    fn a_bucket_made_tagged_and_deleted_through_s3_is_allowed_on_the_bucket_itself() {
+        let role = role(
+            &uses(&[
+                ("s3", "uploads", "CreateBucket"),
+                ("s3", "uploads", "PutBucketTagging"),
+                ("s3", "uploads", "GetBucketTagging"),
+                ("s3", "uploads", "DeleteBucketTagging"),
+                ("s3", "uploads", "DeleteBucket"),
+            ]),
+            &[],
+        );
 
         assert_eq!(
             role.statements,
-            [statement(Target::Bucket("uploads".to_owned()), &["s3:CreateBucket", "s3:DeleteBucket"])]
+            [statement(
+                Target::Bucket("uploads".to_owned()),
+                &["s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucketTagging", "s3:PutBucketTagging"]
+            )]
         );
         assert!(role.templates.is_empty() && role.unknown.is_empty());
     }

@@ -6,6 +6,7 @@ import { Account } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
 import { PlansService } from '../plans/plans.service';
+import { ResourceTagsService, taggedBucket } from '../tags/resource-tags.service';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { BucketView, CreateBucketDto } from './dto/storage.dto';
 import { StorageKey } from './storage-key.entity';
@@ -52,6 +53,7 @@ export class BucketsService {
     private readonly plans: PlansService,
     private readonly audit: AuditService,
     config: ConfigService,
+    private readonly tags: ResourceTagsService,
   ) {
     this.endpoint = new URL(config.getOrThrow<string>('storage.base'));
     this.region = config.getOrThrow<string>('storage.region');
@@ -95,10 +97,11 @@ export class BucketsService {
 
   /**
    * A new bucket, within the plan: counted under a lock on the account, so
-   * that two at once can't pass it together; then made in the store, and its
-   * row taken back if the store can't.
+   * that two at once can't pass it together, with its tags if it has some, as
+   * S3's CreateBucket gives them; then made in the store, and its row taken
+   * back if the store can't.
    */
-  async create(accountId: string, dto: CreateBucketDto): Promise<BucketView> {
+  async create(accountId: string, dto: CreateBucketDto, tags: Record<string, string> = {}): Promise<BucketView> {
     const account = await this.buckets.manager.findOneBy(Account, { id: accountId });
     if (account?.storageDisabledAt) throw new ForbiddenException(`FF turned this account's databases, buckets and queues off: ${account.storageDisabledReason}`);
     const plan = await this.plans.forAccount(accountId);
@@ -110,7 +113,9 @@ export class BucketsService {
         if (count >= plan.limits.buckets) {
           throw new BadRequestException(`The ${plan.name} plan allows ${plan.limits.buckets} bucket${plan.limits.buckets === 1 ? '' : 's'}, and the account has ${count}: delete one first`);
         }
-        return manager.save(Bucket, manager.create(Bucket, { accountId, name: dto.name, storeName: newStoreName() }));
+        const saved = await manager.save(Bucket, manager.create(Bucket, { accountId, name: dto.name, storeName: newStoreName() }));
+        if (Object.keys(tags).length) await this.tags.putNew(manager, accountId, taggedBucket(saved), tags);
+        return saved;
       });
     } catch (error) {
       if (error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION) {
@@ -125,8 +130,18 @@ export class BucketsService {
       this.logger.error(`Could not make bucket ${row.storeName} of account ${accountId} in the store: ${describeError(error)}`);
       throw unavailable();
     }
-    await this.audit.record({ accountId, action: 'bucket.create', resource: `bucket:${row.name}`, details: { name: row.name, store: row.storeName } });
+    await this.audit.record({ accountId, action: 'bucket.create', resource: `bucket:${row.name}`, details: { name: row.name, store: row.storeName, ...(Object.keys(tags).length ? { tags } : {}) } });
     return this.view(row);
+  }
+
+  /** The bucket's tags, by key, as S3's GetBucketTagging reads them. */
+  tagsOf(bucket: Pick<Bucket, 'id' | 'name'>): Promise<Record<string, string>> {
+    return this.tags.of(taggedBucket(bucket));
+  }
+
+  /** The bucket's tags replaced whole, as S3's PutBucketTagging replaces them; none removes them all, as DeleteBucketTagging does. */
+  replaceTags(accountId: string, bucket: Pick<Bucket, 'id' | 'name'>, tags: Record<string, string>): Promise<void> {
+    return this.tags.replace(accountId, taggedBucket(bucket), tags);
   }
 
   /**

@@ -13,6 +13,8 @@ import { EncryptionService } from '../encryption/encryption.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { Bucket } from './bucket.entity';
 import { BucketsService } from './buckets.service';
+import { ResourceTag } from '../tags/resource-tag.entity';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { StorageKeysService } from './storage-keys.service';
@@ -32,7 +34,7 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
   let storeBuckets: StoreBuckets;
   let directory: StorageDirectory;
   let audit: AuditService;
-  const service = (limits = {}, buckets = storeBuckets) => new BucketsService(db.dataSource.getRepository(Bucket), buckets, onePlan(plan(limits)), audit, config);
+  const service = (limits = {}, buckets = storeBuckets) => new BucketsService(db.dataSource.getRepository(Bucket), buckets, onePlan(plan(limits)), audit, config, new ResourceTagsService(db.dataSource.getRepository(ResourceTag), audit));
   const keys = (limits = {}) => new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, audit, onePlan(plan(limits)), config);
   const rowOf = (name: string) => db.dataSource.getRepository(Bucket).findOneBy({ name });
   const actions = async (accountId: string) =>

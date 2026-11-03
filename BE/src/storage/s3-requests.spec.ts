@@ -32,7 +32,14 @@ describe('the operation a request is', () => {
     expect(of('PUT', bucket)).toBe('CreateBucket tier1 writes');
     expect(of('PUT', bucket, 'x-id=CreateBucket')).toBe('CreateBucket tier1 writes');
     expect(of('DELETE', bucket)).toBe('DeleteBucket free writes');
-    expect(of('PUT', bucket, 'tagging')).toBe('NotImplemented tier2');
+    expect(of('PUT', bucket, 'policy')).toBe('NotImplemented tier2');
+  });
+
+  it("the bucket's tags: read as a GET, replaced as a PUT, removed for free, as a DELETE", () => {
+    expect(of('GET', bucket, 'tagging')).toBe('GetBucketTagging tier2');
+    expect(of('PUT', bucket, 'tagging')).toBe('PutBucketTagging tier1 writes');
+    expect(of('DELETE', bucket, 'tagging')).toBe('DeleteBucketTagging free writes');
+    expect(of('GET', bucket, 'tagging&policy')).toBe('NotImplemented tier2');
   });
 
   it("the bucket's: listings, its location, the bucket itself, a batch of deletes", () => {

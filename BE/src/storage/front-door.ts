@@ -25,6 +25,7 @@ import { BucketNotificationsService, ChangedBy } from './bucket-notifications.se
 import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket } from './bucket.entity';
 import { BucketsService } from './buckets.service';
+import { noSuchTagSet, taggingFromXml, taggingXml } from './bucket-tagging';
 import { CHECKSUM_ALGORITHMS, isChecksumAlgorithm } from './checksums';
 import { fullBuckets } from './bucket-storage';
 import { bucketAlreadyExists, bucketAlreadyOwnedByYou, checkCreateBucket } from './create-bucket';
@@ -348,6 +349,17 @@ export class S3FrontDoor implements OnModuleDestroy {
       return this.emptyAnswer(exchange, 204);
     }
     if (operation.name === 'DeleteBucket') return this.deleteBucket(exchange, key, bucket);
+    // And its tags, which S3 keeps with it.
+    if (operation.name === 'GetBucketTagging') {
+      const tags = await this.buckets.tagsOf(bucket);
+      if (Object.keys(tags).length === 0) throw noSuchTagSet();
+      return this.document(exchange, 200, taggingXml(tags));
+    }
+    if (operation.name === 'PutBucketTagging' || operation.name === 'DeleteBucketTagging') {
+      const tags = operation.name === 'PutBucketTagging' ? taggingFromXml(await this.readDocument(exchange, signature, chain, operation, plan)) : {};
+      await this.asKey(exchange, key, () => this.buckets.replaceTags(bucket.accountId, bucket, tags));
+      return this.emptyAnswer(exchange, 204);
+    }
     // Full buckets, or no credit, and uploads wait for room or for credit; reads, and deletes that make room and lower the bill, go on.
     if (operation.writes && operation.class === 'tier1') {
       if (bucketsFull) throw accountProblem(fullBuckets(plan.limits.bucketStorageMb, plan.name));
@@ -488,10 +500,10 @@ export class S3FrontDoor implements OnModuleDestroy {
     const name = exchange.address.bucket;
     if (key.readOnly || !reachesBucket(key, name)) throw accessDenied();
     this.used(key, operation.name, name);
-    checkCreateBucket(name, exchange.request.headers, await this.readDocument(exchange, signature, chain, operation, plan), this.region);
+    const tags = checkCreateBucket(name, exchange.request.headers, await this.readDocument(exchange, signature, chain, operation, plan), this.region);
     const existing = await this.directory.bucket(name);
     if (existing) throw existing.accountId === key.accountId ? bucketAlreadyOwnedByYou() : bucketAlreadyExists();
-    await this.asKey(exchange, key, () => this.buckets.create(key.accountId, { name }), bucketAlreadyExists);
+    await this.bucketChange(exchange, key, () => this.buckets.create(key.accountId, { name }, tags), bucketAlreadyExists);
     exchange.bucket = (await this.directory.bucket(name)) ?? undefined;
     exchange.operation = operation;
     return this.emptyAnswer(exchange, 200, { location: `/${name}` });
@@ -499,19 +511,20 @@ export class S3FrontDoor implements OnModuleDestroy {
 
   /** DeleteBucket: an empty bucket deleted, as S3 deletes one, under the key in the audit log; one with objects, BucketNotEmpty. */
   private async deleteBucket(exchange: Exchange, key: ActiveKey, bucket: Bucket): Promise<number> {
-    await this.asKey(exchange, key, () => this.buckets.remove(bucket.accountId, bucket.name, false), () => new S3Error(409, 'BucketNotEmpty', 'The bucket you tried to delete is not empty'));
+    await this.bucketChange(exchange, key, () => this.buckets.remove(bucket.accountId, bucket.name, false), () => new S3Error(409, 'BucketNotEmpty', 'The bucket you tried to delete is not empty'));
     return this.emptyAnswer(exchange, 204);
   }
 
-  /**
-   * A change of FF's buckets made for the key, which the audit log names as it
-   * names the key's other changes; the refusals of FF's API in S3's words, a
-   * conflict as the change has it.
-   */
-  private async asKey<T>(exchange: Exchange, key: ActiveKey, work: () => Promise<T>, conflict: () => S3Error): Promise<T> {
+  /** Work done for the key, which the audit log names as it names the key's other changes. */
+  private asKey<T>(exchange: Exchange, key: ActiveKey, work: () => Promise<T>): Promise<T> {
     const { actor, ip } = this.changedBy(exchange, key);
+    return withRequestContext({ requestId: exchange.id, actor, ...(ip ? { ip } : {}) }, work);
+  }
+
+  /** A bucket made or deleted for the key: the refusals of FF's bucket service in S3's words, a conflict as the change has it. */
+  private async bucketChange<T>(exchange: Exchange, key: ActiveKey, work: () => Promise<T>, conflict: () => S3Error): Promise<T> {
     try {
-      return await withRequestContext({ requestId: exchange.id, actor, ...(ip ? { ip } : {}) }, work);
+      return await this.asKey(exchange, key, work);
     } catch (error) {
       if (error instanceof ConflictException) throw conflict();
       if (error instanceof BadRequestException) throw new S3Error(400, 'TooManyBuckets', `You have attempted to create more buckets than allowed: ${error.message}`);

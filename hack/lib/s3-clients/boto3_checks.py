@@ -64,6 +64,18 @@ def bucket_refusals():
     return f"{elsewhere} {reserved}"
 
 
+def bucket_tags():
+    name = f"{bucket}-boto3-tags"
+    s3.create_bucket(Bucket=name, CreateBucketConfiguration={"LocationConstraint": "tn-tunis-1"})
+    s3.put_bucket_tagging(Bucket=name, Tagging={"TagSet": [{"Key": "team", "Value": "web"}, {"Key": "stage", "Value": "dev"}]})
+    s3.put_bucket_tagging(Bucket=name, Tagging={"TagSet": [{"Key": "team", "Value": "shop"}]})
+    kept = s3.get_bucket_tagging(Bucket=name)["TagSet"]
+    s3.delete_bucket_tagging(Bucket=name)
+    none = refused_as("NoSuchTagSet", lambda: s3.get_bucket_tagging(Bucket=name))
+    s3.delete_bucket(Bucket=name)
+    return f"{same(kept, [{'Key': 'team', 'Value': 'shop'}]) and 'replaced'} {none}"
+
+
 def fetch(url, method="GET", data=None):
     request = urllib.request.Request(url, method=method, data=data)
     with urllib.request.urlopen(request) as answer:
@@ -105,3 +117,4 @@ check("refused", "another account's bucket: AccessDenied", lambda: s3.get_object
 check("ok", "copies, then deletes a batch", lambda: (s3.copy_object(Bucket=bucket, Key="boto/copy.txt", CopySource={"Bucket": bucket, "Key": "boto/hello.txt"}), same(len(s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": "boto/copy.txt"}, {"Key": "boto/presigned.txt"}]})["Deleted"]), 2))[1])
 check("ok", "create_bucket in FF's region; delete_bucket refused while it holds a file, BucketNotEmpty, then deleted", bucket_life)
 check("ok", "create_bucket in another region, IllegalLocationConstraintException; a name AWS keeps, InvalidBucketName", bucket_refusals)
+check("ok", "a bucket's tags put, the second set replacing the first, read, then deleted: NoSuchTagSet", bucket_tags)

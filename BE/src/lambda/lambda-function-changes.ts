@@ -15,7 +15,7 @@ import { parseQueueArn } from '../queues/sqs-attributes';
 import { reachesBucket } from '../storage/key-reach';
 import { StorageDirectory } from '../storage/storage-directory.service';
 import { StoreBuckets } from '../storage/store-buckets';
-import { ResourceTagsService } from '../tags/resource-tags.service';
+import { ResourceTagsService, taggedFunction } from '../tags/resource-tags.service';
 import { invalidParameterValue, resourceConflict } from './lambda-error';
 import { CodeSource, createFunctionRequest, updateCodeRequest, updateConfigurationRequest } from './lambda-function-requests';
 import { latestConfiguration } from './lambda-functions';
@@ -66,7 +66,7 @@ export class LambdaFunctionChanges implements LambdaHandlers {
     const dto = (await this.validation.transform({ ...request.fields, codeSha256 }, { type: 'body', metatype: CreateFunctionDto })) as CreateFunctionDto;
     const { description, role, deadLetterTargetArn } = request;
     const started = await this.functions.startCreate(caller.accountId, dto, { description, role, deadLetterTargetArn });
-    if (request.tags) await this.tags.tagFunction(caller.accountId, started.function_.id, request.tags);
+    if (request.tags) await this.tags.tag(caller.accountId, taggedFunction(started.function_.id), request.tags);
     this.rollOut(started, caller.accountId, request.publish);
     return { status: 201, document: latestConfiguration(started.function_, caller.region, started.environment.variables) };
   }

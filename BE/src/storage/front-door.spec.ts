@@ -3,11 +3,13 @@ import {
   CopyObjectCommand,
   CreateBucketCommand,
   DeleteBucketCommand,
+  DeleteBucketTaggingCommand,
   DeleteBucketWebsiteCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetBucketLocationCommand,
   GetBucketNotificationConfigurationCommand,
+  GetBucketTaggingCommand,
   GetBucketWebsiteCommand,
   GetObjectCommand,
   HeadBucketCommand,
@@ -15,6 +17,7 @@ import {
   ListObjectsV2Command,
   PutBucketNotificationConfigurationCommand,
   PutBucketPolicyCommand,
+  PutBucketTaggingCommand,
   PutBucketWebsiteCommand,
   PutObjectCommand,
   S3Client,
@@ -184,14 +187,20 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   const websites = { keep: async (bucket: Bucket, website: WebsiteConfiguration | null, by: ChangedBy) => void keptWebsites.push([bucket.name, website, by]) } as unknown as BucketWebsitesService;
   /** What each key used, as the front door noted it. */
   const keyUses = notedUses();
-  /** What FF's bucket service was asked, under whom the audit log would name; or the refusal it answers. */
+  /** What FF's bucket service was asked, under whom the audit log would name; or the refusal it answers. Its buckets' tags. */
   const bucketChanges: string[] = [];
   let bucketRefusal: Error | undefined;
+  const bucketTags = new Map<string, Record<string, string>>();
   const buckets = {
-    create: async (accountId: string, dto: { name: string }) => {
+    create: async (accountId: string, dto: { name: string }, tags: Record<string, string> = {}) => {
       if (bucketRefusal) throw bucketRefusal;
-      bucketChanges.push(`create ${accountId} ${dto.name} by ${currentRequest()?.actor?.id}`);
+      bucketChanges.push(`create ${accountId} ${dto.name}${Object.keys(tags).length ? ` ${JSON.stringify(tags)}` : ''} by ${currentRequest()?.actor?.id}`);
       return {};
+    },
+    tagsOf: async (bucket: Bucket) => bucketTags.get(bucket.name) ?? {},
+    replaceTags: async (accountId: string, bucket: Bucket, tags: Record<string, string>) => {
+      bucketChanges.push(`tags ${accountId} ${bucket.name} ${JSON.stringify(tags)} by ${currentRequest()?.actor?.id}`);
+      bucketTags.set(bucket.name, tags);
     },
     remove: async (accountId: string, name: string, force: boolean) => {
       if (bucketRefusal) throw bucketRefusal;
@@ -238,6 +247,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     keyUses.seen.length = 0;
     bucketChanges.length = 0;
     bucketRefusal = undefined;
+    bucketTags.clear();
   });
 
   it("notes what each key used, by S3's names, for the export's roles: a bucket, a copy's source as a read of it, the account's list, nothing refused", async () => {
@@ -526,6 +536,14 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       expect(await refused(client().send(new DeleteBucketCommand({ Bucket: 'exports' })))).toBe('409 BucketNotEmpty');
     });
 
+    it('makes one with the tags its configuration gives, as S3 keeps them with it', async () => {
+      await client().send(
+        new CreateBucketCommand({ Bucket: 'albums', CreateBucketConfiguration: { LocationConstraint: FF_REGION, Tags: [{ Key: 'team', Value: 'web' }] } }),
+      );
+
+      expect(bucketChanges).toEqual([`create ${KEY.accountId} albums {"team":"web"} by access_key:${KEY.id}`]);
+    });
+
     it("answers a name already the account's, or another's, without asking the service; a read-only key, or one naming other buckets, AccessDenied", async () => {
       expect(await refused(create('photos'))).toBe('409 BucketAlreadyOwnedByYou');
       expect(await refused(create('theirs'))).toBe('409 BucketAlreadyExists');
@@ -533,6 +551,40 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       expect(await refused(create('albums', NARROW))).toBe('403 AccessDenied');
       expect(await refused(client(READ_ONLY).send(new DeleteBucketCommand({ Bucket: 'exports' })))).toBe('403 AccessDenied');
       expect(await refused(client().send(new DeleteBucketCommand({ Bucket: 'theirs' })))).toBe('403 AccessDenied');
+      expect(bucketChanges).toEqual([]);
+    });
+  });
+
+  describe("a bucket's tags, as S3's", () => {
+    it('replaces them with PutBucketTagging, 204, under the key, and reads them with GetBucketTagging; the store never hears of them', async () => {
+      await client().send(new PutBucketTaggingCommand({ Bucket: 'photos', Tagging: { TagSet: [{ Key: 'team', Value: 'web' }, { Key: 'stage', Value: '' }] } }));
+      const read = await client(READ_ONLY).send(new GetBucketTaggingCommand({ Bucket: 'photos' }));
+
+      expect(bucketChanges).toEqual([`tags ${KEY.accountId} photos {"team":"web","stage":""} by access_key:${KEY.id}`]);
+      expect(read.TagSet).toEqual([
+        { Key: 'team', Value: 'web' },
+        { Key: 'stage', Value: '' },
+      ]);
+      expect(counted.map((request) => `${request.class} ${request.status}`)).toEqual(['tier1 204', 'tier2 200']);
+      expect(seen).toEqual([]);
+    });
+
+    it("removes them with DeleteBucketTagging, 204; a bucket without tags answers S3's NoSuchTagSet", async () => {
+      bucketTags.set('photos', { team: 'web' });
+
+      await client().send(new DeleteBucketTaggingCommand({ Bucket: 'photos' }));
+
+      expect(bucketChanges).toEqual([`tags ${KEY.accountId} photos {} by access_key:${KEY.id}`]);
+      expect(await refused(client().send(new GetBucketTaggingCommand({ Bucket: 'photos' })))).toBe('404 NoSuchTagSet');
+    });
+
+    it("refuses a key twice, InvalidTag, nothing changed; a read-only key changes nothing; another account's bucket, AccessDenied", async () => {
+      const put = (key: ActiveKey, Bucket = 'photos') =>
+        refused(client(key).send(new PutBucketTaggingCommand({ Bucket, Tagging: { TagSet: [{ Key: 'team', Value: 'web' }, { Key: 'team', Value: 'shop' }] } })));
+
+      expect(await put(KEY)).toBe('400 InvalidTag');
+      expect(await refused(client(READ_ONLY).send(new DeleteBucketTaggingCommand({ Bucket: 'photos' })))).toBe('403 AccessDenied');
+      expect(await refused(client().send(new GetBucketTaggingCommand({ Bucket: 'theirs' })))).toBe('403 AccessDenied');
       expect(bucketChanges).toEqual([]);
     });
   });

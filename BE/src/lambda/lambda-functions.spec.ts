@@ -12,7 +12,7 @@ import { FunctionAliasesService } from '../functions/aliases.service';
 import { FunctionsService } from '../functions/functions.service';
 import { FunctionVersionsService } from '../functions/versions.service';
 import { PackagesService } from '../packages/packages.service';
-import { ResourceTagsService } from '../tags/resource-tags.service';
+import { ResourceTagsService, Tagged } from '../tags/resource-tags.service';
 import { plan } from '../plans/test-fixtures';
 import { EncryptionService } from '../encryption/encryption.service';
 import { DEVELOPMENT_KEY } from '../encryption/key-ring';
@@ -109,7 +109,7 @@ describe("Lambda's reads of functions (L1)", () => {
       }),
     } as unknown as FunctionAliasesService;
     const packages = { namedBytes: jest.fn(async () => 5_000_000) } as unknown as PackagesService;
-    const tags = { ofFunction: jest.fn(async (id: string) => tagsOf[id] ?? {}) } as unknown as ResourceTagsService;
+    const tags = { of: jest.fn(async ({ id }: Tagged) => tagsOf[id] ?? {}) } as unknown as ResourceTagsService;
     reads = new LambdaFunctionReads(service, versions, aliases, packages, links, tags);
   });
 
