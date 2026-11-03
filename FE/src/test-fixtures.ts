@@ -1,5 +1,5 @@
 // Shared by the unit tests: nothing in the console imports it, so it never ships.
-import type { Plan } from './services/api';
+import type { AwsEndpoints, Plan } from './services/api';
 
 /** The beta plan, as GET /me shows it (P-15). */
 export const BETA_PLAN: Plan = {
@@ -39,4 +39,13 @@ export const BETA_PLAN: Plan = {
     emailsPerSecond: 1,
     accessKeys: 10,
   },
+};
+
+/** FF's region and endpoints, as GET /me gives them with an account: each field the API's, as the contract test checks. */
+export const AWS_ENDPOINTS: AwsEndpoints = {
+  region: 'tn-tunis-1',
+  s3Endpoint: 'https://s3.ffunc.cloud',
+  sqsEndpoint: 'https://sqs.ffunc.cloud',
+  sesEndpoint: 'https://email.ffunc.cloud',
+  lambdaEndpoint: 'https://lambda.ffunc.cloud',
 };

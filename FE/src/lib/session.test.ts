@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MeAccount } from '../services/api';
-import { BETA_PLAN } from '../test-fixtures';
+import { AWS_ENDPOINTS, BETA_PLAN } from '../test-fixtures';
 import {
   accountView,
   can,
@@ -26,6 +26,7 @@ const account = (id: string, status: MeAccount['status'] = 'active'): MeAccount 
   storageDisabledAt: null,
   storageDisabledReason: null,
   bucketStorageNotice: null,
+  aws: AWS_ENDPOINTS,
 });
 
 describe('requestHeaders', () => {

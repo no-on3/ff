@@ -19,6 +19,7 @@ import createFunctionDtoSource from '../../BE/src/functions/dto/create-function.
 import secretsDtoSource from '../../BE/src/functions/dto/secrets.dto.ts?raw';
 import environmentSource from '../../BE/src/functions/environment.ts?raw';
 import accountDtoSource from '../../BE/src/accounts/dto/account.dto.ts?raw';
+import awsEndpointsSource from '../../BE/src/common/aws-endpoints.ts?raw';
 import metricsDtoSource from '../../BE/src/metrics/dto/metrics-query.dto.ts?raw';
 import languageSource from '../../BE/src/mail/language.ts?raw';
 import notificationsDtoSource from '../../BE/src/notifications/notifications.dto.ts?raw';
@@ -73,6 +74,7 @@ import { EVENT_TYPES as NOTIFICATION_EVENTS } from './lib/bucket-notifications';
 import { SITE_DOMAIN_FIELDS, SITE_METRICS, WEBSITE_FIELDS } from './lib/sites';
 import { FUNCTION_NAME_PATTERN, MAX_FUNCTION_NAME_LENGTH, SAVED_FUNCTION_FIELD } from './lib/functions';
 import { ENDPOINTS_RESERVED, FF_RESERVED, LAMBDA_RESERVED, MAX_ENVIRONMENT_BYTES, VARIABLE_NAME } from './lib/environment';
+import { AWS_ENDPOINTS } from './test-fixtures';
 import {
   ALARM_FIELDS,
   QUEUE_FIELDS,
@@ -221,6 +223,10 @@ describe('the metrics', () => {
 describe('an account in GET /me', () => {
   it("has the API's fields, the dates a closed account's data is deleted among them, so the console reads each one there is", () => {
     expect(dtoFields(accountDtoSource, 'class MeAccount {')).toEqual([...ME_ACCOUNT_FIELDS]);
+  });
+
+  it("gives FF's region and endpoints under the API's names, so the account page and a function's AWS CLI commands read each one", () => {
+    expect(dtoFields(awsEndpointsSource, 'export class AwsEndpoints {')).toEqual(Object.keys(AWS_ENDPOINTS));
   });
 });
 

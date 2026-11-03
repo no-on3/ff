@@ -940,6 +940,8 @@ aws lambda list-layers
 
 A request that is none of Lambda's operations answers the same, with its method and its path. Each refusal comes once the request's key is known to be good, so that an unsigned request learns nothing. The list follows Lambda's model as botocore 1.43.118 has it ([`BE/src/lambda/lambda-api-model`](../BE/src/lambda/lambda-api-model/operations.json)); the backend's tests check that each of its operations reaches its own name, and that this section names each one.
 
+**In the console,** a function's page has its AWS CLI commands to copy: the region and Lambda's endpoint to export, beside one of the account's access keys, then the function read, called with its log, given new code and published as a version, by its name. The Account page lists FF's region and its four endpoints, Lambda's beside S3's, SQS's and SES's, and the variables to export, as `GET /me` gives them with each account (`aws`).
+
 ### Moving to AWS: ff export
 
 FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's, its mail SES's: an account moves to AWS with its code as it is. `ff export` writes what the move needs in a new folder, from the account's own resources, with `functions:read` and the other services' reads, and `usage:read` for its estimate:

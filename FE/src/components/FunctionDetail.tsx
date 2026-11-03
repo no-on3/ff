@@ -32,6 +32,7 @@ import { FunctionUrlTab } from './FunctionUrl';
 import { FunctionSchedules } from './FunctionSchedules';
 import { FunctionVersions } from './FunctionVersions';
 import { FunctionAsyncSettings } from './FunctionAsyncSettings';
+import { FunctionAwsCli } from './FunctionAwsCli';
 import { FunctionEventSources } from './FunctionEventSources';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
@@ -379,6 +380,8 @@ const FunctionDetail: React.FC = () => {
               <FunctionAlarms functionId={func.id} mayChange={mayChange} />
             </div>
           </div>
+
+          <FunctionAwsCli func={func} />
         </div>
       )}
 

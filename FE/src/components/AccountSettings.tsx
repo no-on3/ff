@@ -1,9 +1,12 @@
 import React, { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+import { ENDPOINT_LABELS, endpointVariables, shellExports } from '../lib/access-keys';
 import { accountUpdateBody, formatWhen } from '../lib/accounts';
 import { apiErrorMessage } from '../lib/functions';
 import { planLimitRows } from '../lib/plans';
-import { Account, accountsApi } from '../services/api';
+import { Account, AwsEndpoints, accountsApi } from '../services/api';
 import { useSession } from '../session/session';
+import Copyable from './Copyable';
 import EmailLanguage from './EmailLanguage';
 
 const STATUS_TEXT: Record<Account['status'], string> = {
@@ -20,6 +23,31 @@ const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, 
     <dd className="font-medium break-words">{children}</dd>
   </div>
 );
+
+/** Where AWS's SDKs and CLI reach the account: FF's region and its endpoints, Lambda's beside S3's, SQS's and SES's, to copy. */
+const AwsEndpointsCard: React.FC<{ aws: AwsEndpoints }> = ({ aws }) => {
+  const variables = endpointVariables(aws);
+  return (
+    <div className="card mb-6">
+      <h2 className="text-[15px] leading-6 font-semibold text-ink mb-1">AWS&apos;s SDKs and CLI</h2>
+      <p className="mb-4 text-sm text-gray-500">
+        They reach the account&apos;s buckets, queues, mail and functions here, with one of its{' '}
+        <Link to="/account/access-keys" className="font-medium text-ink underline">
+          access keys
+        </Link>
+        . A function needs none of it: its pods have its own key, the region and the endpoints.
+      </p>
+      <dl className="grid gap-4 sm:grid-cols-3 mb-4">
+        {variables.map(([name, value]) => (
+          <Field key={name} label={ENDPOINT_LABELS[name]}>
+            {value || 'None on this FF'}
+          </Field>
+        ))}
+      </dl>
+      <Copyable value={shellExports(variables.filter(([, value]) => value !== ''))} label="the region and the endpoints" testId="endpoint-variables" />
+    </div>
+  );
+};
 
 /** The chosen account: its details for every member, the name and tax ID its owners change, and the user's own e-mail language. */
 const AccountSettings: React.FC = () => {
@@ -60,6 +88,9 @@ const AccountSettings: React.FC = () => {
             Development mode acts as this account, without a user. Log in to change accounts and manage API keys: see "Log in
             with Keycloak" in the getting-started guide.
           </p>
+        </div>
+        <div className="mt-6">
+          <AwsEndpointsCard aws={chosen.aws} />
         </div>
       </div>
     );
@@ -124,6 +155,7 @@ const AccountSettings: React.FC = () => {
               ))}
             </dl>
           </div>
+          <AwsEndpointsCard aws={chosen.aws} />
           <EmailLanguage />
           <form onSubmit={handleSubmit} className="card space-y-4">
             <h2 className="text-[15px] leading-6 font-semibold text-ink">Details</h2>

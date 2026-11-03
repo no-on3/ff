@@ -23,6 +23,8 @@ import { Plan } from './entities/plan.entity';
 import { User } from './entities/user.entity';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
+/** FF's region and endpoints as GET /me gives them, from the settings below: SQS's and SES's not set. */
+const AWS = { region: 'tn-tunis-1', s3Endpoint: 'https://s3.ff.example', sqsEndpoint: '', sesEndpoint: '', lambdaEndpoint: 'https://lambda.ff.example' };
 
 run('accounts, users and memberships (L2, P-12)', () => {
   let db: ScratchDatabase;
@@ -37,7 +39,16 @@ run('accounts, users and memberships (L2, P-12)', () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
     const mail = { send: async (message: Mail) => sent.push(message) > 0 } as unknown as MailService;
-    const config = { getOrThrow: () => ({ operatorEmail, adminUrl: 'https://admin.ff.example' }) } as unknown as ConfigService;
+    // The operator's address read at each call, as a test empties it.
+    const settings: Record<string, unknown> = {
+      get mail() {
+        return { operatorEmail, adminUrl: 'https://admin.ff.example' };
+      },
+      'storage.region': 'tn-tunis-1',
+      'storage.base': 'https://s3.ff.example',
+      'lambda.base': 'https://lambda.ff.example',
+    };
+    const config = { getOrThrow: (key: string) => settings[key], get: (key: string) => settings[key] } as unknown as ConfigService;
     const ds = db.dataSource;
     const audit = new AuditService(ds.getRepository(AuditEntry));
     plans = new PlansService(ds.getRepository(Plan), ds.getRepository(Account), {} as Orchestrator, audit);
@@ -195,7 +206,7 @@ run('accounts, users and memberships (L2, P-12)', () => {
       expect(await service.me(user)).toEqual({
         user: { id: user.id, email: 'user12@example.tn', name: 'User 12', locale: 'fr-TN' },
         key: null,
-        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: false, dataDeletionDueAt: null, dataDeletedAt: null, storageDisabledAt: null, storageDisabledReason: null, bucketStorageNotice: null }],
+        accounts: [{ id, name: 'Mine', status: 'pending', role: 'owner', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: false, dataDeletionDueAt: null, dataDeletedAt: null, storageDisabledAt: null, storageDisabledReason: null, bucketStorageNotice: null, aws: AWS }],
       });
     });
 
@@ -209,7 +220,7 @@ run('accounts, users and memberships (L2, P-12)', () => {
       expect(await service.keyMe(principal)).toEqual({
         user: null,
         key: { id: '0123456789ab', name: 'laptop', scopes: ['functions:read', 'logs:read'] },
-        accounts: [{ id, name: 'Keyed', status: 'active', role: 'developer', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: true, dataDeletionDueAt: null, dataDeletedAt: null, storageDisabledAt: null, storageDisabledReason: null, bucketStorageNotice: null }],
+        accounts: [{ id, name: 'Keyed', status: 'active', role: 'developer', plan: { id: 'beta', name: 'Beta', limits: BETA_LIMITS }, internetEgress: true, dataDeletionDueAt: null, dataDeletedAt: null, storageDisabledAt: null, storageDisabledReason: null, bucketStorageNotice: null, aws: AWS }],
       });
     });
 

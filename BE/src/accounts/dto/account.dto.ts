@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsIn, IsISO31661Alpha2, IsOptional, IsString, Length, MaxLength } from 'class-validator';
 import { SCOPES } from '../../api-keys/api-key-format';
 import { Role } from '../../auth/principal';
+import { AwsEndpoints } from '../../common/aws-endpoints';
 import { LOCALES, Locale } from '../../mail/language';
 import { PlanSummary } from '../../plans/plan.dto';
 import { AccountStatus } from '../entities/account.entity';
@@ -94,6 +95,8 @@ export class MeAccount {
     description: "The share of its plan's storage its buckets reached together at their last measure, which its owners were told of: at 100, uploads wait for room. Null under 80%",
   })
   bucketStorageNotice: 80 | 100 | null;
+  @ApiProperty({ type: AwsEndpoints, description: "What AWS's SDKs and CLI are given, beside one of its access keys: FF's region and its endpoints, Lambda's among them" })
+  aws: AwsEndpoints;
 }
 
 /** The API key a request came with, as GET /me shows it to the key itself. */

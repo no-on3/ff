@@ -923,7 +923,17 @@ export const ME_ACCOUNT_FIELDS = [
   'storageDisabledAt',
   'storageDisabledReason',
   'bucketStorageNotice',
+  'aws',
 ] as const satisfies ReadonlyArray<keyof MeAccount>;
+
+/** What AWS's SDKs and CLI are given, beside one of the account's access keys: FF's region and its endpoints, each empty where FF has none but S3's. */
+export interface AwsEndpoints {
+  region: string;
+  s3Endpoint: string;
+  sqsEndpoint: string;
+  sesEndpoint: string;
+  lambdaEndpoint: string;
+}
 
 export interface MeAccount {
   /** 12 digits. */
@@ -946,6 +956,8 @@ export interface MeAccount {
   storageDisabledReason: string | null;
   /** The share of its plan's storage its buckets reached together at their last measure: at 100, uploads wait for room; null under 80%. */
   bucketStorageNotice: 80 | 100 | null;
+  /** Where AWS's SDKs and CLI reach the account at FF. */
+  aws: AwsEndpoints;
 }
 // A field missing from ME_ACCOUNT_FIELDS stops the build.
 type UnlistedMeAccountField = Exclude<keyof MeAccount, (typeof ME_ACCOUNT_FIELDS)[number]>;
