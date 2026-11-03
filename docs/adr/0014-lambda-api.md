@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-5 plan](../step-5-plan.md)'s D1 to D8, and its choices (its §9), confirmed on 2026-10-31 (the [decision log](../decisions.md)'s 51 to 64); what AWS's tools call, and what a key's end and a pod's replacement do, measured by X-01's spikes the same day |
 | **Date** | 2026-10-31 |
-| **Implementation** | Step-5 plan: decisions D1 to D8; tasks X-07 (one signature check, keys that reach functions), X-08 (functions' keys that expire), X-09 (the endpoint, and functions), X-10 (invoke, and the rest of Lambda's settings) |
+| **Implementation** | Step-5 plan: decisions D1 to D8; tasks X-07 (one signature check, keys that reach functions), X-08 (functions' keys that expire), X-09 (the endpoint, and functions), X-10 (invoke, and the rest of Lambda's settings). As built: X-07 to X-10 (below), the operations of decision 2 that come later listed by X-09's part 3; X-14 documented it: the guide's "The way out" and "Functions through Lambda's API", a profile's `services` section checked by L4, `how-it-works.html`'s scenario of a function made with the AWS CLI and a lane for the endpoint, and the page in French, [Fonctions, comme AWS Lambda](../fr/fonctions.md) |
 | **Related** | [ADR 0009](0009-buckets.md), [ADR 0010](0010-queue.md) and [ADR 0012](0012-customer-mail.md) (the S3, SQS and SES front doors this one joins); [ADR 0015](0015-versions-and-aliases.md) (versions and aliases); [ADR 0016](0016-sam-templates.md) (SAM templates); the spikes, [`hack/spikes/lambda`](../../hack/spikes/lambda/README.md) and [`hack/spikes/keys`](../../hack/spikes/keys/README.md) |
 
 ## Context

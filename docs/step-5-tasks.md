@@ -91,9 +91,9 @@ Each task, or part of one, is one commit with its tests and its documents, as th
   - [x] part 3, the round trip: a template `ff export` wrote, deployed again on FF under another account, makes the same resources, compared through FF's API; `sam validate --lint` and cfn-lint on every fixture, in L1; done: the `ff` suite's `small_app_round_trip`, and `hack/test-sam-fixtures.sh` in the unit stage; the round trip found a variable holding a bucket's name left with FF's name, which the export now writes as the bucket's name parameter.
 
 ### Phase 7: close
-- [ ] **X-14** Documentation:
+- [x] **X-14** Documentation:
   - [x] part 1, the guide's "The way out": AWS's tools against FF (each tool's endpoint setting, a profile's `services` section), versions and aliases, Terraform, SAM's subset, the export, the estimate, `ff doctor`, and the differences said plainly (the parent plan's §6.9); `how-it-works.html`'s scenarios (a function made with the AWS CLI through Lambda's endpoint, an alias's share moving, a template deployed, an export) and a lane for the endpoint; done: the profile checked in L4, the four scenarios checked by the page's own check and in a browser;
-  - [ ] part 2, the pages in French, "Fonctions, comme AWS Lambda" and "Partir vers AWS"; ADRs 0014 to 0016 as built; the CLI plan's C-30, C-32 and C-33 marked done; the documentation's index.
+  - [x] part 2, the pages in French, "Fonctions, comme AWS Lambda" and "Partir vers AWS"; ADRs 0014 to 0016 as built; the CLI plan's C-30, C-32 and C-33 marked done; the documentation's index; done: "Partir vers AWS" brought up to the English page, C-33's last commit named.
 - [ ] **X-15** The step closed:
   - [ ] part 1, the small app as one `template.yaml`: its three functions, its URL, its queue and mapping, its schedule, its receipts' bucket; its database, cache, mail and site made as before, which SAM's resources don't declare; `ff deploy` makes it on FF, `ff export` writes it back, the same file passes `sam validate --lint` and cfn-lint; with an AWS account (the plan's §9, choice 13), `sam deploy` on AWS and the app's smoke test there, in the monthly job (T-10);
   - [ ] part 2, the guide walks through it and `hack/cli-e2e.sh` runs it; What to build next marks step 5 done; the decision log; step 6's plan, from §4 of this list.

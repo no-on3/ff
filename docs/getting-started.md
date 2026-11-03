@@ -901,7 +901,7 @@ hack/k8s/app-database.sh down                               # afterwards: the da
 
 ### The way out
 
-Leaving FF for AWS changes settings, not code. FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's and its mail SES's, and AWS's own tools reach each one with only the endpoint changed. This section is the map; the sections after it give each part in full.
+Leaving FF for AWS changes settings, not code. FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's and its mail SES's, and AWS's own tools reach each one with only the endpoint changed. This section is the map; the sections after it give each part in full. In French: [Fonctions, comme AWS Lambda](fr/fonctions.md) and [Partir vers AWS](fr/partir-vers-aws.md).
 
 **AWS's tools against FF.** Each tool takes FF's endpoints as configuration, outside the code, and the move to AWS removes them:
 
