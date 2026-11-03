@@ -45,6 +45,8 @@ const fn = (name: string, more: Partial<Function> = {}): Function =>
     description: '',
     role: null,
     deadLetterTargetArn: null,
+    maxInstances: 3,
+    callsStopped: false,
     revisionId: `rev-${name}`,
     updatedAt: UPDATED,
     ...more,
@@ -218,6 +220,14 @@ describe("Lambda's reads of functions (L1)", () => {
       expect((await ask('GET', '/2015-03-31/functions/billing')).Tags).toEqual({ team: 'payments', stage: 'prod' });
       expect((await ask('GET', '/2015-03-31/functions/billing', { qualifier: '1' })).Tags).toEqual({ team: 'payments', stage: 'prod' });
       expect(await ask('GET', '/2015-03-31/functions/billing/configuration')).not.toHaveProperty('Tags');
+    });
+
+    it("GetFunction gives its reserved concurrency, as Lambda's: its most instances, 0 while its calls are stopped, none at FF's default", async () => {
+      functions = [fn('orders', { maxInstances: 5 }), fn('billing', { maxInstances: 5, callsStopped: true }), fn('archive')];
+
+      expect((await ask('GET', '/2015-03-31/functions/orders', { qualifier: '1' })).Concurrency).toEqual({ ReservedConcurrentExecutions: 5 });
+      expect((await ask('GET', '/2015-03-31/functions/billing')).Concurrency).toEqual({ ReservedConcurrentExecutions: 0 });
+      expect(await ask('GET', '/2015-03-31/functions/archive')).not.toHaveProperty('Concurrency');
     });
 
     it("give a version's configuration for its number, and an alias's version's for its name, its link to that version's code", async () => {

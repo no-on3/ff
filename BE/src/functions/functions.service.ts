@@ -297,6 +297,10 @@ export type CallAsks = Pick<InvokeOptions, 'logTail' | 'clientContext'>;
 /** A message without its final period, to continue it with another sentence. */
 const clause = (message: string): string => message.replace(/\.\s*$/, '');
 
+/** Why a function whose calls are stopped refuses each, as Lambda throttles a reserved concurrency of 0. */
+export const CALLS_STOPPED =
+  "The function's reserved concurrency is 0: it takes no call until PutFunctionConcurrency reserves more, or DeleteFunctionConcurrency none.";
+
 /** The values a request sets that the account's plan limits (D5). */
 type Sized = Partial<Pick<Function, 'memory' | 'timeout' | 'minInstances' | 'maxInstances'>>;
 
@@ -1312,10 +1316,14 @@ export class FunctionsService {
     // A new row: inserted, without the lookup by ID that save() makes first.
     await this.invocationsRepository.insert(invocation as QueryDeepPartialEntity<FunctionInvocation>);
 
-    // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once (D14).
-    this.metricsService.invocationStarted(running);
     const startTime = Date.now();
+    let counted = false;
     try {
+      // A reservation of 0, as Lambda's: throttled before anything runs, or scales up for it.
+      if (function_.callsStopped) throw new FunctionThrottledError(CALLS_STOPPED);
+      // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once.
+      this.metricsService.invocationStarted(running);
+      counted = true;
       // The runtime logs the request's ID, and the usage record is keyed by it and the attempt's start (D6).
       // A version's first call, or its first since it went idle, makes its pods of its workload whole; $LATEST at
       // zero starts with a fresh key when its key is due a renewal.
@@ -1360,7 +1368,7 @@ export class FunctionsService {
       await this.finish(running, invocation, failureStatus(error), initMsOf(error));
       return { invocation, ok: false, error, visible, logResult: measured?.logResult };
     } finally {
-      this.metricsService.invocationFinished(running);
+      if (counted) this.metricsService.invocationFinished(running);
     }
   }
 
@@ -1489,12 +1497,27 @@ export class FunctionsService {
     if (minInstances > maxInstances) {
       throw new BadRequestException(`minInstances (${minInstances}) can't be more than maxInstances (${maxInstances})`);
     }
-    // These two fields alone: the record as read, saved whole, would write back what a change under way holds.
-    await this.functionsRepository.update({ id, accountId }, { minInstances, maxInstances });
-    const saved = Object.assign(function_, { minInstances, maxInstances });
-    await this.audit.record({ accountId, action: 'function.scaling', resource: `function:${id}`, details: { minInstances, maxInstances } });
+    return this.scalingConfig(await this.saveScaling(function_, { minInstances, maxInstances }));
+  }
+
+  /**
+   * Lambda's reserved concurrency, onto the function's instances: their most,
+   * or every call stopped, as a reservation of 0 stops them. Its caller checks
+   * them against the plan and the instances the function keeps running.
+   */
+  async reserveConcurrency(accountId: string, id: string, reserved: Pick<Function, 'maxInstances' | 'callsStopped'>): Promise<Function> {
+    return this.saveScaling(await this.findOne(accountId, id), reserved);
+  }
+
+  /** The scaling fields alone, said in the audit log, the running instances brought within them at once. */
+  private async saveScaling(function_: Function, changes: Partial<Pick<Function, 'minInstances' | 'maxInstances' | 'callsStopped'>>): Promise<Function> {
+    const { id, accountId } = function_;
+    // These fields alone: the record as read, saved whole, would write back what a change under way holds.
+    await this.functionsRepository.update({ id, accountId }, changes);
+    const saved = Object.assign(function_, changes);
+    await this.audit.record({ accountId, action: 'function.scaling', resource: `function:${id}`, details: changes });
     if (saved.status === FunctionStatus.ACTIVE) await this.applyInstanceLimits(saved);
-    return this.scalingConfig(saved);
+    return saved;
   }
 
   private async applyInstanceLimits(function_: Function): Promise<void> {

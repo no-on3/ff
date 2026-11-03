@@ -917,6 +917,45 @@ as_ver DELETE /queues/e2e-async-dead >/dev/null
 }
 section_def lambda_async section_lambda_async lambda_changes budget=30
 
+section_lambda_concurrency() {
+section "Lambda's reserved concurrency with the AWS CLI: none at FF's default, a reservation onto the function's instances, 0 stopping every call as Lambda throttles it, deleted; past the plan and a version's refused"
+lambda_zip "$work/concurrency.zip" 'export const handler = async () => ({ ran: true });' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-concurrency --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/concurrency.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-concurrency >/dev/null 2>&1 || true
+concurrency_id="$(as_ver GET '/functions?name=e2e-concurrency' | jq -r '.[0].id')"
+# reserved: the function's reservation as GetFunctionConcurrency answers it; none for Lambda's empty answer, which the CLI prints as nothing.
+reserved() {
+  local said
+  said="$(as_reader get-function-concurrency --function-name e2e-concurrency)"
+  if [ -z "$said" ]; then echo none; else jq -r .ReservedConcurrentExecutions <<<"$said"; fi
+}
+check "GetFunctionConcurrency: none at FF's default, as Lambda answers a function without a reservation" "none" "$(reserved)"
+check "PutFunctionConcurrency 2: the function's most instances, as FF's scaling says too; GetFunctionConcurrency and GetFunction read it" \
+  "2 2 2 2" \
+  "$(as_maker aws_lambda put-function-concurrency --function-name e2e-concurrency --reserved-concurrent-executions 2 | jq -r .ReservedConcurrentExecutions) \
+$(as_ver GET "/functions/$concurrency_id/scaling-config" | jq -r .maxInstances) \
+$(reserved) $(as_reader get-function --function-name e2e-concurrency | jq -r .Concurrency.ReservedConcurrentExecutions)"
+as_maker aws_lambda put-function-concurrency --function-name e2e-concurrency --reserved-concurrent-executions 0 >/dev/null
+check "  ... 0 stops every call, \$LATEST's and its version's, refused as Lambda throttles them; the history keeps them THROTTLED, not run" \
+  "refused TooManyRequestsException refused TooManyRequestsException THROTTLED true" \
+  "$(outcome as_maker aws_lambda invoke --function-name e2e-concurrency /dev/null) $(outcome as_maker aws_lambda invoke --function-name e2e-concurrency:1 /dev/null) \
+$(as_ver GET "/functions/$concurrency_id/invocations?limit=1" | jq -r '.invocations[0] | "\(.status) \(.error | test("reserved concurrency is 0"))"')"
+check "  ... a call that doesn't wait is taken, 202, as Lambda takes one, to be retried as a throttle is" "202" \
+  "$(as_maker aws_lambda invoke --function-name e2e-concurrency --invocation-type Event /dev/null | jq -r .StatusCode)"
+as_maker aws_lambda delete-function-concurrency --function-name e2e-concurrency
+check "DeleteFunctionConcurrency: none again, FF's default of 3 instances, and calls run again" "none 3 200" \
+  "$(reserved) $(as_ver GET "/functions/$concurrency_id/scaling-config" | jq -r .maxInstances) \
+$(as_maker aws_lambda invoke --function-name e2e-concurrency /dev/null | jq -r .StatusCode)"
+check "refused: past the plan's instances, a version's, a key that may only read" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda put-function-concurrency --function-name e2e-concurrency --reserved-concurrent-executions 1000) \
+$(outcome as_maker aws_lambda put-function-concurrency --function-name e2e-concurrency:1 --reserved-concurrent-executions 1) \
+$(outcome as_reader delete-function-concurrency --function-name e2e-concurrency)"
+as_maker aws_lambda delete-function --function-name e2e-concurrency >/dev/null
+}
+section_def lambda_concurrency section_lambda_concurrency lambda_changes budget=30
+
 section_lambda_invoke() {
 section "Lambda's Invoke with the AWS CLI: the function's answer as it returned it, the version that ran, the call's log with LogType Tail, the ClientContext in Node.js and Python; an error and a timeout as the call's outcome; Event and DryRun; refused as Lambda refuses"
 invoker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-invoker", "functions": ["e2e-invoked", "e2e-invoked-py", "e2e-invoked-broken"], "functionAccess": "invoke"}')"
@@ -995,7 +1034,7 @@ as_ver DELETE "/storage-keys/$(jq -r .id <<<"$invoker")" >/dev/null
 section_def lambda_invoke section_lambda_invoke lambda_changes budget=60
 
 section_lambda_sdks() {
-section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls' settings, refused as Lambda refuses, deleted"
+section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls' settings, its dead-letter queue, its reserved concurrency, refused as Lambda refuses, deleted"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0014 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
 lambda_clients="$FF_REPO_ROOT/hack/.cache/lambda-clients"
@@ -1016,10 +1055,10 @@ clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$make
 for queue_of in sdk boto3; do as_ver POST /queues "{\"name\": \"e2e-$queue_of-orders\"}" >/dev/null; done
 env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-sdk-orders" MODULES="$lambda_clients/node_modules" \
   node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
-client_checks "$work/lambda-sdk.jsonl" 17
+client_checks "$work/lambda-sdk.jsonl" 18
 env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-boto3-orders" \
   "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
-client_checks "$work/lambda-boto3.jsonl" 17
+client_checks "$work/lambda-boto3.jsonl" 18
 for queue_of in sdk boto3; do as_ver DELETE "/queues/e2e-$queue_of-orders" >/dev/null; done
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60

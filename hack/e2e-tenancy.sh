@@ -1139,6 +1139,14 @@ $(lambda_with "${lambda_b[@]}" list-function-event-invoke-configs --function-nam
 $(lambda_with "${lambda_b[@]}" delete-function-event-invoke-config --function-name l5-a) \
 $(lambda_with "${lambda_a[@]}" get-function-event-invoke-config --function-name l5-a --query MaximumRetryAttempts)"
 lambda_with "${lambda_a[@]}" delete-function-event-invoke-config --function-name l5-a >/dev/null
+lambda_with "${lambda_a[@]}" put-function-concurrency --function-name l5-a --reserved-concurrent-executions 2 >/dev/null
+check "  ... nor reserves, reads or deletes its concurrency, nor stops its calls with 0: A's as it was" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException 2" \
+  "$(lambda_with "${lambda_b[@]}" put-function-concurrency --function-name "$arn_a" --reserved-concurrent-executions 0) \
+$(lambda_with "${lambda_b[@]}" get-function-concurrency --function-name l5-a) \
+$(lambda_with "${lambda_b[@]}" delete-function-concurrency --function-name l5-a) \
+$(lambda_with "${lambda_a[@]}" get-function-concurrency --function-name l5-a --query ReservedConcurrentExecutions)"
+lambda_with "${lambda_a[@]}" delete-function-concurrency --function-name l5-a >/dev/null
 check "  ... nor reads its tags, nor tags it, nor untags it, by its ARN" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" list-tags --resource "$arn_a") $(lambda_with "${lambda_b[@]}" tag-resource --resource "$arn_a" --tags owner=b) \
 $(lambda_with "${lambda_b[@]}" untag-resource --resource "$arn_a" --tag-keys owner)"

@@ -40,7 +40,7 @@ import { PackagesService } from '../packages/packages.service';
 import { filesOf, zipOf } from '../packages/test-fixtures';
 import { RegistryError } from '../packages/registry';
 import { FunctionKeys } from '../storage/function-keys.service';
-import { FunctionsService, workloadOf } from './functions.service';
+import { CALLS_STOPPED, FunctionsService, workloadOf } from './functions.service';
 import { meetsWhere, memoryEnvironments } from './test-fixtures';
 import { TAIL_ENDED, TAIL_UNAVAILABLE } from './live-tail';
 import { Observable } from 'rxjs';
@@ -1367,6 +1367,16 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       );
     });
 
+    it('throttles every call of a function whose reserved concurrency is 0, before it runs or counts toward its scaling', async () => {
+      functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), callsStopped: true });
+
+      const failure = await service.invoke('user-1', 'fn-1', {}).catch((error: unknown) => error);
+
+      expect(failure).toMatchObject({ status: HttpStatus.TOO_MANY_REQUESTS, message: `TooManyRequestsException: ${CALLS_STOPPED}` });
+      expect([orchestrator.invoke.mock.calls.length, metrics.invocationStarted.mock.calls.length, metrics.invocationFinished.mock.calls.length]).toEqual([0, 0, 0]);
+      expect(invocationsRepo.save).toHaveBeenLastCalledWith(expect.objectContaining({ status: InvocationStatus.THROTTLED }));
+    });
+
     it('rejects functions that are not ACTIVE without calling the orchestrator', async () => {
       functionsRepo.findOne.mockResolvedValue({ ...activeFunction(), status: FunctionStatus.CREATING });
 
@@ -1569,6 +1579,18 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(functionsRepo.update).toHaveBeenCalledWith({ id: 'fn-1', accountId: 'user-1' }, { minInstances: 1, maxInstances: 3 });
       expect(orchestrator.desiredInstances).not.toHaveBeenCalled();
       expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    it("saves Lambda's reserved concurrency, its calls stopped or its most instances, said in the audit log, the instances brought within it", async () => {
+      functionsRepo.findOne.mockResolvedValue(activeFunction());
+      orchestrator.desiredInstances.mockResolvedValue(4);
+
+      const saved = await service.reserveConcurrency('user-1', 'fn-1', { maxInstances: 2, callsStopped: false });
+
+      expect([saved.maxInstances, saved.callsStopped]).toEqual([2, false]);
+      expect(functionsRepo.update).toHaveBeenCalledWith({ id: 'fn-1', accountId: 'user-1' }, { maxInstances: 2, callsStopped: false });
+      expect(orchestrator.scale).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 2);
+      expect(audit.record).toHaveBeenCalledWith({ accountId: 'user-1', action: 'function.scaling', resource: 'function:fn-1', details: { maxInstances: 2, callsStopped: false } });
     });
 
     it('keeps the saved limits when the cluster cannot be reached', async () => {
@@ -2419,6 +2441,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       ['invoke', (accountId, id = ID) => service.invoke(accountId, id, {})],
       ['getInvocations', (accountId, id = ID) => service.getInvocations(accountId, id, { limit: 10, offset: 0 })],
       ['updateScalingConfig', (accountId, id = ID) => service.updateScalingConfig(accountId, id, { maxInstances: 2 })],
+      ['reserveConcurrency', (accountId, id = ID) => service.reserveConcurrency(accountId, id, { maxInstances: 2, callsStopped: false })],
       ['logs', (accountId, id = ID) => service.logs(accountId, id, { tail: 200 })],
       ['liveLogs', (accountId, id = ID) => service.liveLogs(accountId, id, {}, new AbortController().signal)],
     ];

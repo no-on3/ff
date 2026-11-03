@@ -9,6 +9,7 @@ import { PACKAGE_LIMITS } from '../packages/package-archive';
 import { PackagesService } from '../packages/packages.service';
 import { invalidParameterValue, resourceNotFound } from './lambda-error';
 import { LambdaCodeLinks } from './lambda-code-links';
+import { reservedConcurrency } from './lambda-concurrency';
 import { pageOf } from './lambda-pages';
 import { ResourceTagsService } from '../tags/resource-tags.service';
 import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, namedFunction, ok } from './lambda-operations';
@@ -150,9 +151,15 @@ export class LambdaFunctionReads {
     const function_ = namedFunction(caller);
     const { configuration, version } = await this.configuration(caller);
     const location = this.links.linkFor({ accountId: caller.accountId, functionId: function_.id, ...(version !== undefined ? { version } : {}) });
-    // The function's tags, whichever version is read, as Lambda's; none, none said.
+    // The function's tags and its reserved concurrency, whichever version is read, as Lambda's; none, none said.
     const tags = await this.tags.ofFunction(function_.id);
-    return ok({ Configuration: configuration, Code: { RepositoryType: 'S3', Location: location }, ...(Object.keys(tags).length > 0 ? { Tags: tags } : {}) });
+    const reserved = reservedConcurrency(function_);
+    return ok({
+      Configuration: configuration,
+      Code: { RepositoryType: 'S3', Location: location },
+      ...(Object.keys(tags).length > 0 ? { Tags: tags } : {}),
+      ...(reserved !== undefined ? { Concurrency: { ReservedConcurrentExecutions: reserved } } : {}),
+    });
   }
 
   /** The configuration that the request's qualifier names, and the version it is, none for $LATEST. */

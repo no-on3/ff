@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // AWS's SDK for JavaScript v3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the
 // endpoint, the region and the key are given. A function through its life: made, waited for, listed, its code and its
-// settings changed, each change waited for, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls' settings, refused as Lambda refuses, deleted; an operation FF doesn't offer
-// yet refused once, by its name, though the client retries by default. One JSON line per check,
+// settings changed, each change waited for, tagged, invoked, a version and an alias, a URL, a queue's mapping, its
+// asynchronous calls' settings, its dead-letter queue, its reserved concurrency, refused as Lambda refuses, deleted; an
+// operation FF doesn't offer yet refused once, by its name, though the client retries by default. One JSON line per check,
 // {client, want, got, what}, for hack/e2e.sh.
 //   MODULES=<folder with node_modules> ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> \
 //   CODE=<zip> CODE_SHA=<its CodeSha256> NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> \
@@ -170,6 +171,14 @@ await check('ok', 'UpdateFunctionConfiguration with a DeadLetterConfig of a queu
   await send(lambda.UpdateFunctionConfigurationCommand, { FunctionName, DeadLetterConfig: { TargetArn: '' } });
   const removed = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });
   return expect([set.DeadLetterConfig?.TargetArn, set.LastUpdateStatus, read.DeadLetterConfig?.TargetArn, removed.DeadLetterConfig ?? 'none'], [QUEUE_ARN, 'Successful', QUEUE_ARN, 'none']);
+});
+await check('ok', 'PutFunctionConcurrency, then GetFunctionConcurrency and GetFunction read it; DeleteFunctionConcurrency, none again', async () => {
+  const put = await send(lambda.PutFunctionConcurrencyCommand, { FunctionName, ReservedConcurrentExecutions: 2 });
+  const read = await send(lambda.GetFunctionConcurrencyCommand, { FunctionName });
+  const { Concurrency } = await send(lambda.GetFunctionCommand, { FunctionName });
+  await send(lambda.DeleteFunctionConcurrencyCommand, { FunctionName });
+  const none = await send(lambda.GetFunctionConcurrencyCommand, { FunctionName });
+  return expect([put.ReservedConcurrentExecutions, read.ReservedConcurrentExecutions, Concurrency?.ReservedConcurrentExecutions, none.ReservedConcurrentExecutions ?? 'none'], [2, 2, 2, 'none']);
 });
 await check('ok', 'TagResource, ListTags and UntagResource on its ARN', async () => {
   const { FunctionArn } = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });

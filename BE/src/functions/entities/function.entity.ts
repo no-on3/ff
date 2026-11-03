@@ -57,6 +57,14 @@ export enum PackageType {
 }
 
 /**
+ * The most instances a function runs until it is told otherwise. Lambda's
+ * endpoint reads it as no reserved concurrency, so that a tool's default sees
+ * nothing to change, as `ff export` does with its copy of the number
+ * (cli/src/commands/export/template.rs).
+ */
+export const DEFAULT_MAX_INSTANCES = 3;
+
+/**
  * A name belongs to one function of its account, as on AWS Lambda, compared
  * exactly: "Hello" and "hello" are two names. The index also serves every
  * query by account, which all start with its column.
@@ -196,12 +204,22 @@ export class Function {
   minInstances: number;
 
   /** The most instances autoscaling may run: each serves one call at a time (D14). */
-  @Column({ default: 3 })
+  @Column({ default: DEFAULT_MAX_INSTANCES })
   maxInstances: number;
 
   /** Not settable: a function scales to zero exactly when its minInstances is 0. */
   @Column({ default: true })
   scaleToZero: boolean;
+
+  /**
+   * Every call refused as throttled, none run, as Lambda's reserved
+   * concurrency of 0: its versions and aliases too, its queues read no more,
+   * its calls that don't wait retried as Lambda retries a throttle. Set
+   * through Lambda's endpoint; PutFunctionConcurrency with more, or
+   * DeleteFunctionConcurrency, takes calls again.
+   */
+  @Column({ default: false })
+  callsStopped: boolean;
 
   /**
    * Lambda's RevisionId: new with each change of its code, its settings or its
