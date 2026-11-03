@@ -30,7 +30,7 @@ import {
   LogStoreUnavailableError,
   initMsOf,
 } from '../orchestrator/orchestrator.errors';
-import { FunctionWorkload, ORCHESTRATOR, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
+import { FunctionWorkload, InvokeOptions, ORCHESTRATOR, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
@@ -277,12 +277,18 @@ const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string>
   Object.fromEntries(Object.entries(secrets).map(([name, secret]) => [name, secret.value]));
 
 /**
- * A call's outcome: the invocation as kept, and the function's output, or why
- * the call failed: the error, and what its caller may see of it.
+ * A call's outcome: the invocation as kept, and the function's output, as a
+ * value and as its runtime sent it, or why the call failed: the error, and what
+ * its caller may see of it. The call's last 4 KB of log, when it asked for them
+ * and its runtime gave them.
  */
-export type CallOutcome =
-  | { invocation: FunctionInvocation; ok: true; output: unknown }
-  | { invocation: FunctionInvocation; ok: false; error: unknown; visible: string };
+export type CallOutcome = { invocation: FunctionInvocation; logResult?: string } & (
+  | { ok: true; output: unknown; outputJson?: string }
+  | { ok: false; error: unknown; visible: string }
+);
+
+/** What a call asks of the runtime, as Lambda's Invoke asks it: the call's log back, and the caller's ClientContext for the handler. */
+export type CallAsks = Pick<InvokeOptions, 'logTail' | 'clientContext'>;
 
 /** A message without its final period, to continue it with another sentence. */
 const clause = (message: string): string => message.replace(/\.\s*$/, '');
@@ -1269,12 +1275,13 @@ export class FunctionsService {
    * `history` is what the history keeps of the event, when not the event
    * itself: a URL's, without its callers' credentials. `requestId` is the
    * request's ID when the caller chose it first: a URL's event names it, and
-   * an asynchronous call's attempts keep it, each with its `attempt`.
+   * an asynchronous call's attempts keep it, each with its `attempt`. `asks`
+   * is what Lambda's Invoke asks of the runtime.
    */
   async call(
     function_: Function,
     payload: unknown,
-    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number; target?: CallTarget },
+    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number; target?: CallTarget; asks?: CallAsks },
   ): Promise<CallOutcome> {
     const { version, alias } = options.target ?? {};
     const running: Running = version ? versionRun(function_, version) : function_;
@@ -1307,7 +1314,7 @@ export class FunctionsService {
       // A version's first call, or its first since it went idle, makes its pods of its workload whole; $LATEST at
       // zero starts with a fresh key when its key is due a renewal.
       const start = version ? () => this.versionWorkload(running, version.version) : () => this.withFreshKey(function_.id);
-      const result = await this.orchestrator.invoke(running, payload, invocation.requestId, start);
+      const result = await this.orchestrator.invoke(running, payload, { requestId: invocation.requestId, start, ...options.asks });
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
@@ -1324,7 +1331,7 @@ export class FunctionsService {
       invocation.status = InvocationStatus.COMPLETED;
       // Should this fail, the catch below ends the call as a platform failure, unbilled: its outcome couldn't be kept.
       await this.finish(running, invocation, UsageStatus.SUCCESS, result.initMs);
-      return { invocation, ok: true, output: result.output };
+      return { invocation, ok: true, output: result.output, outputJson: result.outputJson, logResult: result.logResult };
     } catch (error) {
       const duration = Date.now() - startTime;
       this.metricsService.recordMetric(function_.id, duration, 0, true);
@@ -1345,7 +1352,7 @@ export class FunctionsService {
       invocation.error = keptError.value;
       invocation.errorTruncated = keptError.truncated;
       await this.finish(running, invocation, failureStatus(error), initMsOf(error));
-      return { invocation, ok: false, error, visible };
+      return { invocation, ok: false, error, visible, logResult: measured?.logResult };
     } finally {
       this.metricsService.invocationFinished(running);
     }

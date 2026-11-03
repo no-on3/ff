@@ -1174,7 +1174,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       expect(outcome.invocation).toMatchObject({ requestId: 'req-3', attempt: 2, source: InvocationSource.ASYNC, status: InvocationStatus.COMPLETED });
       expect(outcome.invocation.id).toMatch(UUID);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, 'req-3', expect.any(globalThis.Function));
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, { requestId: 'req-3', start: expect.any(globalThis.Function) });
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-3' }), ending);
     });
 
@@ -1194,7 +1194,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(inserted).toEqual([
         expect.objectContaining({ id: 'req-1', source: InvocationSource.URL, input: { version: '2.0', headers: { authorization: '***' } }, status: InvocationStatus.RUNNING }),
       ]);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, 'req-1', expect.any(globalThis.Function));
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, { requestId: 'req-1', start: expect.any(globalThis.Function) });
       expect(outcome).toMatchObject({ ok: true, output: { statusCode: 204 }, invocation: { id: 'req-1', status: InvocationStatus.COMPLETED } });
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-1' }), ending);
     });
@@ -1205,6 +1205,22 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       const outcome = await service.call(activeFunction(), {}, { source: InvocationSource.URL, requestId: 'req-2' });
 
       expect(outcome).toMatchObject({ ok: false, visible: 'TypeError: x is undefined', invocation: { id: 'req-2', status: InvocationStatus.ERROR } });
+    });
+
+    it("passes on what a caller of Lambda's Invoke asks for, and answers with the runtime's answer as sent and the call's log, failed or not", async () => {
+      orchestrator.invoke.mockResolvedValueOnce({ output: { n: 1 }, outputJson: '{ "n": 1 }', logResult: 'U1RBUlQK', durationMs: 1 });
+      orchestrator.invoke.mockRejectedValueOnce(new FunctionRuntimeError('TypeError', 'bad input', { durationMs: 2, logResult: 'RU5ECg==' }));
+      const asks = { logTail: true, clientContext: 'e30=' };
+
+      const answered = await service.call(activeFunction(), {}, { source: InvocationSource.API, requestId: 'req-4', asks });
+      const failed = await service.call(activeFunction(), {}, { source: InvocationSource.API, requestId: 'req-5', asks: { logTail: true } });
+
+      expect(orchestrator.invoke.mock.calls.map(([, , options]) => options)).toEqual([
+        { requestId: 'req-4', start: expect.any(globalThis.Function), logTail: true, clientContext: 'e30=' },
+        { requestId: 'req-5', start: expect.any(globalThis.Function), logTail: true },
+      ]);
+      expect(answered).toMatchObject({ ok: true, output: { n: 1 }, outputJson: '{ "n": 1 }', logResult: 'U1RBUlQK' });
+      expect(failed).toMatchObject({ ok: false, visible: 'TypeError: bad input', logResult: 'RU5ECg==' });
     });
 
     it('hands the function its input as the event, any JSON value, as AWS Lambda takes a payload; {} without one', async () => {
@@ -1225,7 +1241,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1', { a: 1 });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, created().requestId, expect.any(globalThis.Function));
+      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, { requestId: created().requestId, start: expect.any(globalThis.Function) });
       expect(invocation).toMatchObject({
         status: InvocationStatus.COMPLETED,
         output: { hello: 'world' },
@@ -1264,7 +1280,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1');
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, created().requestId, expect.any(globalThis.Function));
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, { requestId: created().requestId, start: expect.any(globalThis.Function) });
       expect(invocation.duration).toBeGreaterThanOrEqual(0);
     });
 
@@ -1723,12 +1739,12 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     it("runs a version as it was published, billed at its memory and with no warm instance; its first call's pods made of its workload whole", async () => {
       const answer = await service.invoke('user-1', 'fn-1', { a: 1 }, '2');
 
-      const [running, payload, , deploy] = orchestrator.invoke.mock.calls[0];
+      const [running, payload, options] = orchestrator.invoke.mock.calls[0];
       expect(running).toMatchObject({ id: 'fn-1', version: 2, memory: 1024, timeout: 30, minInstances: 0, code: 'export const handler = async () => 2;' });
       expect(payload).toEqual({ a: 1 });
       expect(answer).toMatchObject({ version: 2, alias: null, output: 'ok' });
       expect(record()).toMatchObject({ functionId: 'fn-1', version: 2, alias: null, memoryMb: 1024, minInstances: 0 });
-      expect(await deploy?.()).toMatchObject({ version: 2, codeImage: imageOf('package2'), environment: { revision: 'v2', values: { STAGE: 'v2' } } });
+      expect(await options?.start?.()).toMatchObject({ version: 2, codeImage: imageOf('package2'), environment: { revision: 'v2', values: { STAGE: 'v2' } } });
       expect(codeImages.imageFor).toHaveBeenLastCalledWith('user-1', 'package2');
     });
 
@@ -1758,7 +1774,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.invoke('user-1', 'fn-1', {}, 'edge');
       await service.invoke('user-1', 'fn-1', {}, '$LATEST');
 
-      const starts = await Promise.all(orchestrator.invoke.mock.calls.map(async ([running, , , start]) => [running.version, await start?.()]));
+      const starts = await Promise.all(orchestrator.invoke.mock.calls.map(async ([running, , options]) => [running.version, await options?.start?.()]));
       expect(starts).toEqual([
         [undefined, undefined],
         [undefined, undefined],
@@ -1801,7 +1817,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.invoke('user-1', 'fn-1', { name: 'x' });
 
       // $LATEST's pods are there: nothing to make at a cold start.
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, created().requestId, expect.any(globalThis.Function));
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, { requestId: created().requestId, start: expect.any(globalThis.Function) });
       expect(usage.record).toHaveBeenCalledWith(
         {
           requestId: created().requestId,

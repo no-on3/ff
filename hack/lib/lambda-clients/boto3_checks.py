@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # boto3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the endpoint, the region
 # and the key are given. A function through its life: made, waited for, listed, its code and its settings changed,
-# each change waited for, tagged, refused as Lambda refuses, deleted; an operation FF doesn't offer yet refused once, by
+# each change waited for, tagged, invoked, refused as Lambda refuses, deleted; an operation FF doesn't offer yet refused once, by
 # its name, though boto3 retries by default. One JSON line per check, {client, want, got, what}, for hack/e2e.sh.
 #   ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> CODE=<zip> CODE_SHA=<its CodeSha256> \
 #   NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> python boto3_checks.py
+import base64
 import json
 import os
 
@@ -87,6 +88,24 @@ def new_settings():
     return expect([read["LastUpdateStatus"], read["Timeout"], read["Environment"]["Variables"]], ["Successful", 10, {"STAGE": "boto3-2"}])
 
 
+def invoked():
+    called = client.invoke(FunctionName=NAME, Payload=json.dumps({"n": 1}).encode(), LogType="Tail",
+                           ClientContext=base64.b64encode(json.dumps({"custom": {"cart": "7"}}).encode()).decode())
+    log = base64.b64decode(called["LogResult"]).decode()
+    lines = log.splitlines()
+    return expect([called["StatusCode"], called["ExecutedVersion"], called.get("FunctionError", "none"), json.loads(called["Payload"].read()),
+                   lines[0].startswith("START RequestId: "), 'invoked with {"n":1}' in lines, lines[-1].startswith("REPORT RequestId: ")],
+                  [200, "$LATEST", "none", {"code": "v2", "event": {"n": 1}, "clientContext": {"custom": {"cart": "7"}}}, True, True, True])
+
+
+def invoked_otherwise():
+    failed = client.invoke(FunctionName=NAME, Payload=json.dumps({"fail": True}).encode())
+    queued = client.invoke(FunctionName=NAME, InvocationType="Event", Payload=b"{}")
+    dry = client.invoke(FunctionName=NAME, InvocationType="DryRun")
+    return expect([failed["StatusCode"], failed.get("FunctionError"), json.loads(failed["Payload"].read()), queued["StatusCode"], dry["StatusCode"]],
+                  [200, "Unhandled", {"errorType": "TypeError", "errorMessage": "bad input"}, 202, 204])
+
+
 def tags():
     arn = client.get_function_configuration(FunctionName=NAME)["FunctionArn"]
     client.tag_resource(Resource=arn, Tags={"team": "shop"})
@@ -131,6 +150,8 @@ check("ok", "UpdateFunctionCode answers InProgress; the waiter function_updated_
 check("ok", "UpdateFunctionConfiguration answers InProgress; another change meanwhile is ResourceConflictException; the first is live once Successful", new_settings)
 check("ok", "a RevisionId read before those changes is PreconditionFailedException",
       lambda: refused_as(lambda: client.update_function_configuration(FunctionName=NAME, Timeout=12, RevisionId=state.get("revision")), "PreconditionFailedException"))
+check("ok", "Invoke waits for the call: $LATEST ran it, the function's answer as it returned it, the ClientContext in its context, its log with LogType Tail", invoked)
+check("ok", "a function that throws: 200, FunctionError Unhandled and Lambda's error document; Event 202; DryRun 204", invoked_otherwise)
 check("ok", "TagResource, ListTags and UntagResource on its ARN", tags)
 check("ok", "refused as boto3 names Lambda's errors: a runtime FF lacks, a function the account hasn't", refusals)
 check("ok", "operations FF doesn't offer yet are UnknownOperationException, named, sent once by a client that retries by default", not_offered)

@@ -116,10 +116,33 @@ export interface TenantLimits {
 export interface InvokeResult {
   /** The value returned by the function handler. */
   output: unknown;
+  /** The handler's value as its runtime sent it, JSON, as Lambda's Invoke gives it back: its numbers and its spacing as they were. */
+  outputJson?: string;
   durationMs?: number;
   memoryUsedMb?: number;
   /** How long the call waited for an instance to start from zero: a cold start (P-20). */
   initMs?: number;
+  /** The call's last 4 KB of log in base64, when the call asked for it and its runtime gives it. */
+  logResult?: string;
+}
+
+/** What a call asks of its runtime beside its payload, and what a cold start starts from. */
+export interface InvokeOptions {
+  /**
+   * The call's ID, which goes to the runtime (X-FF-Request-Id), so that the invocation, its usage record and its log
+   * lines share it.
+   */
+  requestId?: string;
+  /**
+   * What a cold start starts from, which the call asks for only then: a version's workload whole, its code image and
+   * environment, when the version has nothing to run on (its first call, or its first since it went idle); $LATEST's
+   * at zero with a fresh key when its key is due a renewal, else nothing, its Deployment then scaled up as it is.
+   */
+  start?: () => Promise<FunctionWorkload | undefined>;
+  /** The call's last 4 KB of log given back, as Lambda's LogType Tail. */
+  logTail?: boolean;
+  /** Lambda's ClientContext, the base64 of a JSON object, for the handler's context. */
+  clientContext?: string;
 }
 
 export interface Orchestrator {
@@ -180,14 +203,10 @@ export interface Orchestrator {
    */
   renewEnvironment(fn: FunctionWorkload): Promise<boolean>;
   /**
-   * Calls the function, or the version `fn.version` names. `requestId` goes to the runtime (X-FF-Request-Id), so the
-   * invocation, its usage record and its log lines share one ID. An error after a cold start carries its
-   * duration: initMsOf(). `start` gives what a cold start starts from, which the call asks for only then: a version's
-   * workload whole, its code image and environment, when the version has nothing to run on (its first call, or its
-   * first since it went idle); $LATEST's at zero with a fresh key when its key is due a renewal, else nothing, its
-   * Deployment then scaled up as it is. The cold start's duration counts its making.
+   * Calls the function, or the version `fn.version` names, as `options` asks. An error after a cold start carries its
+   * duration: initMsOf(); the cold start's duration counts its making.
    */
-  invoke(fn: FunctionWorkload, payload: unknown, requestId?: string, start?: () => Promise<FunctionWorkload | undefined>): Promise<InvokeResult>;
+  invoke(fn: FunctionWorkload, payload: unknown, options?: InvokeOptions): Promise<InvokeResult>;
   scale(fn: FunctionWorkload, replicas: number): Promise<void>;
   /** Instances that can serve now, of the version `fn.version` names, or $LATEST's. */
   readyInstances(fn: FunctionWorkload): Promise<number>;

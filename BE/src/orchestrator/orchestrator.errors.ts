@@ -12,33 +12,37 @@ export class OrchestratorError extends Error {
   }
 }
 
-/** What the runtime measured of a call that failed, from its answer's headers (P-20). */
-export interface Measured {
+/** What the runtime said of a call that failed, from its answer's headers: what it measured, which bills it, and the call's log when asked. */
+export interface CallReport {
   durationMs?: number;
   memoryUsedMb?: number;
+  /** The call's last 4 KB of log in base64, as Lambda's X-Amz-Log-Result. */
+  logResult?: string;
 }
 
 /** The function ran and failed (it threw, ran out of memory, crashed, or could not load). */
 export class FunctionRuntimeError extends Error {
   readonly durationMs?: number;
   readonly memoryUsedMb?: number;
+  readonly logResult?: string;
 
   constructor(
     readonly errorType: string,
     message: string,
-    measured: Measured = {},
+    report: CallReport = {},
   ) {
     super(message);
     this.name = 'FunctionRuntimeError';
-    this.durationMs = measured.durationMs;
-    this.memoryUsedMb = measured.memoryUsedMb;
+    this.durationMs = report.durationMs;
+    this.memoryUsedMb = report.memoryUsedMb;
+    this.logResult = report.logResult;
   }
 }
 
 /** The function exceeded its configured timeout. */
 export class FunctionTimeoutError extends FunctionRuntimeError {
-  constructor(message: string, measured: Measured = {}) {
-    super('Sandbox.Timedout', message, measured);
+  constructor(message: string, report: CallReport = {}) {
+    super('Sandbox.Timedout', message, report);
     this.name = 'FunctionTimeoutError';
   }
 }

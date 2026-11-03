@@ -239,7 +239,7 @@ export async function handler(_event: unknown, context: { functionVersion: strin
       // Published: version 1 is the function as it is, whose pods carry no version label yet.
       const version1 = { ...latest, version: 1, lastVersion: 1 };
 
-      const first = await orchestrator.invoke({ ...version1, codeImage: undefined }, {}, undefined, async () => version1);
+      const first = await orchestrator.invoke({ ...version1, codeImage: undefined }, {}, { start: async () => version1 });
 
       expect(first.output).toEqual({ version: '1', code: 'a' });
       expect(first.initMs).toBeGreaterThan(0);
@@ -326,12 +326,12 @@ export async function handler() {
       // At zero, a call that brings a fresh key starts the function on it; one that brings none, on the key it had.
       await orchestrator.scale(renewing, 0);
       await eventually(async () => (await orchestrator.readyInstances(renewing)) === 0, 90_000);
-      const cold = await orchestrator.invoke(renewed, {}, undefined, async () => ({ ...renewing, environment: keyed('third') }));
+      const cold = await orchestrator.invoke(renewed, {}, { start: async () => ({ ...renewing, environment: keyed('third') }) });
       expect(cold.output).toEqual({ key: 'third' });
       expect(cold.initMs).toBeGreaterThan(0);
       await orchestrator.scale(renewing, 0);
       await eventually(async () => (await orchestrator.readyInstances(renewing)) === 0, 90_000);
-      expect((await orchestrator.invoke(renewed, {}, undefined, async () => undefined)).output).toEqual({ key: 'third' });
+      expect((await orchestrator.invoke(renewed, {}, { start: async () => undefined })).output).toEqual({ key: 'third' });
     } finally {
       await orchestrator.remove(renewing);
     }

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // AWS's SDK for JavaScript v3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the
 // endpoint, the region and the key are given. A function through its life: made, waited for, listed, its code and its
-// settings changed, each change waited for, tagged, refused as Lambda refuses, deleted; an operation FF doesn't offer
+// settings changed, each change waited for, tagged, invoked, refused as Lambda refuses, deleted; an operation FF doesn't offer
 // yet refused once, by its name, though the client retries by default. One JSON line per check,
 // {client, want, got, what}, for hack/e2e.sh.
 //   MODULES=<folder with node_modules> ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> \
@@ -95,6 +95,30 @@ await check('ok', 'UpdateFunctionConfiguration answers InProgress; another chang
 await check('ok', 'a RevisionId read before those changes is PreconditionFailedException', () =>
   refusedAs(() => send(lambda.UpdateFunctionConfigurationCommand, { FunctionName, Timeout: 12, RevisionId: revision }), 'PreconditionFailedException'),
 );
+/** What a call answered, read as JSON. */
+const answerOf = (called) => JSON.parse(Buffer.from(called.Payload).toString('utf8'));
+await check('ok', "Invoke waits for the call: $LATEST ran it, the function's answer as it returned it, the ClientContext in its context, its log with LogType Tail", async () => {
+  const called = await send(lambda.InvokeCommand, {
+    FunctionName,
+    Payload: Buffer.from(JSON.stringify({ n: 1 })),
+    LogType: 'Tail',
+    ClientContext: Buffer.from(JSON.stringify({ custom: { cart: '7' } })).toString('base64'),
+  });
+  const log = Buffer.from(called.LogResult, 'base64').toString('utf8');
+  return expect(
+    [called.StatusCode, called.ExecutedVersion, called.FunctionError ?? 'none', answerOf(called), /^START RequestId: /m.test(log), log.includes('invoked with {"n":1}\n'), /^REPORT RequestId: /m.test(log)],
+    [200, '$LATEST', 'none', { code: 'v2', event: { n: 1 }, clientContext: { custom: { cart: '7' } } }, true, true, true],
+  );
+});
+await check('ok', "a function that throws: 200, FunctionError Unhandled and Lambda's error document; Event 202; DryRun 204", async () => {
+  const failed = await send(lambda.InvokeCommand, { FunctionName, Payload: Buffer.from(JSON.stringify({ fail: true })) });
+  const queued = await send(lambda.InvokeCommand, { FunctionName, InvocationType: 'Event', Payload: Buffer.from('{}') });
+  const dry = await send(lambda.InvokeCommand, { FunctionName, InvocationType: 'DryRun' });
+  return expect(
+    [failed.StatusCode, failed.FunctionError, answerOf(failed), queued.StatusCode, dry.StatusCode],
+    [200, 'Unhandled', { errorType: 'TypeError', errorMessage: 'bad input' }, 202, 204],
+  );
+});
 await check('ok', 'TagResource, ListTags and UntagResource on its ARN', async () => {
   const { FunctionArn } = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });
   await send(lambda.TagResourceCommand, { Resource: FunctionArn, Tags: { team: 'shop' } });

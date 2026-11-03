@@ -437,7 +437,7 @@ describe('KubernetesOrchestrator', () => {
       api.objects.set(deploymentPath, { ...api.applied.at(-1)!.manifest, spec: { ...api.applied.at(-1)!.manifest.spec, replicas: 0 }, status: { readyReplicas: 0 } });
       api.applied = [];
 
-      await orchestrator.invoke(withKey('AKFFOLD'), {}, undefined, async () => withKey('AKFFNEW'));
+      await orchestrator.invoke(withKey('AKFFOLD'), {}, { start: async () => withKey('AKFFNEW') });
 
       expect(api.scaled).toEqual([]);
       expect(api.applied.map((a) => a.path)).toEqual([secretPath(1), deploymentPath]);
@@ -448,7 +448,7 @@ describe('KubernetesOrchestrator', () => {
     it('scales $LATEST from zero as it is when its call has no fresh key to give', async () => {
       api.objects.set(deploymentPath, { ...rolledOut(0), status: { readyReplicas: 0 } });
 
-      await orchestrator.invoke(withKey('AKFFOLD'), {}, undefined, async () => undefined);
+      await orchestrator.invoke(withKey('AKFFOLD'), {}, { start: async () => undefined });
 
       expect(api.scaled).toEqual([1]);
       expect(api.applied).toEqual([]);
@@ -578,14 +578,14 @@ describe('KubernetesOrchestrator', () => {
       keepApplied();
       const deploy = jest.fn(async () => version({ environment: { revision: 'r1', values: { STAGE: 'v2' } } }));
 
-      const result = await orchestrator.invoke(version({ codeImage: undefined }), { a: 1 }, 'req-1', deploy);
+      const result = await orchestrator.invoke(version({ codeImage: undefined }), { a: 1 }, { requestId: 'req-1', start: deploy });
 
       expect(deploy).toHaveBeenCalledTimes(1);
       expect(api.requests[0].path).toBe(`/api/v1/namespaces/${ns}/services/${versionName}:http/proxy/invoke`);
       expect(result.initMs).toEqual(expect.any(Number));
 
       // Its next call finds them: nothing made again.
-      await orchestrator.invoke(version({ codeImage: undefined }), { a: 2 }, 'req-2', deploy);
+      await orchestrator.invoke(version({ codeImage: undefined }), { a: 2 }, { requestId: 'req-2', start: deploy });
       expect(deploy).toHaveBeenCalledTimes(1);
     });
 
@@ -838,7 +838,7 @@ describe('KubernetesOrchestrator', () => {
 
       const result = await orchestrator.invoke(fn, { a: 1 });
 
-      expect(result).toEqual({ output: { message: 'hi' }, durationMs: 12.5, memoryUsedMb: 61 });
+      expect(result).toEqual({ output: { message: 'hi' }, outputJson: '{"message":"hi"}', durationMs: 12.5, memoryUsedMb: 61 });
       expect(api.requests[0]).toMatchObject({
         method: 'POST',
         path: `/api/v1/namespaces/${ns}/services/${name}:http/proxy/invoke`,
@@ -921,6 +921,42 @@ describe('KubernetesOrchestrator', () => {
       await expect(orchestrator.invoke(fn, {})).rejects.toMatchObject({ errorType: 'Runtime.OutOfMemory', message: 'heap' });
     });
 
+    describe("what a caller of Lambda's Invoke asks for", () => {
+      it("asks the runtime for the call's log and passes the caller's client context on, and neither when not asked", async () => {
+        api.objects.set(deploymentPath, rolledOut(1));
+        api.responses.push({ status: 200, headers: { 'x-ff-log-result': 'U1RBUlQK' }, body: '{ "spaced" : 1 }' }, { status: 200, headers: {}, body: '' });
+
+        const asked = await orchestrator.invoke(fn, {}, { requestId: 'inv-1', logTail: true, clientContext: 'e30=' });
+        const plain = await orchestrator.invoke(fn, {}, { requestId: 'inv-2' });
+
+        expect(api.requests.map((request) => request.options?.headers)).toEqual([
+          { 'x-ff-request-id': 'inv-1', 'x-ff-log-type': 'Tail', 'x-ff-client-context': 'e30=' },
+          { 'x-ff-request-id': 'inv-2' },
+        ]);
+        // The answer as the runtime sent it, its spacing kept; an empty one is null, as its output.
+        expect(asked).toMatchObject({ output: { spaced: 1 }, outputJson: '{ "spaced" : 1 }', logResult: 'U1RBUlQK' });
+        expect(plain).toMatchObject({ output: null, outputJson: 'null' });
+        expect(plain).not.toHaveProperty('logResult');
+      });
+
+      it("keeps the log of a call that threw or timed out on its error, as Lambda gives it back with the error", async () => {
+        api.objects.set(deploymentPath, rolledOut(1));
+        const unhandled = { 'x-ff-function-error': 'Unhandled', 'x-ff-log-result': 'RU5ECg==' };
+        api.responses.push(
+          { status: 500, headers: unhandled, body: '{"errorType":"TypeError","errorMessage":"bad input"}' },
+          { status: 504, headers: unhandled, body: '{"errorType":"Sandbox.Timedout","errorMessage":"Task timed out after 3.00 seconds"}' },
+        );
+
+        const threw = await orchestrator.invoke(fn, {}, { logTail: true }).catch((error: unknown) => error);
+        const timedOut = await orchestrator.invoke(fn, {}, { logTail: true }).catch((error: unknown) => error);
+
+        expect(threw).toBeInstanceOf(FunctionRuntimeError);
+        expect(threw).toMatchObject({ errorType: 'TypeError', logResult: 'RU5ECg==' });
+        expect(timedOut).toBeInstanceOf(FunctionTimeoutError);
+        expect(timedOut).toMatchObject({ errorType: 'Sandbox.Timedout', logResult: 'RU5ECg==' });
+      });
+    });
+
     describe('what usage records need (P-20)', () => {
       /** Starting instances that become ready after `ms`: a cold start of about that long. */
       const readyAfter = (ms: number) => {
@@ -931,7 +967,7 @@ describe('KubernetesOrchestrator', () => {
       it("sends the invocation's ID to the runtime as X-FF-Request-Id, and nothing without one (D6)", async () => {
         api.objects.set(deploymentPath, rolledOut(1));
 
-        await orchestrator.invoke(fn, {}, 'inv-1');
+        await orchestrator.invoke(fn, {}, { requestId: 'inv-1' });
         await orchestrator.invoke(fn, {});
 
         expect(api.requests.map((request) => request.options?.headers)).toEqual([{ 'x-ff-request-id': 'inv-1' }, {}]);
@@ -948,14 +984,14 @@ describe('KubernetesOrchestrator', () => {
         try {
           api.objects.set(deploymentPath, rolledOut(1));
 
-          const result = await directly().invoke(fn, { a: 1 }, 'inv-2');
+          const result = await directly().invoke(fn, { a: 1 }, { requestId: 'inv-2' });
 
           expect(calls.urls).toEqual([serviceUrl]);
           expect(seen).toEqual([
             { url: '/invoke', headers: expect.objectContaining({ 'x-ff-request-id': 'inv-2', 'content-type': 'application/json' }), body: '{"a":1}' },
           ]);
           // 0.00 ms is what the runtime measured: billed as such, not replaced by the backend's own, longer measure.
-          expect(result).toEqual({ output: 'ok', durationMs: 0, memoryUsedMb: 48 });
+          expect(result).toEqual({ output: 'ok', outputJson: '"ok"', durationMs: 0, memoryUsedMb: 48 });
         } finally {
           calls.restore();
           await pod.close();
@@ -1032,7 +1068,7 @@ describe('KubernetesOrchestrator', () => {
         try {
           api.objects.set(deploymentPath, rolledOut(1));
 
-          const result = await directly().invoke(fn, {}, 'inv-3');
+          const result = await directly().invoke(fn, {}, { requestId: 'inv-3' });
 
           expect(result.output).toBe('answered');
           expect(calls.urls).toEqual(Array(3).fill(serviceUrl));
@@ -1049,7 +1085,7 @@ describe('KubernetesOrchestrator', () => {
           api.objects.set(deploymentPath, rolledOut(1));
           const started = Date.now();
 
-          await expect(directly(1000).invoke(fn, {}, 'inv-4')).rejects.toMatchObject({ code: 'ECONNREFUSED' });
+          await expect(directly(1000).invoke(fn, {}, { requestId: 'inv-4' })).rejects.toMatchObject({ code: 'ECONNREFUSED' });
           // At 0, 100, 300 and 700 ms, the next wait ending past the second given; three when the machine is slow.
           expect([calls.urls.length >= 3 && calls.urls.length <= 4, Date.now() - started < 1000]).toEqual([true, true]);
         } finally {
@@ -1068,7 +1104,7 @@ describe('KubernetesOrchestrator', () => {
         try {
           api.objects.set(deploymentPath, rolledOut(1));
 
-          const result = await directly().invoke(fn, {}, 'inv-5');
+          const result = await directly().invoke(fn, {}, { requestId: 'inv-5' });
 
           expect(result.output).toBe('answered');
           // The first on a connection kept alive, as every call; the second on one of its own, closed after it: one kept
@@ -1093,7 +1129,7 @@ describe('KubernetesOrchestrator', () => {
           api.objects.set(deploymentPath, rolledOut(1));
 
           // 200 ms to try again: over already at the refusal, were they counted from the start of the call.
-          const result = await directly(200).invoke(fn, {}, 'inv-6');
+          const result = await directly(200).invoke(fn, {}, { requestId: 'inv-6' });
 
           expect([result.output, attempts]).toEqual(['answered', 2]);
         } finally {
@@ -1112,7 +1148,7 @@ describe('KubernetesOrchestrator', () => {
         try {
           api.objects.set(deploymentPath, rolledOut(1));
 
-          const error = await directly(300).invoke(fn, {}, 'inv-7').catch((failure: unknown) => failure);
+          const error = await directly(300).invoke(fn, {}, { requestId: 'inv-7' }).catch((failure: unknown) => failure);
 
           expect(error).toBeInstanceOf(OrchestratorError);
           expect((error as Error).message).toMatch(/^Invocation failed with HTTP 503: .*Runtime is shutting down/);

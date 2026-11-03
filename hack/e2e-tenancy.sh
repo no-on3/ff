@@ -1123,6 +1123,8 @@ $(lambda_with "${lambda_b[@]}" update-function-code --function-name "$arn_a" --s
 $([ "$(seen_by_a)" = "$before_b" ] && echo true || echo false)"
 check "A's key finds it, by its name and by its ARN" "$arn_a $arn_a" \
   "$(lambda_with "${lambda_a[@]}" get-function --function-name l5-a --query Configuration.FunctionArn) $(lambda_with "${lambda_a[@]}" get-function --function-name "$arn_a" --query Configuration.FunctionArn)"
+check "  ... and invokes it, a DryRun, which runs nothing" 204 \
+  "$(lambda_with "${lambda_a[@]}" invoke --function-name "$arn_a" --invocation-type DryRun --query StatusCode /dev/null)"
 # listed <key ID> <secret>: the functions the key's ListFunctions gives, by name, one a line.
 listed() { lambda_with "$@" list-functions --query 'Functions[].FunctionName' | tr '\t' '\n'; }
 check "  ... and lists it, where B's key lists none of A's functions" "true false" \

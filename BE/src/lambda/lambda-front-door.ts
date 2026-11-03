@@ -132,7 +132,7 @@ export class LambdaFrontDoor implements OnModuleDestroy {
     // One of Lambda's other operations is named in its refusal, its body read to Lambda's own limit for it.
     const later = route ? null : laterOperationOf(method, rawPath, rawQuery);
     const limited = route?.operation ?? later;
-    const body = await readBody(request, limited?.maxBodyBytes ?? PAYLOAD_BYTES, bodyRefusals(limited?.name));
+    const body = await readBody(request, limited?.maxBodyBytes ?? PAYLOAD_BYTES, bodyRefusals(route?.operation.refusedAs ?? limited?.name));
     // A link to a function's code, which GetFunction gave: unsigned, its token the proof.
     const link = method === 'GET' ? CODE_LINK_PATH.exec(rawPath) : null;
     if (link) return this.code(link[1]);

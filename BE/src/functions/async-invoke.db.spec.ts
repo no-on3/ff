@@ -288,7 +288,7 @@ run('asynchronous calls, in the database (L2)', () => {
 
     expect(delays).toEqual([60, 120]);
     expect(await message(requestId)).toBeUndefined();
-    expect(invoke.mock.calls.map(([, payload, id]) => [payload, id])).toEqual([
+    expect(invoke.mock.calls.map(([, payload, options]) => [payload, options?.requestId])).toEqual([
       [{ order: 3 }, requestId],
       [{ order: 3 }, requestId],
       [{ order: 3 }, requestId],

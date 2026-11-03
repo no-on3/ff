@@ -226,13 +226,14 @@ outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused 
 # aws_lambda <arguments…>: the AWS CLI at Lambda's endpoint, from AWS_ENDPOINT_URL_LAMBDA alone, with AWS_KEY's key.
 aws_lambda() { AWS_ACCESS_KEY_ID="$AWS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
   AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_LAMBDA="http://localhost:$lambda_port" "${aws_cli[@]}" lambda "$@" --output json; }
-# lambda_zip <zip> <index.mjs's code>: a package of one module, as Lambda takes one; its CodeSha256 printed. Defined here,
-# as a section passes on only the functions it adds: one it defines again, as zip_of, stays the suite's in the next.
+# lambda_zip <zip> <code> [file]: a package of one module, index.mjs unless named, as Lambda takes one; its CodeSha256
+# printed. Defined here, as a section passes on only the functions it adds: one it defines again, as zip_of, stays the
+# suite's in the next.
 lambda_zip() {
   python3 - "$@" <<'PY'
 import base64, hashlib, sys, zipfile
 with zipfile.ZipFile(sys.argv[1], 'w') as archive:
-    archive.writestr('index.mjs', sys.argv[2])
+    archive.writestr(sys.argv[3] if len(sys.argv) > 3 else 'index.mjs', sys.argv[2])
 print(base64.b64encode(hashlib.sha256(open(sys.argv[1], 'rb').read()).digest()).decode())
 PY
 }
@@ -684,8 +685,85 @@ as_ver DELETE /buckets/e2e-lambda-code >/dev/null
 }
 section_def lambda_updates section_lambda_updates lambda_changes budget=120
 
+section_lambda_invoke() {
+section "Lambda's Invoke with the AWS CLI: the function's answer as it returned it, the version that ran, the call's log with LogType Tail, the ClientContext in Node.js and Python; an error and a timeout as the call's outcome; Event and DryRun; refused as Lambda refuses"
+invoker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-invoker", "functions": ["e2e-invoked", "e2e-invoked-py", "e2e-invoked-broken"], "functionAccess": "invoke"}')"
+# as_invoker <aws lambda arguments…>: the AWS CLI at Lambda's endpoint with a key that may invoke this section's functions.
+as_invoker() { AWS_KEY="$(jq -r .id <<<"$invoker")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$invoker")" aws_lambda "$@"; }
+# invoked <function> <aws lambda invoke arguments…>: the call's metadata as the CLI prints it; its payload in $work/invoked.json.
+invoked() { as_invoker invoke --function-name "$1" --cli-binary-format raw-in-base64-out "${@:2}" "$work/invoked.json"; }
+# log_of <metadata>: the call's log, X-Amz-Log-Result decoded.
+log_of() { jq -r '.LogResult // ""' <<<"$1" | base64 -d; }
+lambda_zip "$work/invoked.zip" 'export const handler = async (event, context) => {
+  if (event.fail) throw new TypeError("bad input");
+  if (event.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.sleepMs));
+  console.log("invoked with", JSON.stringify(event));
+  return { event, clientContext: context.clientContext ?? null, version: process.env.FUNCTION_VERSION };
+};' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-invoked --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/invoked.zip" --timeout 2 --publish >/dev/null
+lambda_zip "$work/invoked-py.zip" 'def handler(event, context):
+    print("invoked with", event)
+    said = context.client_context
+    return {"app": said.client.app_title if said and said.client else None, "custom": said.custom if said else None}' index.py >/dev/null
+as_maker aws_lambda create-function --function-name e2e-invoked-py --runtime python3.13 --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/invoked-py.zip" >/dev/null
+lambda_zip "$work/invoked-broken.zip" 'throw new Error("boom at import");' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-invoked-broken --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/invoked-broken.zip" >/dev/null
+for made in e2e-invoked e2e-invoked-py e2e-invoked-broken; do as_maker aws_lambda wait function-active-v2 --function-name "$made" >/dev/null 2>&1 || true; done
+invoked_id="$(as_ver GET '/functions?name=e2e-invoked' | jq -r '.[0].id')"
+
+called="$(invoked e2e-invoked --payload '{"n": 1}')"
+check "Invoke waits for the call: 200, \$LATEST ran it, the function's answer as it returned it" '200 $LATEST none {"n":1}' \
+  "$(jq -r '"\(.StatusCode) \(.ExecutedVersion) \(.FunctionError // "none")"' <<<"$called") $(jq -c .event "$work/invoked.json")"
+called="$(invoked e2e-invoked --payload '{"n": 2}' --log-type Tail)"
+check "  ... with --log-type Tail, the call's log from its START to its REPORT, the function's line in it" "1 1 1" \
+  "$(log_of "$called" | grep -c '^START RequestId: ') $(log_of "$called" | grep -c '^invoked with {"n":2}$') $(log_of "$called" | grep -c '^REPORT RequestId: ')"
+invoked e2e-invoked --payload '{}' --client-context "$(printf '{"custom": {"cart": "7"}}' | base64 -w0)" >/dev/null
+check "  ... with --client-context, the caller's ClientContext in the handler's context.clientContext" '{"custom":{"cart":"7"}}' \
+  "$(jq -c .clientContext "$work/invoked.json")"
+called="$(invoked e2e-invoked-py --payload '{}' --log-type Tail --client-context "$(printf '{"client": {"app_title": "shop"}, "custom": {"cart": "8"}}' | base64 -w0)")"
+check "  ... and in Python's context.client_context, as Lambda's Python runtime gives it, the call's log with it" '{"app":"shop","custom":{"cart":"8"}} 1 1' \
+  "$(jq -c . "$work/invoked.json") $(log_of "$called" | grep -c '^invoked with {}$') $(log_of "$called" | grep -c '^REPORT RequestId: ')"
+called="$(invoked e2e-invoked --payload '{"n": 3}' --qualifier 1)"
+check "  ... through its version 1, which ran it, as ExecutedVersion says" "1 1" "$(jq -r .ExecutedVersion <<<"$called") $(jq -r .version "$work/invoked.json")"
+called="$(invoked e2e-invoked --payload '{"fail": true}')"
+check "a function that throws: the call's outcome, 200 with FunctionError Unhandled and Lambda's error document" \
+  '200 Unhandled {"errorType":"TypeError","errorMessage":"bad input"}' \
+  "$(jq -r '"\(.StatusCode) \(.FunctionError)"' <<<"$called") $(jq -c . "$work/invoked.json")"
+called="$(invoked e2e-invoked --payload '{"sleepMs": 4000}')"
+check "  ... and one past its timeout too, Sandbox.Timedout" "200 Unhandled Sandbox.Timedout" \
+  "$(jq -r '"\(.StatusCode) \(.FunctionError)"' <<<"$called") $(jq -r .errorType "$work/invoked.json")"
+called="$(invoked e2e-invoked --payload '{"marker": "e2e-event"}' --invocation-type Event)"
+event_ran=none
+for _ in $(seq 30); do
+  event_ran="$(as_ver GET "/functions/$invoked_id/invocations" | jq -r '[.invocations[] | select(.source == "async" and .input.marker == "e2e-event")][0].status // "none"')"
+  [ "$event_ran" = COMPLETED ] && break
+  sleep 1
+done
+check "Event: 202 at once, and the call runs without the caller, its attempt in the function's history" "202 COMPLETED" \
+  "$(jq -r .StatusCode <<<"$called") $event_ran"
+check "DryRun: 204, nothing run" 204 "$(invoked e2e-invoked --payload '{}' --invocation-type DryRun | jq -r .StatusCode)"
+head -c $((6 * 1024 * 1024)) /dev/zero | tr '\0' 'a' | sed 's/.*/"&"/' >"$work/invoked-big.json"
+head -c $((1024 * 1024)) /dev/zero | tr '\0' 'a' | sed 's/.*/"&"/' >"$work/invoked-event.json"
+check "refused as Lambda refuses: a payload past 6 MB, an Event's past 1 MB, one that isn't JSON, a function Failed, a key that may only read it" \
+  "refused RequestEntityTooLargeException refused RequestEntityTooLargeException refused InvalidRequestContentException refused ResourceConflictException refused AccessDeniedException" \
+  "$(outcome invoked e2e-invoked --payload "fileb://$work/invoked-big.json") \
+$(outcome invoked e2e-invoked --payload "fileb://$work/invoked-event.json" --invocation-type Event) \
+$(outcome invoked e2e-invoked --payload 'not json') $(outcome invoked e2e-invoked-broken --payload '{}') \
+$(outcome as_reader invoke --function-name e2e-invoked "$work/invoked.json")"
+check "  ... the function Failed named in its words, and the payload's limit in Lambda's" \
+  "The function is currently in the following state: Failed Request must be smaller than 6291456 bytes for the InvokeFunction operation" \
+  "$(outcome invoked e2e-invoked-broken --payload '{}' >/dev/null; grep -oE 'The function is currently in the following state: [A-Za-z]+' "$work/aws.err") \
+$(outcome invoked e2e-invoked --payload "fileb://$work/invoked-big.json" >/dev/null; grep -oE 'Request must be smaller than [0-9]+ bytes for the [A-Za-z]+ operation' "$work/aws.err")"
+for made in e2e-invoked e2e-invoked-py e2e-invoked-broken; do as_maker aws_lambda delete-function --function-name "$made" >/dev/null; done
+as_ver DELETE "/storage-keys/$(jq -r .id <<<"$invoker")" >/dev/null
+}
+section_def lambda_invoke section_lambda_invoke lambda_changes budget=60
+
 section_lambda_sdks() {
-section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, refused as Lambda refuses, deleted"
+section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, refused as Lambda refuses, deleted"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0014 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
 lambda_clients="$FF_REPO_ROOT/hack/.cache/lambda-clients"
@@ -696,12 +774,16 @@ fi
 # and the next one, and the account's other function, which their lists find too.
 clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$maker")" SECRET="$(jq -r .secretAccessKey <<<"$maker")" ROLE="$role"
   CODE="$work/sdks-v1.zip" CODE_SHA="$(lambda_zip "$work/sdks-v1.zip" 'export const handler = async () => ({ code: "v1" });')"
-  NEW_CODE="$work/sdks-v2.zip" NEW_CODE_SHA="$(lambda_zip "$work/sdks-v2.zip" 'export const handler = async () => ({ code: "v2" });')"
+  NEW_CODE="$work/sdks-v2.zip" NEW_CODE_SHA="$(lambda_zip "$work/sdks-v2.zip" 'export const handler = async (event, context) => {
+  if (event.fail) throw new TypeError("bad input");
+  console.log("invoked with", JSON.stringify(event));
+  return { code: "v2", event, clientContext: context.clientContext ?? null };
+};')"
   OTHER_FUNCTION=e2e-versioned)
 env "${clients_env[@]}" MODULES="$lambda_clients/node_modules" node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
-client_checks "$work/lambda-sdk.jsonl" 10
+client_checks "$work/lambda-sdk.jsonl" 12
 env "${clients_env[@]}" "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
-client_checks "$work/lambda-boto3.jsonl" 10
+client_checks "$work/lambda-boto3.jsonl" 12
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60
 
@@ -2075,9 +2157,10 @@ as_copied() { AWS_KEY="$first_key" AWS_SECRET="$(jq -r .secretAccessKey <<<"$cop
 check "a function's key lasts 12 hours" "12" "$(key_life "$first_key")"
 check "  ... copied out of it, it opens S3, SQS and SES" "accepted accepted accepted" \
   "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities)"
-check "  ... and at Lambda's endpoint it invokes its account's functions, as a role allowed to invoke them, Invoke not offered there yet; and does nothing else" \
-  "refused UnknownOperationException refused AccessDeniedException" \
-  "$(as_copied outcome aws_lambda invoke --function-name e2e-key-life /dev/null) $(as_copied outcome aws_lambda get-function --function-name e2e-key-life)"
+# A DryRun, which leaves the function at zero for the start on a fresh key below.
+check "  ... and at Lambda's endpoint it invokes its account's functions, as a role allowed to invoke them, and does nothing else" \
+  "accepted refused AccessDeniedException" \
+  "$(as_copied outcome aws_lambda invoke --function-name e2e-key-life --invocation-type DryRun /dev/null) $(as_copied outcome aws_lambda get-function --function-name e2e-key-life)"
 sql "UPDATE storage_keys SET created_at = now() - interval '12 hours 1 second', expires_at = now() - interval '1 second' WHERE id = '$first_key'"
 check "past its end, each front door refuses it at once, in its service's words: S3's ExpiredToken, SQS's, SES's and Lambda's ExpiredTokenException" \
   "refused ExpiredToken refused ExpiredToken refused ExpiredTokenException refused ExpiredTokenException" \

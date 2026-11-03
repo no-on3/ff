@@ -429,7 +429,7 @@ describe("Lambda's endpoint (L1)", () => {
       expect(counted).toEqual([`writes:account:${ACCOUNT}`, `writes:account:${ACCOUNT}`]);
     });
 
-    it("is refused past its operation's limit before it is read, in Lambda's words: 50 MB of code in base64, 6 MB for any other", async () => {
+    it("is refused past its operation's limit before it is read, in Lambda's words: 50 MB of code in base64, 6 MB for any other, Invoke's payload too", async () => {
       expect(refusal(await raw('POST', '/2015-03-31/functions', { 'content-length': '69905068' }))).toEqual([
         413,
         'RequestEntityTooLargeException',
@@ -437,6 +437,10 @@ describe("Lambda's endpoint (L1)", () => {
       ]);
       expect(refusal(await raw('PUT', '/2015-03-31/functions/orders/configuration', { 'content-length': String(6 * 1024 * 1024 + 1) }))[2]).toBe(
         'Request must be smaller than 6291456 bytes for the UpdateFunctionConfiguration operation',
+      );
+      // Invoke's refusal names the operation as Lambda's does, InvokeFunction.
+      expect(refusal(await raw('POST', '/2015-03-31/functions/orders/invocations', { 'content-length': String(6 * 1024 * 1024 + 1) }))[2]).toBe(
+        'Request must be smaller than 6291456 bytes for the InvokeFunction operation',
       );
       // One of Lambda's other operations, at Lambda's limit for it, so that a layer's zip is refused by its name.
       expect(refusal(await raw('POST', '/2018-10-31/layers/shared/versions', { 'content-length': '69905068' }))[2]).toBe(

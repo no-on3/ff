@@ -26,7 +26,12 @@ export interface LambdaOperation {
   maxBodyBytes: number;
   /** Its body is a call's payload, as sent, rather than the operation's JSON (Invoke's). */
   payload?: true;
+  /** Its name in Lambda's refusal of a body too large, where that isn't its own. */
+  refusedAs?: string;
 }
+
+/** Invoke's name in Lambda's refusal of a payload too large. */
+export const INVOKE_FUNCTION = 'InvokeFunction';
 
 /** Lambda's limit on a request that carries code: 50 MB zipped, in base64, in JSON. */
 export const CODE_BODY_BYTES = 69_905_067;
@@ -43,7 +48,7 @@ const operation = (
   name: string,
   access: FunctionAccess,
   namedIn: NamedIn,
-  more: Partial<Pick<LambdaOperation, 'maxBodyBytes' | 'payload'>> = {},
+  more: Partial<Pick<LambdaOperation, 'maxBodyBytes' | 'payload' | 'refusedAs'>> = {},
 ): LambdaOperation => ({ name, method, path: new RegExp(`^${path}$`), access, namedIn, maxBodyBytes: PAYLOAD_BYTES, ...more });
 
 /**
@@ -63,7 +68,7 @@ export const LAMBDA_OPERATIONS: readonly LambdaOperation[] = [
   operation('PUT', `/2015-03-31/functions/${F}/code`, 'UpdateFunctionCode', 'write', 'path', { maxBodyBytes: CODE_BODY_BYTES }),
   operation('GET', `/2020-06-30/functions/${F}/code-signing-config`, 'GetFunctionCodeSigningConfig', 'read', 'path'),
   // Invoke.
-  operation('POST', `/2015-03-31/functions/${F}/invocations`, 'Invoke', 'invoke', 'path', { payload: true }),
+  operation('POST', `/2015-03-31/functions/${F}/invocations`, 'Invoke', 'invoke', 'path', { payload: true, refusedAs: INVOKE_FUNCTION }),
   // Versions and aliases.
   operation('POST', `/2015-03-31/functions/${F}/versions`, 'PublishVersion', 'write', 'path'),
   operation('GET', `/2015-03-31/functions/${F}/versions`, 'ListVersionsByFunction', 'read', 'path'),
