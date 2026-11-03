@@ -1,4 +1,5 @@
 import { Check, Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
+import type { PublicAccessBlock } from './bucket-access';
 import type { NotificationRule } from './bucket-notifications';
 import type { WebsiteConfiguration } from './website';
 
@@ -52,6 +53,18 @@ export class Bucket {
    */
   @Column({ type: 'jsonb', nullable: true })
   website: WebsiteConfiguration | null;
+
+  /**
+   * Its policy, as S3 keeps one, the JSON as sent; null for none. Kept
+   * without effect, for the move to AWS: the website configuration alone
+   * makes a bucket public on FF.
+   */
+  @Column({ type: 'text', nullable: true })
+  policy: string | null;
+
+  /** Its public access block, as S3 keeps one; null for none. Kept without effect, as its policy is. */
+  @Column({ type: 'jsonb', nullable: true })
+  publicAccessBlock: PublicAccessBlock | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

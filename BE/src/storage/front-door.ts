@@ -19,9 +19,12 @@ import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { countStorageRequest } from '../plans/rate-limits';
 import { ChunkedBodyReader, ExpectedChecksum, PlainBodyChecker, STREAMING_SIGNED, STREAMING_SIGNED_TRAILER, STREAMING_UNSIGNED_TRAILER, isStreaming } from './aws-chunked';
+import { noSuchBucketPolicy, noSuchPublicAccessBlock, policyFrom, publicAccessBlockFromXml, publicAccessBlockXml } from './bucket-access';
+import { BucketAccessService } from './bucket-access.service';
 import { BucketEvents } from './bucket-events';
 import { nextSequencer, ruleFor, rulesFromXml, rulesXml, s3EventRecord } from './bucket-notifications';
-import { BucketNotificationsService, ChangedBy } from './bucket-notifications.service';
+import { BucketNotificationsService } from './bucket-notifications.service';
+import { ChangedBy } from './bucket-changes';
 import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket } from './bucket.entity';
 import { BucketsService } from './buckets.service';
@@ -210,6 +213,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     private readonly websites: BucketWebsitesService,
     private readonly keyUses: KeyUses,
     private readonly buckets: BucketsService,
+    private readonly access: BucketAccessService,
   ) {
     const base = new URL(config.getOrThrow<string>('storage.base'));
     this.host = base.hostname;
@@ -359,6 +363,33 @@ export class S3FrontDoor implements OnModuleDestroy {
     if (operation.name === 'PutBucketTagging' || operation.name === 'DeleteBucketTagging') {
       const tags = operation.name === 'PutBucketTagging' ? taggingFromXml(await this.readDocument(exchange, signature, chain, operation, plan)) : {};
       await this.asKey(exchange, key, () => this.buckets.replaceTags(bucket.accountId, bucket, tags));
+      return this.emptyAnswer(exchange, 204);
+    }
+    // And its policy and public access block, kept for the move to AWS: on FF its website alone makes a bucket public.
+    if (operation.name === 'GetBucketPolicy') {
+      if (!bucket.policy) throw noSuchBucketPolicy();
+      return this.document(exchange, 200, bucket.policy, 'application/json');
+    }
+    if (operation.name === 'PutBucketPolicy') {
+      const policy = policyFrom(await this.readDocument(exchange, signature, chain, operation, plan));
+      await this.access.keepPolicy(bucket, policy, this.changedBy(exchange, key));
+      return this.emptyAnswer(exchange, 204);
+    }
+    if (operation.name === 'DeleteBucketPolicy') {
+      if (bucket.policy) await this.access.keepPolicy(bucket, null, this.changedBy(exchange, key));
+      return this.emptyAnswer(exchange, 204);
+    }
+    if (operation.name === 'GetPublicAccessBlock') {
+      if (!bucket.publicAccessBlock) throw noSuchPublicAccessBlock();
+      return this.document(exchange, 200, publicAccessBlockXml(bucket.publicAccessBlock));
+    }
+    if (operation.name === 'PutPublicAccessBlock') {
+      const block = publicAccessBlockFromXml(await this.readDocument(exchange, signature, chain, operation, plan));
+      await this.access.keepPublicAccessBlock(bucket, block, this.changedBy(exchange, key));
+      return this.emptyAnswer(exchange, 200);
+    }
+    if (operation.name === 'DeletePublicAccessBlock') {
+      if (bucket.publicAccessBlock) await this.access.keepPublicAccessBlock(bucket, null, this.changedBy(exchange, key));
       return this.emptyAnswer(exchange, 204);
     }
     // Full buckets, or no credit, and uploads wait for room or for credit; reads, and deletes that make room and lower the bill, go on.
@@ -727,8 +758,8 @@ export class S3FrontDoor implements OnModuleDestroy {
   }
 
   /** A small XML document of the front door's own. */
-  private document({ id, response, method }: Exchange, status: number, document: string): number {
-    response.writeHead(status, { 'content-type': 'application/xml', 'content-length': Buffer.byteLength(document), 'x-amz-request-id': id });
+  private document({ id, response, method }: Exchange, status: number, document: string, contentType = 'application/xml'): number {
+    response.writeHead(status, { 'content-type': contentType, 'content-length': Buffer.byteLength(document), 'x-amz-request-id': id });
     response.end(method === 'HEAD' ? undefined : document);
     return status;
   }

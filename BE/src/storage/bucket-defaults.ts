@@ -25,12 +25,11 @@ function ownerOnlyAcl(owner: string): string {
  * S3's reads of a bucket's settings that FF's buckets don't have, by S3's
  * name for each, answered as S3 answers a bucket that has none, so that a
  * tool reading every one of them, as Terraform's provider does at each plan,
- * reads what is so: no policy, CORS, lifecycle, replication, Object Lock or
+ * reads what is so: no CORS, lifecycle, replication, Object Lock or
  * encryption of its own; versioning, acceleration and logging never turned
  * on; the owner paying for requests, and owning every object, without ACLs.
  */
 export const UNSET_SETTINGS: Record<string, Unset> = {
-  GetBucketPolicy: { parameter: 'policy', answer: missing('NoSuchBucketPolicy', 'The bucket policy does not exist') },
   GetBucketAcl: { parameter: 'acl', answer: ownerOnlyAcl },
   GetBucketCors: { parameter: 'cors', answer: missing('NoSuchCORSConfiguration', 'The CORS configuration does not exist') },
   GetBucketVersioning: { parameter: 'versioning', answer: empty('VersioningConfiguration') },

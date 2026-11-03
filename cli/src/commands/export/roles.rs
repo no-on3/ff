@@ -131,8 +131,14 @@ fn s3_action(operation: &str) -> Option<(&'static str, Scope)> {
         "GetBucketTagging" => ("s3:GetBucketTagging", Scope::Bucket),
         // S3 allows the removal of a bucket's tags by the action that puts them: it has no other.
         "PutBucketTagging" | "DeleteBucketTagging" => ("s3:PutBucketTagging", Scope::Bucket),
-        // A bucket's settings FF's buckets don't have, which tools read all the same.
+        // A bucket's policy and public access block, kept for AWS, where a site's bucket needs both; S3 removes the block
+        // by the action that puts it.
         "GetBucketPolicy" => ("s3:GetBucketPolicy", Scope::Bucket),
+        "PutBucketPolicy" => ("s3:PutBucketPolicy", Scope::Bucket),
+        "DeleteBucketPolicy" => ("s3:DeleteBucketPolicy", Scope::Bucket),
+        "GetPublicAccessBlock" => ("s3:GetBucketPublicAccessBlock", Scope::Bucket),
+        "PutPublicAccessBlock" | "DeletePublicAccessBlock" => ("s3:PutBucketPublicAccessBlock", Scope::Bucket),
+        // A bucket's settings FF's buckets don't have, which tools read all the same.
         "GetBucketAcl" => ("s3:GetBucketAcl", Scope::Bucket),
         "GetBucketCors" => ("s3:GetBucketCORS", Scope::Bucket),
         "GetBucketVersioning" => ("s3:GetBucketVersioning", Scope::Bucket),
@@ -457,6 +463,36 @@ mod tests {
             [statement(
                 Target::Bucket("uploads".to_owned()),
                 &["s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucketTagging", "s3:PutBucketTagging"]
+            )]
+        );
+        assert!(role.templates.is_empty() && role.unknown.is_empty());
+    }
+
+    #[test]
+    fn a_site_s_policy_and_public_access_block_are_allowed_by_s3_s_own_actions_the_block_s_removal_by_its_put() {
+        let role = role(
+            &uses(&[
+                ("s3", "site", "PutBucketPolicy"),
+                ("s3", "site", "GetBucketPolicy"),
+                ("s3", "site", "DeleteBucketPolicy"),
+                ("s3", "site", "PutPublicAccessBlock"),
+                ("s3", "site", "GetPublicAccessBlock"),
+                ("s3", "site", "DeletePublicAccessBlock"),
+            ]),
+            &[],
+        );
+
+        assert_eq!(
+            role.statements,
+            [statement(
+                Target::Bucket("site".to_owned()),
+                &[
+                    "s3:DeleteBucketPolicy",
+                    "s3:GetBucketPolicy",
+                    "s3:GetBucketPublicAccessBlock",
+                    "s3:PutBucketPolicy",
+                    "s3:PutBucketPublicAccessBlock"
+                ]
             )]
         );
         assert!(role.templates.is_empty() && role.unknown.is_empty());

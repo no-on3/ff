@@ -120,3 +120,13 @@ Terraform's provider reads every setting of a bucket at each plan, and AWS's CLI
 - **`ff export`** allows each by S3's own action (`s3:GetBucketCORS`, `s3:GetLifecycleConfiguration`, `s3:GetEncryptionConfiguration`, …).
 - **Measured** with the SDK for JavaScript and boto3 (each read) and the AWS CLI (`get-bucket-policy`, `get-bucket-request-payment`, `get-bucket-versioning`) in L4, and in L5 a key of one account that reads none of another's.
 
+## As built: a bucket's policy and public access block, kept without effect (X-11, part 2, 2026-11-03)
+
+A site on AWS needs two settings of its bucket besides its website configuration: a public access block that lets a policy open it, and a policy that lets anyone read its files. A Terraform module for a site that applies on FF and, with only the provider changed, on AWS holds both, and FF answered `NotImplemented` to each. FF now keeps them as S3 keeps them, **without effect**, as it keeps a function's role and its permissions (ADR 0014): on FF a bucket's website configuration alone makes it public, at its site's address, and its S3 API stays signed whatever its policy says.
+
+- **The policy:** `PutBucketPolicy` keeps the document as sent, checked for its form as S3 checks it (JSON, an object, a `Statement`, 20 KB at most; else `MalformedPolicy`), `GetBucketPolicy` gives it back as it was written, `404 NoSuchBucketPolicy` when there is none, and `DeleteBucketPolicy` removes it.
+- **The public access block:** `PutPublicAccessBlock` keeps its four switches, any left out `false`, as S3 reads them; `GetPublicAccessBlock` gives them, `404 NoSuchPublicAccessBlockConfiguration` for none; `DeletePublicAccessBlock` removes it. A bucket made on FF has none, as S3's buckets made before 2023.
+- **Each in a column of the bucket's** (`policy`, `public_access_block`), gone with it; each change under the key in the audit log, `bucket.policy` and `bucket.public_access_block`; a `PUT` and a `GET` billed as S3's, the `DELETE` free; a read-only key reads them.
+- **`ff export`** allows each by S3's action: `s3:PutBucketPolicy`, `s3:GetBucketPolicy`, `s3:DeleteBucketPolicy`, `s3:GetBucketPublicAccessBlock`, and `s3:PutBucketPublicAccessBlock` for its removal too, as on AWS.
+- **Measured** with the SDK for JavaScript and boto3 in L4, and in L5 a key of one account that reads, sets and removes neither of another's.
+

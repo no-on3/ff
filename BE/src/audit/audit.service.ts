@@ -89,6 +89,9 @@ export type AuditAction =
   | 'bucket.notifications'
   // A bucket's website configuration, set whole or removed, through the S3 front door or FF's API: it makes the bucket a site.
   | 'bucket.website'
+  // A bucket's policy and its public access block, as S3's, set whole or removed through the S3 front door, kept without effect.
+  | 'bucket.policy'
+  | 'bucket.public_access_block'
   // A bucket's tags, as S3's: replaced whole, or all removed, through the S3 front door.
   | 'bucket.tag'
   | 'bucket.untag'

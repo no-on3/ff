@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
-import { ChangedBy } from './bucket-notifications.service';
+import { ChangedBy, bucketChange } from './bucket-changes';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { WebsiteView } from './dto/website.dto';
 import { S3Error } from './s3-error';
@@ -57,14 +57,7 @@ export class BucketWebsitesService {
   /** Keeps a bucket's configuration, or none, and logs the change, whichever way it came. */
   async keep(bucket: Bucket, website: WebsiteConfiguration | null, changedBy: ChangedBy): Promise<void> {
     await this.buckets.update({ id: bucket.id }, { website });
-    await this.audit.record({
-      accountId: bucket.accountId,
-      action: 'bucket.website',
-      resource: `bucket:${bucket.name}`,
-      details: website ? { ...website } : { removed: true },
-      ...(changedBy.actor ? { actor: changedBy.actor } : {}),
-      ...(changedBy.ip ? { ip: changedBy.ip } : {}),
-    });
+    await this.audit.record(bucketChange(bucket, 'bucket.website', website ? { ...website } : { removed: true }, changedBy));
   }
 
   private view(name: string, website: WebsiteConfiguration): WebsiteView {

@@ -12,6 +12,7 @@ import { BucketEvents } from './bucket-events';
 import { BucketNotificationsService } from './bucket-notifications.service';
 import { BucketSamplesService } from './bucket-samples.service';
 import { BucketWebsitesService } from './bucket-websites.service';
+import { BucketAccessService } from './bucket-access.service';
 import { Bucket } from './bucket.entity';
 import { BucketsController } from './buckets.controller';
 import { BucketsService } from './buckets.service';
@@ -45,7 +46,7 @@ import { TagsModule } from '../tags/tags.module';
   // A notification's destinations are the account's functions and queues, looked up by their rows.
   imports: [TypeOrmModule.forFeature([Bucket, StorageKey, StorageRequestCount, KeyUse, Account, Function, Queue]), EncryptionModule, AuditModule, PlansModule, BillingModule, NotificationsModule, TagsModule],
   controllers: [BucketsController, StorageKeysController, DeployKeysController],
-  providers: [StorageDirectory, StorageRequestCountsService, KeyUses, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys, BucketSamplesService, BucketEvents, BucketNotificationsService, BucketWebsitesService, SiteTransfer, WebsiteServer],
+  providers: [StorageDirectory, StorageRequestCountsService, KeyUses, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys, BucketSamplesService, BucketEvents, BucketNotificationsService, BucketWebsitesService, BucketAccessService, SiteTransfer, WebsiteServer],
   exports: [StorageDirectory, KeyUses, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys, BucketEvents, WebsiteServer],
 })
 export class StorageModule {}

@@ -3,10 +3,12 @@ import {
   CopyObjectCommand,
   CreateBucketCommand,
   DeleteBucketCommand,
+  DeleteBucketPolicyCommand,
   DeleteBucketTaggingCommand,
   DeleteBucketWebsiteCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
+  DeletePublicAccessBlockCommand,
   GetBucketAccelerateConfigurationCommand,
   GetBucketAclCommand,
   GetBucketCorsCommand,
@@ -24,14 +26,17 @@ import {
   GetBucketWebsiteCommand,
   GetObjectLockConfigurationCommand,
   GetObjectCommand,
+  GetPublicAccessBlockCommand,
   HeadBucketCommand,
   ListBucketsCommand,
   ListObjectsV2Command,
+  PutBucketCorsCommand,
   PutBucketNotificationConfigurationCommand,
   PutBucketPolicyCommand,
   PutBucketTaggingCommand,
   PutBucketWebsiteCommand,
   PutObjectCommand,
+  PutPublicAccessBlockCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
 import { BadRequestException, ConflictException, Logger, ServiceUnavailableException } from '@nestjs/common';
@@ -49,8 +54,11 @@ import { PlansService } from '../plans/plans.service';
 import { plan } from '../plans/test-fixtures';
 import { BucketEvent, BucketEvents } from './bucket-events';
 import { NotificationRule } from './bucket-notifications';
-import { BucketNotificationsService, ChangedBy } from './bucket-notifications.service';
+import { BucketNotificationsService } from './bucket-notifications.service';
+import { ChangedBy } from './bucket-changes';
 import { BucketWebsitesService } from './bucket-websites.service';
+import { BucketAccessService } from './bucket-access.service';
+import { PublicAccessBlock } from './bucket-access';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { BucketsService } from './buckets.service';
 import { S3FrontDoor } from './front-door';
@@ -72,7 +80,7 @@ const QUEUES_ONLY: ActiveKey = { ...KEY, id: 'AKFFEEEEEEEEEEEEEEEE', queues: ['o
 /** A function's key past its end, which the directory says so of. */
 const ENDED = 'AKFFFFFFFFFFFFFFFFFF';
 const bucket = (name: string, accountId: string, storeName: string): Bucket =>
-  Object.assign(new Bucket(), { id: `id-${name}`, accountId, name, storeName, status: BucketStatus.ACTIVE, createdAt: new Date('2026-10-23T06:00:00Z') });
+  Object.assign(new Bucket(), { id: `id-${name}`, accountId, name, storeName, status: BucketStatus.ACTIVE, policy: null, publicAccessBlock: null, createdAt: new Date('2026-10-23T06:00:00Z') });
 const BUCKETS = [bucket('photos', KEY.accountId, 'ff-000000000000000000000001'), bucket('exports', KEY.accountId, 'ff-000000000000000000000002'), bucket('theirs', OTHERS.accountId, 'ff-000000000000000000000003')];
 
 /** What the store got: each request, as it came, and whether its body arrived whole. */
@@ -219,6 +227,18 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       bucketChanges.push(`remove ${accountId} ${name} ${force ? 'forced' : 'empty'} by ${currentRequest()?.actor?.id}`);
     },
   } as unknown as BucketsService;
+  /** What the buckets' policies and public access blocks got, and by whom: each kept on its bucket, as the database keeps it. */
+  const accessChanges: string[] = [];
+  const access = {
+    keepPolicy: async (bucket: Bucket, policy: string | null, by: ChangedBy) => {
+      accessChanges.push(`policy ${bucket.name} ${policy ?? 'removed'} by ${by.actor?.id}`);
+      bucket.policy = policy;
+    },
+    keepPublicAccessBlock: async (bucket: Bucket, block: PublicAccessBlock | null, by: ChangedBy) => {
+      accessChanges.push(`block ${bucket.name} ${block ? JSON.stringify(block) : 'removed'} by ${by.actor?.id}`);
+      bucket.publicAccessBlock = block;
+    },
+  } as unknown as BucketAccessService;
   const client = (key: ActiveKey = KEY, secret = key.secret) =>
     new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: secret }, maxAttempts: 1 });
   /** The SDK's error for a refused call: its name and status. */
@@ -239,7 +259,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       storage: { base: 'http://s3.example.test:3002', region: 'tn-tunis-1' },
       objectStore: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
     });
-    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites, keyUses, buckets);
+    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites, keyUses, buckets, access);
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
 
@@ -260,6 +280,8 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     bucketChanges.length = 0;
     bucketRefusal = undefined;
     bucketTags.clear();
+    accessChanges.length = 0;
+    for (const each of BUCKETS) Object.assign(each, { policy: null, publicAccessBlock: null });
   });
 
   it("notes what each key used, by S3's names, for the export's roles: a bucket, a copy's source as a read of it, the account's list, nothing refused", async () => {
@@ -380,7 +402,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     expect(await refused(client(QUEUES_ONLY).send(new ListObjectsV2Command({ Bucket: 'photos' })))).toBe('403 AccessDenied');
     expect(await refused(client(READ_ONLY).send(new PutObjectCommand({ Bucket: 'photos', Key: 'x', Body: 'x' })))).toBe('403 AccessDenied');
     expect(await refused(client().send(new GetObjectCommand({ Bucket: 'nowhere', Key: 'x' })))).toBe('404 NoSuchBucket');
-    expect(await refused(client().send(new PutBucketPolicyCommand({ Bucket: 'photos', Policy: '{}' })))).toBe('501 NotImplemented');
+    expect(await refused(client().send(new PutBucketCorsCommand({ Bucket: 'photos', CORSConfiguration: { CORSRules: [{ AllowedMethods: ['GET'], AllowedOrigins: ['*'] }] } })))).toBe('501 NotImplemented');
     const anonymous = await fetch(`${endpoint}/photos/range.txt`);
     expect([anonymous.status, await anonymous.text()]).toEqual([403, expect.stringContaining('<Code>AccessDenied</Code>')]);
     expect(seen).toEqual([]);
@@ -602,9 +624,8 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   });
 
   describe("a bucket's settings FF's buckets don't have, read as S3 answers a bucket without them", () => {
-    it("answers that there is none: no policy, CORS, lifecycle, replication, encryption or Object Lock of its own, in S3's errors", async () => {
+    it("answers that there is none: no CORS, lifecycle, replication, encryption or Object Lock of its own, in S3's errors", async () => {
       const answers = await Promise.all([
-        refused(client().send(new GetBucketPolicyCommand({ Bucket: 'photos' }))),
         refused(client().send(new GetBucketCorsCommand({ Bucket: 'photos' }))),
         refused(client().send(new GetBucketLifecycleConfigurationCommand({ Bucket: 'photos' }))),
         refused(client().send(new GetBucketReplicationCommand({ Bucket: 'photos' }))),
@@ -613,7 +634,6 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       ]);
 
       expect(answers).toEqual([
-        '404 NoSuchBucketPolicy',
         '404 NoSuchCORSConfiguration',
         '404 NoSuchLifecycleConfiguration',
         '404 ReplicationConfigurationNotFoundError',
@@ -621,7 +641,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
         '404 ObjectLockConfigurationNotFoundError',
       ]);
       // Each counted, as S3 bills a request it refuses, and the store never asked.
-      expect(counted.map((request) => `${request.method} ${request.class} ${request.status}`)).toEqual(Array(6).fill('GET tier2 404'));
+      expect(counted.map((request) => `${request.method} ${request.class} ${request.status}`)).toEqual(Array(5).fill('GET tier2 404'));
       expect(seen).toEqual([]);
     });
 
@@ -645,6 +665,56 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     it("refuses another account's bucket, AccessDenied, before it answers", async () => {
       expect(await refused(client().send(new GetBucketVersioningCommand({ Bucket: 'theirs' })))).toBe('403 AccessDenied');
       expect(await refused(client().send(new GetBucketPolicyCommand({ Bucket: 'theirs' })))).toBe('403 AccessDenied');
+    });
+  });
+
+  describe("a bucket's policy and public access block, kept as S3 keeps them, without effect on FF", () => {
+    const POLICY = JSON.stringify({
+      Version: '2012-10-17',
+      Statement: [{ Sid: 'site', Effect: 'Allow', Principal: '*', Action: 's3:GetObject', Resource: 'arn:aws:s3:::photos/*' }],
+    });
+
+    it('keeps PutBucketPolicy\'s document as sent, 204, under the key, gives it back with GetBucketPolicy, and removes it with DeleteBucketPolicy; the store never hears of it', async () => {
+      await client().send(new PutBucketPolicyCommand({ Bucket: 'photos', Policy: POLICY }));
+      const read = await client(READ_ONLY).send(new GetBucketPolicyCommand({ Bucket: 'photos' }));
+      await client().send(new DeleteBucketPolicyCommand({ Bucket: 'photos' }));
+
+      expect(read.Policy).toBe(POLICY);
+      expect(accessChanges).toEqual([`policy photos ${POLICY} by access_key:${KEY.id}`, `policy photos removed by access_key:${KEY.id}`]);
+      expect(await refused(client().send(new GetBucketPolicyCommand({ Bucket: 'photos' })))).toBe('404 NoSuchBucketPolicy');
+      // A PUT and a GET as S3 bills them, the DELETE free, the read of none a GET too.
+      expect(counted.map((request) => `${request.method} ${request.class} ${request.status}`)).toEqual(['PUT tier1 204', 'GET tier2 200', 'DELETE free 204', 'GET tier2 404']);
+      expect(seen).toEqual([]);
+    });
+
+    it("refuses a policy that isn't a JSON object with a Statement, MalformedPolicy, nothing kept; a read-only key, or another account's bucket, AccessDenied", async () => {
+      const put = (Policy: string, key = KEY, Bucket = 'photos') => refused(client(key).send(new PutBucketPolicyCommand({ Bucket, Policy })));
+
+      expect(await put('not json')).toBe('400 MalformedPolicy');
+      expect(await put('{"Version": "2012-10-17"}')).toBe('400 MalformedPolicy');
+      expect(await put(POLICY, READ_ONLY)).toBe('403 AccessDenied');
+      expect(await put(POLICY, KEY, 'theirs')).toBe('403 AccessDenied');
+      expect(await refused(client().send(new DeleteBucketPolicyCommand({ Bucket: 'theirs' })))).toBe('403 AccessDenied');
+      expect(accessChanges).toEqual([]);
+    });
+
+    it("keeps PutPublicAccessBlock's four switches, any left out false, reads them back, and removes them; none, NoSuchPublicAccessBlockConfiguration", async () => {
+      expect(await refused(client().send(new GetPublicAccessBlockCommand({ Bucket: 'photos' })))).toBe('404 NoSuchPublicAccessBlockConfiguration');
+
+      await client().send(new PutPublicAccessBlockCommand({ Bucket: 'photos', PublicAccessBlockConfiguration: { BlockPublicAcls: true, RestrictPublicBuckets: false } }));
+      const read = await client(READ_ONLY).send(new GetPublicAccessBlockCommand({ Bucket: 'photos' }));
+      await client().send(new DeletePublicAccessBlockCommand({ Bucket: 'photos' }));
+
+      expect(read.PublicAccessBlockConfiguration).toEqual({ BlockPublicAcls: true, IgnorePublicAcls: false, BlockPublicPolicy: false, RestrictPublicBuckets: false });
+      expect(accessChanges).toEqual([
+        `block photos {"blockPublicAcls":true,"ignorePublicAcls":false,"blockPublicPolicy":false,"restrictPublicBuckets":false} by access_key:${KEY.id}`,
+        `block photos removed by access_key:${KEY.id}`,
+      ]);
+      expect(await refused(client().send(new GetPublicAccessBlockCommand({ Bucket: 'photos' })))).toBe('404 NoSuchPublicAccessBlockConfiguration');
+      expect(await refused(client(READ_ONLY).send(new DeletePublicAccessBlockCommand({ Bucket: 'photos' })))).toBe('403 AccessDenied');
+      // Removing what isn't there changes nothing, as S3 answers it.
+      await client().send(new DeletePublicAccessBlockCommand({ Bucket: 'photos' }));
+      expect(accessChanges).toHaveLength(2);
     });
   });
 

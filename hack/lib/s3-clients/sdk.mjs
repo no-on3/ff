@@ -103,8 +103,24 @@ await check('ok', "ListBuckets, the account's, and the bucket's region", async (
   const location = (await virtual.send(new s3.GetBucketLocationCommand({ Bucket: BUCKET }))).LocationConstraint;
   return expect(`${listed.includes(BUCKET)} ${listed.includes(OTHER_BUCKET)} ${location}`, 'true false tn-tunis-1');
 });
-await check('refused', "what the front door doesn't serve: PutBucketPolicy, NotImplemented", () =>
-  virtual.send(new s3.PutBucketPolicyCommand({ Bucket: BUCKET, Policy: '{"Version":"2012-10-17","Statement":[]}' })));
+await check('refused', "what the front door doesn't serve: PutBucketCors, NotImplemented", () =>
+  virtual.send(new s3.PutBucketCorsCommand({ Bucket: BUCKET, CORSConfiguration: { CORSRules: [{ AllowedMethods: ['GET'], AllowedOrigins: ['*'] }] } })));
+await check('ok', "a bucket's policy and public access block, kept as sent and read back, as a site's bucket on AWS needs them; removed, none, in S3's errors", async () => {
+  const Policy = JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Principal: '*', Action: 's3:GetObject', Resource: `arn:aws:s3:::${BUCKET}/*` }] });
+  const open = { BlockPublicAcls: false, IgnorePublicAcls: false, BlockPublicPolicy: false, RestrictPublicBuckets: false };
+  await virtual.send(new s3.PutPublicAccessBlockCommand({ Bucket: BUCKET, PublicAccessBlockConfiguration: open }));
+  await virtual.send(new s3.PutBucketPolicyCommand({ Bucket: BUCKET, Policy }));
+  const policy = (await virtual.send(new s3.GetBucketPolicyCommand({ Bucket: BUCKET }))).Policy === Policy;
+  const block = Object.values((await virtual.send(new s3.GetPublicAccessBlockCommand({ Bucket: BUCKET }))).PublicAccessBlockConfiguration).join(',');
+  const malformed = await refusedAs('MalformedPolicy', virtual.send(new s3.PutBucketPolicyCommand({ Bucket: BUCKET, Policy: 'not json' })));
+  await virtual.send(new s3.DeleteBucketPolicyCommand({ Bucket: BUCKET }));
+  await virtual.send(new s3.DeletePublicAccessBlockCommand({ Bucket: BUCKET }));
+  const none = await Promise.all([
+    refusedAs('NoSuchBucketPolicy', virtual.send(new s3.GetBucketPolicyCommand({ Bucket: BUCKET }))),
+    refusedAs('NoSuchPublicAccessBlockConfiguration', virtual.send(new s3.GetPublicAccessBlockCommand({ Bucket: BUCKET }))),
+  ]);
+  return expect(`${policy} ${block} ${malformed} ${none.join(' ')}`, 'true false,false,false,false MalformedPolicy NoSuchBucketPolicy NoSuchPublicAccessBlockConfiguration');
+});
 await check('ok', "CreateBucket in FF's region, virtual-hosted, and HeadBucket there; DeleteBucket refused while it holds a file, BucketNotEmpty, then deleted", async () => {
   const name = `${BUCKET}-sdk`;
   await virtual.send(new s3.CreateBucketCommand({ Bucket: name, CreateBucketConfiguration: { LocationConstraint: region } }));
@@ -132,7 +148,6 @@ await check('ok', "a bucket's tags: CreateBucket's, read by GetBucketTagging; Pu
 await check('ok', "a bucket's settings FF's buckets don't have, read as S3 answers a bucket without them, as Terraform reads them at each plan", async () => {
   const read = (Command) => virtual.send(new Command({ Bucket: BUCKET }));
   const none = await Promise.all([
-    refusedAs('NoSuchBucketPolicy', read(s3.GetBucketPolicyCommand)),
     refusedAs('NoSuchCORSConfiguration', read(s3.GetBucketCorsCommand)),
     refusedAs('NoSuchLifecycleConfiguration', read(s3.GetBucketLifecycleConfigurationCommand)),
     refusedAs('ReplicationConfigurationNotFoundError', read(s3.GetBucketReplicationCommand)),
@@ -144,7 +159,7 @@ await check('ok', "a bucket's settings FF's buckets don't have, read as S3 answe
   const payer = (await read(s3.GetBucketRequestPaymentCommand)).Payer;
   const grants = (await read(s3.GetBucketAclCommand)).Grants.map((grant) => grant.Permission).join(',');
   const ownership = (await read(s3.GetBucketOwnershipControlsCommand)).OwnershipControls.Rules[0].ObjectOwnership;
-  return expect(`${none.length} ${versioning} ${logging} ${payer} ${grants} ${ownership}`, '6 never never BucketOwner FULL_CONTROL BucketOwnerEnforced');
+  return expect(`${none.length} ${versioning} ${logging} ${payer} ${grants} ${ownership}`, '5 never never BucketOwner FULL_CONTROL BucketOwnerEnforced');
 });
 await check('ok', "CreateBucket of another account's bucket's name, BucketAlreadyExists; of its own, BucketAlreadyOwnedByYou", async () => {
   const configuration = { LocationConstraint: region };

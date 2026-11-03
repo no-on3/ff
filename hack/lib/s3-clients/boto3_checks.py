@@ -76,9 +76,19 @@ def bucket_tags():
     return f"{same(kept, [{'Key': 'team', 'Value': 'shop'}]) and 'replaced'} {none}"
 
 
+def site_access():
+    policy = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": f"arn:aws:s3:::{bucket}/*"}]})
+    s3.put_public_access_block(Bucket=bucket, PublicAccessBlockConfiguration={"BlockPublicAcls": False, "IgnorePublicAcls": False, "BlockPublicPolicy": False, "RestrictPublicBuckets": True})
+    s3.put_bucket_policy(Bucket=bucket, Policy=policy)
+    same(s3.get_bucket_policy(Bucket=bucket)["Policy"], policy)
+    same(s3.get_public_access_block(Bucket=bucket)["PublicAccessBlockConfiguration"]["RestrictPublicBuckets"], True)
+    s3.delete_bucket_policy(Bucket=bucket)
+    s3.delete_public_access_block(Bucket=bucket)
+    return f"{refused_as('NoSuchBucketPolicy', lambda: s3.get_bucket_policy(Bucket=bucket))} {refused_as('NoSuchPublicAccessBlockConfiguration', lambda: s3.get_public_access_block(Bucket=bucket))}"
+
+
 def unset_settings():
     missing = [refused_as(code, lambda read=read: read(Bucket=bucket)) for code, read in [
-        ("NoSuchBucketPolicy", s3.get_bucket_policy),
         ("NoSuchCORSConfiguration", s3.get_bucket_cors),
         ("NoSuchLifecycleConfiguration", s3.get_bucket_lifecycle_configuration),
         ("ReplicationConfigurationNotFoundError", s3.get_bucket_replication),
@@ -136,3 +146,4 @@ check("ok", "create_bucket in FF's region; delete_bucket refused while it holds 
 check("ok", "create_bucket in another region, IllegalLocationConstraintException; a name AWS keeps, InvalidBucketName", bucket_refusals)
 check("ok", "a bucket's tags put, the second set replacing the first, read, then deleted: NoSuchTagSet", bucket_tags)
 check("ok", "a bucket's settings FF's buckets don't have, read as S3 answers a bucket without them", unset_settings)
+check("ok", "a bucket's policy and public access block kept and read back, then removed: none, in S3's errors", site_access)

@@ -35,7 +35,8 @@
 #     account's key reaches its own account's alone; another's bucket is
 #     AccessDenied, another's queue one that doesn't exist, by its URL or its
 #     name, and its messages and tags stay; a key deletes no other account's bucket
-#     through S3, nor takes its name, nor reads or changes its tags.
+#     through S3, nor takes its name, nor reads or changes its tags, its policy
+#     or its public access block.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -1023,6 +1024,18 @@ $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-taggin
 $(sql_value "SELECT string_agg(t.key || '=' || t.value, ',') FROM resource_tags t JOIN buckets b ON b.id = t.bucket_id WHERE b.name = 'l5-photos-a'")"
 check "  ... nor reads its settings, its ACL and versioning among them" "refused AccessDenied refused AccessDenied" \
   "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-acl --bucket l5-photos-a) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-versioning --bucket l5-photos-a)"
+check "  ... nor reads, sets or removes its policy and public access block, which A's key put and A still has" \
+  "accepted accepted refused AccessDenied refused AccessDenied refused AccessDenied refused AccessDenied refused AccessDenied refused AccessDenied true true" \
+  "$(s3_with "$key_a_id" "$key_a_secret" "$storage_port" s3api put-public-access-block --bucket l5-photos-a --public-access-block-configuration BlockPublicAcls=true) \
+$(s3_with "$key_a_id" "$key_a_secret" "$storage_port" s3api put-bucket-policy --bucket l5-photos-a --policy '{"Version": "2012-10-17", "Statement": []}') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-policy --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-policy --bucket l5-photos-a --policy '{"Statement": []}') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-policy --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-public-access-block --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-public-access-block --bucket l5-photos-a --public-access-block-configuration BlockPublicAcls=false) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-public-access-block --bucket l5-photos-a) \
+$(sql_value "SELECT (policy IS NOT NULL AND public_access_block->>'blockPublicAcls' = 'true')::text FROM buckets WHERE name = 'l5-photos-a'") \
+$(sql_value "SELECT (count(*) = 2)::text FROM audit_log WHERE resource = 'bucket:l5-photos-a' AND action IN ('bucket.policy', 'bucket.public_access_block')")"
 check "B's key can neither delete A's bucket through S3, AccessDenied, nor take its name, BucketAlreadyExists: it stays A's" \
   "refused AccessDenied refused BucketAlreadyExists $account_a" \
   "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 rb s3://l5-photos-a) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 mb s3://l5-photos-a) \

@@ -47,7 +47,8 @@
 # only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in
 # parts, presigned URLs, a wrong signature, an expired URL, another account's
 # bucket, a bucket made, tagged, its settings read and deleted as Terraform and
-# the CLI do, with the API's checks); a read-only key, a revoked one, a suspended account and one whose
+# the CLI do, with the API's checks, its policy and public access block kept as a
+# site's on AWS needs them); a read-only key, a revoked one, a suspended account and one whose
 # storage is off refused; two functions, AWS's SDK for JavaScript v3 and boto3
 # with no setting at all, writing to the account's bucket with keys of their own
 # and refused another's, a function's key revoked with it; the bucket measured
@@ -1920,10 +1921,10 @@ aws_ff s3 cp s3://e2e-photos/no-such-file.txt "$work/none" --only-show-errors 2>
 head -c $((100 * 1024 * 1024)) /dev/urandom >"$work/big.bin"
 MODULES="$clients/node_modules" ENDPOINT="$s3_endpoint" IP_ENDPOINT="http://127.0.0.1:$storage_port" KEY="$key_id" SECRET="$key_secret" \
   BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" node "$FF_REPO_ROOT/hack/lib/s3-clients/sdk.mjs" >"$work/sdk.jsonl" 2>"$work/sdk.log" || true
-client_checks "$work/sdk.jsonl" 18
+client_checks "$work/sdk.jsonl" 19
 ENDPOINT="$s3_endpoint" KEY="$key_id" SECRET="$key_secret" BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" \
   "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/s3-clients/boto3_checks.py" >"$work/boto3.jsonl" 2>"$work/boto3.log" || true
-client_checks "$work/boto3.jsonl" 15
+client_checks "$work/boto3.jsonl" 16
 aws_ff s3 cp "$work/big.bin" s3://e2e-photos/cli/big.bin --only-show-errors
 aws_ff s3 cp s3://e2e-photos/cli/big.bin "$work/big.out" --only-show-errors
 check "aws: 100 MB up in parts and down again, byte for byte" "104857600 0" \

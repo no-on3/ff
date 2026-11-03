@@ -4,23 +4,16 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
-import { Actor } from '../common/request-context';
 import { functionArn, parseFunctionArn } from '../functions/arns';
 import { Function } from '../functions/entities/function.entity';
 import { hasQualifier } from '../functions/qualifier';
 import { Queue, QueueKind } from '../queues/queue.entity';
 import { parseQueueArn, queueArn } from '../queues/sqs-attributes';
 import { BucketEvents } from './bucket-events';
+import { ChangedBy, bucketChange } from './bucket-changes';
 import { NotificationConfigurationJson, NotificationRule, checkRules, rulesFromJson, rulesJson, testEvent } from './bucket-notifications';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { S3Error, invalidArgument } from './s3-error';
-
-/** Who changed a configuration through the S3 front door: the access key, from its address; FF's API's caller is the request's own. */
-export interface ChangedBy {
-  actor?: Actor;
-  ip?: string;
-  requestId?: string;
-}
 
 /**
  * A bucket's notification configuration, as S3's (ADR 0010): the functions and
@@ -93,14 +86,8 @@ export class BucketNotificationsService {
     }
     await this.buckets.update({ id: bucket.id }, { notifications: rules.length ? rules : null });
     const changedBy = options.changedBy ?? {};
-    await this.audit.record({
-      accountId: bucket.accountId,
-      action: 'bucket.notifications',
-      resource: `bucket:${bucket.name}`,
-      details: { configurations: rules.map(({ id, target, arn, events, prefix, suffix }) => ({ id, target, arn, events, prefix, suffix })) },
-      ...(changedBy.actor ? { actor: changedBy.actor } : {}),
-      ...(changedBy.ip ? { ip: changedBy.ip } : {}),
-    });
+    const configurations = rules.map(({ id, target, arn, events, prefix, suffix }) => ({ id, target, arn, events, prefix, suffix }));
+    await this.audit.record(bucketChange(bucket, 'bucket.notifications', { configurations }, changedBy));
     const requestId = changedBy.requestId ?? randomUUID();
     for (const rule of rules.filter((candidate) => candidate.target === 'queue')) {
       await this.events.publish({ kind: 'test', accountId: bucket.accountId, bucket: bucket.name, queueArn: rule.arn, body: testEvent(bucket.name, requestId, new Date()) });

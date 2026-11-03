@@ -7,14 +7,20 @@ import {
   CreateBucketCommand,
   CreateMultipartUploadCommand,
   DeleteBucketCommand,
+  DeleteBucketPolicyCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
+  DeletePublicAccessBlockCommand,
+  GetBucketPolicyCommand,
   GetObjectCommand,
+  GetPublicAccessBlockCommand,
   HeadBucketCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   ListPartsCommand,
+  PutBucketPolicyCommand,
   PutObjectCommand,
+  PutPublicAccessBlockCommand,
   S3Client,
   UploadPartCommand,
 } from '@aws-sdk/client-s3';
@@ -36,6 +42,7 @@ import { StorageDirectory } from './storage-directory.service';
 import { BucketEvents } from './bucket-events';
 import { BucketNotificationsService } from './bucket-notifications.service';
 import { BucketWebsitesService } from './bucket-websites.service';
+import { BucketAccessService } from './bucket-access.service';
 import { KeyUse } from './key-use.entity';
 import { KeyUses } from './key-uses.service';
 import { StorageKey } from './storage-key.entity';
@@ -119,6 +126,7 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
       keyUses,
       // A plan of three buckets: the account's one, and two more.
       new BucketsService(buckets, new StoreBuckets(config), onePlan(plan({ buckets: 3 })), audit, config, new ResourceTagsService(db.dataSource.getRepository(ResourceTag), audit)),
+      new BucketAccessService(buckets, audit),
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
@@ -319,5 +327,30 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
       expect(await refused(client().send(new DeleteBucketCommand({ Bucket: theirs.name })))).toBe('403 AccessDenied');
       expect([await rowOf(name), (await rowOf(photos.name))?.accountId, (await rowOf(theirs.name))?.accountId]).toEqual([null, ACCOUNT, OTHER]);
     });
+  });
+
+  it("keeps a bucket's policy and public access block in its row, reads them back from there, and removes them, each change under the key in the audit log", async () => {
+    const policy = JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Principal: '*', Action: 's3:GetObject', Resource: `arn:aws:s3:::${photos.name}/*` }] });
+    const block = { BlockPublicAcls: false, IgnorePublicAcls: false, BlockPublicPolicy: false, RestrictPublicBuckets: true };
+
+    await client().send(new PutPublicAccessBlockCommand({ Bucket: photos.name, PublicAccessBlockConfiguration: block }));
+    await client().send(new PutBucketPolicyCommand({ Bucket: photos.name, Policy: policy }));
+    const row = await db.dataSource.getRepository(Bucket).findOneByOrFail({ name: photos.name });
+    const read = [(await client().send(new GetBucketPolicyCommand({ Bucket: photos.name }))).Policy, (await client().send(new GetPublicAccessBlockCommand({ Bucket: photos.name }))).PublicAccessBlockConfiguration];
+    await client().send(new DeleteBucketPolicyCommand({ Bucket: photos.name }));
+    await client().send(new DeletePublicAccessBlockCommand({ Bucket: photos.name }));
+
+    expect([row.policy, row.publicAccessBlock]).toEqual([policy, { blockPublicAcls: false, ignorePublicAcls: false, blockPublicPolicy: false, restrictPublicBuckets: true }]);
+    expect(read).toEqual([policy, block]);
+    const after = await db.dataSource.getRepository(Bucket).findOneByOrFail({ name: photos.name });
+    expect([after.policy, after.publicAccessBlock]).toEqual([null, null]);
+    const entries = await db.dataSource.getRepository(AuditEntry).find({ where: { accountId: ACCOUNT, resource: `bucket:${photos.name}` }, order: { id: 'ASC' } });
+    const by = `access_key:${key.id}`;
+    expect(entries.map((entry) => [entry.action, entry.actor, entry.details])).toEqual([
+      ['bucket.public_access_block', by, { blockPublicAcls: false, ignorePublicAcls: false, blockPublicPolicy: false, restrictPublicBuckets: true }],
+      ['bucket.policy', by, { policy: JSON.parse(policy) }],
+      ['bucket.policy', by, { removed: true }],
+      ['bucket.public_access_block', by, { removed: true }],
+    ]);
   });
 });

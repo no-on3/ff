@@ -32,7 +32,7 @@ describe('the operation a request is', () => {
     expect(of('PUT', bucket)).toBe('CreateBucket tier1 writes');
     expect(of('PUT', bucket, 'x-id=CreateBucket')).toBe('CreateBucket tier1 writes');
     expect(of('DELETE', bucket)).toBe('DeleteBucket free writes');
-    expect(of('PUT', bucket, 'policy')).toBe('NotImplemented tier2');
+    expect(of('PUT', bucket, 'cors')).toBe('NotImplemented tier2');
   });
 
   it("the bucket's tags: read as a GET, replaced as a PUT, removed for free, as a DELETE", () => {
@@ -42,9 +42,22 @@ describe('the operation a request is', () => {
     expect(of('GET', bucket, 'tagging&policy')).toBe('NotImplemented tier2');
   });
 
+  it("the bucket's policy and public access block, kept as the tags are: read as a GET, set as a PUT, removed for free; with the object's key, NotImplemented", () => {
+    for (const [parameter, name] of [
+      ['policy', 'BucketPolicy'],
+      ['publicAccessBlock', 'PublicAccessBlock'],
+    ]) {
+      expect(of('GET', bucket, `${parameter}&x-id=Get${name}`)).toBe(`Get${name} tier2`);
+      expect(of('PUT', bucket, parameter)).toBe(`Put${name} tier1 writes`);
+      expect(of('DELETE', bucket, parameter)).toBe(`Delete${name} free writes`);
+      expect(of('POST', bucket, parameter)).toBe('NotImplemented tier2');
+      expect(of('PUT', object, parameter)).toBe('NotImplemented tier2');
+    }
+    expect(of('DELETE', bucket, 'notification')).toBe('NotImplemented tier2');
+  });
+
   it("the bucket's settings FF's buckets don't have, each read as a GET, which S3 answers for a bucket without it; set, NotImplemented", () => {
     const reads = {
-      policy: 'GetBucketPolicy',
       acl: 'GetBucketAcl',
       cors: 'GetBucketCors',
       versioning: 'GetBucketVersioning',
@@ -103,10 +116,10 @@ describe('the operation a request is', () => {
     expect(of('GET', object, `${presigned}&x-amz-checksum-mode=ENABLED&x-id=GetObject`)).toBe('GetObject tier2');
   });
 
-  it("anything else answers NotImplemented: a bucket's policy set, its public access block, an object's tags, versions", () => {
+  it("anything else answers NotImplemented: a bucket's CORS set, its policy's status, an object's tags, versions", () => {
     for (const [method, address, query] of [
-      ['GET', bucket, 'publicAccessBlock'],
-      ['PUT', bucket, 'policy'],
+      ['GET', bucket, 'policyStatus'],
+      ['PUT', bucket, 'cors'],
       ['GET', bucket, 'versions'],
       ['GET', bucket, 'list-type=2&acl'],
       ['GET', object, 'tagging'],
