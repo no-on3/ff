@@ -237,6 +237,17 @@ print(base64.b64encode(hashlib.sha256(open(sys.argv[1], 'rb').read()).digest()).
 PY
 }
 
+# boto3_python: the Python of the clients' venv, with boto3 pinned to the version ADR 0009 measured, made once in
+# hack/.cache; its path printed.
+boto3_python() {
+  local venv="$FF_REPO_ROOT/hack/.cache/s3-clients/venv"
+  if [ ! -x "$venv/bin/python" ]; then
+    python3 -m venv "$venv"
+    "$venv/bin/pip" install --quiet --disable-pip-version-check boto3==1.43.118 >&2
+  fi
+  echo "$venv/bin/python"
+}
+
 # written_within <seconds> <table> <id> <since>: true when the backend wrote the table's first row for the id within
 # that many seconds of <since> (seconds since the epoch), else how long after, as its log says: in development, each
 # query with its time. A sample read minutes after it was due is timed there.
@@ -659,6 +670,27 @@ as_maker aws_ff s3 rm s3://e2e-lambda-code/builds/v3.zip --only-show-errors
 as_ver DELETE /buckets/e2e-lambda-code >/dev/null
 }
 section_def lambda_updates section_lambda_updates lambda_changes budget=120
+
+section_lambda_sdks() {
+section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, refused as Lambda refuses, deleted"
+# AWS's SDK for JavaScript v3, pinned to the version ADR 0014 measured, fetched once into hack/.cache; boto3 from the
+# buckets' clients.
+lambda_clients="$FF_REPO_ROOT/hack/.cache/lambda-clients"
+if [ ! -d "$lambda_clients/node_modules/@aws-sdk/client-lambda" ]; then
+  npm install --prefix "$lambda_clients" --no-audit --no-fund --silent @aws-sdk/client-lambda@3.1156.0 >/dev/null
+fi
+# What both clients are given: the endpoint, the key that may change every function of the account, a role, a package
+# and the next one, and the account's other function, which their lists find too.
+clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$maker")" SECRET="$(jq -r .secretAccessKey <<<"$maker")" ROLE="$role"
+  CODE="$work/sdks-v1.zip" CODE_SHA="$(lambda_zip "$work/sdks-v1.zip" 'export const handler = async () => ({ code: "v1" });')"
+  NEW_CODE="$work/sdks-v2.zip" NEW_CODE_SHA="$(lambda_zip "$work/sdks-v2.zip" 'export const handler = async () => ({ code: "v2" });')"
+  OTHER_FUNCTION=e2e-versioned)
+env "${clients_env[@]}" MODULES="$lambda_clients/node_modules" node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
+client_checks "$work/lambda-sdk.jsonl" 9
+env "${clients_env[@]}" "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
+client_checks "$work/lambda-boto3.jsonl" 9
+}
+section_def lambda_sdks section_lambda_sdks lambda_changes budget=60
 
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"
@@ -1384,10 +1416,7 @@ clients="$FF_REPO_ROOT/hack/.cache/s3-clients"
 if [ ! -d "$clients/node_modules/@aws-sdk/lib-storage" ]; then
   npm install --prefix "$clients" --no-audit --no-fund --silent @aws-sdk/client-s3@3.1156.0 @aws-sdk/s3-request-presigner@3.1156.0 @aws-sdk/lib-storage@3.1156.0 >/dev/null
 fi
-if [ ! -x "$clients/venv/bin/python" ]; then
-  python3 -m venv "$clients/venv"
-  "$clients/venv/bin/pip" install --quiet --disable-pip-version-check boto3==1.43.118
-fi
+boto3_python >/dev/null # in $clients/venv
 if [ ! -d "$clients/python/boto3" ]; then
   "$clients/venv/bin/pip" install --quiet --disable-pip-version-check --target "$clients/python" boto3==1.43.118
 fi
