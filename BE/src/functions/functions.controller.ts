@@ -6,7 +6,9 @@ import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
 import { booleanQuery } from '../common/boolean-query';
 import { Invocation } from '../plans/rate-limits';
+import { StacksService } from '../stacks/stacks.service';
 import { KeyUses } from '../storage/key-uses.service';
+import { ResourceTagsService, taggedFunction } from '../tags/resource-tags.service';
 import { CreateFunctionDto } from './dto/create-function.dto';
 import { FunctionLogsQuery, FunctionLogsStreamQuery, FunctionLogsView } from './dto/function-logs.dto';
 import { FunctionKeyUsesView } from './dto/key-uses.dto';
@@ -20,9 +22,22 @@ import { FunctionInvocation } from './entities/function-invocation.entity';
 import { Function } from './entities/function.entity';
 import { sendEvents } from './event-stream';
 import { AsyncInvocationsService } from './async-invocations.service';
-import { FunctionView, FunctionsService } from './functions.service';
+import { EventInvokeConfigService } from './event-invoke-config.service';
+import { FunctionView, FunctionsService, LambdaFields, StartedChange } from './functions.service';
 
 const INVOCATION_TYPES = Object.values(InvocationType) as string[];
+
+/** What FF's answers for a function add: the stack it is in (ADR 0016), null for none. */
+interface InStack {
+  stack: string | null;
+}
+
+/** A function's own answer adds its tags, as Lambda's GetFunction does; a list leaves them out, as ListFunctions does. */
+interface WithTags {
+  tags: Record<string, string>;
+}
+
+type FunctionAnswer = FunctionView & InStack & WithTags;
 
 /** The call's invocation type: the header's, as Lambda takes it, else the body's, else RequestResponse. */
 export function invocationTypeOf(header: string | undefined, body: InvocationType | undefined): InvocationType {
@@ -47,7 +62,37 @@ export class FunctionsController {
     private readonly functionsService: FunctionsService,
     private readonly asyncInvocations: AsyncInvocationsService,
     private readonly keyUses: KeyUses,
+    private readonly stacks: StacksService,
+    private readonly configs: EventInvokeConfigService,
+    private readonly tags: ResourceTagsService,
   ) {}
+
+  /** The functions, each with the stack it is in, null for none, as `ff deploy` made it from a template. */
+  private async withStacks<T extends Function>(accountId: string, functions: T[]): Promise<(T & InStack)[]> {
+    const stackOf = await this.stacks.ofFunctions(accountId, functions.map((function_) => function_.name));
+    return functions.map((function_) => ({ ...function_, stack: stackOf.get(function_.name) ?? null }));
+  }
+
+  private async answer(accountId: string, function_: FunctionView): Promise<FunctionAnswer> {
+    const [inStack] = await this.withStacks(accountId, [function_]);
+    return { ...inStack, tags: await this.tags.of(taggedFunction(function_.id)) };
+  }
+
+  /** The fields of Lambda's that FF's API takes too, its dead-letter queue the account's. */
+  private async lambdaFields(accountId: string, { description, deadLetterTargetArn }: LambdaFields): Promise<LambdaFields> {
+    if (deadLetterTargetArn) await this.configs.checkedQueue(accountId, 'deadLetterTargetArn', deadLetterTargetArn);
+    return { description, deadLetterTargetArn };
+  }
+
+  /**
+   * The change rolled out, then the tags sent replacing the function's: a
+   * failed change leaves them as they were, as it leaves the rest.
+   */
+  private async live(accountId: string, started: StartedChange, tags: Record<string, string> | undefined): Promise<FunctionAnswer> {
+    const function_ = await started.rollOut();
+    if (tags) await this.tags.replace(accountId, taggedFunction(function_.id), tags);
+    return this.answer(accountId, function_);
+  }
 
   @Post()
   @RequireScope('functions:write')
@@ -67,24 +112,30 @@ export class FunctionsController {
       'The request was refused (validation, the plan), and nothing was saved; or the code failed to load, and `functionId` names the function saved as ERROR',
   })
   @ApiResponse({ status: 409, description: 'Another of the account\'s functions has the name: names are unique within an account. Nothing was saved' })
-  async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<FunctionView> {
-    return this.functionsService.create(principal.accountId, createFunctionDto);
+  async create(@Body() createFunctionDto: CreateFunctionDto, @Principal() principal: Principal): Promise<FunctionAnswer> {
+    const { description, deadLetterTargetArn, tags, ...fields } = createFunctionDto;
+    const lambda = await this.lambdaFields(principal.accountId, { description, deadLetterTargetArn });
+    return this.live(principal.accountId, await this.functionsService.startCreate(principal.accountId, fields, lambda), tags);
   }
 
   @Get()
   @RequireScope('functions:read')
-  @ApiOperation({ summary: "List the account's functions, newest first; with name, the one of that name" })
+  @ApiOperation({ summary: "List the account's functions, newest first, each with the stack it is in; with name, the one of that name" })
   @ApiResponse({ status: 200, description: 'List of functions', type: [Function] })
-  async findAll(@Query() query: ListFunctionsQuery, @Principal() principal: Principal): Promise<Function[]> {
-    return this.functionsService.findAll(principal.accountId, query.name);
+  async findAll(@Query() query: ListFunctionsQuery, @Principal() principal: Principal): Promise<(Function & InStack)[]> {
+    return this.withStacks(principal.accountId, await this.functionsService.findAll(principal.accountId, query.name));
   }
 
   @Get(':id')
   @RequireScope('functions:read')
   @ApiOperation({ summary: 'Get a function by ID' })
-  @ApiResponse({ status: 200, description: "Function details, with its environment variables; never its secrets' values", type: Function })
-  async findOne(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<FunctionView> {
-    return this.functionsService.describe(principal.accountId, id);
+  @ApiResponse({
+    status: 200,
+    description: "Function details, with its environment variables, never its secrets' values, its tags, and the stack it is in, null for none",
+    type: Function,
+  })
+  async findOne(@Param('id', ParseUUIDPipe) id: string, @Principal() principal: Principal): Promise<FunctionAnswer> {
+    return this.answer(principal.accountId, await this.functionsService.describe(principal.accountId, id));
   }
 
   @Get(':id/code')
@@ -140,8 +191,10 @@ export class FunctionsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() updateFunctionDto: UpdateFunctionDto,
     @Principal() principal: Principal,
-  ): Promise<FunctionView> {
-    return this.functionsService.update(principal.accountId, id, updateFunctionDto);
+  ): Promise<FunctionAnswer> {
+    const { description, deadLetterTargetArn, tags, ...fields } = updateFunctionDto;
+    const lambda = await this.lambdaFields(principal.accountId, { description, deadLetterTargetArn });
+    return this.live(principal.accountId, await this.functionsService.startUpdate(principal.accountId, id, fields, lambda), tags);
   }
 
   @Delete(':id')

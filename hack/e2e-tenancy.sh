@@ -37,6 +37,10 @@
 #     name, and its messages and tags stay; a key deletes no other account's bucket
 #     through S3, nor takes its name, nor reads or changes its tags, its policy
 #     or its public access block.
+#   - Stacks (ADR 0016): each account's own, their names each account's;
+#     another account gets 404 on every route, and a stack names only its own
+#     account's functions, queues and buckets, which a function's answer says;
+#     a key needs stacks:read and stacks:write.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -259,6 +263,16 @@ site_of() { "$1" GET "/buckets/$2/website" | jq -r '.indexDocument.suffix'; }
 
 # site_domains_of <as_…> <bucket>: the domains of the bucket's site, as its own account reads them.
 site_domains_of() { "$1" GET "/buckets/$2/website/domains" | jq -r '[.[].domain] | join(",")'; }
+
+# stack_body <function> <queue> <bucket>: a stack as `ff deploy` puts one, which makes the three.
+stack_body() {
+  jq -cn --arg sha "$(printf 'l5' | sha256sum | cut -d' ' -f1)" --arg fn "$1" --arg queue "$2" --arg bucket "$3" \
+    '{templateSha256: $sha, parameters: {Stage: "l5"}, resources: [{logicalId: "Orders", type: "AWS::Serverless::Function", physicalId: $fn},
+      {logicalId: "Queue", type: "AWS::SQS::Queue", physicalId: $queue}, {logicalId: "Photos", type: "AWS::S3::Bucket", physicalId: $bucket}]}'
+}
+
+# stack_of <as_…> <stack>: the stack's name, its resources counted, and its Stage, as its own account reads it.
+stack_of() { "$1" GET "/stacks/$2" | jq -r '"\(.name) \(.resources | length) \(.parameters.Stage)"'; }
 
 # kept_by <as_…> <queue>: the queue's name and its messages that can be received, as its own account reads them.
 kept_by() { "$1" GET "/queues/$2" | jq -r '"\(.name) \(.messages.available)"'; }
@@ -516,6 +530,9 @@ as_a PUT /buckets/l5-photos-a/website '{"indexDocument": {"suffix": "index.html"
 check "  ... and is a site" "200 index.html" "$(status) $(jq -r '.indexDocument.suffix' "$work/body")"
 as_a POST /buckets/l5-photos-a/website/domains '{"domain": "l5.example.tn"}' >/dev/null
 check "  ... with a domain of A's own, pending" "201 pending" "$(status) $(jq -r .status "$work/body")"
+as_a PUT /stacks/l5-shop "$(stack_body l5-a l5-orders-a l5-photos-a)" >/dev/null
+check "A puts a stack of its function, its queue and its bucket, as ff deploy does" "200 l5-shop 3 l5" "$(status) $(stack_of as_a l5-shop)"
+check "  ... which its function's answer names" "l5-shop" "$(as_a GET "/functions/$id" | jq -r .stack)"
 key_a="$(as_a POST /storage-keys '{}')"
 check "  ... and an access key to it, its secret in the answer" "201 true" "$(status) $(jq -r '.secretAccessKey | test("^[A-Za-z0-9+/]{40}$")' <<<"$key_a")"
 key_a_id="$(jq -r .id <<<"$key_a")"
@@ -812,6 +829,25 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b DELETE /caches/l5-sessions >/dev/null
       check "  ... and which B deletes, A's own untouched" "204 a" "$(status) $(cache_cli "$cache_url_a" GET l5)"
       ;;
+    "GET /stacks")
+      listed="$(as_b GET /stacks | jq 'map(select(.name == "l5-shop")) | length')"
+      check "$route: B's list doesn't show A's stack" "200 0" "$(status) $listed"
+      ;;
+    "GET /stacks/{name}" | "DELETE /stacks/{name}")
+      as_b "$method" /stacks/l5-shop >/dev/null
+      check "$route: B gets 404 for A's stack" '404 The account has no stack named "l5-shop"' "$(status) $(message)"
+      check "  ... which A still has, as it put it" "l5-shop 3 l5 200" "$(stack_of as_a l5-shop) $(status)"
+      ;;
+    "PUT /stacks/{name}")
+      as_b PUT /stacks/l5-shop "$(stack_body l5-a l5-orders-a l5-photos-a)" >/dev/null
+      check "$route: B can't name A's function, queue or bucket in a stack" \
+        '400 Orders: the account has no function named "l5-a"; Queue: the account has no queue named "l5-orders-a"; Photos: the account has no bucket named "l5-photos-a"' \
+        "$(status) $(messages)"
+      as_b PUT /stacks/l5-shop "$(jq -c '.resources = []' <<<"$(stack_body x x x)")" >/dev/null
+      check "  ... and puts one of its own, of the name A's has: names are each account's, A's as it put it" "200 l5-shop 3 l5" "$(status) $(stack_of as_a l5-shop)"
+      as_b DELETE /stacks/l5-shop >/dev/null
+      check "  ... which B forgets, A's own untouched" "204 l5-shop 3 l5 l5-shop" "$(status) $(stack_of as_a l5-shop) $(as_a GET "/functions/$id" | jq -r .stack)"
+      ;;
     "GET /email/identities")
       listed="$(as_b GET /email/identities | jq 'map(select(.dkimSelector == "'"$selector_a"'")) | length')"
       check "$route: B's list doesn't show A's domain" "200 0" "$(status) $listed"
@@ -970,6 +1006,11 @@ check "  ... nor A's queue" \
 as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
 check "  ... which, under its own account's ARN, is no queue of B's" \
   '400 destinationConfig.onFailure.destination: the account has no queue named "l5-records"' "$(status) $(message)"
+as_b PUT "/functions/$own" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-records" '{deadLetterTargetArn: $arn}')" >/dev/null
+check "  ... nor as its function's dead-letter queue, a SAM template's DeadLetterQueue" \
+  "400 deadLetterTargetArn must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_b:l5-records" "$(status) $(message)"
+as_b PUT "/functions/$own" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-records" '{deadLetterTargetArn: $arn}')" >/dev/null
+check "  ... under its own account's ARN either" '400 deadLetterTargetArn: the account has no queue named "l5-records"' "$(status) $(message)"
 sql "DELETE FROM queues WHERE account_id = '$account_a' AND name = 'l5-records'"
 as_b POST "/functions/$own/event-sources" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a" '{eventSourceArn: $arn}')" >/dev/null
 check "B can't have its own function read A's queue" \
@@ -1362,6 +1403,8 @@ as_user_1 PUT /buckets/l5-photos-1/website '{"indexDocument": {"suffix": "index.
 check "  ... and is a single-page app's site" "200 true" "$(status) $(jq -r .singlePageApp "$work/body")"
 as_user_1 POST /buckets/l5-photos-1/website/domains '{"domain": "l5-one.example.tn"}' >/dev/null
 check "  ... with a domain of its own, pending" "201 pending" "$(status) $(jq -r .status "$work/body")"
+as_user_1 PUT /stacks/l5-shop "$(stack_body l5-one l5-orders-1 l5-photos-1)" >/dev/null
+check "  ... and a stack of its function, its queue and its bucket" "200 l5-shop 3 l5" "$(status) $(stack_of as_user_1 l5-shop)"
 key_1_s3="$(as_user_1 POST /storage-keys '{}')"
 check "  ... and an access key to it" 201 "$(status)"
 key_1_s3_id="$(jq -r .id <<<"$key_1_s3")"
@@ -1628,6 +1671,22 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 DELETE /caches/l5-one >/dev/null
       check "  ... and which account 2 deletes, account 1's own untouched" "204 one" "$(status) $(cache_cli "$cache_conn_1" GET l5)"
       ;;
+    "GET /stacks")
+      listed="$(as_user_2 GET /stacks | jq 'map(select(.name == "l5-shop")) | length')"
+      check "$route: account 2's list doesn't show account 1's stack" "200 0" "$(status) $listed"
+      ;;
+    "GET /stacks/{name}" | "DELETE /stacks/{name}")
+      as_user_2 "$method" /stacks/l5-shop >/dev/null
+      check "$route: account 2 gets 404 for account 1's stack" '404 The account has no stack named "l5-shop"' "$(status) $(message)"
+      check "  ... which account 1 still has, as it put it" "l5-shop 3 l5 200" "$(stack_of as_user_1 l5-shop) $(status)"
+      ;;
+    "PUT /stacks/{name}")
+      as_user_2 PUT /stacks/l5-shop "$(stack_body l5-one l5-orders-1 l5-photos-1)" >/dev/null
+      check "$route: account 2 can't name account 1's function, queue or bucket in a stack" \
+        '400 Orders: the account has no function named "l5-one"; Queue: the account has no queue named "l5-orders-1"; Photos: the account has no bucket named "l5-photos-1"' \
+        "$(status) $(messages)"
+      check "  ... account 1's stack as it put it" "l5-shop 3 l5" "$(stack_of as_user_1 l5-shop)"
+      ;;
     "GET /email/identities")
       listed="$(as_user_2 GET /email/identities | jq 'map(select(.dkimSelector == "'"$selector_1"'")) | length')"
       check "$route: account 2's list doesn't show account 1's domain" "200 0" "$(status) $listed"
@@ -1831,6 +1890,10 @@ with_token "$key_1" GET /queues >/dev/null
 check "a key without queues:read can't list the account's queues" "403 This API key lacks the scope queues:read" "$(status) $(message)"
 with_token "$key_1" POST /queues/l5-orders-1/messages '{"body": "by key"}' >/dev/null
 check "nor send to one without queues:write" "403 This API key lacks the scope queues:write" "$(status) $(message)"
+with_token "$key_1" GET /stacks >/dev/null
+check "a key without stacks:read can't list the account's stacks" "403 This API key lacks the scope stacks:read" "$(status) $(message)"
+with_token "$key_1" DELETE /stacks/l5-shop >/dev/null
+check "nor forget one without stacks:write, the stack kept" "403 This API key lacks the scope stacks:write l5-shop 3 l5" "$(status) $(message) $(stack_of as_user_1 l5-shop)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
 me_key="$(with_token "$key_1" GET /me)"
@@ -1947,7 +2010,7 @@ section_audit() {
 section "the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create email.identity.create email.suppression.put bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add storage_key.create api_key.create storage_key.create storage_key.delete function_url.create storage_key.create storage_key.delete api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create email.identity.create email.suppression.put bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add stack.put storage_key.create api_key.create storage_key.create storage_key.delete function_url.create storage_key.create storage_key.delete api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"

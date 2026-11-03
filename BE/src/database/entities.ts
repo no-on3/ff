@@ -61,9 +61,10 @@ import { QueueRequestCount } from '../queues/queue-request-count.entity';
 import { QueueSample } from '../queues/queue-sample.entity';
 import { AsyncEventCount } from '../queues/async-event-count.entity';
 import { ResourceTag } from '../tags/resource-tag.entity';
+import { Stack, StackResource } from '../stacks/stack.entity';
 
 /**
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionVersion, FunctionAlias, FunctionPolicyStatement, ResourceTag, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, KeyUse, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping, QueueRequestCount, QueueSample, AsyncEventCount, Cache, CacheSample, EmailIdentity, EmailSuppression, EmailMessage, EmailSending, EmailSend];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionVersion, FunctionAlias, FunctionPolicyStatement, ResourceTag, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, KeyUse, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping, QueueRequestCount, QueueSample, AsyncEventCount, Cache, CacheSample, EmailIdentity, EmailSuppression, EmailMessage, EmailSending, EmailSend, Stack, StackResource];

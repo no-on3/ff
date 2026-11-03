@@ -1939,6 +1939,8 @@ run('database schema (L2, real PostgreSQL)', () => {
         'resource_tags',
         'resource_usage_hourly',
         'schedules',
+        'stack_resources',
+        'stacks',
         'storage_keys',
         'storage_request_counts',
         'tax_rates',

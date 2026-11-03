@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-5 plan](../step-5-plan.md)'s D11, and its choices (its §9, 9 and 10), confirmed on 2026-10-31 (the [decision log](../decisions.md)'s 51 to 64); what the SAM CLI asks AWS, and how a template's YAML is read in Rust, measured by X-01's spikes the same day |
 | **Date** | 2026-10-31 |
-| **Implementation** | Step-5 plan: decision D11 (the CLI plan's C-30); tasks X-12 (`ff deploy` from a `template.yaml`) and X-13 (SAM's events, queues and buckets). The reader, the subset, the parameters and the Globals in `cli/src/sam/`, which `ff doctor` checks a template with (X-12's part 1) |
+| **Implementation** | Step-5 plan: decision D11 (the CLI plan's C-30); tasks X-12 (`ff deploy` from a `template.yaml`) and X-13 (SAM's events, queues and buckets). The reader, the subset, the parameters and the Globals in `cli/src/sam/`, which `ff doctor` checks a template with (X-12's part 1); the stack in FF's API, `/stacks` (`BE/src/stacks/`), and a function's answer naming its stack (X-12's part 2) |
 | **Related** | [ADR 0002](0002-cli.md) (the `ff` command); [ADR 0010](0010-queue.md) (a queue's URL inside the cluster); [ADR 0014](0014-lambda-api.md) (Lambda's API) and [ADR 0015](0015-versions-and-aliases.md) (`AutoPublishAlias`'s versions and aliases); the spikes, [`hack/spikes/sam-yaml`](../../hack/spikes/sam-yaml/README.md) and [`hack/spikes/lambda`](../../hack/spikes/lambda/README.md)'s SAM part |
 
 ## Context
@@ -36,6 +36,8 @@ The plan's D11: `Globals`; `Parameters` with `--parameter-overrides` and `samcon
 ### 4. A stack, kept by FF
 
 A deploy's **stack**, named by `--stack-name` or `samconfig.toml`, is kept in FF (`/stacks`): for each resource the template made, its logical ID, its type and the FF resource it is; the parameters it was deployed with; and the template's SHA-256, to tell when it changed. Not the template's text: the template is the customer's, in their repository, as the code is. The next deploy changes the stack's resources, and removes those the template no longer has after asking (§9, 9); `ff delete-stack` removes them all, as `sam delete`. The console and `ff get` say when a function belongs to a stack.
+
+**As built (X-12, part 2):** `GET /stacks`, `GET`, `PUT` and `DELETE /stacks/{name}`, under the scopes `stacks:read` and `stacks:write`. A `PUT` gives the stack whole, as a deploy left it. A resource's physical ID is the FF resource's name, a function's, a queue's or a bucket's, a version's number or an alias's name after a colon for what is a version's or an alias's, and null for what FF keeps without effect. A stack names only its account's functions, queues and buckets, each in one stack at most, so that two stacks never delete each other's. A `NoEcho` parameter's value is left out, FF keeping no copy of it. `DELETE` forgets the stack and leaves what it made, which `ff delete-stack` deletes first. An account has 2,000 stacks at most, CloudFormation's quota. A function's answers in FF's API name its stack, `stack`, null for none. FF's API takes three of Lambda's settings that a template gives and only Lambda's own endpoint took: a function's `description`, its `deadLetterTargetArn`, a queue of the account, and its `tags`, put once a create or an update is live and replaced whole, which a function's own answer carries.
 
 ### 5. What a template means on FF
 

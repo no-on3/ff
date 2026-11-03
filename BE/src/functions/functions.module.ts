@@ -9,7 +9,9 @@ import { BillingModule } from '../billing/billing.module';
 import { EncryptionModule } from '../encryption/encryption.module';
 import { UsageModule } from '../usage/usage.module';
 import { PackagesModule } from '../packages/packages.module';
+import { StacksModule } from '../stacks/stacks.module';
 import { StorageModule } from '../storage/storage.module';
+import { TagsModule } from '../tags/tags.module';
 import { QueuesModule } from '../queues/queues.module';
 import { Account } from '../accounts/entities/account.entity';
 import { AsyncInvocationsService } from './async-invocations.service';
@@ -52,6 +54,9 @@ import { StoppedChanges } from './stopped-changes.service';
     StorageModule,
     // Its asynchronous calls wait in a queue of its own.
     QueuesModule,
+    // Its answers say which stack it is in, and its tags.
+    StacksModule,
+    TagsModule,
   ],
   controllers: [FunctionsController, EventInvokeConfigController, FunctionVersionsController, FunctionAliasesController],
   providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionPoliciesService, FunctionKeyRenewal, StoppedChanges],

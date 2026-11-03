@@ -1,5 +1,5 @@
-/** L1: what a resource's tags may be, as AWS says: their keys, their values, 50 a resource. */
-import { TAG_LIMITS, tagsProblem } from './tag-rules';
+/** L1: what a resource's tags may be, as AWS says: their keys, their values, 50 a resource; and all of them, as a body gives them. */
+import { TAG_LIMITS, allTagsProblem, tagsProblem } from './tag-rules';
 
 describe('tag rules (L1)', () => {
   it("takes AWS's tags: letters of any language, digits, spaces and + - = . _ : / @, an empty value too", () => {
@@ -21,5 +21,12 @@ describe('tag rules (L1)', () => {
     const fifty = Object.fromEntries(Array.from({ length: TAG_LIMITS.perResource }, (_, n) => [`k${n}`, 'v']));
     expect(tagsProblem(fifty, { k0: 'new value', k49: 'x' })).toBeUndefined();
     expect(tagsProblem(fifty, { k50: 'v' })).toBe('A resource has at most 50 tags: these would make it 51.');
+  });
+
+  it("takes all of a resource's tags as a body gives them, none among them, and refuses what isn't an object of strings", () => {
+    expect([allTagsProblem({}), allTagsProblem({ team: 'orders' })]).toEqual([undefined, undefined]);
+    expect([allTagsProblem(null), allTagsProblem(['team']), allTagsProblem('team=orders')]).toEqual(Array(3).fill("Tags are an object, each tag's value by its key."));
+    expect(allTagsProblem({ team: 'orders', size: 3 })).toBe("The value of size is a string, as every tag's is.");
+    expect(allTagsProblem({ 'aws:team': 'x' })).toBe('The key aws:team starts with aws:, which AWS keeps for its own tags.');
   });
 });

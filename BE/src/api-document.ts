@@ -6,7 +6,7 @@ import { DocumentBuilder, OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
  * without effect, so that no one reads a permission or a role as a promise.
  */
 export const API_DESCRIPTION = [
-  "FF's API: an account's functions, their versions, aliases, URLs, schedules and settings, its databases, buckets, queues, caches and mail, its keys, members, usage and billing.",
+  "FF's API: an account's functions, their versions, aliases, URLs, schedules and settings, its databases, buckets, queues, caches and mail, its stacks, its keys, members, usage and billing.",
   "AWS's tools call FF's own endpoints for Lambda, S3, SQS and SES, signed with the account's access keys (ff keys create).",
   "Lambda's permissions (AddPermission, RemovePermission, GetPolicy) are kept as sent and given back, without effect, as a function's role is:",
   "FF's keys, and a URL's AuthType, decide who calls a function, and the account's own buckets, schedules and queues call it as they are told.",

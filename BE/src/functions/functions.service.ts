@@ -136,6 +136,15 @@ export interface LambdaFields {
   deadLetterTargetArn?: string | null;
 }
 
+/**
+ * The fields of a create or an update that the API's controller handles
+ * itself: Lambda's, checked and sent as LambdaFields, and the tags, put once
+ * the change is live.
+ */
+type HandledByTheController = 'description' | 'deadLetterTargetArn' | 'tags';
+export type NewFunction = Omit<CreateFunctionDto, HandledByTheController>;
+export type FunctionChange = Omit<UpdateFunctionDto, HandledByTheController>;
+
 /** An update's Lambda fields, and the RevisionId its caller read: refused once another change came since, as Lambda's. */
 export interface LambdaUpdateFields extends LambdaFields {
   revisionId?: string;
@@ -272,7 +281,7 @@ interface EnvironmentChange {
 }
 
 /** The fields of a function a change asks for, without its environment; with new code, how it comes, its hash and size. */
-type FieldChanges = Omit<UpdateFunctionDto, 'environment'> &
+type FieldChanges = Omit<FunctionChange, 'environment'> &
   Partial<CodeFields> &
   LambdaFields & { packageSha256?: string; revisionId?: string };
 
@@ -453,7 +462,7 @@ export class FunctionsService {
   }
 
   /** Creates a function and rolls it out, answering once it is ACTIVE; ERROR answers its diagnosis, the function kept. */
-  async create(accountId: string, createFunctionDto: CreateFunctionDto): Promise<FunctionView> {
+  async create(accountId: string, createFunctionDto: NewFunction): Promise<FunctionView> {
     return (await this.startCreate(accountId, createFunctionDto)).rollOut();
   }
 
@@ -464,7 +473,7 @@ export class FunctionsService {
    * by its create until it ends. Its rollout is the second half, which that
    * operation doesn't wait for.
    */
-  async startCreate(accountId: string, createFunctionDto: CreateFunctionDto, lambda: LambdaFields = {}): Promise<StartedChange> {
+  async startCreate(accountId: string, createFunctionDto: NewFunction, lambda: LambdaFields = {}): Promise<StartedChange> {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, createFunctionDto);
     const { environment: variables, secrets, ...fields } = createFunctionDto;
@@ -756,7 +765,7 @@ export class FunctionsService {
   }
 
   /** Changes a function, answering once the change is live; a failure answers its diagnosis, the change rolled back. */
-  async update(accountId: string, id: string, updateFunctionDto: UpdateFunctionDto): Promise<FunctionView> {
+  async update(accountId: string, id: string, updateFunctionDto: FunctionChange): Promise<FunctionView> {
     return (await this.startUpdate(accountId, id, updateFunctionDto)).rollOut();
   }
 
@@ -766,7 +775,7 @@ export class FunctionsService {
    * with Lambda's fields when Lambda's operations change it. Its rollout is the
    * second half, which they don't wait for.
    */
-  async startUpdate(accountId: string, id: string, updateFunctionDto: UpdateFunctionDto, lambda: LambdaUpdateFields = {}): Promise<StartedChange> {
+  async startUpdate(accountId: string, id: string, updateFunctionDto: FunctionChange, lambda: LambdaUpdateFields = {}): Promise<StartedChange> {
     const function_ = await this.findOne(accountId, id);
     this.refuseWhileChanging(function_);
     if (lambda.revisionId !== undefined && lambda.revisionId !== function_.revisionId) throw revisionMoved(lambda.revisionId, function_);

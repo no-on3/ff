@@ -1024,6 +1024,8 @@ export const SCOPES = [
   'caches:write',
   'email:read',
   'email:write',
+  'stacks:read',
+  'stacks:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 

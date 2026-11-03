@@ -65,6 +65,9 @@ import { QueuesController } from './queues/queues.controller';
 import { EventSourcesController } from './event-sources/event-sources.controller';
 import { EventSourcesService } from './event-sources/event-sources.service';
 import { QueuesService } from './queues/queues.service';
+import { StacksController } from './stacks/stacks.controller';
+import { StacksService } from './stacks/stacks.service';
+import { ResourceTagsService } from './tags/resource-tags.service';
 import { ORCHESTRATOR } from './orchestrator/orchestrator.types';
 import { DataSource } from 'typeorm';
 import { of } from 'rxjs';
@@ -115,6 +118,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
         AdminStatsController,
         QueuesController,
         EventSourcesController,
+        StacksController,
       ],
       providers: [
         // The caller owns the function, so the ownership checks pass.
@@ -123,12 +127,17 @@ describe('the OpenAPI document (L1, P-08)', () => {
           // The live tail answers with an event stream, which ends here at once (P-43); the code, with a zip: an empty one.
           useValue: succeeding(FunctionsService, {
             findOne: async () => ({ id: ID, accountId: ACCOUNT }),
+            findAll: async () => [],
+            startCreate: async () => ({ rollOut: async () => ({ id: ID, accountId: ACCOUNT }) }),
+            startUpdate: async () => ({ rollOut: async () => ({ id: ID, accountId: ACCOUNT }) }),
             liveLogs: async () => of({ data: {} }),
             code: async () => ({ name: 'hello', zip: Buffer.from([0x50, 0x4b, 0x05, 0x06, ...new Array<number>(18).fill(0)]) }),
           }),
         },
         { provide: AsyncInvocationsService, useValue: succeeding(AsyncInvocationsService, { queue: async () => ({ requestId: ID }), dryRun: async () => undefined }) },
         { provide: KeyUses, useValue: succeeding(KeyUses, { of: async () => [] }) },
+        { provide: StacksService, useValue: succeeding(StacksService, { list: async () => [], remove: async () => undefined, ofFunctions: async () => new Map() }) },
+        { provide: ResourceTagsService, useValue: succeeding(ResourceTagsService) },
         { provide: QueuesService, useValue: succeeding(QueuesService, { list: async () => [], receive: async () => [], remove: async () => undefined, purge: async () => undefined, deleteMessage: async () => undefined }) },
         { provide: EventInvokeConfigService, useValue: succeeding(EventInvokeConfigService, { remove: async () => undefined }) },
         { provide: EventSourcesService, useValue: succeeding(EventSourcesService, { list: async () => [], listForFunction: async () => [], remove: async () => undefined }) },
@@ -218,7 +227,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /functions/{id}/event-invoke-config', 'PUT /functions/{id}/event-invoke-config', 'DELETE /functions/{id}/event-invoke-config', 'POST /functions/{id}/url', 'GET /functions/{id}/url', 'PUT /functions/{id}/url', 'DELETE /functions/{id}/url', 'GET /functions/{id}/url/domains', 'POST /functions/{id}/url/domains', 'POST /functions/{id}/url/domains/{domain}/verify', 'DELETE /functions/{id}/url/domains/{domain}', 'GET /functions/{id}/schedules', 'POST /functions/{id}/schedules', 'GET /functions/{id}/schedules/{scheduleId}', 'PUT /functions/{id}/schedules/{scheduleId}', 'DELETE /functions/{id}/schedules/{scheduleId}', 'GET /schedules/next-runs', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}', 'GET /readyz', 'GET /admin/stats/overview', 'GET /queues', 'POST /queues', 'GET /queues/{name}', 'PATCH /queues/{name}', 'DELETE /queues/{name}', 'POST /queues/{name}/purge', 'POST /queues/{name}/messages', 'POST /queues/{name}/receive', 'DELETE /queues/{name}/messages/{receiptHandle}', 'GET /functions/{id}/event-sources', 'POST /functions/{id}/event-sources', 'GET /event-sources', 'GET /event-sources/{uuid}', 'PATCH /event-sources/{uuid}', 'DELETE /event-sources/{uuid}']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /functions/{id}/event-invoke-config', 'PUT /functions/{id}/event-invoke-config', 'DELETE /functions/{id}/event-invoke-config', 'POST /functions/{id}/url', 'GET /functions/{id}/url', 'PUT /functions/{id}/url', 'DELETE /functions/{id}/url', 'GET /functions/{id}/url/domains', 'POST /functions/{id}/url/domains', 'POST /functions/{id}/url/domains/{domain}/verify', 'DELETE /functions/{id}/url/domains/{domain}', 'GET /functions/{id}/schedules', 'POST /functions/{id}/schedules', 'GET /functions/{id}/schedules/{scheduleId}', 'PUT /functions/{id}/schedules/{scheduleId}', 'DELETE /functions/{id}/schedules/{scheduleId}', 'GET /schedules/next-runs', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}', 'GET /readyz', 'GET /admin/stats/overview', 'GET /queues', 'POST /queues', 'GET /queues/{name}', 'PATCH /queues/{name}', 'DELETE /queues/{name}', 'POST /queues/{name}/purge', 'POST /queues/{name}/messages', 'POST /queues/{name}/receive', 'DELETE /queues/{name}/messages/{receiptHandle}', 'GET /functions/{id}/event-sources', 'POST /functions/{id}/event-sources', 'GET /event-sources', 'GET /event-sources/{uuid}', 'PATCH /event-sources/{uuid}', 'DELETE /event-sources/{uuid}', 'GET /stacks', 'GET /stacks/{name}', 'PUT /stacks/{name}', 'DELETE /stacks/{name}']));
     // The scaler's per-minute table answered GET /metrics/:functionId; the metrics now come from the usage records.
     expect(checked.map((r) => r.route)).not.toContain('GET /metrics/{functionId}');
     // Invoke answers each of its invocation types with its own status, which the next test checks.

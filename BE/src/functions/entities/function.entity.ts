@@ -168,8 +168,8 @@ export class Function {
    * Where an asynchronous call that failed for good goes, as Lambda's
    * DeadLetterConfig: a queue of the account, by its ARN, which gets the call's
    * event as a message's body. Its versions and aliases follow it too, as they
-   * follow its EventInvokeConfig. Set through Lambda's endpoint; none for a
-   * function made through FF's API, whose destinations do as much.
+   * follow its EventInvokeConfig. Set through Lambda's endpoint, or FF's API
+   * for a SAM template's DeadLetterQueue; its destinations do as much.
    */
   @Column({ type: 'varchar', length: 256, nullable: true })
   deadLetterTargetArn: string | null;

@@ -107,6 +107,9 @@ export type AuditAction =
   // A queue's tags, as SQS's: put and removed by key, through the SQS endpoint.
   | 'queue.tag'
   | 'queue.untag'
+  // A stack (ADR 0016), put as a deploy left it, or forgotten: what it made stays.
+  | 'stack.put'
+  | 'stack.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

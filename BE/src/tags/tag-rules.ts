@@ -1,3 +1,5 @@
+import { ValidateBy } from 'class-validator';
+
 /** AWS's limits on a resource's tags, which Lambda's are: 50 a resource, a key of 128 characters, a value of 256. */
 export const TAG_LIMITS = { perResource: 50, keyLength: 128, valueLength: 256 } as const;
 
@@ -28,3 +30,21 @@ export function tagsProblem(existing: Record<string, string>, adding: Record<str
   if (total > TAG_LIMITS.perResource) return `A resource has at most ${TAG_LIMITS.perResource} tags: these would make it ${total}.`;
   return undefined;
 }
+
+/** Why a body's tags, all of a resource's, can't be: not an object of strings, or tags AWS wouldn't take. None is no tags. */
+export function allTagsProblem(value: unknown): string | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return "Tags are an object, each tag's value by its key.";
+  const notText = Object.entries(value).find(([, tag]) => typeof tag !== 'string');
+  if (notText) return `The value of ${notText[0]} is a string, as every tag's is.`;
+  return Object.keys(value).length === 0 ? undefined : tagsProblem({}, value as Record<string, string>);
+}
+
+/** A body's tags, all of a resource's, as allTagsProblem checks them. */
+export const IsTags = (): PropertyDecorator =>
+  ValidateBy({
+    name: 'isTags',
+    validator: {
+      validate: (value: unknown) => allTagsProblem(value) === undefined,
+      defaultMessage: (args) => allTagsProblem(args?.value) ?? '',
+    },
+  });

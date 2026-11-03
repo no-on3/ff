@@ -80,6 +80,7 @@ import { FunctionPolicies1793690000000 } from './1793690000000-FunctionPolicies'
 import { BucketTags1793700000000 } from './1793700000000-BucketTags';
 import { QueueTags1793710000000 } from './1793710000000-QueueTags';
 import { BucketPolicies1793720000000 } from './1793720000000-BucketPolicies';
+import { Stacks1793730000000 } from './1793730000000-Stacks';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -169,4 +170,5 @@ export const MIGRATIONS: Array<new () => object> = [
   BucketTags1793700000000,
   QueueTags1793710000000,
   BucketPolicies1793720000000,
+  Stacks1793730000000,
 ];

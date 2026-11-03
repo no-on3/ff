@@ -1,4 +1,4 @@
-import { ArrayUnique, IsArray, IsString, IsEnum, IsNumber, IsObject, IsOptional, Matches, Min, Max, ValidateBy, ValidateIf } from 'class-validator';
+import { ArrayUnique, IsArray, IsString, IsEnum, IsNumber, IsObject, IsOptional, Matches, MaxLength, Min, Max, ValidateBy, ValidateIf } from 'class-validator';
 import { applyDecorators } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { MaxJsonBytes, MaxUtf8Bytes } from '../../common/byte-limits';
@@ -8,6 +8,10 @@ import { CODE_SHA256, CODE_SHA256_RULE, DEFAULT_HANDLER, MAX_HANDLER_LENGTH, han
 import { AWS_ENDPOINTS, AwsEndpoint } from '../../common/aws-endpoint';
 import { EventFormat, Runtime } from '../entities/function.entity';
 import { IsEnvironment, IsSecrets } from '../environment';
+import { IsTags, TAG_LIMITS } from '../../tags/tag-rules';
+
+/** Lambda's longest Description, which the column holds. */
+export const MAX_DESCRIPTION_LENGTH = 256;
 
 /**
  * AWS Lambda's rule for a function's name, which FF's follow: names address
@@ -124,6 +128,37 @@ export class CreateFunctionDto {
   @ArrayUnique()
   @IsEnum(AwsEndpoint, { each: true })
   awsEndpoints?: AwsEndpoint[];
+
+  @ApiPropertyOptional({ description: "What the function is for, as Lambda's Description: 256 characters at most, empty for none", maxLength: MAX_DESCRIPTION_LENGTH })
+  @ValidateIf((_dto, value) => value !== undefined)
+  @IsString()
+  @MaxLength(MAX_DESCRIPTION_LENGTH)
+  description?: string;
+
+  @ApiPropertyOptional({
+    description:
+      "Where an asynchronous call that failed every try goes, as Lambda's DeadLetterConfig: a queue of the account, by its ARN, which gets the " +
+      "call's event as a message's body; null for none. A function's destinations, PUT /functions/{id}/event-invoke-config, do as much",
+    type: String,
+    nullable: true,
+    maxLength: 256,
+  })
+  @ValidateIf((_dto, value) => value !== undefined && value !== null)
+  @IsString()
+  @MaxLength(256)
+  deadLetterTargetArn?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      `Its tags, as Lambda's: ${TAG_LIMITS.perResource} at most, a key of ${TAG_LIMITS.keyLength} characters, a value of ${TAG_LIMITS.valueLength}. ` +
+      "Put once the function is live; on an update, those sent replace them all, as Lambda's TagResource and UntagResource would, {} removing them",
+    type: 'object',
+    additionalProperties: { type: 'string' },
+    example: { team: 'orders' },
+  })
+  @ValidateIf((_dto, value) => value !== undefined)
+  @IsTags()
+  tags?: Record<string, string>;
 
   @ApiPropertyOptional({ description: 'Additional metadata: an object, 4 KB at most as JSON', type: 'object', additionalProperties: true })
   @IsOptional()
