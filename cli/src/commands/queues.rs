@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use super::Context;
 use crate::api::{Call, Client};
 use crate::cli::QueueAttributeArgs;
+use crate::config::is_queue_name;
 use crate::error::{Error, Kind};
 use crate::table::{table, time};
 
@@ -80,12 +81,6 @@ struct Received {
     /// Whether `--delete` deleted it: then it isn't received again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deleted: Option<bool>,
-}
-
-/// SQS's rule for a standard queue's name, as the API's: 1 to 80 letters, digits, hyphens and underscores.
-pub fn is_queue_name(name: &str) -> bool {
-    (1..=80).contains(&name.len())
-        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 pub fn checked_name(name: &str) -> Result<&str, Error> {

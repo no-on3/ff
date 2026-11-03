@@ -1,0 +1,61 @@
+# A template's queues as ff deploy makes them: one with its dead-letter queue and its tags, a function reading it, and
+# what its functions and its outputs see of them.
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Jobs:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      ReceiveMessageWaitTimeSeconds: 20
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt JobsFailed.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: team
+          Value: shop
+  JobsFailed:
+    Type: AWS::SQS::Queue
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      QueueName: jobs-failed
+      MessageRetentionPeriod: 1209600
+  JobsPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref Jobs]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt Jobs.Arn
+  Worker:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: worker
+      CodeUri: orders
+      Handler: index.handler
+      Runtime: nodejs24.x
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt JobsFailed.Arn
+      Environment:
+        Variables:
+          JOBS_URL: !Ref Jobs
+          FAILED_URL: !GetAtt JobsFailed.QueueUrl
+          FAILED_NAME: !GetAtt JobsFailed.QueueName
+      Events:
+        Jobs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Jobs.Arn
+            BatchSize: 5
+Outputs:
+  JobsUrl:
+    Description: Where the jobs are sent
+    Value: !Ref Jobs
+  JobsArn:
+    Value: !GetAtt Jobs.Arn

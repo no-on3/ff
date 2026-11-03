@@ -29,7 +29,17 @@ pub fn is_account_id(text: &str) -> bool {
 /// AWS Lambda's rule for a function's name, which the API follows: 1 to 64 letters, digits,
 /// hyphens or underscores.
 pub fn is_function_name(text: &str) -> bool {
-    (1..=64).contains(&text.len())
+    is_word(text, 64)
+}
+
+/// SQS's rule for a standard queue's name, as the API's: 1 to 80 letters, digits, hyphens and underscores.
+pub fn is_queue_name(text: &str) -> bool {
+    is_word(text, 80)
+}
+
+/// 1 to `most` letters, digits, hyphens or underscores, as AWS names functions and queues.
+fn is_word(text: &str, most: usize) -> bool {
+    (1..=most).contains(&text.len())
         && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 

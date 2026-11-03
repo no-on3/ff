@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use super::deploy::{self, Code, Deploy, Wanted};
 use super::event_sources::{self, EventSource};
 use super::functions::confirmed;
+use super::queues;
 use super::schedule::{self, Schedule};
 use super::secrets::Secrets;
 use super::url::FunctionUrl;
@@ -23,7 +24,7 @@ use crate::cli::{DeployArgs, Runtime};
 use crate::error::{Error, Kind};
 use crate::package::{self, Options, Package};
 use crate::sam::parameters::{self, SAMCONFIG, Samconfig};
-use crate::sam::plan::{self, ALIAS, EVENT_INVOKE_CONFIG, Known, MAPPING, Made, Place, RULE, SCHEDULE, URL};
+use crate::sam::plan::{self, ALIAS, EVENT_INVOKE_CONFIG, Known, MAPPING, Made, Place, QUEUE, RULE, SCHEDULE, URL};
 use crate::sam::resolve::FUNCTION;
 use crate::sam::{self, Template, subset};
 
@@ -199,10 +200,23 @@ struct FunctionDeployed {
     url: Option<String>,
 }
 
+/// What the deploy did to one of the template's queues.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueueDeployed {
+    logical_id: String,
+    name: String,
+    /// created, updated or unchanged.
+    action: &'static str,
+    /// Its attributes changed, by FF's API's names, and `tags`.
+    changed: Vec<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StackDeployed {
     stack: String,
+    queues: Vec<QueueDeployed>,
     functions: Vec<FunctionDeployed>,
     deleted: Vec<StackResource>,
     kept: Vec<StackResource>,
@@ -376,10 +390,27 @@ fn ensure_mappings(
     Ok(changed)
 }
 
-/// What the functions' events name that the account has to have, said before any change: each schedule's expression
-/// as FF's own parser reads it, and each queue a function reads.
-fn check_events(client: &Client, functions: &[plan::Function], problems: &mut Problems) -> Result<(), Error> {
-    for function in functions {
+/// What the template names that the account has to have, said before any change: each schedule's expression as FF's
+/// own parser reads it, each queue a function reads and each dead-letter queue, but the template's own queues.
+fn check_named(client: &Client, deployment: &plan::Plan, problems: &mut Problems) -> Result<(), Error> {
+    let made: BTreeSet<&str> = deployment.queues.iter().map(|queue| queue.name.as_str()).collect();
+    let missing = |queue: &str| -> Result<bool, Error> {
+        Ok(!made.contains(queue) && client.json_if_any::<Value>(&Call::get(format!("/queues/{queue}")))?.is_none())
+    };
+    for queue in &deployment.queues {
+        let Some(dead_letter) = queue.dead_letter() else { continue };
+        if missing(dead_letter)? {
+            let id = &queue.id;
+            problems.at(
+                &format!("/Resources/{id}/Properties/RedrivePolicy/deadLetterTargetArn"),
+                &format!(
+                    "{id}: RedrivePolicy's dead-letter queue {dead_letter}, which the account hasn't: a queue of \
+                     the template, or `ff queues create {dead_letter}`, makes it"
+                ),
+            );
+        }
+    }
+    for function in &deployment.functions {
         let id = &function.id;
         for schedule in &function.schedules {
             let key = plan::expression_key(schedule.kind);
@@ -395,7 +426,7 @@ fn check_events(client: &Client, functions: &[plan::Function], problems: &mut Pr
         }
         for mapping in &function.mappings {
             let queue = mapping.queue();
-            if client.json_if_any::<Value>(&Call::get(format!("/queues/{queue}")))?.is_none() {
+            if missing(queue)? {
                 problems.at(
                     &format!("/Resources/{id}/Properties/Events/{}/Properties/Queue", mapping.event),
                     &format!(
@@ -408,6 +439,49 @@ fn check_events(client: &Client, functions: &[plan::Function], problems: &mut Pr
         }
     }
     Ok(())
+}
+
+/// What of a queue differs from the template's, as a change's body: each attribute, by FF's API's names, and its tags.
+fn queue_changes(existing: &queues::Queue, wanted: &plan::Queue) -> Value {
+    let current = serde_json::to_value(existing).unwrap_or_default();
+    let mut changes = serde_json::Map::new();
+    for (field, value) in wanted.attributes.as_object().into_iter().flatten() {
+        if current.get(field) != Some(value) {
+            changes.insert(field.clone(), value.clone());
+        }
+    }
+    if existing.tags.clone().unwrap_or_default() != wanted.tags {
+        changes.insert("tags".into(), json!(wanted.tags));
+    }
+    Value::Object(changes)
+}
+
+/// The queue as the template says: made with its attributes and tags, or what differs of them changed.
+fn ensure_queue(
+    client: &Client,
+    queue: &plan::Queue,
+    existing: Option<&queues::Queue>,
+) -> Result<QueueDeployed, Error> {
+    let deployed =
+        |action, changed| QueueDeployed { logical_id: queue.id.clone(), name: queue.name.clone(), action, changed };
+    let Some(existing) = existing else {
+        let mut body = queue.attributes.as_object().cloned().unwrap_or_default();
+        // A new queue has no redrive policy unless it is given one.
+        body.retain(|_, value| !value.is_null());
+        body.insert("name".into(), queue.name.clone().into());
+        if !queue.tags.is_empty() {
+            body.insert("tags".into(), json!(queue.tags));
+        }
+        client.json::<Value>(&Call::post("/queues", Value::Object(body)))?;
+        return Ok(deployed("created", Vec::new()));
+    };
+    let changes = queue_changes(existing, queue);
+    let changed: Vec<String> = changes.as_object().map(|changes| changes.keys().cloned().collect()).unwrap_or_default();
+    if changed.is_empty() {
+        return Ok(deployed("unchanged", changed));
+    }
+    client.json::<Value>(&Call::patch(format!("/queues/{}", queue.name), changes))?;
+    Ok(deployed("updated", changed))
 }
 
 /// The settings of its asynchronous calls as FF's API answers them, Lambda's fields alone, those unset left out.
@@ -442,10 +516,28 @@ fn ensure_event_invoke_config(client: &Client, function: &Function, wanted: &Val
     Ok(true)
 }
 
-/// Deletes what a resource of the stack made, unless it is gone already: a function with what is its, its URL, its
-/// alias, or its asynchronous calls' settings.
+/// Whether a resource of the stack is a queue, and the queue's or the function's name it is or is of.
+fn owner(resource: &StackResource) -> (bool, &str) {
+    (resource.kind == QUEUE, plan::function_of(resource))
+}
+
+/// Deletes what a resource of the stack made, unless it is gone already: a queue, or what is a function's.
 fn delete_resource(client: &Client, resource: &StackResource) -> Result<(), Error> {
-    let Some(function) = find(client, plan::function_of(resource))? else { return Ok(()) };
+    let call = match (resource.kind.as_str(), resource.physical_id.as_deref()) {
+        (QUEUE, Some(name)) => Some(Call::delete(format!("/queues/{name}"))),
+        _ => function_deletion(client, resource)?,
+    };
+    let Some(call) = call else { return Ok(()) };
+    match client.done(&call) {
+        Err(error) if error.status == Some(404) => Ok(()),
+        done => done,
+    }
+}
+
+/// What deletes a function's resource of the stack, none when it is gone already: the function with what is its, its
+/// URL, its alias, its asynchronous calls' settings, one of its schedules or its reading of a queue.
+fn function_deletion(client: &Client, resource: &StackResource) -> Result<Option<Call>, Error> {
+    let Some(function) = find(client, plan::function_of(resource))? else { return Ok(None) };
     // What follows the function's name: an alias's, a schedule's or a queue's.
     let named = resource.physical_id.as_deref().and_then(|id| id.split_once(':')).map(|(_, named)| named);
     let id = &function.id;
@@ -457,21 +549,18 @@ fn delete_resource(client: &Client, resource: &StackResource) -> Result<(), Erro
         (EVENT_INVOKE_CONFIG, _) => Call::delete(format!("/functions/{id}/event-invoke-config")),
         (RULE | SCHEDULE, Some(name)) => {
             let schedules = schedule::schedules(client, id)?;
-            let Some(schedule) = schedules.into_iter().find(|schedule| schedule.name == name) else { return Ok(()) };
+            let Some(schedule) = schedules.into_iter().find(|schedule| schedule.name == name) else { return Ok(None) };
             Call::delete(format!("/functions/{id}/schedules/{}", schedule.id))
         }
         (MAPPING, Some(queue)) => {
             let mappings = event_sources::of_function(client, id)?;
             let found = mappings.into_iter().find(|mapping| name_in_arn(&mapping.event_source_arn) == queue);
-            let Some(mapping) = found else { return Ok(()) };
+            let Some(mapping) = found else { return Ok(None) };
             Call::delete(format!("/event-sources/{}", mapping.uuid))
         }
-        _ => return Ok(()),
+        _ => return Ok(None),
     };
-    match client.done(&call) {
-        Err(error) if error.status == Some(404) => Ok(()),
-        done => done,
-    }
+    Ok(Some(call))
 }
 
 /// What a function of the stack is, for the question before a delete: its resources in words.
@@ -577,13 +666,22 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     let client = Client::new(&settings)?;
     let me = account::me(&client)?;
     let account = account::current(&me, &settings)?;
-    let region = account.aws.as_ref().map(|aws| aws.region.as_str()).ok_or_else(|| {
+    let aws = account.aws.as_ref().ok_or_else(|| {
         Error::new(
             Kind::Failed,
             "The API doesn't say FF's region, which a template's ARNs name: it is older than this ff",
         )
     })?;
-    let place = Place { stack: &stack_name, region, account: &account.id };
+    // An API that doesn't say where functions reach SQS has them reach its public endpoint.
+    let sqs_function_endpoint =
+        if aws.sqs_function_endpoint.is_empty() { &aws.sqs_endpoint } else { &aws.sqs_function_endpoint };
+    let place = Place {
+        stack: &stack_name,
+        region: &aws.region,
+        account: &account.id,
+        sqs_endpoint: &aws.sqs_endpoint,
+        sqs_function_endpoint,
+    };
     let last: Option<Stack> = client.json_if_any(&Call::get(format!("/stacks/{stack_name}")))?;
     let last_resources = last.as_ref().map(|stack| stack.resources.as_slice()).unwrap_or_default();
 
@@ -607,12 +705,11 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     for name in &values.unknown {
         context.out.warn(&format!("{from} gives {name}, which the template has no parameter for: ff deploy passes it over, as `sam deploy` does"));
     }
-    let functions_in_template = template
-        .value
-        .get("Resources")
-        .and_then(Value::as_object)
-        .map_or(0, |resources| resources.values().filter(|resource| resource["Type"] == FUNCTION).count());
-    let mut suffixes = suffixes(functions_in_template)?;
+    // Each function and queue may need a name CloudFormation's way, with a random suffix.
+    let named_in_template = template.value.get("Resources").and_then(Value::as_object).map_or(0, |resources| {
+        resources.values().filter(|resource| [FUNCTION, QUEUE].iter().any(|kind| resource["Type"] == *kind)).count()
+    });
+    let mut suffixes = suffixes(named_in_template)?;
     let planned = plan::plan(&template, &values.values, &place, last_resources, &at.folder, &mut || {
         suffixes.pop().unwrap_or_default()
     });
@@ -668,7 +765,25 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
         }
         existing.push(found);
     }
-    check_events(&client, &deployment.functions, &mut problems)?;
+    let mut existing_queues = Vec::new();
+    for queue in &deployment.queues {
+        let found: Option<queues::Queue> = client.json_if_any(&Call::get(format!("/queues/{}", queue.name)))?;
+        let ours = last_resources
+            .iter()
+            .any(|resource| resource.kind == QUEUE && resource.physical_id.as_deref() == Some(queue.name.as_str()));
+        if found.is_some() && !ours {
+            let (id, name) = (&queue.id, &queue.name);
+            problems.at(
+                &format!("/Resources/{id}"),
+                &format!(
+                    "{id}: the account has a queue {name} outside the stack: ff deploy doesn't take it over; give {id} \
+                     another QueueName, or delete that queue with `ff queues delete {name}`"
+                ),
+            );
+        }
+        existing_queues.push(found);
+    }
+    check_named(&client, &deployment, &mut problems)?;
     let next = deployment.resources();
     let removed = plan::removed(last_resources, &next, &deployment.replace_policies());
     let (built, indexes) = packages(&deployment.functions, &at, args, &mut problems, context)?;
@@ -688,12 +803,21 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
             .result(&json!({ "stack": stack_name, "deployed": false }), || "Nothing deployed".to_owned());
     }
 
-    // What the stack has that is still there: its record as the deploy goes starts from it.
+    // What the stack has that is still there, by the queue or the function it is: the record starts from it.
     let mut still_there = BTreeSet::new();
-    let named = last_resources.iter().filter(|resource| resource.physical_id.is_some()).map(plan::function_of);
-    for name in named.collect::<BTreeSet<_>>() {
-        if deployment.functions.iter().any(|function| function.name == name) || find(&client, name)?.is_some() {
-            still_there.insert(name.to_owned());
+    let named = last_resources.iter().filter(|resource| resource.physical_id.is_some()).map(owner);
+    for (is_queue, name) in named.collect::<BTreeSet<_>>() {
+        let there = match is_queue {
+            true => {
+                deployment.queues.iter().any(|queue| queue.name == name)
+                    || client.json_if_any::<Value>(&Call::get(format!("/queues/{name}")))?.is_some()
+            }
+            false => {
+                deployment.functions.iter().any(|function| function.name == name) || find(&client, name)?.is_some()
+            }
+        };
+        if there {
+            still_there.insert((is_queue, name));
         }
     }
     let template_sha256 = sha256_hex(text.as_bytes());
@@ -705,7 +829,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
         parameters: last.as_ref().map_or_else(|| parameters.clone(), |stack| stack.parameters.clone()),
         resources: last_resources
             .iter()
-            .filter(|resource| resource.physical_id.is_none() || still_there.contains(plan::function_of(resource)))
+            .filter(|resource| resource.physical_id.is_none() || still_there.contains(&owner(resource)))
             .cloned()
             .collect(),
     };
@@ -715,6 +839,15 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     }
 
     let started = Instant::now();
+    // The queues first, each dead-letter queue before those that use it: the functions read them and send to them.
+    let mut queues_deployed = Vec::new();
+    for (queue, existing) in deployment.queues.iter().zip(&existing_queues) {
+        queues_deployed.push(ensure_queue(&client, queue, existing.as_ref())?);
+        record.keep(&[queue.resource()]);
+        if existing.is_none() {
+            record.save()?;
+        }
+    }
     let mut made = BTreeMap::new();
     let mut deployed = Vec::new();
     for ((function, existing), index) in deployment.functions.iter().zip(existing).zip(indexes) {
@@ -820,14 +953,35 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     // What its template said to retain is the account's from now on, as a stack CloudFormation updates leaves it.
     Record { template_sha256, parameters, resources: next, ..record }.save()?;
 
-    let known = Known { place: &place, values: &values.values, functions: made };
+    let queues_made = deployment.queues.iter().map(|queue| (queue.id.clone(), queue.name.clone())).collect();
+    let known = Known {
+        place: &place,
+        values: &values.values,
+        functions: made,
+        queues: queues_made,
+        queue_endpoint: place.sqs_endpoint,
+    };
     let outputs = plan::outputs(&template, &known);
     let seconds = deploy::seconds_since(started);
     let removal_lines: Vec<String> = removal_lines(&removed).collect();
     let plan::Removed { deleted, kept } = removed;
-    let document = StackDeployed { stack: stack_name.clone(), functions: deployed, deleted, kept, outputs };
+    let document = StackDeployed {
+        stack: stack_name.clone(),
+        queues: queues_deployed,
+        functions: deployed,
+        deleted,
+        kept,
+        outputs,
+    };
     context.out.result(&document, || {
         let mut lines = vec![format!("{stack_name}: deployed in {seconds} s")];
+        for queue in &document.queues {
+            let changed = match queue.action {
+                "updated" => format!(", changed: {}", queue.changed.join(", ")),
+                _ => String::new(),
+            };
+            lines.push(format!("{} the queue {} ({}){changed}", queue.action, queue.name, queue.logical_id));
+        }
         for function in &document.functions {
             let changed = match function.action {
                 "updated" => format!(", changed: {}", function.changed.join(", ")),
@@ -1025,6 +1179,52 @@ mod tests {
         assert!(!mapping_as_wanted(&mapping(&format!("{arn}:live"), "Enabled", Value::Null), &wanted, Some("live")));
         let unlimited = plan::Mapping { max_concurrency: None, ..wanted };
         assert!(mapping_as_wanted(&mapping(arn, "Enabled", Value::Null), &unlimited, None));
+    }
+
+    #[test]
+    fn a_queues_changes_are_the_attributes_and_the_tags_that_differ_from_the_templates() {
+        let existing: queues::Queue = serde_json::from_value(json!({
+            "name": "jobs",
+            "url": "https://sqs.ffunc.cloud/000000000001/jobs",
+            "arn": "arn:aws:sqs:tn-tunis-1:000000000001:jobs",
+            "visibilityTimeout": 30,
+            "messageRetentionPeriod": 345_600,
+            "delaySeconds": 0,
+            "maximumMessageSize": 1_048_576,
+            "receiveMessageWaitTimeSeconds": 0,
+            "redrivePolicy": { "deadLetterTargetArn": "arn:aws:sqs:tn-tunis-1:000000000001:jobs-failed", "maxReceiveCount": 3 },
+            "tags": { "team": "shop" },
+            "messages": { "available": 0, "inFlight": 0, "delayed": 0 },
+            "sizeBytes": 0,
+            "createdAt": "2026-11-03T10:00:00.000Z",
+            "updatedAt": "2026-11-03T10:00:00.000Z"
+        }))
+        .unwrap();
+        let attributes = |timeout: u32, redrive: Value| {
+            json!({
+                "visibilityTimeout": timeout,
+                "messageRetentionPeriod": 345_600,
+                "delaySeconds": 0,
+                "maximumMessageSize": 1_048_576,
+                "receiveMessageWaitTimeSeconds": 0,
+                "redrivePolicy": redrive,
+            })
+        };
+        let redrive = existing.redrive_policy.clone().map(|policy| serde_json::to_value(policy).unwrap()).unwrap();
+        let wanted = plan::Queue {
+            id: "Jobs".into(),
+            name: "jobs".into(),
+            attributes: attributes(30, redrive),
+            tags: [("team".to_owned(), "shop".to_owned())].into(),
+            policies: plan::Policies::default(),
+        };
+
+        assert_eq!(queue_changes(&existing, &wanted), json!({}));
+        let changed = plan::Queue { attributes: attributes(60, Value::Null), tags: BTreeMap::new(), ..wanted };
+        assert_eq!(
+            queue_changes(&existing, &changed),
+            json!({ "visibilityTimeout": 60, "redrivePolicy": null, "tags": {} })
+        );
     }
 
     #[test]

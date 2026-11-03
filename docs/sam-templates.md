@@ -6,8 +6,8 @@ that changes nothing; `ff doctor template.yaml` names the same pieces as warning
 [getting-started guide](getting-started.md#sam-templates) shows the commands, and [ADR 0016](adr/0016-sam-templates.md)
 the choices behind the subset.
 
-The functions of a template are deployed today, with their URLs, aliases, asynchronous settings and
-[events](#events), an `S3` event aside. Queues and buckets are in the subset, which `ff doctor` reads, and come to
+The functions and queues of a template are deployed today, the functions with their URLs, aliases, asynchronous
+settings and [events](#events), an `S3` event aside. Buckets are in the subset, which `ff doctor` reads, and come to
 `ff deploy` next, `S3` events with them: until then it refuses them, saying so.
 
 ## `sam init`'s hello world
@@ -77,8 +77,10 @@ aren't on, and so are `AWS::NoValue` and `AWS::NotificationARNs`.
 
 **What a function's name gives:** `!Ref` of a function, its name; `!GetAtt <function>.Arn`; with its
 `FunctionUrlConfig`, `!GetAtt <function>Url.FunctionUrl` and `.FunctionArn`; with its `AutoPublishAlias`,
-`!Ref <function>.Alias`, `!Ref <function>.Version` and `!Ref <function>Alias<alias>`, as SAM names them. A value FF
-can't know before the deploy, such as a function's URL in another function's variables, is refused.
+`!Ref <function>.Alias`, `!Ref <function>.Version` and `!Ref <function>Alias<alias>`, as SAM names them. A queue's
+`!Ref` and `!GetAtt <queue>.QueueUrl` give its URL, the one functions reach inside the cluster in a function's
+variables and the public one in `Outputs`; `.Arn` and `.QueueName` the rest. A value FF can't know before the deploy,
+such as a function's URL in another function's variables, is refused.
 
 ## Functions: `AWS::Serverless::Function`
 
@@ -110,14 +112,14 @@ can't know before the deploy, such as a function's URL in another function's var
 |---|---|
 | `Schedule` | One of the function's schedules, as an EventBridge rule: its `Schedule`, `rate(…)` or `cron(…)`, in UTC, as EventBridge reads it; `Input`, JSON text, the function's event, else EventBridge's Scheduled Event; `State`, `ENABLED` or `DISABLED`, or `Enabled`; `Description`; and `Name`, the schedule's, else the event's key. `RetryPolicy` and `DeadLetterConfig` are outside: FF's schedules run the function, retried as an asynchronous call is |
 | `ScheduleV2` | The same, as EventBridge Scheduler's schedule: its `ScheduleExpression` in UTC, its `ScheduleExpressionTimezone` `UTC` alone; `at(…)`, a run once, is outside |
-| `SQS` | The function reading a queue of the account, which `ff queues create` makes, until templates make theirs: `Queue`, the queue's ARN, `arn:aws:sqs:<region>:<account>:<name>`, which `!Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:<name>` gives; `BatchSize`, `MaximumBatchingWindowInSeconds`, 1 to 300 for over 10 messages, `FunctionResponseTypes`, `ReportBatchItemFailures`, `ScalingConfig`'s `MaximumConcurrency` and `Enabled`, Lambda's defaults where left out. A function reads a queue once, as on Lambda. `FilterCriteria` is outside: the function gets each message |
+| `SQS` | The function reading a queue: `Queue`, the queue's ARN, `!GetAtt <queue>.Arn` of one of the template's, else one of the account's, `arn:aws:sqs:<region>:<account>:<name>`, which `!Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:<name>` gives; `BatchSize`, `MaximumBatchingWindowInSeconds`, 1 to 300 for over 10 messages, `FunctionResponseTypes`, `ReportBatchItemFailures`, `ScalingConfig`'s `MaximumConcurrency` and `Enabled`, Lambda's defaults where left out. A function reads a queue once, as on Lambda. `FilterCriteria` is outside: the function gets each message |
 | `HttpApi` | Its routes go to the function's URL, made with `AuthType: NONE` if the function has no `FunctionUrlConfig`: each path and method reaches the function, whose code reads them in the event's `rawPath` and `requestContext.http.method`, its `routeKey` `$default`. `TimeoutInMillis` is left, the function's `Timeout` being its own. One function's `HttpApi` events alone, of `PayloadFormatVersion` `2.0`; `ApiId`, `Auth` and `RouteSettings` are outside |
 | `S3` | Next, with the buckets: SAM writes it in its bucket's `NotificationConfiguration` |
 
 An event's `BatchSize`, `MaximumBatchingWindowInSeconds` and `Enabled` are a number and a boolean, not text, as SAM's
 transform takes them, where CloudFormation would take text. With `AutoPublishAlias`, each schedule runs the alias and
 the alias reads each queue, as SAM's events call it. Before
-any change, `ff deploy` reads each expression with FF's own parser and looks for each queue: what it wouldn't take is
+any change, `ff deploy` reads each expression with FF's own parser and looks for each queue the template doesn't make: what it wouldn't take is
 in its one refusal. A schedule or a queue's reader of the function made outside the template, with `ff schedule` or
 `ff event-sources`, stays as it is.
 
@@ -126,7 +128,9 @@ in its one refusal. A schedule or a queue's reader of the function made outside 
 | Type | On FF |
 |---|---|
 | `AWS::Lambda::Permission` | Kept without effect: a function's URL, and its account's buckets and queues, call it with no permission |
-| `AWS::SQS::Queue`, `AWS::SQS::QueuePolicy`, `AWS::S3::Bucket`, `AWS::S3::BucketPolicy` | In the subset, and next: a standard queue with its attributes and its dead-letter queue, a bucket with its notifications and its website; their policies kept without effect |
+| `AWS::SQS::Queue` | A standard queue, made before the functions, each dead-letter queue first, and changed by what differs: `QueueName`, else the stack's last, else a name CloudFormation's way, `<stack>-<logical ID>-<12 letters and digits>` within SQS's 80 characters; `VisibilityTimeout`, `MessageRetentionPeriod`, `DelaySeconds`, `MaximumMessageSize` and `ReceiveMessageWaitTimeSeconds`, SQS's defaults where left out, as CloudFormation sets back an attribute removed; `RedrivePolicy`, its `deadLetterTargetArn` another queue of the account, the template's or not, and its `maxReceiveCount`, 1 to 1000, a circle of dead-letter queues refused, as CloudFormation refuses one; `Tags`, CloudFormation's list of `Key` and `Value`. `!Ref` of it and `!GetAtt <queue>.QueueUrl` give its URL: in a function's variables the one functions reach inside the cluster, which AWS's SDKs send to, in `Outputs` the public one; `Arn` and `QueueName` the rest. A name the account has outside the stack is refused, as CloudFormation refuses a name that exists. `FifoQueue: true` and its settings are outside: FIFO queues come later |
+| `AWS::SQS::QueuePolicy` | Kept without effect: on FF a queue's own account sends to it |
+| `AWS::S3::Bucket`, `AWS::S3::BucketPolicy` | In the subset, and next: a bucket with its notifications and its website; its policy kept without effect |
 | `AWS::Lambda::Function`, `Url`, `Alias`, `Version`, `EventInvokeConfig`, `EventSourceMapping` | Outside: SAM's function gives each, by its `CodeUri`, `FunctionUrlConfig`, `AutoPublishAlias`, `EventInvokeConfig` and `SQS` event |
 | `AWS::Events::Rule`, `AWS::Scheduler::Schedule` | Outside: a function's `Schedule` or `ScheduleV2` event makes its schedule |
 | `AWS::IAM::…` | Outside: FF has no IAM |
@@ -141,14 +145,14 @@ in its one refusal. A schedule or a queue's reader of the function made outside 
 
 A deploy keeps the stack in FF: each logical ID with its type and the FF resource it made, by SAM's names, `<function>`,
 `<function>Url`, `<function>Alias<alias>`, `<function>EventInvokeConfig` and `<function><event>`, an event's schedule
-or reading of a queue, and each permission, kept without effect; the template's SHA-256, and the parameters' values, a `NoEcho` one left out. The next deploy changes what the
-template changed and deletes, after asking (`--yes` in a script), what it no longer has, last, as CloudFormation cleans
+or reading of a queue, each queue by its logical ID, and each permission and queue policy, kept without effect; the template's SHA-256, and the parameters' values, a `NoEcho` one left out. The next deploy changes what the
+template changed and deletes, after asking (`--yes` in a script), what it no longer has, last, the queues after the functions, as CloudFormation cleans
 up. `ff get` and the console name a function's stack, and `ff delete-stack` deletes it with what it made.
 
 **A resource's `DeletionPolicy: Retain`** leaves what it made in the account, out of the stack, once the template has it
 no more and at `ff delete-stack`, as CloudFormation does with the policy of the template it was made by. A function's
 URL, alias, settings and events follow the function's policy, as SAM gives them its. **`UpdateReplacePolicy: Retain`**
-does the same for what a new name replaces, a function given another `FunctionName` or a schedule another `Name`, by the
+does the same for what a new name replaces, a function given another `FunctionName`, a queue another `QueueName` or a schedule another `Name`, by the
 new template's policy. What is left is the account's, as any function made with `ff`: a template that names it again is
 refused, as CloudFormation refuses a name that exists, until `ff delete` deletes it or the template names another.
 

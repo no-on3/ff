@@ -535,7 +535,13 @@ mod tests {
             assert_eq!(config.stack_name.as_deref(), Some("shop"));
             let values = parameters::values(&template, &config.parameter_overrides);
             assert_eq!(subset::check(&template, &values.values), []);
-            let place = plan::Place { stack: "shop", region: "tn-tunis-1", account: "000000000001" };
+            let place = plan::Place {
+                stack: "shop",
+                region: "tn-tunis-1",
+                account: "000000000001",
+                sqs_endpoint: "https://sqs.ffunc.cloud",
+                sqs_function_endpoint: "http://10.43.0.251:3003",
+            };
             let planned = plan::plan(&template, &values.values, &place, &[], &folder, &mut || "ABCDEFGHIJKL".into());
             let [function] = &planned.unwrap().functions[..] else { panic!("one function") };
             assert_eq!(

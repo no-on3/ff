@@ -9,9 +9,11 @@ use serde_json::{Map, Value, json};
 
 use super::Template;
 use super::resolve::{self, FUNCTION};
-use crate::api::types::{DEFAULT_MAX_INSTANCES, DeletionPolicy, REPORT_BATCH_ITEM_FAILURES, StackResource};
+use crate::api::types::{
+    DEFAULT_MAX_INSTANCES, DeletionPolicy, REPORT_BATCH_ITEM_FAILURES, StackResource, name_in_arn,
+};
 use crate::cli::Runtime;
-use crate::config::is_function_name;
+use crate::config::{is_function_name, is_queue_name};
 
 /// The resources SAM makes of a function that a stack keeps, by their CloudFormation types.
 pub const URL: &str = "AWS::Lambda::Url";
@@ -24,6 +26,21 @@ pub const PERMISSION: &str = "AWS::Lambda::Permission";
 pub const RULE: &str = "AWS::Events::Rule";
 pub const SCHEDULE: &str = "AWS::Scheduler::Schedule";
 pub const MAPPING: &str = "AWS::Lambda::EventSourceMapping";
+pub const QUEUE: &str = "AWS::SQS::Queue";
+/// A queue's policy, kept without effect: on FF a queue's own account sends to it.
+pub const QUEUE_POLICY: &str = "AWS::SQS::QueuePolicy";
+/// What the stack keeps of a function besides the function, named after it: each goes with it.
+const OF_A_FUNCTION: [&str; 6] = [URL, ALIAS, EVENT_INVOKE_CONFIG, RULE, SCHEDULE, MAPPING];
+
+/// SQS's attributes a queue of the template gives, by CloudFormation's names and FF's API's, with SQS's bounds, their
+/// unit and SQS's default, which an attribute the template leaves out has, as CloudFormation sets it back.
+const QUEUE_ATTRIBUTES: [(&str, &str, i64, i64, &str, u32); 5] = [
+    ("VisibilityTimeout", "visibilityTimeout", 0, 43_200, "seconds", 30),
+    ("MessageRetentionPeriod", "messageRetentionPeriod", 60, 1_209_600, "seconds", 345_600),
+    ("DelaySeconds", "delaySeconds", 0, 900, "seconds", 0),
+    ("MaximumMessageSize", "maximumMessageSize", 1024, 1_048_576, "bytes", 1_048_576),
+    ("ReceiveMessageWaitTimeSeconds", "receiveMessageWaitTimeSeconds", 0, 20, "seconds", 0),
+];
 
 /// Lambda's defaults, which a template's functions get, as on AWS.
 const DEFAULT_MEMORY: u32 = 128;
@@ -34,17 +51,31 @@ const DEFAULT_BATCH_SIZE: u32 = 10;
 const SUFFIX_CHARACTERS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 pub const SUFFIX_LENGTH: usize = 12;
 
-/// What the deploy is for: the stack, FF's region and the account, which the pseudo parameters and the ARNs give.
+/// What the deploy is for: the stack, FF's region and the account, which the pseudo parameters and the ARNs give, and
+/// FF's SQS endpoint, which a queue's URL is under, the public one and the one functions reach inside the cluster.
 pub struct Place<'a> {
     pub stack: &'a str,
     pub region: &'a str,
     pub account: &'a str,
+    pub sqs_endpoint: &'a str,
+    pub sqs_function_endpoint: &'a str,
 }
 
 impl Place<'_> {
     /// A function's ARN, qualified by a version or an alias after a colon when one is given.
     pub fn arn(&self, name: &str) -> String {
         format!("arn:aws:lambda:{}:{}:function:{name}", self.region, self.account)
+    }
+
+    /// A queue's ARN.
+    pub fn queue_arn(&self, name: &str) -> String {
+        format!("arn:aws:sqs:{}:{}:{name}", self.region, self.account)
+    }
+
+    /// The queue an ARN names, when it is one of the account's in FF's region.
+    fn queue_of<'a>(&self, arn: &'a str) -> Option<&'a str> {
+        let prefix = self.queue_arn("");
+        arn.strip_prefix(&prefix).filter(|name| !name.is_empty() && !name.contains(':'))
     }
 }
 
@@ -108,6 +139,35 @@ impl Policies {
             _ => DeletionPolicy::Delete,
         };
         Policies { deletion: policy("DeletionPolicy"), update_replace: policy("UpdateReplacePolicy") }
+    }
+}
+
+/// A queue of the template, as FF's API takes it.
+#[derive(Debug, PartialEq)]
+pub struct Queue {
+    pub id: String,
+    pub name: String,
+    /// Its attributes by FF's API's names, each of them: the template's, else SQS's default; and its redrive policy, or
+    /// null for none.
+    pub attributes: Value,
+    pub tags: BTreeMap<String, String>,
+    pub policies: Policies,
+}
+
+impl Queue {
+    /// The queue its redrive policy moves messages to, by name.
+    pub fn dead_letter(&self) -> Option<&str> {
+        self.attributes.pointer("/redrivePolicy/deadLetterTargetArn").and_then(Value::as_str).map(name_in_arn)
+    }
+
+    /// What the stack keeps of it.
+    pub fn resource(&self) -> StackResource {
+        StackResource {
+            logical_id: self.id.clone(),
+            kind: QUEUE.to_owned(),
+            physical_id: Some(self.name.clone()),
+            deletion_policy: self.policies.deletion,
+        }
     }
 }
 
@@ -196,23 +256,20 @@ pub fn alias_id(function: &str, alias: &str) -> String {
     format!("{function}Alias{alias}")
 }
 
-/// The template's functions, in its order, and the permissions it has, which FF keeps without effect.
+/// The template's functions and queues, in its order but each dead-letter queue before the queues that use it, and
+/// what FF keeps without effect, the permissions and the queues' policies.
 #[derive(Debug)]
 pub struct Plan {
     pub functions: Vec<Function>,
-    pub permissions: Vec<String>,
+    pub queues: Vec<Queue>,
+    pub without_effect: Vec<StackResource>,
 }
 
 impl Plan {
     /// What the stack keeps once the deploy is done.
     pub fn resources(&self) -> Vec<StackResource> {
-        let permissions = self.permissions.iter().map(|id| StackResource {
-            logical_id: id.clone(),
-            kind: PERMISSION.to_owned(),
-            physical_id: None,
-            deletion_policy: DeletionPolicy::Delete,
-        });
-        self.functions.iter().flat_map(Function::resources).chain(permissions).collect()
+        let functions = self.functions.iter().flat_map(Function::resources);
+        functions.chain(self.queues.iter().map(Queue::resource)).chain(self.without_effect.iter().cloned()).collect()
     }
 
     /// The UpdateReplacePolicy of each resource the deploy makes, by logical ID: what becomes of the one it replaces.
@@ -221,7 +278,8 @@ impl Plan {
             let policy = function.policies.update_replace;
             function.resources().into_iter().map(move |resource| (resource.logical_id, policy))
         };
-        self.functions.iter().flat_map(of_a_function).collect()
+        let of_a_queue = |queue: &Queue| (queue.id.clone(), queue.policies.update_replace);
+        self.functions.iter().flat_map(of_a_function).chain(self.queues.iter().map(of_a_queue)).collect()
     }
 }
 
@@ -230,8 +288,8 @@ pub type Problems = Vec<(String, String)>;
 
 /// A name CloudFormation's way: the stack's, the logical ID's and a random suffix, each cut so that the whole is within
 /// Lambda's 64 characters, the logical ID keeping half of what is left at least.
-pub fn generated_name(stack: &str, id: &str, suffix: &str) -> String {
-    let room = 64 - suffix.len() - 2;
+pub fn generated_name(stack: &str, id: &str, suffix: &str, most: usize) -> String {
+    let room = most - suffix.len() - 2;
     let id_part = &id[..id.len().min((room / 2).max(room.saturating_sub(stack.len())))];
     let stack_part = &stack[..stack.len().min(room - id_part.len())];
     format!("{stack_part}-{id_part}-{suffix}")
@@ -239,8 +297,7 @@ pub fn generated_name(stack: &str, id: &str, suffix: &str) -> String {
 
 /// The subset's resources and events that `ff deploy` doesn't make yet: what is outside the subset its check refuses.
 /// An S3 event comes with the buckets, as SAM writes it in its bucket's notifications.
-const RESOURCES_NEXT: [&str; 4] =
-    ["AWS::SQS::Queue", "AWS::SQS::QueuePolicy", "AWS::S3::Bucket", "AWS::S3::BucketPolicy"];
+const RESOURCES_NEXT: [&str; 2] = ["AWS::S3::Bucket", "AWS::S3::BucketPolicy"];
 const EVENTS_NEXT: [&str; 1] = ["S3"];
 
 /// A random suffix for a name, from 12 random bytes, letters and digits as CloudFormation's.
@@ -249,11 +306,14 @@ pub fn suffix(random: &[u8; SUFFIX_LENGTH]) -> String {
 }
 
 /// What FF knows of the template's names: the parameters' values, the pseudo parameters, each function's name, its
-/// ARN and its alias's; after the deploy, its URL and the version it published.
+/// ARN and its alias's, after the deploy its URL and the version it published; each queue's name, by logical ID, its
+/// ARN and its URL under `queue_endpoint`, the public one or the one functions reach.
 pub struct Known<'a> {
     pub place: &'a Place<'a>,
     pub values: &'a BTreeMap<String, Value>,
     pub functions: BTreeMap<String, Made>,
+    pub queues: BTreeMap<String, String>,
+    pub queue_endpoint: &'a str,
 }
 
 /// What a function of the template is on FF.
@@ -288,6 +348,14 @@ impl Known<'_> {
             return match attribute {
                 None => Some(made.name.clone().into()),
                 Some("Arn") => Some(place.arn(&made.name).into()),
+                Some(_) => None,
+            };
+        }
+        if let Some(queue) = self.queues.get(name) {
+            return match attribute {
+                None | Some("QueueUrl") => Some(format!("{}/{}/{queue}", self.queue_endpoint, place.account).into()),
+                Some("Arn") => Some(place.queue_arn(queue).into()),
+                Some("QueueName") => Some(queue.clone().into()),
                 Some(_) => None,
             };
         }
@@ -383,9 +451,18 @@ struct Reading<'a> {
     properties: &'a Map<String, Value>,
     pointer: String,
     problems: Problems,
+    /// What the deploy makes of the resource, in words: the function, the queue.
+    making: &'static str,
 }
 
-impl Reading<'_> {
+impl<'a> Reading<'a> {
+    /// The properties of a resource of the resolved template, `empty` when it has none.
+    fn of(resolved: &'a Value, empty: &'a Map<String, Value>, id: &'a str, making: &'static str) -> Self {
+        let pointer = format!("/Resources/{id}/Properties");
+        let properties = resolved.pointer(&pointer).and_then(Value::as_object).unwrap_or(empty);
+        Reading { id, properties, pointer, problems: Vec::new(), making }
+    }
+
     fn problem(&mut self, path: &str, message: String) {
         self.problems.push((format!("{}/{path}", self.pointer), format!("{}: {message}", self.id)));
     }
@@ -401,7 +478,11 @@ impl Reading<'_> {
             Some(what) => {
                 self.problem(
                     path,
-                    format!("{} holds {what}, which ff deploy doesn't know before it makes the function", said(path)),
+                    format!(
+                        "{} holds {what}, which ff deploy doesn't know before it makes {}",
+                        said(path),
+                        self.making
+                    ),
                 );
                 None
             }
@@ -469,6 +550,28 @@ impl Reading<'_> {
                 None
             }
         }
+    }
+
+    /// CloudFormation's Tags of a resource SAM doesn't make: a list of a Key and a Value each, both text.
+    fn tag_list(&mut self, path: &str) -> BTreeMap<String, String> {
+        let Some(value) = self.known(path) else { return BTreeMap::new() };
+        let Some(list) = value.as_array() else {
+            self.problem(path, format!("{} is a list of a Key and a Value each", said(path)));
+            return BTreeMap::new();
+        };
+        let mut tags = BTreeMap::new();
+        for (index, tag) in list.iter().enumerate() {
+            match (tag.get("Key").and_then(text), tag.get("Value").and_then(text)) {
+                (Some(key), Some(value)) => {
+                    tags.insert(key, value);
+                }
+                _ => self.problem(
+                    &format!("{path}/{index}"),
+                    format!("{} {index} is a Key and a Value, both text", said(path)),
+                ),
+            }
+        }
+        tags
     }
 
     /// A mapping of text by name, as Environment's Variables and Tags are, each value written out.
@@ -657,13 +760,10 @@ fn schedule(reading: &mut Reading, event: &str, kind: &str, at: &str) -> Option<
 fn mapping(reading: &mut Reading, event: &str, at: &str, place: &Place) -> Option<Mapping> {
     let queue_at = format!("{at}/Queue");
     let queue_arn = reading.needed(&queue_at, "the queue's ARN")?;
-    let prefix = format!("arn:aws:sqs:{}:{}:", place.region, place.account);
-    let named = queue_arn.strip_prefix(&prefix).is_some_and(|name| !name.is_empty() && !name.contains(':'));
-    if !named {
-        reading.problem(
-            &queue_at,
-            format!("event {event}'s Queue {queue_arn}: the ARN of a queue of the account, {prefix}<name>"),
-        );
+    if place.queue_of(&queue_arn).is_none() {
+        let arn = place.queue_arn("<name>");
+        reading
+            .problem(&queue_at, format!("event {event}'s Queue {queue_arn}: the ARN of a queue of the account, {arn}"));
     }
     let number = |reading: &mut Reading, key: &str, least: i64, most: i64, unit: &str, default: u32| {
         let path = format!("{at}/{key}");
@@ -849,42 +949,160 @@ fn event_invoke_config(reading: &mut Reading, config: &Value) -> Value {
     Value::Object(body)
 }
 
-/// Each function's name: its FunctionName, else the one the stack's last deploy gave it, else one CloudFormation's way.
+/// How the template's resources of a type are named on FF: the property that names one, what it is in words, the rule
+/// its name keeps, and the most characters a name has, CloudFormation's included.
+struct Naming {
+    kind: &'static str,
+    property: &'static str,
+    what: &'static str,
+    valid: fn(&str) -> bool,
+    rule: &'static str,
+    most: usize,
+}
+
+const FUNCTIONS: Naming = Naming {
+    kind: FUNCTION,
+    property: "FunctionName",
+    what: "function",
+    valid: is_function_name,
+    rule: "1 to 64 letters, digits, hyphens or underscores, as Lambda's",
+    most: 64,
+};
+
+const QUEUES: Naming = Naming {
+    kind: QUEUE,
+    property: "QueueName",
+    what: "queue",
+    valid: is_queue_name,
+    rule: "1 to 80 letters, digits, hyphens or underscores, as SQS's",
+    most: 80,
+};
+
+/// Each resource's name: its own property's, else the one the stack's last deploy gave it, else one CloudFormation's
+/// way.
 fn names(
+    naming: &Naming,
     template: &Value,
-    functions: &[String],
+    ids: &[String],
     known: &Known,
     last: &[StackResource],
     suffix: &mut dyn FnMut() -> String,
     problems: &mut Problems,
 ) -> BTreeMap<String, String> {
+    let Naming { kind, property, what, valid, rule, most } = naming;
     let mut names = BTreeMap::new();
-    for id in functions {
-        let pointer = format!("/Resources/{id}/Properties/FunctionName");
+    for id in ids {
+        let pointer = format!("/Resources/{id}/Properties/{property}");
         let name = match template.pointer(&pointer).map(|value| known.resolve(value)) {
-            Some(Value::String(name)) if is_function_name(&name) => name,
+            Some(Value::String(name)) if valid(&name) => name,
             Some(value) => {
-                let message = format!(
-                    "{id}: FunctionName {}: 1 to 64 letters, digits, hyphens or underscores, as Lambda's, known before the deploy",
-                    text(&value).unwrap_or_else(|| value.to_string())
-                );
-                problems.push((pointer, message));
+                let value = text(&value).unwrap_or_else(|| value.to_string());
+                problems.push((pointer, format!("{id}: {property} {value}: {rule}, known before the deploy")));
                 continue;
             }
             None => last
                 .iter()
-                .find(|resource| resource.logical_id == *id && resource.kind == FUNCTION)
+                .find(|resource| resource.logical_id == *id && resource.kind == *kind)
                 .and_then(|resource| resource.physical_id.clone())
-                .unwrap_or_else(|| generated_name(known.place.stack, id, &suffix())),
+                .unwrap_or_else(|| generated_name(known.place.stack, id, &suffix(), *most)),
         };
         if let Some((other, _)) = names.iter().find(|(_, taken)| **taken == name) {
-            problems
-                .push((pointer, format!("{id}: FunctionName {name} is {other}'s too: a function's name is its own")));
+            problems.push((pointer, format!("{id}: {property} {name} is {other}'s too: a {what}'s name is its own")));
             continue;
         }
         names.insert(id.clone(), name);
     }
     names
+}
+
+/// A queue of the template as FF's API takes it: SQS's attributes, its redrive policy to another queue of the
+/// account, and its tags.
+fn queue(reading: &mut Reading, name: String, place: &Place, policies: Policies) -> Option<Queue> {
+    let mut attributes = Map::new();
+    let mut complete = true;
+    for (property, field, least, most, unit, default) in QUEUE_ATTRIBUTES {
+        let value = if reading.has(property) { reading.number(property, least, most, unit) } else { Some(default) };
+        match value {
+            Some(value) => {
+                attributes.insert(field.to_owned(), value.into());
+            }
+            None => complete = false,
+        }
+    }
+    let redrive = match reading.has("RedrivePolicy") {
+        true => redrive_policy(reading, &name, place),
+        false => Some(Value::Null),
+    };
+    let tags = if reading.has("Tags") { reading.tag_list("Tags") } else { BTreeMap::new() };
+    attributes.insert("redrivePolicy".to_owned(), redrive?);
+    complete.then(|| Queue { id: reading.id.to_owned(), name, attributes: Value::Object(attributes), tags, policies })
+}
+
+/// A queue's RedrivePolicy as FF's API takes it: another queue of the account, by its ARN, and the receives a message
+/// has before it goes there.
+fn redrive_policy(reading: &mut Reading, name: &str, place: &Place) -> Option<Value> {
+    let target_at = "RedrivePolicy/deadLetterTargetArn";
+    let count_at = "RedrivePolicy/maxReceiveCount";
+    let target = reading.needed(target_at, "the dead-letter queue's ARN");
+    let count = match reading.has(count_at) {
+        true => reading.number(count_at, 1, 1000, "receives"),
+        false => {
+            reading.needed(count_at, "the receives a message has before it goes there, 1 to 1000");
+            None
+        }
+    };
+    let target = target?;
+    match place.queue_of(&target) {
+        None => {
+            let arn = place.queue_arn("<name>");
+            reading
+                .problem(target_at, format!("{} {target}: the ARN of a queue of the account, {arn}", said(target_at)));
+            return None;
+        }
+        Some(dead_letter) if dead_letter == name => {
+            let message =
+                format!("{} names the queue itself: its dead-letter queue is another, as SQS's", said(target_at));
+            reading.problem(target_at, message);
+            return None;
+        }
+        Some(_) => {}
+    }
+    Some(json!({ "deadLetterTargetArn": target, "maxReceiveCount": count? }))
+}
+
+/// The queues, each dead-letter queue of the template before those that move messages to it, which FF's API wants
+/// made first; a circle of them refused, as CloudFormation refuses one.
+fn dead_letters_first(queues: Vec<Queue>, problems: &mut Problems) -> Vec<Queue> {
+    let dead_letter: BTreeMap<&str, &str> =
+        queues.iter().filter_map(|queue| Some((queue.name.as_str(), queue.dead_letter()?))).collect();
+    // How many of the template's queues a queue's messages may go through after it: none for a queue that moves none.
+    let depth = |name: &str| {
+        let (mut at, mut depth) = (name, 0);
+        while let Some(next) = dead_letter.get(at) {
+            depth += 1;
+            if depth > dead_letter.len() {
+                return None;
+            }
+            at = next;
+        }
+        Some(depth)
+    };
+    let depths: Vec<Option<usize>> = queues.iter().map(|queue| depth(&queue.name)).collect();
+    let mut ordered = Vec::new();
+    for (queue, depth) in queues.into_iter().zip(depths) {
+        match depth {
+            Some(depth) => ordered.push((depth, queue)),
+            None => problems.push((
+                format!("/Resources/{}/Properties/RedrivePolicy", queue.id),
+                format!(
+                    "{}: RedrivePolicy's dead-letter queues go round in a circle, which CloudFormation refuses",
+                    queue.id
+                ),
+            )),
+        }
+    }
+    ordered.sort_by_key(|(depth, _)| *depth);
+    ordered.into_iter().map(|(_, queue)| queue).collect()
 }
 
 /// The template's functions as FF makes them, from its folder, its parameters' values and the stack's last deploy; or
@@ -908,14 +1126,25 @@ pub fn plan(
         ids.sort_by_key(|id| template.line(&format!("/Resources/{id}")));
         ids
     };
-    let (ids, permissions) = (of_type(FUNCTION), of_type(PERMISSION));
+    let (ids, queue_ids) = (of_type(FUNCTION), of_type(QUEUE));
+    let mut without_effect = Vec::new();
+    for kind in [PERMISSION, QUEUE_POLICY] {
+        without_effect.extend(of_type(kind).into_iter().map(|id| StackResource {
+            deletion_policy: Policies::of(&resources[&id]).deletion,
+            logical_id: id,
+            kind: kind.to_owned(),
+            physical_id: None,
+        }));
+    }
     let mut problems = Problems::new();
     for (id, resource) in &resources {
         let kind = resource.get("Type").and_then(Value::as_str).unwrap_or("");
         if RESOURCES_NEXT.contains(&kind) {
             problems.push((
                 format!("/Resources/{id}"),
-                format!("{id}: ff deploy makes a template's functions and their events so far: its {kind} comes next"),
+                format!(
+                    "{id}: ff deploy makes a template's functions, their events and its queues so far: its {kind} comes next"
+                ),
             ));
         }
         let events = resource.pointer("/Properties/Events").and_then(Value::as_object).into_iter().flatten();
@@ -931,35 +1160,49 @@ pub fn plan(
             ));
         }
     }
-    let mut known = Known { place, values, functions: BTreeMap::new() };
-    let names = names(&merged, &ids, &known, last, suffix, &mut problems);
+    let mut known = Known {
+        place,
+        values,
+        functions: BTreeMap::new(),
+        queues: BTreeMap::new(),
+        queue_endpoint: place.sqs_function_endpoint,
+    };
+    let function_names = names(&FUNCTIONS, &merged, &ids, &known, last, suffix, &mut problems);
+    known.queues = names(&QUEUES, &merged, &queue_ids, &known, last, suffix, &mut problems);
     for id in &ids {
-        let Some(name) = names.get(id) else { continue };
+        let Some(name) = function_names.get(id) else { continue };
         let alias = merged
             .pointer(&format!("/Resources/{id}/Properties/AutoPublishAlias"))
             .and_then(|value| text(&known.resolve(value)));
         known.functions.insert(id.clone(), Made { name: name.clone(), alias, ..Made::default() });
     }
+    // Resolved as functions see it: a queue's URL is the one they reach, inside the cluster.
     let resolved = known.resolve(&merged);
+    let empty = Map::new();
     let mut functions = Vec::new();
     for id in &ids {
-        let Some(name) = names.get(id) else { continue };
-        let empty = Map::new();
-        let properties =
-            resolved.pointer(&format!("/Resources/{id}/Properties")).and_then(Value::as_object).unwrap_or(&empty);
-        let mut reading =
-            Reading { id, properties, pointer: format!("/Resources/{id}/Properties"), problems: Vec::new() };
+        let Some(name) = function_names.get(id) else { continue };
+        let mut reading = Reading::of(&resolved, &empty, id, "the function");
         let function = function(&mut reading, name.clone(), folder, place, Policies::of(&resources[id]));
         problems.append(&mut reading.problems);
         functions.extend(function);
     }
-    if problems.is_empty() { Ok(Plan { functions, permissions }) } else { Err(problems) }
+    let mut queues = Vec::new();
+    for id in &queue_ids {
+        let Some(name) = known.queues.get(id) else { continue };
+        let mut reading = Reading::of(&resolved, &empty, id, "the queue");
+        let queue = queue(&mut reading, name.clone(), place, Policies::of(&resources[id]));
+        problems.append(&mut reading.problems);
+        queues.extend(queue);
+    }
+    let queues = dead_letters_first(queues, &mut problems);
+    if problems.is_empty() { Ok(Plan { functions, queues, without_effect }) } else { Err(problems) }
 }
 
 /// What the stack's last deploy made that this one doesn't, a function's own resources going with it.
 #[derive(Debug, Default, PartialEq)]
 pub struct Removed {
-    /// Each to delete, a URL first and a function last.
+    /// Each to delete, a URL first, then a function, the queues last.
     pub deleted: Vec<StackResource>,
     /// Each its template said to retain, left in the account, out of the stack.
     pub kept: Vec<StackResource>,
@@ -984,11 +1227,14 @@ pub fn removed(
         .filter(|resource| resource.kind == FUNCTION)
         .filter_map(|resource| resource.physical_id.as_deref())
         .collect();
-    let order = [URL, EVENT_INVOKE_CONFIG, RULE, SCHEDULE, MAPPING, ALIAS, FUNCTION];
+    // The queues last, a function reading one or sending to it what it failed.
+    let order = [URL, EVENT_INVOKE_CONFIG, RULE, SCHEDULE, MAPPING, ALIAS, FUNCTION, QUEUE];
     let rank = |kind: &str| order.iter().position(|of| *of == kind).unwrap_or(0);
     let mut removed: Vec<StackResource> = gone
         .into_iter()
-        .filter(|resource| resource.kind == FUNCTION || !functions_gone.contains(function_of(resource)))
+        .filter(|resource| {
+            !OF_A_FUNCTION.contains(&resource.kind.as_str()) || !functions_gone.contains(function_of(resource))
+        })
         .cloned()
         .collect();
     removed.sort_by_key(|resource| rank(&resource.kind));
@@ -1015,6 +1261,7 @@ pub fn in_words(resource: &StackResource) -> String {
         EVENT_INVOKE_CONFIG => format!("{id}'s asynchronous calls' settings"),
         RULE | SCHEDULE => format!("{function}'s schedule {named}"),
         MAPPING => format!("{function}'s reading of the queue {named}"),
+        QUEUE => format!("the queue {id}"),
         other => format!("the {other} {id}"),
     };
     format!("{what} ({})", resource.logical_id)
@@ -1052,7 +1299,13 @@ mod tests {
     use super::*;
     use crate::sam::read;
 
-    const PLACE: Place = Place { stack: "shop", region: "tn-tunis-1", account: "000000000001" };
+    const PLACE: Place = Place {
+        stack: "shop",
+        region: "tn-tunis-1",
+        account: "000000000001",
+        sqs_endpoint: "https://sqs.ffunc.cloud",
+        sqs_function_endpoint: "http://10.43.0.251:3003",
+    };
 
     fn folder() -> tempfile::TempDir {
         let dir = tempfile::TempDir::new().unwrap();
@@ -1219,9 +1472,9 @@ Outputs:
         let plan = planned(SHOP, &last, &[("Stage", "prod")]).unwrap();
 
         assert_eq!(plan.functions[0].name, "shop-Orders-KEPT00000000");
-        let long = generated_name(&"s".repeat(128), "OrdersFunction", "ABCDEFGHIJKL");
+        let long = generated_name(&"s".repeat(128), "OrdersFunction", "ABCDEFGHIJKL", 64);
         assert_eq!((long.len(), long.ends_with("-OrdersFunction-ABCDEFGHIJKL")), (64, true));
-        let both = generated_name("shop-in-tunis-and-sfax-and-sousse", &"F".repeat(40), "ABCDEFGHIJKL");
+        let both = generated_name("shop-in-tunis-and-sfax-and-sousse", &"F".repeat(40), "ABCDEFGHIJKL", 64);
         assert_eq!(both, format!("shop-in-tunis-and-sfax-an-{}-ABCDEFGHIJKL", "F".repeat(25)));
         assert_eq!(suffix(&[0, 25, 26, 35, 36, 255, 1, 2, 3, 4, 5, 6]), "AZ09ADBCDEFG");
     }
@@ -1264,8 +1517,8 @@ Resources:
       CodeUri: orders
       Handler: index.handler
       Runtime: nodejs24.x
-  Queue:
-    Type: AWS::SQS::Queue
+  Uploads:
+    Type: AWS::S3::Bucket
 ";
         let problems = planned(template, &[], &[]).unwrap_err();
 
@@ -1274,7 +1527,7 @@ Resources:
             problems,
             [
                 (format!("{props}/Events/Uploads"), "Orders: event Uploads, of type S3, comes with a template's buckets, which ff deploy makes next".to_owned()),
-                ("/Resources/Queue".to_owned(), "Queue: ff deploy makes a template's functions and their events so far: its AWS::SQS::Queue comes next".to_owned()),
+                ("/Resources/Uploads".to_owned(), "Uploads: ff deploy makes a template's functions, their events and its queues so far: its AWS::S3::Bucket comes next".to_owned()),
                 ("/Resources/Twin/Properties/FunctionName".to_owned(), "Twin: FunctionName orders is Orders's too: a function's name is its own".to_owned()),
                 (format!("{props}/CodeUri"), "Orders: CodeUri nowhere: there is no folder or .zip there".to_owned()),
                 (format!("{props}/Timeout"), "Orders: Timeout 901: a whole number of seconds from 1 to 900".to_owned()),
@@ -1429,6 +1682,188 @@ Resources:
         assert_eq!(problems, expected);
     }
 
+    /// A template's queues and a function using them, a fixture `sam validate --lint` takes.
+    const WITH_QUEUES: &str = include_str!("testdata/queues.yaml");
+
+    #[test]
+    fn makes_a_templates_queues_each_dead_letter_queue_first_its_functions_reaching_them_inside_the_cluster() {
+        let plan = planned(WITH_QUEUES, &[], &[]).unwrap();
+
+        let arn = |name: &str| format!("arn:aws:sqs:tn-tunis-1:000000000001:{name}");
+        let jobs = "shop-Jobs-SUFFIX000001";
+        let kept = Policies { deletion: DeletionPolicy::Retain, update_replace: DeletionPolicy::Retain };
+        assert_eq!(
+            plan.queues,
+            [
+                Queue {
+                    id: "JobsFailed".into(),
+                    name: "jobs-failed".into(),
+                    // SQS's defaults where the template says nothing.
+                    attributes: json!({
+                        "visibilityTimeout": 30,
+                        "messageRetentionPeriod": 1_209_600,
+                        "delaySeconds": 0,
+                        "maximumMessageSize": 1_048_576,
+                        "receiveMessageWaitTimeSeconds": 0,
+                        "redrivePolicy": null,
+                    }),
+                    tags: BTreeMap::new(),
+                    policies: kept,
+                },
+                Queue {
+                    id: "Jobs".into(),
+                    name: jobs.into(),
+                    attributes: json!({
+                        "visibilityTimeout": 60,
+                        "messageRetentionPeriod": 345_600,
+                        "delaySeconds": 0,
+                        "maximumMessageSize": 1_048_576,
+                        "receiveMessageWaitTimeSeconds": 20,
+                        "redrivePolicy": { "deadLetterTargetArn": arn("jobs-failed"), "maxReceiveCount": 5 },
+                    }),
+                    tags: [("team".to_owned(), "shop".to_owned())].into(),
+                    policies: Policies::default(),
+                },
+            ]
+        );
+        let [worker] = &plan.functions[..] else { panic!("{plan:?}") };
+        let inside = "http://10.43.0.251:3003/000000000001";
+        let variables = [
+            ("FAILED_NAME", "jobs-failed".to_owned()),
+            ("FAILED_URL", format!("{inside}/jobs-failed")),
+            ("JOBS_URL", format!("{inside}/{jobs}")),
+        ];
+        assert_eq!(worker.environment, variables.map(|(name, value)| (name.to_owned(), value)).into());
+        assert_eq!(worker.dead_letter, Some(arn("jobs-failed")));
+        let queues_read: Vec<&str> = worker.mappings.iter().map(|mapping| mapping.queue_arn.as_str()).collect();
+        assert_eq!(queues_read, [arn(jobs)]);
+        assert_eq!(
+            plan.resources(),
+            [
+                resource("Worker", FUNCTION, Some("worker")),
+                resource("WorkerJobs", MAPPING, Some(&format!("worker:{jobs}"))),
+                retained("JobsFailed", QUEUE, Some("jobs-failed")),
+                resource("Jobs", QUEUE, Some(jobs)),
+                resource("JobsPolicy", QUEUE_POLICY, None),
+            ]
+        );
+        // An output gives a queue's public URL, which a client outside the cluster sends to.
+        let values = BTreeMap::new();
+        let known = Known {
+            place: &PLACE,
+            values: &values,
+            functions: BTreeMap::new(),
+            queues: plan.queues.iter().map(|queue| (queue.id.clone(), queue.name.clone())).collect(),
+            queue_endpoint: PLACE.sqs_endpoint,
+        };
+        assert_eq!(
+            outputs(&read(WITH_QUEUES).unwrap(), &known),
+            [
+                Output {
+                    name: "JobsUrl".into(),
+                    value: format!("https://sqs.ffunc.cloud/000000000001/{jobs}").into(),
+                    description: Some("Where the jobs are sent".into()),
+                },
+                Output { name: "JobsArn".into(), value: arn(jobs).into(), description: None },
+            ]
+        );
+    }
+
+    #[test]
+    fn says_what_ff_cant_make_of_a_queue_at_its_property() {
+        let template = "\
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Named:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: jobs.fifo
+  Twin:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: jobs
+  Again:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: jobs
+  Bounds:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 50000
+      MaximumMessageSize: 100
+      Tags: {team: shop}
+  Tagged:
+    Type: AWS::SQS::Queue
+    Properties:
+      Tags:
+        - Key: team
+  Elsewhere:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        deadLetterTargetArn: arn:aws:sqs:eu-west-3:123456789012:failed
+        maxReceiveCount: 2000
+  Itself:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: itself
+      RedrivePolicy:
+        deadLetterTargetArn: arn:aws:sqs:tn-tunis-1:000000000001:itself
+  Ping:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt Pong.Arn
+        maxReceiveCount: 3
+  Pong:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt Ping.Arn
+        maxReceiveCount: 3
+";
+        let problems = planned(template, &[], &[]).unwrap_err();
+
+        let expected = [
+            ("Named/Properties/QueueName", "Named: QueueName jobs.fifo: 1 to 80 letters, digits, hyphens or underscores, as SQS's, known before the deploy"),
+            ("Again/Properties/QueueName", "Again: QueueName jobs is Twin's too: a queue's name is its own"),
+            ("Bounds/Properties/VisibilityTimeout", "Bounds: VisibilityTimeout 50000: a whole number of seconds from 0 to 43200"),
+            ("Bounds/Properties/MaximumMessageSize", "Bounds: MaximumMessageSize 100: a whole number of bytes from 1024 to 1048576"),
+            ("Bounds/Properties/Tags", "Bounds: Tags is a list of a Key and a Value each"),
+            ("Tagged/Properties/Tags/0", "Tagged: Tags 0 is a Key and a Value, both text"),
+            ("Elsewhere/Properties/RedrivePolicy/maxReceiveCount", "Elsewhere: RedrivePolicy.maxReceiveCount 2000: a whole number of receives from 1 to 1000"),
+            ("Elsewhere/Properties/RedrivePolicy/deadLetterTargetArn", "Elsewhere: RedrivePolicy.deadLetterTargetArn arn:aws:sqs:eu-west-3:123456789012:failed: the ARN of a queue of the account, arn:aws:sqs:tn-tunis-1:000000000001:<name>"),
+            ("Itself/Properties/RedrivePolicy/maxReceiveCount", "Itself: RedrivePolicy needs its maxReceiveCount: the receives a message has before it goes there, 1 to 1000"),
+            ("Itself/Properties/RedrivePolicy/deadLetterTargetArn", "Itself: RedrivePolicy.deadLetterTargetArn names the queue itself: its dead-letter queue is another, as SQS's"),
+            ("Ping/Properties/RedrivePolicy", "Ping: RedrivePolicy's dead-letter queues go round in a circle, which CloudFormation refuses"),
+            ("Pong/Properties/RedrivePolicy", "Pong: RedrivePolicy's dead-letter queues go round in a circle, which CloudFormation refuses"),
+        ]
+        .map(|(at, message)| (format!("/Resources/{at}"), message.to_owned()));
+        assert_eq!(problems, expected);
+    }
+
+    #[test]
+    fn deletes_a_templates_queues_after_its_functions_and_leaves_those_it_retains() {
+        // A queue of a deleted function's name is a queue still, deleted on its own.
+        let last = [
+            resource("Worker", FUNCTION, Some("jobs")),
+            resource("WorkerJobs", MAPPING, Some("jobs:jobs")),
+            resource("JobsFailed", QUEUE, Some("jobs-failed")),
+            resource("Jobs", QUEUE, Some("jobs")),
+            retained("Kept", QUEUE, Some("kept")),
+            resource("JobsPolicy", QUEUE_POLICY, None),
+        ];
+
+        let removed = removed(&last, &[], &BTreeMap::new());
+
+        let deleted = [
+            resource("Worker", FUNCTION, Some("jobs")),
+            resource("JobsFailed", QUEUE, Some("jobs-failed")),
+            resource("Jobs", QUEUE, Some("jobs")),
+        ];
+        assert_eq!(removed, Removed { deleted: deleted.into(), kept: [retained("Kept", QUEUE, Some("kept"))].into() });
+    }
+
     #[test]
     fn deletes_what_the_last_deploy_made_and_this_one_doesnt_a_url_first_a_function_last_with_its_own() {
         let last = [
@@ -1565,7 +2000,13 @@ Resources:
             url: Some("https://o.example.tn/".into()),
             version: Some("3".into()),
         };
-        let known = Known { place: &PLACE, values: &values, functions: [("Orders".to_owned(), made)].into() };
+        let known = Known {
+            place: &PLACE,
+            values: &values,
+            functions: [("Orders".to_owned(), made)].into(),
+            queues: BTreeMap::new(),
+            queue_endpoint: PLACE.sqs_endpoint,
+        };
 
         assert_eq!(
             outputs(&template, &known),
