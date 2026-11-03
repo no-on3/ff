@@ -137,8 +137,18 @@ impl Function {
     }
 }
 
-/// A resource of a stack: its logical ID and type, as the template names them, and the FF resource it made, by name, a
-/// version's or an alias's after its function's and a colon; none for what FF keeps without effect.
+/// What becomes of what a resource made once its template has it no more, or its stack is deleted: deleted, or left in
+/// the account, out of the stack. CloudFormation's DeletionPolicy and UpdateReplacePolicy, its other values aside.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum DeletionPolicy {
+    #[default]
+    Delete,
+    Retain,
+}
+
+/// A resource of a stack: its logical ID and type, as the template names them, the FF resource it made, by name, a
+/// version's or an alias's after its function's and a colon, none for what FF keeps without effect; and its
+/// DeletionPolicy, which its removal follows.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StackResource {
@@ -146,6 +156,8 @@ pub struct StackResource {
     #[serde(rename = "type")]
     pub kind: String,
     pub physical_id: Option<String>,
+    #[serde(default)]
+    pub deletion_policy: DeletionPolicy,
 }
 
 /// A stack, FF's record of what `ff deploy` made of a SAM template, as `GET /stacks/:name` answers it: its parameters'

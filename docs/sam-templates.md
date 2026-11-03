@@ -145,6 +145,13 @@ or reading of a queue, and each permission, kept without effect; the template's 
 template changed and deletes, after asking (`--yes` in a script), what it no longer has, last, as CloudFormation cleans
 up. `ff get` and the console name a function's stack, and `ff delete-stack` deletes it with what it made.
 
+**A resource's `DeletionPolicy: Retain`** leaves what it made in the account, out of the stack, once the template has it
+no more and at `ff delete-stack`, as CloudFormation does with the policy of the template it was made by. A function's
+URL, alias, settings and events follow the function's policy, as SAM gives them its. **`UpdateReplacePolicy: Retain`**
+does the same for what a new name replaces, a function given another `FunctionName` or a schedule another `Name`, by the
+new template's policy. What is left is the account's, as any function made with `ff`: a template that names it again is
+refused, as CloudFormation refuses a name that exists, until `ff delete` deletes it or the template names another.
+
 ## Checking a template
 
 `ff doctor template.yaml` reads it as `ff deploy` does, with the parameters' values `sam deploy` would take: what is

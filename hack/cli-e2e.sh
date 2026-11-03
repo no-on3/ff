@@ -485,8 +485,8 @@ check "sam init's own hello world is refused, each problem at its line, its Api 
   "$(code) $(err | head -1 | grep '^error: ff deploy changed nothing: the template has [0-9]* problems$' >/dev/null && echo true || echo false) $(err | grep "^template.yaml:25: HelloWorldFunction's event HelloWorld: an Api event makes an API Gateway REST API, which FF hasn't: the function's FunctionUrlConfig gives it a URL, and HttpApi events, all of one function, go to that URL$" >/dev/null && echo true || echo false)"
 
 # A stack of the suite's own: a parameter from samconfig.toml, an alias and its URL, and, in with-reports.yaml, a
-# second function, whose HttpApi event gives it a URL, and the first's Schedule and SQS events, which the deploy after
-# the next no longer has.
+# second function, whose HttpApi event gives it a URL and whose DeletionPolicy retains it, and the first's Schedule and
+# SQS events, which the deploy after the next no longer has.
 stack="$work/cli-stack"
 rm -rf "$stack" && mkdir -p "$stack/src"
 cat >"$stack/src/app.mjs" <<'EOF'
@@ -526,7 +526,7 @@ Outputs:
   HelloFunctionName:
     Value: !Ref HelloFunction
 EOF
-awk '/^Outputs:/ { print "  ReportsFunction:\n    Type: AWS::Serverless::Function\n    Properties:\n      FunctionName: cli-stack-reports\n      CodeUri: src/\n      Handler: app.handler\n      ReservedConcurrentExecutions: 2\n      Tags:\n        team: reports\n      Events:\n        Reports:\n          Type: HttpApi\n          Properties:\n            Path: /reports\n            Method: get\n" } { print }' \
+awk '/^Outputs:/ { print "  ReportsFunction:\n    Type: AWS::Serverless::Function\n    DeletionPolicy: Retain\n    Properties:\n      FunctionName: cli-stack-reports\n      CodeUri: src/\n      Handler: app.handler\n      ReservedConcurrentExecutions: 2\n      Tags:\n        team: reports\n      Events:\n        Reports:\n          Type: HttpApi\n          Properties:\n            Path: /reports\n            Method: get\n" } { print }' \
   "$stack/template.yaml" >"$stack/with-reports.yaml"
 cat >"$stack/hello-events.yaml" <<'EOF'
       Events:
@@ -576,12 +576,13 @@ in_folder "$stack" deploy template.yaml --parameter-overrides Stage=prod
 check "what the template no longer has is deleted after asking, which a script says with --yes" \
   "2 error: ff deploy asks first, and there is no terminal to ask in: say --yes" "$(code) $(err | tail -1)"
 in_folder "$stack" deploy template.yaml --parameter-overrides Stage=prod --yes --output json
-check "with --yes, the function changed and published, the one and the events the template no longer has deleted" \
-  "0 updated HelloFunction environment,description 2 HelloFunctionNightly HelloFunctionJobs ReportsFunction" \
-  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.changed | join(",")) \(.version)") | join(", ")') $(out | jq -r '.deleted | map(.logicalId) | join(" ")')"
-ff get cli-stack-reports
-check "which is gone, as are the schedule and the queue's reader" "3 0 0" \
-  "$(code) $(ff schedule list "$hello" --output json; out | jq length) $(ff event-sources list --function "$hello" --output json; out | jq length)"
+check "with --yes, the function changed and published, the events the template no longer has deleted, the function it retained kept" \
+  "0 updated HelloFunction environment,description 2 HelloFunctionNightly HelloFunctionJobs kept ReportsFunction" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.changed | join(",")) \(.version)") | join(", ")') $(out | jq -r '.deleted | map(.logicalId) | join(" ")') kept $(out | jq -r '.kept | map(.logicalId) | join(" ")')"
+ff get cli-stack-reports --output json
+check "which stays in the account, in no stack, as CloudFormation leaves it; the schedule and the queue's reader are gone" "0 none 0 0" \
+  "$(code) $(out | jq -r '.stack // "none"') $(ff schedule list "$hello" --output json; out | jq length) $(ff event-sources list --function "$hello" --output json; out | jq length)"
+ff delete cli-stack-reports --yes
 ff invoke "$hello:live" --http GET "/?name=Stack"
 check "and the alias's URL runs the new version" "0 HTTP 200 Hello Stack prod" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.message) \(.stage)"')"
 in_folder "$stack" delete-stack --yes

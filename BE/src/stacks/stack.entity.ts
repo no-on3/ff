@@ -41,6 +41,10 @@ export class Stack {
  * FF keeps without effect. One FF resource of a type is in one of the
  * account's stacks at most.
  */
+/** CloudFormation's DeletionPolicy of a resource, as FF keeps it: deleted, or left in the account, out of the stack. */
+export const DELETION_POLICIES = ['Delete', 'Retain'] as const;
+export type DeletionPolicy = (typeof DELETION_POLICIES)[number];
+
 @Entity('stack_resources')
 @Index(['accountId', 'type', 'physicalId'], { unique: true, where: '"physical_id" IS NOT NULL' })
 export class StackResource {
@@ -65,4 +69,8 @@ export class StackResource {
   /** A function's, a queue's or a bucket's name, a version's or an alias's after a colon; null for what has no effect on FF. */
   @Column({ type: 'varchar', length: 1024, nullable: true })
   physicalId: string | null;
+
+  /** CloudFormation's DeletionPolicy, the template's that made it: Retain leaves what it made in the account once the template, or the stack, has it no more. */
+  @Column({ type: 'varchar', length: 6, default: 'Delete' })
+  deletionPolicy: DeletionPolicy;
 }

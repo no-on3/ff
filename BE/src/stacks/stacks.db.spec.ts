@@ -79,25 +79,34 @@ run('stacks, in FF\'s database (L2)', () => {
     const replaced = await stacks.put(
       ACCOUNT,
       'shop',
-      shop([fn('Reports', 'reports'), { logicalId: 'Queue', type: 'AWS::SQS::Queue', physicalId: 'orders-queue' }, { logicalId: 'Allow', type: 'AWS::Lambda::Permission', physicalId: null }], {
-        Stage: 'prod',
-      }),
+      shop(
+        [
+          fn('Reports', 'reports'),
+          { logicalId: 'Queue', type: 'AWS::SQS::Queue', physicalId: 'orders-queue', deletionPolicy: 'Retain' },
+          { logicalId: 'Allow', type: 'AWS::Lambda::Permission', physicalId: null },
+        ],
+        { Stage: 'prod' },
+      ),
     );
 
-    expect([made.resources.map((resource) => resource.logicalId), replaced.parameters, replaced.resources]).toEqual([
-      ['Orders', 'Queue'],
+    // Delete when the template gives no DeletionPolicy, as CloudFormation's default.
+    expect([made.resources.map((resource) => [resource.logicalId, resource.deletionPolicy]), replaced.parameters, replaced.resources]).toEqual([
+      [
+        ['Orders', 'Delete'],
+        ['Queue', 'Delete'],
+      ],
       { Stage: 'prod' },
       [
-        { logicalId: 'Allow', type: 'AWS::Lambda::Permission', physicalId: null },
-        { logicalId: 'Queue', type: 'AWS::SQS::Queue', physicalId: 'orders-queue' },
-        fn('Reports', 'reports'),
+        { logicalId: 'Allow', type: 'AWS::Lambda::Permission', physicalId: null, deletionPolicy: 'Delete' },
+        { logicalId: 'Queue', type: 'AWS::SQS::Queue', physicalId: 'orders-queue', deletionPolicy: 'Retain' },
+        { ...fn('Reports', 'reports'), deletionPolicy: 'Delete' },
       ],
     ]);
     expect(await stacks.get(ACCOUNT, 'shop')).toEqual(replaced);
     expect(replaced.createdAt).toEqual(made.createdAt);
     expect(await audited('stack.put')).toEqual([
       { resource: 'stack:shop', details: { templateSha256: SHA, created: true, added: ['Orders', 'Queue'], changed: [], removed: [] } },
-      { resource: 'stack:shop', details: { templateSha256: SHA, created: false, added: ['Reports', 'Allow'], changed: [], removed: ['Orders'] } },
+      { resource: 'stack:shop', details: { templateSha256: SHA, created: false, added: ['Reports', 'Allow'], changed: ['Queue'], removed: ['Orders'] } },
     ]);
   });
 

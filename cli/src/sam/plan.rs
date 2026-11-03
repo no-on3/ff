@@ -9,7 +9,7 @@ use serde_json::{Map, Value, json};
 
 use super::Template;
 use super::resolve::{self, FUNCTION};
-use crate::api::types::{DEFAULT_MAX_INSTANCES, REPORT_BATCH_ITEM_FAILURES, StackResource};
+use crate::api::types::{DEFAULT_MAX_INSTANCES, DeletionPolicy, REPORT_BATCH_ITEM_FAILURES, StackResource};
 use crate::cli::Runtime;
 use crate::config::is_function_name;
 
@@ -91,6 +91,26 @@ impl Mapping {
     }
 }
 
+/// What becomes of what a resource made once the template has it no more or the stack is deleted, its DeletionPolicy,
+/// and once a new name replaces it, its UpdateReplacePolicy: a function's own resources follow the function's, as SAM
+/// gives them its.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Policies {
+    pub deletion: DeletionPolicy,
+    pub update_replace: DeletionPolicy,
+}
+
+impl Policies {
+    /// A resource's, Retain or Delete alone, as the subset's check takes them.
+    fn of(resource: &Value) -> Self {
+        let policy = |key: &str| match resource.get(key).and_then(Value::as_str) {
+            Some("Retain") => DeletionPolicy::Retain,
+            _ => DeletionPolicy::Delete,
+        };
+        Policies { deletion: policy("DeletionPolicy"), update_replace: policy("UpdateReplacePolicy") }
+    }
+}
+
 /// A function of the template, as FF makes it.
 #[derive(Debug, PartialEq)]
 pub struct Function {
@@ -120,6 +140,7 @@ pub struct Function {
     pub schedules: Vec<Schedule>,
     /// Its SQS events.
     pub mappings: Vec<Mapping>,
+    pub policies: Policies,
 }
 
 impl Function {
@@ -138,12 +159,14 @@ impl Function {
     }
 
     /// The resources the stack keeps of it, named as SAM names them: the function, its URL, its alias, its
-    /// asynchronous calls' settings, and its events' schedules and mappings, each named after the function by FF.
+    /// asynchronous calls' settings, and its events' schedules and mappings, each named after the function by FF, each
+    /// with the function's DeletionPolicy.
     pub fn resources(&self) -> Vec<StackResource> {
         let resource = |logical_id: String, kind: &str, physical_id: String| StackResource {
             logical_id,
             kind: kind.to_owned(),
             physical_id: Some(physical_id),
+            deletion_policy: self.policies.deletion,
         };
         let id = &self.id;
         let mut resources = vec![resource(id.clone(), FUNCTION, self.name.clone())];
@@ -187,8 +210,18 @@ impl Plan {
             logical_id: id.clone(),
             kind: PERMISSION.to_owned(),
             physical_id: None,
+            deletion_policy: DeletionPolicy::Delete,
         });
         self.functions.iter().flat_map(Function::resources).chain(permissions).collect()
+    }
+
+    /// The UpdateReplacePolicy of each resource the deploy makes, by logical ID: what becomes of the one it replaces.
+    pub fn replace_policies(&self) -> BTreeMap<String, DeletionPolicy> {
+        let of_a_function = |function: &Function| {
+            let policy = function.policies.update_replace;
+            function.resources().into_iter().map(move |resource| (resource.logical_id, policy))
+        };
+        self.functions.iter().flat_map(of_a_function).collect()
     }
 }
 
@@ -685,7 +718,7 @@ fn mapping(reading: &mut Reading, event: &str, at: &str, place: &Place) -> Optio
     })
 }
 
-fn function(reading: &mut Reading, name: String, folder: &Path, place: &Place) -> Option<Function> {
+fn function(reading: &mut Reading, name: String, folder: &Path, place: &Place, policies: Policies) -> Option<Function> {
     let code = reading.text("CodeUri");
     if let Some(given) = &code
         && !is_code(&folder.join(given))
@@ -780,6 +813,7 @@ fn function(reading: &mut Reading, name: String, folder: &Path, place: &Place) -
         dead_letter,
         schedules: events.schedules,
         mappings: events.mappings,
+        policies,
     })
 }
 
@@ -915,17 +949,31 @@ pub fn plan(
             resolved.pointer(&format!("/Resources/{id}/Properties")).and_then(Value::as_object).unwrap_or(&empty);
         let mut reading =
             Reading { id, properties, pointer: format!("/Resources/{id}/Properties"), problems: Vec::new() };
-        let function = function(&mut reading, name.clone(), folder, place);
+        let function = function(&mut reading, name.clone(), folder, place, Policies::of(&resources[id]));
         problems.append(&mut reading.problems);
         functions.extend(function);
     }
     if problems.is_empty() { Ok(Plan { functions, permissions }) } else { Err(problems) }
 }
 
-/// What the stack's last deploy made that this one doesn't, by type and FF resource: each to delete, a URL first and a
-/// function last, a function's own resources going with it. A Schedule event's rule and a ScheduleV2 event's schedule
-/// are one schedule of the function on FF: an event that changes from one to the other keeps it.
-pub fn removed(last: &[StackResource], next: &[StackResource]) -> Vec<StackResource> {
+/// What the stack's last deploy made that this one doesn't, a function's own resources going with it.
+#[derive(Debug, Default, PartialEq)]
+pub struct Removed {
+    /// Each to delete, a URL first and a function last.
+    pub deleted: Vec<StackResource>,
+    /// Each its template said to retain, left in the account, out of the stack.
+    pub kept: Vec<StackResource>,
+}
+
+/// What the stack's last deploy made that this one doesn't, by type and FF resource, split by its policy as
+/// CloudFormation's: the last template's DeletionPolicy, else, for a resource that one of another name replaces under
+/// its logical ID, that one's UpdateReplacePolicy, from `replacing`. A Schedule event's rule and a ScheduleV2 event's
+/// schedule are one schedule of the function on FF: an event that changes from one to the other keeps it.
+pub fn removed(
+    last: &[StackResource],
+    next: &[StackResource],
+    replacing: &BTreeMap<String, DeletionPolicy>,
+) -> Removed {
     let on_ff = |kind: &str| if kind == RULE { SCHEDULE.to_owned() } else { kind.to_owned() };
     let identity = |resource: &StackResource| Some((on_ff(&resource.kind), resource.physical_id.clone()?));
     let kept: BTreeSet<(String, String)> = next.iter().filter_map(identity).collect();
@@ -944,7 +992,10 @@ pub fn removed(last: &[StackResource], next: &[StackResource]) -> Vec<StackResou
         .cloned()
         .collect();
     removed.sort_by_key(|resource| rank(&resource.kind));
-    removed
+    let (kept, deleted) = removed.into_iter().partition(|resource| {
+        replacing.get(&resource.logical_id).copied().unwrap_or(resource.deletion_policy) == DeletionPolicy::Retain
+    });
+    Removed { deleted, kept }
 }
 
 /// The function a resource of the stack belongs to: its physical ID's name, before a version's or an alias's colon.
@@ -1028,7 +1079,20 @@ mod tests {
     }
 
     fn resource(logical_id: &str, kind: &str, physical_id: Option<&str>) -> StackResource {
-        StackResource { logical_id: logical_id.into(), kind: kind.into(), physical_id: physical_id.map(str::to_owned) }
+        StackResource {
+            logical_id: logical_id.into(),
+            kind: kind.into(),
+            physical_id: physical_id.map(str::to_owned),
+            deletion_policy: DeletionPolicy::Delete,
+        }
+    }
+
+    fn retained(logical_id: &str, kind: &str, physical_id: Option<&str>) -> StackResource {
+        StackResource { deletion_policy: DeletionPolicy::Retain, ..resource(logical_id, kind, physical_id) }
+    }
+
+    fn by_logical_id(policies: &[(&str, DeletionPolicy)]) -> BTreeMap<String, DeletionPolicy> {
+        policies.iter().map(|(id, policy)| (id.to_string(), *policy)).collect()
     }
 
     const SHOP: &str = "\
@@ -1127,6 +1191,7 @@ Outputs:
                 dead_letter: None,
                 schedules: vec![],
                 mappings: vec![],
+                policies: Policies::default(),
             }
         );
         assert_eq!(
@@ -1385,23 +1450,108 @@ Resources:
             resource("OrdersNightly", SCHEDULE, Some("orders:nightly")),
         ];
 
-        let removed = removed(&last, &next);
+        let removed = removed(&last, &next, &BTreeMap::new());
 
         assert_eq!(
-            removed,
+            removed.deleted,
             [
                 resource("OrdersUrl", URL, Some("orders")),
                 resource("OrdersJobs", MAPPING, Some("orders:jobs")),
                 resource("Old", FUNCTION, Some("old")),
             ]
         );
+        assert_eq!(removed.kept, []);
         assert_eq!(
-            removed.iter().map(in_words).collect::<Vec<_>>(),
+            removed.deleted.iter().map(in_words).collect::<Vec<_>>(),
             ["orders's URL (OrdersUrl)", "orders's reading of the queue jobs (OrdersJobs)", "the function old (Old)"]
         );
         assert_eq!(
             in_words(&resource("OrdersNightly", RULE, Some("orders:nightly"))),
             "orders's schedule nightly (OrdersNightly)"
+        );
+    }
+
+    #[test]
+    fn a_functions_resources_have_its_deletion_policy_and_what_they_replace_its_update_replace_policy() {
+        let template = "Transform: AWS::Serverless-2016-10-31
+Resources:
+  Orders:
+    Type: AWS::Serverless::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: orders
+      CodeUri: orders
+      Handler: index.handler
+      Runtime: nodejs24.x
+      AutoPublishAlias: live
+      FunctionUrlConfig:
+        AuthType: NONE
+  Api:
+    Type: AWS::Serverless::Function
+    UpdateReplacePolicy: Retain
+    Properties:
+      FunctionName: api
+      CodeUri: orders
+      Handler: index.handler
+      Runtime: nodejs24.x
+";
+
+        let plan = planned(template, &[], &[]).unwrap();
+
+        assert_eq!(
+            plan.resources(),
+            [
+                retained("Orders", FUNCTION, Some("orders")),
+                retained("OrdersUrl", URL, Some("orders:live")),
+                retained("OrdersAliaslive", ALIAS, Some("orders:live")),
+                resource("Api", FUNCTION, Some("api")),
+            ]
+        );
+        let (delete, retain) = (DeletionPolicy::Delete, DeletionPolicy::Retain);
+        assert_eq!(
+            plan.replace_policies(),
+            by_logical_id(&[("Orders", delete), ("OrdersUrl", delete), ("OrdersAliaslive", delete), ("Api", retain)])
+        );
+    }
+
+    #[test]
+    fn leaves_in_the_account_what_the_template_said_to_retain_when_removed_or_replaced_by_a_new_name() {
+        let last = [
+            retained("Orders", FUNCTION, Some("orders")),
+            retained("OrdersUrl", URL, Some("orders")),
+            resource("Api", FUNCTION, Some("api")),
+            resource("Reports", FUNCTION, Some("reports")),
+            retained("Old", FUNCTION, Some("old")),
+            retained("OldUrl", URL, Some("old")),
+        ];
+        // Orders and Api renamed: the next template's UpdateReplacePolicy decides, Delete for Orders, Retain for Api.
+        let next = [
+            resource("Orders", FUNCTION, Some("orders-v2")),
+            resource("OrdersUrl", URL, Some("orders-v2")),
+            resource("Api", FUNCTION, Some("api-v2")),
+        ];
+        let (delete, retain) = (DeletionPolicy::Delete, DeletionPolicy::Retain);
+        let replacing = by_logical_id(&[("Orders", delete), ("OrdersUrl", delete), ("Api", retain)]);
+
+        let updated = removed(&last, &next, &replacing);
+        let deleted = removed(&last, &[], &BTreeMap::new());
+
+        assert_eq!(
+            updated,
+            Removed {
+                deleted: vec![
+                    retained("Orders", FUNCTION, Some("orders")),
+                    resource("Reports", FUNCTION, Some("reports"))
+                ],
+                kept: vec![resource("Api", FUNCTION, Some("api")), retained("Old", FUNCTION, Some("old"))],
+            }
+        );
+        assert_eq!(
+            deleted,
+            Removed {
+                deleted: vec![resource("Api", FUNCTION, Some("api")), resource("Reports", FUNCTION, Some("reports"))],
+                kept: vec![retained("Orders", FUNCTION, Some("orders")), retained("Old", FUNCTION, Some("old"))],
+            }
         );
     }
 

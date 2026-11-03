@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { ArrayMaxSize, IsArray, IsOptional, IsString, Length, Matches, ValidateIf, ValidateNested, ValidationOptions, registerDecorator } from 'class-validator';
+import { ArrayMaxSize, IsArray, IsIn, IsOptional, IsString, Length, Matches, ValidateIf, ValidateNested, ValidationOptions, registerDecorator } from 'class-validator';
+import { DELETION_POLICIES, DeletionPolicy } from '../stack.entity';
 
 /** A stack's name, as CloudFormation's: letters, digits and hyphens, a letter first. */
 export const STACK_NAME = /^[A-Za-z][-A-Za-z0-9]*$/;
@@ -63,6 +64,15 @@ export class StackResourceDto {
   @IsString()
   @Length(1, 1024)
   physicalId: string | null;
+
+  @ApiPropertyOptional({
+    enum: DELETION_POLICIES,
+    default: 'Delete',
+    description: "CloudFormation's DeletionPolicy, as the template gives it: Retain leaves what it made in the account once the template, or the stack, has it no more",
+  })
+  @IsOptional()
+  @IsIn(DELETION_POLICIES, { message: 'deletionPolicy is Delete or Retain, as CloudFormation takes it' })
+  deletionPolicy?: DeletionPolicy;
 }
 
 /** PUT /stacks/{name}: the stack as a deploy left it, whole. */
@@ -94,6 +104,7 @@ export class StackResourceView {
   @ApiProperty({ example: 'HelloFunction' }) logicalId: string;
   @ApiProperty({ example: 'AWS::Serverless::Function' }) type: string;
   @ApiProperty({ nullable: true, type: String, example: 'hello', description: 'The FF resource it made; null for what FF keeps without effect' }) physicalId: string | null;
+  @ApiProperty({ enum: DELETION_POLICIES, description: 'Retain: left in the account once the template, or the stack, has it no more' }) deletionPolicy: DeletionPolicy;
 }
 
 /** A stack, as GET and PUT /stacks/{name} answer it. */

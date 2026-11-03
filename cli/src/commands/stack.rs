@@ -1,6 +1,7 @@
 //! `ff deploy template.yaml` and `ff delete-stack`: a SAM template's functions and their events made on FF as
 //! `sam deploy` makes them on AWS (ADR 0016), and the stack kept in FF's API, what each logical ID made, so that the
-//! next deploy changes what the template changed and deletes what it no longer has, after asking.
+//! next deploy changes what the template changed and deletes what it no longer has, after asking, or leaves it in the
+//! account when its DeletionPolicy says Retain.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -204,6 +205,7 @@ struct StackDeployed {
     stack: String,
     functions: Vec<FunctionDeployed>,
     deleted: Vec<StackResource>,
+    kept: Vec<StackResource>,
     outputs: Vec<plan::Output>,
 }
 
@@ -477,6 +479,17 @@ fn listed(resources: &[StackResource]) -> String {
     resources.iter().map(plan::in_words).collect::<Vec<_>>().join(", ")
 }
 
+/// The report's lines of what was deleted and of what was left in the account.
+fn removal_lines(removed: &plan::Removed) -> impl Iterator<Item = String> + '_ {
+    let deleted = removed.deleted.iter().map(|resource| format!("deleted {}", plan::in_words(resource)));
+    deleted.chain(removed.kept.iter().map(|resource| format!("kept {}", left_in_the_account(resource))))
+}
+
+/// A resource its template said to retain, in words.
+fn left_in_the_account(resource: &StackResource) -> String {
+    format!("{}: in the account, out of the stack, as its template said Retain", plan::in_words(resource))
+}
+
 /// The functions' packages, each folder built once for its runtime and each .zip read once, each function's handler
 /// checked: the packages, and the one of each function.
 fn packages(
@@ -657,15 +670,15 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     }
     check_events(&client, &deployment.functions, &mut problems)?;
     let next = deployment.resources();
-    let removed = plan::removed(last_resources, &next);
+    let removed = plan::removed(last_resources, &next, &deployment.replace_policies());
     let (built, indexes) = packages(&deployment.functions, &at, args, &mut problems, context)?;
     problems.refusal()?;
-    if !removed.is_empty()
+    if !removed.deleted.is_empty()
         && !confirmed(
             "ff deploy",
             &format!(
                 "The template no longer has what the stack {stack_name} made: {}. Delete it as the deploy goes?",
-                listed(&removed)
+                listed(&removed.deleted)
             ),
             args.yes,
         )?
@@ -801,15 +814,18 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
             url,
         });
     }
-    for resource in &removed {
+    for resource in &removed.deleted {
         delete_resource(&client, resource)?;
     }
+    // What its template said to retain is the account's from now on, as a stack CloudFormation updates leaves it.
     Record { template_sha256, parameters, resources: next, ..record }.save()?;
 
     let known = Known { place: &place, values: &values.values, functions: made };
     let outputs = plan::outputs(&template, &known);
     let seconds = deploy::seconds_since(started);
-    let document = StackDeployed { stack: stack_name.clone(), functions: deployed, deleted: removed, outputs };
+    let removal_lines: Vec<String> = removal_lines(&removed).collect();
+    let plan::Removed { deleted, kept } = removed;
+    let document = StackDeployed { stack: stack_name.clone(), functions: deployed, deleted, kept, outputs };
     context.out.result(&document, || {
         let mut lines = vec![format!("{stack_name}: deployed in {seconds} s")];
         for function in &document.functions {
@@ -820,7 +836,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
             let version = function.version.as_deref().map(|version| format!(", version {version}")).unwrap_or_default();
             lines.push(format!("{} {} ({}){changed}{version}", function.action, function.name, function.logical_id));
         }
-        lines.extend(document.deleted.iter().map(|resource| format!("deleted {}", plan::in_words(resource))));
+        lines.extend(removal_lines);
         if !document.outputs.is_empty() {
             lines.push("outputs:".to_owned());
             for output in &document.outputs {
@@ -832,7 +848,8 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     })
 }
 
-/// `ff delete-stack`: what the stack made deleted, then the stack. With no name, the one samconfig.toml names here.
+/// `ff delete-stack`: what the stack made deleted, but what its template said to retain, then the stack. With no name,
+/// the one samconfig.toml names here.
 pub fn delete_stack(name: Option<&str>, yes: bool, context: &Context) -> Result<(), Error> {
     let name = match name {
         Some(name) => name.to_owned(),
@@ -842,21 +859,25 @@ pub fn delete_stack(name: Option<&str>, yes: bool, context: &Context) -> Result<
     };
     let client = Client::new(&context.settings()?)?;
     let stack: Stack = client.json(&Call::get(format!("/stacks/{name}")))?;
-    let doomed = plan::removed(&stack.resources, &[]);
-    let question = match doomed.len() {
-        0 => format!("Delete the stack {name}? It made nothing that is still there"),
-        _ => format!("Delete the stack {name} and what it made: {}?", listed(&doomed)),
+    let removed = plan::removed(&stack.resources, &[], &BTreeMap::new());
+    let mut question = match removed.deleted.len() {
+        0 => format!("Delete the stack {name}? It made nothing that is still there to delete"),
+        _ => format!("Delete the stack {name} and what it made: {}?", listed(&removed.deleted)),
     };
+    if !removed.kept.is_empty() {
+        let kept: Vec<String> = removed.kept.iter().map(left_in_the_account).collect();
+        question.push_str(&format!(" It keeps {}", kept.join(", ")));
+    }
     if !confirmed("ff delete-stack", &question, yes)? {
         return context.out.result(&json!({ "deleted": false, "stack": name }), || "Nothing deleted".to_owned());
     }
-    for resource in &doomed {
+    for resource in &removed.deleted {
         delete_resource(&client, resource)?;
     }
     client.done(&Call::delete(format!("/stacks/{name}")))?;
-    context.out.result(&json!({ "deleted": true, "stack": name, "resources": doomed }), || {
-        let mut lines: Vec<String> =
-            doomed.iter().map(|resource| format!("deleted {}", plan::in_words(resource))).collect();
+    let document = json!({ "deleted": true, "stack": name, "resources": removed.deleted, "kept": removed.kept });
+    context.out.result(&document, || {
+        let mut lines: Vec<String> = removal_lines(&removed).collect();
         lines.push(format!("deleted the stack {name}"));
         lines.join("\n")
     })
@@ -865,6 +886,7 @@ pub fn delete_stack(name: Option<&str>, yes: bool, context: &Context) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::types::DeletionPolicy;
 
     fn template(text: &str) -> Template {
         sam::read(text).unwrap()
@@ -942,6 +964,28 @@ mod tests {
         assert_eq!(
             event_invoke_fields(&answered),
             json!({ "maximumRetryAttempts": 1, "destinationConfig": { "onFailure": { "destination": "arn:q" } } })
+        );
+    }
+
+    #[test]
+    fn the_report_says_what_was_deleted_and_what_its_template_said_to_retain() {
+        let function = |logical_id: &str, name: &str, deletion_policy| StackResource {
+            logical_id: logical_id.into(),
+            kind: FUNCTION.into(),
+            physical_id: Some(name.into()),
+            deletion_policy,
+        };
+        let removed = plan::Removed {
+            deleted: vec![function("Old", "old", DeletionPolicy::Delete)],
+            kept: vec![function("Reports", "reports", DeletionPolicy::Retain)],
+        };
+
+        assert_eq!(
+            removal_lines(&removed).collect::<Vec<_>>(),
+            [
+                "deleted the function old (Old)",
+                "kept the function reports (Reports): in the account, out of the stack, as its template said Retain",
+            ]
         );
     }
 

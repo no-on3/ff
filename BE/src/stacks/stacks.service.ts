@@ -72,7 +72,7 @@ const viewOf = (stack: Stack, resources: StackResource[]): StackView => ({
   templateSha256: stack.templateSha256,
   parameters: stack.parameters,
   resources: resources
-    .map(({ logicalId, type, physicalId }) => ({ logicalId, type, physicalId }))
+    .map(({ logicalId, type, physicalId, deletionPolicy }) => ({ logicalId, type, physicalId, deletionPolicy }))
     .sort((a, b) => (a.logicalId < b.logicalId ? -1 : a.logicalId > b.logicalId ? 1 : 0)),
   createdAt: stack.createdAt,
   updatedAt: stack.updatedAt,
@@ -188,7 +188,9 @@ export class StacksService {
     }
     const before = await manager.find(StackResource, { where: { stackId: row.id } });
     await manager.delete(StackResource, { stackId: row.id });
-    const resources = dto.resources.map((resource) => manager.create(StackResource, { ...resource, stackId: row.id, accountId }));
+    const resources = dto.resources.map((resource) =>
+      manager.create(StackResource, { ...resource, deletionPolicy: resource.deletionPolicy ?? 'Delete', stackId: row.id, accountId }),
+    );
     if (resources.length) await manager.insert(StackResource, resources);
     const was = new Map(before.map((resource) => [resource.logicalId, resource]));
     const now = new Set(resources.map((resource) => resource.logicalId));
@@ -204,7 +206,7 @@ export class StacksService {
           changed: resources
             .filter((resource) => {
               const old = was.get(resource.logicalId);
-              return old !== undefined && (old.type !== resource.type || old.physicalId !== resource.physicalId);
+              return old !== undefined && (old.type !== resource.type || old.physicalId !== resource.physicalId || old.deletionPolicy !== resource.deletionPolicy);
             })
             .map((resource) => resource.logicalId),
           removed: before.filter((resource) => !now.has(resource.logicalId)).map((resource) => resource.logicalId),

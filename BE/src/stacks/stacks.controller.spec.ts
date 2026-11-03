@@ -93,6 +93,10 @@ describe('/stacks (L1)', () => {
       400,
       ['resources.0.physicalId must be longer than or equal to 1 and shorter than or equal to 1024 characters', 'resources.0.physicalId must be a string'],
     ]);
+    expect(await refusal({ templateSha256: SHA, resources: [{ ...function_, deletionPolicy: 'Snapshot' }] })).toEqual([
+      400,
+      ['resources.0.deletionPolicy is Delete or Retain, as CloudFormation takes it'],
+    ]);
     expect(await refusal({ templateSha256: SHA, resources: Array.from({ length: MAX_STACK_RESOURCES + 1 }, (_, i) => ({ ...function_, logicalId: `F${i}` })) })).toEqual([
       400,
       ['resources must contain no more than 500 elements'],
