@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import {
   AbortMultipartUploadCommand,
+  BucketLocationConstraint,
   CompleteMultipartUploadCommand,
   CopyObjectCommand,
   CreateBucketCommand,
@@ -9,6 +10,7 @@ import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
   ListPartsCommand,
@@ -18,14 +20,17 @@ import {
 } from '@aws-sdk/client-s3';
 import { ConfigService } from '@nestjs/config';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
+import { AuditEntry } from '../audit/audit-entry.entity';
+import { AuditService } from '../audit/audit.service';
 import { CreditService } from '../billing/credit.service';
-import { onePlan } from '../plans/test-fixtures';
+import { onePlan, plan } from '../plans/test-fixtures';
 import { createHash, randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
 import { EncryptionService } from '../encryption/encryption.service';
 import { Bucket } from './bucket.entity';
+import { BucketsService } from './buckets.service';
 import { S3FrontDoor } from './front-door';
 import { StorageDirectory } from './storage-directory.service';
 import { BucketEvents } from './bucket-events';
@@ -34,9 +39,10 @@ import { BucketWebsitesService } from './bucket-websites.service';
 import { KeyUse } from './key-use.entity';
 import { KeyUses } from './key-uses.service';
 import { StorageKey } from './storage-key.entity';
-import { newAccessKeyId, newSecretAccessKey, newStoreName } from './storage-names';
+import { STORE_NAME, newAccessKeyId, newSecretAccessKey, newStoreName } from './storage-names';
 import { StorageRequestCount } from './storage-request-count.entity';
 import { StorageRequestCountsService } from './storage-request-counts.service';
+import { StoreBuckets } from './store-buckets';
 import { testObjectStore, testStoreClient } from '../object-store/test-fixtures';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
@@ -46,10 +52,12 @@ const MB = 1024 * 1024;
 
 run("buckets' S3 front door, in front of the store, its keys and buckets in FF's database (L2)", () => {
   const objectStore = testObjectStore();
+  const config = new ConfigService({ storage: { base: 'http://s3.localhost:3002', region: 'tn-tunis-1' }, website: { base: 'http://site.localhost:3003' }, objectStore });
   /** The store itself, with FF's credentials: what it really keeps. */
   const store = testStoreClient();
   const encryption = new EncryptionService({ getOrThrow: () => [{ id: 'test', key: randomBytes(32) }] } as unknown as ConfigService);
   let db: ScratchDatabase;
+  let directory: StorageDirectory;
   let frontDoor: S3FrontDoor;
   let counts: StorageRequestCountsService;
   let keyUses: KeyUses;
@@ -57,8 +65,8 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
   const photos = { name: `photos-${randomBytes(4).toString('hex')}`, storeName: newStoreName() };
   const theirs = { name: `theirs-${randomBytes(4).toString('hex')}`, storeName: newStoreName() };
   const key = { id: newAccessKeyId(), secret: newSecretAccessKey() };
-  const client = (secret = key.secret) =>
-    new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: secret }, maxAttempts: 1 });
+  const client = (secret = key.secret, id = key.id) =>
+    new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: id, secretAccessKey: secret }, maxAttempts: 1 });
   const stored = async (name: string) => {
     const object = await store.send(new GetObjectCommand({ Bucket: photos.storeName, Key: name }));
     return Buffer.from(await (object.Body as { transformToByteArray(): Promise<Uint8Array> }).transformToByteArray());
@@ -87,7 +95,7 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
       { accountId: ACCOUNT, name: photos.name, storeName: photos.storeName },
       { accountId: OTHER, name: theirs.name, storeName: theirs.storeName },
     ]);
-    const directory = new StorageDirectory(buckets, db.dataSource.getRepository(StorageKey), encryption);
+    directory = new StorageDirectory(buckets, db.dataSource.getRepository(StorageKey), encryption);
     await db.dataSource.getRepository(StorageKey).save({ id: key.id, accountId: ACCOUNT, secret: directory.sealSecret(key.id, key.secret) });
     counts = new StorageRequestCountsService(db.dataSource.getRepository(StorageRequestCount));
     keyUses = new KeyUses(db.dataSource.getRepository(KeyUse));
@@ -95,7 +103,7 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
     const credit = { admit: async () => undefined } as unknown as CreditService;
     const throttler = { increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 }) };
     frontDoor = new S3FrontDoor(
-      new ConfigService({ storage: { base: 'http://s3.localhost:3002', region: 'tn-tunis-1' }, objectStore }),
+      config,
       directory,
       counts,
       onePlan(),
@@ -106,13 +114,16 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
       new BucketEvents(),
       {} as BucketWebsitesService,
       keyUses,
+      // A plan of three buckets: the account's one, and two more.
+      new BucketsService(buckets, new StoreBuckets(config), onePlan(plan({ buckets: 3 })), new AuditService(db.dataSource.getRepository(AuditEntry)), config),
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
 
   afterAll(async () => {
     await frontDoor?.onModuleDestroy();
-    for (const bucket of [photos, theirs]) {
+    const left = (await db?.dataSource.getRepository(Bucket).find()) ?? [];
+    for (const bucket of [photos, theirs, ...left.filter((row) => row.name !== photos.name && row.name !== theirs.name)]) {
       const listed = await store.send(new ListObjectsV2Command({ Bucket: bucket.storeName })).catch(() => ({ Contents: [] }));
       for (const object of listed.Contents ?? []) await store.send(new DeleteObjectCommand({ Bucket: bucket.storeName, Key: object.Key }));
       await store.send(new DeleteBucketCommand({ Bucket: bucket.storeName })).catch(() => undefined);
@@ -227,5 +238,83 @@ run("buckets' S3 front door, in front of the store, its keys and buckets in FF's
       expect.arrayContaining(['CompleteMultipartUpload', 'CopyObject', 'CreateMultipartUpload', 'DeleteObject', 'DeleteObjects', 'GetObject', 'HeadObject', 'ListObjectsV2', 'ListParts', 'PutObject', 'UploadPart']),
     );
     expect(await db.dataSource.query(`SELECT count(*)::int AS n FROM key_uses WHERE resource = $1`, [theirs.name])).toEqual([{ n: 0 }]);
+  });
+
+  describe("CreateBucket and DeleteBucket, with the checks of FF's API", () => {
+    const named = () => `made-${randomBytes(4).toString('hex')}`;
+    const refused = (call: Promise<unknown>) =>
+      call.then(
+        () => 'accepted',
+        (error: { name: string; $metadata?: { httpStatusCode?: number } }) => `${error.$metadata?.httpStatusCode} ${error.name}`,
+      );
+    const rowOf = (name: string) => db.dataSource.getRepository(Bucket).findOneBy({ name });
+    const held = (storeName: string) => store.send(new HeadBucketCommand({ Bucket: storeName })).then(() => true, () => false);
+    /** A key of the account's own: read-only, or naming some buckets alone. */
+    const otherKey = async (fields: Partial<StorageKey>) => {
+      const made = { id: newAccessKeyId(), secret: newSecretAccessKey() };
+      await db.dataSource.getRepository(StorageKey).save({ id: made.id, accountId: ACCOUNT, name: made.id, secret: directory.sealSecret(made.id, made.secret), ...fields });
+      return client(made.secret, made.id);
+    };
+
+    it("makes a bucket in FF's region, kept in the store under a name of FF's, and deletes it once empty, each change under the key in the audit log", async () => {
+      const name = named();
+
+      const made = await client().send(new CreateBucketCommand({ Bucket: name, CreateBucketConfiguration: { LocationConstraint: 'tn-tunis-1' as BucketLocationConstraint } }));
+
+      const row = await rowOf(name);
+      const storeName = row?.storeName ?? '';
+      expect([made.Location, row?.accountId, storeName, await held(storeName)]).toEqual([`/${name}`, ACCOUNT, expect.stringMatching(STORE_NAME), true]);
+      await client().send(new PutObjectCommand({ Bucket: name, Key: 'kept.txt', Body: 'kept' }));
+      expect(await refused(client().send(new DeleteBucketCommand({ Bucket: name })))).toBe('409 BucketNotEmpty');
+      await client().send(new DeleteObjectCommand({ Bucket: name, Key: 'kept.txt' }));
+      await client().send(new DeleteBucketCommand({ Bucket: name }));
+      expect([await rowOf(name), await held(storeName)]).toEqual([null, false]);
+      const entries = await db.dataSource.getRepository(AuditEntry).find({ where: { accountId: ACCOUNT, resource: `bucket:${name}` }, order: { id: 'ASC' } });
+      expect(entries.map((entry) => `${entry.action} ${entry.actor} ${entry.ip} ${/^[0-9A-F]{16}$/.test(entry.requestId ?? '')}`)).toEqual([
+        `bucket.create access_key:${key.id} 127.0.0.1 true`,
+        `bucket.delete access_key:${key.id} 127.0.0.1 true`,
+      ]);
+    });
+
+    it("makes one without a location, as the SDK asks in us-east-1, in FF's region", async () => {
+      const name = named();
+
+      await client().send(new CreateBucketCommand({ Bucket: name }));
+
+      expect((await rowOf(name))?.accountId).toBe(ACCOUNT);
+      await client().send(new DeleteBucketCommand({ Bucket: name }));
+    });
+
+    it("refuses as S3 does: another account's name, its own again, a name AWS wouldn't take, another region, an ACL, Object Lock, more than the plan's buckets", async () => {
+      const [second, third, fourth] = [named(), named(), named()];
+
+      expect(await refused(client().send(new CreateBucketCommand({ Bucket: theirs.name })))).toBe('409 BucketAlreadyExists');
+      expect(await refused(client().send(new CreateBucketCommand({ Bucket: photos.name })))).toBe('409 BucketAlreadyOwnedByYou');
+      expect(await refused(client().send(new CreateBucketCommand({ Bucket: 'xn--made' })))).toBe('400 InvalidBucketName');
+      expect(await refused(client().send(new CreateBucketCommand({ Bucket: second, CreateBucketConfiguration: { LocationConstraint: 'eu-west-1' } })))).toBe(
+        '400 IllegalLocationConstraintException',
+      );
+      expect(await refused(client().send(new CreateBucketCommand({ Bucket: second, ACL: 'public-read' })))).toBe('400 InvalidBucketAclWithObjectOwnership');
+      expect(await refused(client().send(new CreateBucketCommand({ Bucket: second, ObjectLockEnabledForBucket: true })))).toBe('501 NotImplemented');
+      expect(await rowOf(second)).toBeNull();
+      await client().send(new CreateBucketCommand({ Bucket: second }));
+      await client().send(new CreateBucketCommand({ Bucket: third }));
+      expect(await refused(client().send(new CreateBucketCommand({ Bucket: fourth })))).toBe('400 TooManyBuckets');
+      expect(await rowOf(fourth)).toBeNull();
+      await client().send(new DeleteBucketCommand({ Bucket: second }));
+      await client().send(new DeleteBucketCommand({ Bucket: third }));
+    });
+
+    it("refuses a read-only key, and a key that names other buckets, AccessDenied; nor deletes another account's bucket", async () => {
+      const readOnly = await otherKey({ readOnly: true });
+      const photosOnly = await otherKey({ buckets: [photos.name] });
+      const name = named();
+
+      expect(await refused(readOnly.send(new CreateBucketCommand({ Bucket: name })))).toBe('403 AccessDenied');
+      expect(await refused(readOnly.send(new DeleteBucketCommand({ Bucket: photos.name })))).toBe('403 AccessDenied');
+      expect(await refused(photosOnly.send(new CreateBucketCommand({ Bucket: name })))).toBe('403 AccessDenied');
+      expect(await refused(client().send(new DeleteBucketCommand({ Bucket: theirs.name })))).toBe('403 AccessDenied');
+      expect([await rowOf(name), (await rowOf(photos.name))?.accountId, (await rowOf(theirs.name))?.accountId]).toEqual([null, ACCOUNT, OTHER]);
+    });
   });
 });

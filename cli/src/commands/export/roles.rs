@@ -126,6 +126,8 @@ fn s3_action(operation: &str) -> Option<(&'static str, Scope)> {
         "GetBucketWebsite" => ("s3:GetBucketWebsite", Scope::Bucket),
         "PutBucketWebsite" => ("s3:PutBucketWebsite", Scope::Bucket),
         "DeleteBucketWebsite" => ("s3:DeleteBucketWebsite", Scope::Bucket),
+        "CreateBucket" => ("s3:CreateBucket", Scope::Bucket),
+        "DeleteBucket" => ("s3:DeleteBucket", Scope::Bucket),
         "ListBuckets" => ("s3:ListAllMyBuckets", Scope::Account),
         _ => return None,
     })
@@ -419,6 +421,17 @@ mod tests {
                 statement(Target::Queue("orders".to_owned()), &["sqs:SendMessage"]),
             ]
         );
+    }
+
+    #[test]
+    fn a_bucket_made_and_deleted_through_s3_is_allowed_on_the_bucket_itself() {
+        let role = role(&uses(&[("s3", "uploads", "CreateBucket"), ("s3", "uploads", "DeleteBucket")]), &[]);
+
+        assert_eq!(
+            role.statements,
+            [statement(Target::Bucket("uploads".to_owned()), &["s3:CreateBucket", "s3:DeleteBucket"])]
+        );
+        assert!(role.templates.is_empty() && role.unknown.is_empty());
     }
 
     #[test]

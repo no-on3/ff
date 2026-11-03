@@ -79,6 +79,8 @@ export function operationOf(method: string, address: S3Address, query: URLSearch
     if (method === 'GET' && only(LISTING)) return op(query.get('list-type') === '2' ? 'ListObjectsV2' : 'ListObjects', 'tier1');
     if (method === 'HEAD' && names.length === 0) return op('HeadBucket', 'tier2');
     if (method === 'POST' && has('delete') && only('delete')) return op('DeleteObjects', 'free', true);
+    if (method === 'PUT' && names.length === 0) return op('CreateBucket', 'tier1', true);
+    if (method === 'DELETE' && names.length === 0) return op('DeleteBucket', 'free', true);
     return NOT_IMPLEMENTED;
   }
   switch (method) {

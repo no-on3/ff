@@ -1,3 +1,5 @@
+import { malformedXml } from './s3-error';
+
 /** An element of a small XML document: its local name, its elements in order, and its text, entities read. */
 export interface XmlElement {
   name: string;
@@ -97,4 +99,17 @@ export const childrenNamed = (element: XmlElement, name: string): XmlElement[] =
 export function childText(element: XmlElement, name: string): string | undefined {
   const [child] = childrenNamed(element, name);
   return child?.text.trim();
+}
+
+/** An S3 request's document, its root element named `root`: anything else is S3's MalformedXML. */
+export function readS3Document(source: string, root: string): XmlElement {
+  let element: XmlElement;
+  try {
+    element = readXml(source);
+  } catch (error) {
+    if (error instanceof MalformedXml) throw malformedXml();
+    throw error;
+  }
+  if (element.name !== root) throw malformedXml();
+  return element;
 }

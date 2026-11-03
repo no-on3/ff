@@ -13,7 +13,7 @@ import { parseQueueArn, queueArn } from '../queues/sqs-attributes';
 import { BucketEvents } from './bucket-events';
 import { NotificationConfigurationJson, NotificationRule, checkRules, rulesFromJson, rulesJson, testEvent } from './bucket-notifications';
 import { Bucket, BucketStatus } from './bucket.entity';
-import { S3Error } from './s3-error';
+import { S3Error, invalidArgument } from './s3-error';
 
 /** Who changed a configuration through the S3 front door: the access key, from its address; FF's API's caller is the request's own. */
 export interface ChangedBy {
@@ -79,17 +79,15 @@ export class BucketNotificationsService {
     const unknown: string[] = [];
     for (const rule of rules) {
       const named = rule.target === 'queue' ? parseQueueArn(rule.arn) : parseFunctionArn(rule.arn);
-      if (!named) throw new S3Error(400, 'InvalidArgument', `The ARN is not well formed: ${rule.arn}`);
+      if (!named) throw invalidArgument(`The ARN is not well formed: ${rule.arn}`);
       if (named.accountId !== bucket.accountId || named.region !== this.region) {
-        throw new S3Error(400, 'InvalidArgument', `A destination must be a ${rule.target} of the bucket's account, in ${this.region}: ${rule.arn}`);
+        throw invalidArgument(`A destination must be a ${rule.target} of the bucket's account, in ${this.region}: ${rule.arn}`);
       }
       const qualifier = rule.target === 'queue' ? undefined : parseFunctionArn(rule.arn)?.qualifier;
       if (!options.skipDestinationValidation && !(await this.exists(bucket.accountId, rule.target, named.name, qualifier))) unknown.push(rule.arn);
     }
     if (unknown.length) {
-      throw new S3Error(
-        400,
-        'InvalidArgument',
+      throw invalidArgument(
         `Unable to validate the following destination configurations: ${unknown.join(', ')}: the account has no such function, version, alias or queue`,
       );
     }

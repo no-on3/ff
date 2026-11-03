@@ -37,6 +37,15 @@ const expect = (actual, wanted) => {
   if (actual !== wanted) throw new Error(`got ${JSON.stringify(actual)}, not ${JSON.stringify(wanted)}`);
   return actual;
 };
+/** Fails unless the call is refused with S3's error of that name. */
+const refusedAs = async (name, call) => {
+  try {
+    await call;
+  } catch (error) {
+    return expect(error.name, name);
+  }
+  throw new Error(`accepted, not refused ${name}`);
+};
 
 await check('ok', 'uploads a string, virtual-hosted, and downloads it', async () => {
   await virtual.send(new s3.PutObjectCommand({ Bucket: BUCKET, Key: 'hello.txt', Body: 'Ahlan from the SDK', ContentType: 'text/plain' }));
@@ -96,3 +105,20 @@ await check('ok', "ListBuckets, the account's, and the bucket's region", async (
 });
 await check('refused', "what the front door doesn't serve: PutBucketPolicy, NotImplemented", () =>
   virtual.send(new s3.PutBucketPolicyCommand({ Bucket: BUCKET, Policy: '{"Version":"2012-10-17","Statement":[]}' })));
+await check('ok', "CreateBucket in FF's region, virtual-hosted, and HeadBucket there; DeleteBucket refused while it holds a file, BucketNotEmpty, then deleted", async () => {
+  const name = `${BUCKET}-sdk`;
+  await virtual.send(new s3.CreateBucketCommand({ Bucket: name, CreateBucketConfiguration: { LocationConstraint: region } }));
+  const where = (await virtual.send(new s3.HeadBucketCommand({ Bucket: name }))).BucketRegion;
+  await virtual.send(new s3.PutObjectCommand({ Bucket: name, Key: 'kept.txt', Body: 'kept' }));
+  const full = await refusedAs('BucketNotEmpty', virtual.send(new s3.DeleteBucketCommand({ Bucket: name })));
+  await virtual.send(new s3.DeleteObjectCommand({ Bucket: name, Key: 'kept.txt' }));
+  await virtual.send(new s3.DeleteBucketCommand({ Bucket: name }));
+  const gone = await refusedAs('NotFound', virtual.send(new s3.HeadBucketCommand({ Bucket: name })));
+  return expect(`${where} ${full} ${gone}`, `${region} BucketNotEmpty NotFound`);
+});
+await check('ok', "CreateBucket of another account's bucket's name, BucketAlreadyExists; of its own, BucketAlreadyOwnedByYou", async () => {
+  const configuration = { LocationConstraint: region };
+  const theirs = await refusedAs('BucketAlreadyExists', virtual.send(new s3.CreateBucketCommand({ Bucket: OTHER_BUCKET, CreateBucketConfiguration: configuration })));
+  const own = await refusedAs('BucketAlreadyOwnedByYou', virtual.send(new s3.CreateBucketCommand({ Bucket: BUCKET, CreateBucketConfiguration: configuration })));
+  return `${theirs} ${own}`;
+});

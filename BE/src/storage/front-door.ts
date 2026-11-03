@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, OnModuleDestroy, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectThrottlerStorage, ThrottlerStorage } from '@nestjs/throttler';
 import { createHash, randomBytes } from 'node:crypto';
@@ -13,6 +13,7 @@ import { describeError } from '../common/describe-error';
 import { AwsEndpoint } from '../common/aws-endpoint';
 import { requestTarget, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
+import { withRequestContext } from '../common/request-context';
 import { SigningChain, decodeEscapes } from '../common/signature-v4';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
@@ -23,8 +24,10 @@ import { nextSequencer, ruleFor, rulesFromXml, rulesXml, s3EventRecord } from '.
 import { BucketNotificationsService, ChangedBy } from './bucket-notifications.service';
 import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket } from './bucket.entity';
+import { BucketsService } from './buckets.service';
 import { CHECKSUM_ALGORITHMS, isChecksumAlgorithm } from './checksums';
 import { fullBuckets } from './bucket-storage';
+import { bucketAlreadyExists, bucketAlreadyOwnedByYou, checkCreateBucket } from './create-bucket';
 import { S3Error, accessDenied, accountProblem, errorDocument, expiredToken, internalError, invalidAccessKeyId, invalidRequest, noSuchBucket, notImplemented } from './s3-error';
 import { S3Address, S3Operation, addressOf, operationOf } from './s3-requests';
 import { RequestSignature, UNSIGNED_PAYLOAD, checkSignature, readSignature } from './s3-signature';
@@ -204,6 +207,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     private readonly bucketEvents: BucketEvents,
     private readonly websites: BucketWebsitesService,
     private readonly keyUses: KeyUses,
+    private readonly buckets: BucketsService,
   ) {
     const base = new URL(config.getOrThrow<string>('storage.base'));
     this.host = base.hostname;
@@ -324,6 +328,7 @@ export class S3FrontDoor implements OnModuleDestroy {
       const buckets = (await this.directory.bucketsOf(key.accountId)).filter((bucket) => reachesBucket(key, bucket.name));
       return this.document(exchange, 200, listBucketsDocument(key.accountId, buckets, this.region));
     }
+    if (operation.name === 'CreateBucket') return this.createBucket(exchange, signature, chain, key, operation, plan);
     const bucket = await this.bucketFor(address.bucket, key);
     exchange.bucket = bucket;
     exchange.operation = operation;
@@ -340,21 +345,16 @@ export class S3FrontDoor implements OnModuleDestroy {
     if (operation.name === 'PutBucketWebsite') return this.putWebsite(exchange, signature, chain, key, bucket, operation, plan);
     if (operation.name === 'DeleteBucketWebsite') {
       if (bucket.website) await this.websites.keep(bucket, null, this.changedBy(exchange, key));
-      exchange.response.writeHead(204, { 'x-amz-request-id': exchange.id });
-      exchange.response.end();
-      return 204;
+      return this.emptyAnswer(exchange, 204);
     }
+    if (operation.name === 'DeleteBucket') return this.deleteBucket(exchange, key, bucket);
     // Full buckets, or no credit, and uploads wait for room or for credit; reads, and deletes that make room and lower the bill, go on.
     if (operation.writes && operation.class === 'tier1') {
       if (bucketsFull) throw accountProblem(fullBuckets(plan.limits.bucketStorageMb, plan.name));
       await this.admitUpload(key.accountId);
     }
     if (operation.name === 'GetBucketLocation') return this.document(exchange, 200, locationDocument(this.region));
-    if (operation.name === 'HeadBucket') {
-      exchange.response.writeHead(200, { 'x-amz-request-id': exchange.id, 'x-amz-bucket-region': this.region, 'content-length': 0 });
-      exchange.response.end();
-      return 200;
-    }
+    if (operation.name === 'HeadBucket') return this.emptyAnswer(exchange, 200, { 'x-amz-bucket-region': this.region });
     return this.forward(exchange, signature, chain, key, bucket, operation, plan);
   }
 
@@ -464,27 +464,76 @@ export class S3FrontDoor implements OnModuleDestroy {
 
   /** PutBucketNotificationConfiguration: its document read whole, the body's checks on the way, and kept as S3 keeps one, under the key. */
   private async putNotifications(exchange: Exchange, signature: RequestSignature, chain: SigningChain, key: ActiveKey, bucket: Bucket, operation: S3Operation, plan: PlanView): Promise<number> {
-    const stages = this.body(exchange, signature, chain, operation, {}, plan);
-    if (exchange.expectsContinue) exchange.response.writeContinue();
-    const document = await readWhole(stages, MAX_DOCUMENT_BYTES);
-    await this.notifications.keep(bucket, rulesFromXml(document.toString('utf8')), {
+    const document = await this.readDocument(exchange, signature, chain, operation, plan);
+    await this.notifications.keep(bucket, rulesFromXml(document), {
       skipDestinationValidation: single(exchange.request.headers['x-amz-skip-destination-validation'])?.toLowerCase() === 'true',
       changedBy: this.changedBy(exchange, key),
     });
-    exchange.response.writeHead(200, { 'x-amz-request-id': exchange.id, 'content-length': 0 });
-    exchange.response.end();
-    return 200;
+    return this.emptyAnswer(exchange, 200);
   }
 
   /** PutBucketWebsite: its document read whole, the body's checks on the way, and kept as S3 keeps one, under the key. */
   private async putWebsite(exchange: Exchange, signature: RequestSignature, chain: SigningChain, key: ActiveKey, bucket: Bucket, operation: S3Operation, plan: PlanView): Promise<number> {
+    const document = await this.readDocument(exchange, signature, chain, operation, plan);
+    await this.websites.keep(bucket, websiteFromXml(document, bucket.website), this.changedBy(exchange, key));
+    return this.emptyAnswer(exchange, 200);
+  }
+
+  /**
+   * CreateBucket, with the checks of FF's API: the name's rules, the plan's
+   * buckets, a name once across FF; FF's region its location. The key writes,
+   * and reaches the bucket by its name; the audit log names it.
+   */
+  private async createBucket(exchange: Exchange, signature: RequestSignature, chain: SigningChain, key: ActiveKey, operation: S3Operation, plan: PlanView): Promise<number> {
+    const name = exchange.address.bucket;
+    if (key.readOnly || !reachesBucket(key, name)) throw accessDenied();
+    this.used(key, operation.name, name);
+    checkCreateBucket(name, exchange.request.headers, await this.readDocument(exchange, signature, chain, operation, plan), this.region);
+    const existing = await this.directory.bucket(name);
+    if (existing) throw existing.accountId === key.accountId ? bucketAlreadyOwnedByYou() : bucketAlreadyExists();
+    await this.asKey(exchange, key, () => this.buckets.create(key.accountId, { name }), bucketAlreadyExists);
+    exchange.bucket = (await this.directory.bucket(name)) ?? undefined;
+    exchange.operation = operation;
+    return this.emptyAnswer(exchange, 200, { location: `/${name}` });
+  }
+
+  /** DeleteBucket: an empty bucket deleted, as S3 deletes one, under the key in the audit log; one with objects, BucketNotEmpty. */
+  private async deleteBucket(exchange: Exchange, key: ActiveKey, bucket: Bucket): Promise<number> {
+    await this.asKey(exchange, key, () => this.buckets.remove(bucket.accountId, bucket.name, false), () => new S3Error(409, 'BucketNotEmpty', 'The bucket you tried to delete is not empty'));
+    return this.emptyAnswer(exchange, 204);
+  }
+
+  /**
+   * A change of FF's buckets made for the key, which the audit log names as it
+   * names the key's other changes; the refusals of FF's API in S3's words, a
+   * conflict as the change has it.
+   */
+  private async asKey<T>(exchange: Exchange, key: ActiveKey, work: () => Promise<T>, conflict: () => S3Error): Promise<T> {
+    const { actor, ip } = this.changedBy(exchange, key);
+    try {
+      return await withRequestContext({ requestId: exchange.id, actor, ...(ip ? { ip } : {}) }, work);
+    } catch (error) {
+      if (error instanceof ConflictException) throw conflict();
+      if (error instanceof BadRequestException) throw new S3Error(400, 'TooManyBuckets', `You have attempted to create more buckets than allowed: ${error.message}`);
+      if (error instanceof ForbiddenException) throw accountProblem(error.message);
+      if (error instanceof NotFoundException) throw noSuchBucket();
+      if (error instanceof ServiceUnavailableException) throw new S3Error(503, 'ServiceUnavailable', error.message);
+      throw error;
+    }
+  }
+
+  /** A request's small document, read whole, its body checked on the way. */
+  private async readDocument(exchange: Exchange, signature: RequestSignature, chain: SigningChain, operation: S3Operation, plan: PlanView): Promise<string> {
     const stages = this.body(exchange, signature, chain, operation, {}, plan);
     if (exchange.expectsContinue) exchange.response.writeContinue();
-    const document = await readWhole(stages, MAX_DOCUMENT_BYTES);
-    await this.websites.keep(bucket, websiteFromXml(document.toString('utf8'), bucket.website), this.changedBy(exchange, key));
-    exchange.response.writeHead(200, { 'x-amz-request-id': exchange.id, 'content-length': 0 });
+    return (await readWhole(stages, MAX_DOCUMENT_BYTES)).toString('utf8');
+  }
+
+  /** An answer without a body: a 204 says none, any other its length of 0. */
+  private emptyAnswer(exchange: Exchange, status: number, headers: Record<string, string> = {}): number {
+    exchange.response.writeHead(status, { 'x-amz-request-id': exchange.id, ...headers, ...(status === 204 ? {} : { 'content-length': 0 }) });
     exchange.response.end();
-    return 200;
+    return status;
   }
 
   /** Who changed a bucket's settings through the front door: the access key, from the caller's address. */

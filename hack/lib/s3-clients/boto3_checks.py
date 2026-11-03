@@ -12,6 +12,7 @@ import urllib.request
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 endpoint = os.environ["ENDPOINT"]
 bucket = os.environ["BUCKET"]
@@ -36,6 +37,31 @@ def same(actual, wanted):
     if actual != wanted:
         raise AssertionError(f"got {actual!r}, not {wanted!r}")
     return actual
+
+
+def refused_as(code, run):
+    """Fails unless the call is refused with S3's error of that code."""
+    try:
+        run()
+    except ClientError as error:
+        return same(error.response["Error"]["Code"], code)
+    raise AssertionError(f"accepted, not refused {code}")
+
+
+def bucket_life():
+    name = f"{bucket}-boto3"
+    s3.create_bucket(Bucket=name, CreateBucketConfiguration={"LocationConstraint": "tn-tunis-1"})
+    s3.put_object(Bucket=name, Key="kept.txt", Body=b"kept")
+    full = refused_as("BucketNotEmpty", lambda: s3.delete_bucket(Bucket=name))
+    s3.delete_object(Bucket=name, Key="kept.txt")
+    s3.delete_bucket(Bucket=name)
+    return f"{full} {refused_as('404', lambda: s3.head_bucket(Bucket=name))}"
+
+
+def bucket_refusals():
+    elsewhere = refused_as("IllegalLocationConstraintException", lambda: s3.create_bucket(Bucket=f"{bucket}-boto3", CreateBucketConfiguration={"LocationConstraint": "eu-west-1"}))
+    reserved = refused_as("InvalidBucketName", lambda: s3.create_bucket(Bucket="xn--boto3", CreateBucketConfiguration={"LocationConstraint": "tn-tunis-1"}))
+    return f"{elsewhere} {reserved}"
 
 
 def fetch(url, method="GET", data=None):
@@ -77,3 +103,5 @@ check("refused", "a presigned URL past its expiry: AccessDenied", expired)
 check("refused", "a wrong secret: SignatureDoesNotMatch", lambda: boto3.session.Session(aws_access_key_id=os.environ["KEY"], aws_secret_access_key=os.environ["SECRET"] + "x", region_name="tn-tunis-1").client("s3", endpoint_url=endpoint).head_object(Bucket=bucket, Key="boto/hello.txt"))
 check("refused", "another account's bucket: AccessDenied", lambda: s3.get_object(Bucket=other, Key="anything.txt"))
 check("ok", "copies, then deletes a batch", lambda: (s3.copy_object(Bucket=bucket, Key="boto/copy.txt", CopySource={"Bucket": bucket, "Key": "boto/hello.txt"}), same(len(s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": "boto/copy.txt"}, {"Key": "boto/presigned.txt"}]})["Deleted"]), 2))[1])
+check("ok", "create_bucket in FF's region; delete_bucket refused while it holds a file, BucketNotEmpty, then deleted", bucket_life)
+check("ok", "create_bucket in another region, IllegalLocationConstraintException; a name AWS keeps, InvalidBucketName", bucket_refusals)

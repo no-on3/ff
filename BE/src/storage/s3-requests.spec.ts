@@ -28,6 +28,13 @@ describe('the operation a request is', () => {
     return `${operation.name} ${operation.class}${operation.writes ? ' writes' : ''}`;
   };
 
+  it('a bucket made, as S3 bills a PUT, and deleted for free, as a DELETE; with a parameter, another operation', () => {
+    expect(of('PUT', bucket)).toBe('CreateBucket tier1 writes');
+    expect(of('PUT', bucket, 'x-id=CreateBucket')).toBe('CreateBucket tier1 writes');
+    expect(of('DELETE', bucket)).toBe('DeleteBucket free writes');
+    expect(of('PUT', bucket, 'tagging')).toBe('NotImplemented tier2');
+  });
+
   it("the bucket's: listings, its location, the bucket itself, a batch of deletes", () => {
     expect(of('GET', { ...bucket, bucket: '' })).toBe('ListBuckets tier1');
     expect(of('GET', bucket, 'list-type=2&prefix=2026%2F&delimiter=%2F&max-keys=100&x-id=ListObjectsV2')).toBe('ListObjectsV2 tier1');
@@ -67,12 +74,10 @@ describe('the operation a request is', () => {
     expect(of('GET', object, `${presigned}&x-amz-checksum-mode=ENABLED&x-id=GetObject`)).toBe('GetObject tier2');
   });
 
-  it("anything else answers NotImplemented: a bucket's policy or creation, an object's tags, versions", () => {
+  it("anything else answers NotImplemented: a bucket's policy, an object's tags, versions", () => {
     for (const [method, address, query] of [
       ['GET', bucket, 'policy'],
       ['PUT', bucket, 'policy'],
-      ['PUT', bucket, ''],
-      ['DELETE', bucket, ''],
       ['GET', bucket, 'versions'],
       ['GET', bucket, 'list-type=2&acl'],
       ['GET', object, 'tagging'],

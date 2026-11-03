@@ -44,6 +44,7 @@ import { QueueStore } from '../queues/queue-store';
 import { BucketEvents } from './bucket-events';
 import { BucketNotificationsService } from './bucket-notifications.service';
 import { BucketWebsitesService } from './bucket-websites.service';
+import { BucketsService } from './buckets.service';
 import { Bucket } from './bucket.entity';
 import { S3FrontDoor } from './front-door';
 import { StorageDirectory } from './storage-directory.service';
@@ -148,9 +149,10 @@ run("buckets' notifications, as S3's, through the S3 front door and FF's API (L2
       { increment: async () => ({ totalHits: 1, timeToExpire: 1, isBlocked: false, timeToBlockExpire: 0 }) },
       notifications,
       events,
-      // The bucket is no site: sites have their own suite; nor are its keys' uses this suite's.
+      // The bucket is no site: sites have their own suite; nor are its keys' uses, nor buckets made through S3, this suite's.
       {} as BucketWebsitesService,
       notedUses(),
+      {} as BucketsService,
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
     client = new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: key.secret }, maxAttempts: 1 });

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { S3Error } from './s3-error';
+import { invalidArgument, malformedXml } from './s3-error';
 import { S3_NAMESPACE, escapeXml } from './xml';
-import { MalformedXml, XmlElement, childText, childrenNamed, readXml } from './xml-reader';
+import { childText, childrenNamed, readS3Document } from './xml-reader';
 
 /** Where a rule's events go: a function of the account, called without waiting, as S3 calls Lambda; or a queue of it, a message each. */
 export type NotificationTarget = 'function' | 'queue';
@@ -36,8 +36,6 @@ export const MAX_RULES = 100;
 const MAX_ID = 255;
 const MAX_FILTER_VALUE = 1024;
 
-const invalidArgument = (message: string) => new S3Error(400, 'InvalidArgument', message);
-const malformed = () => new S3Error(400, 'MalformedXML', 'The XML you provided was not well-formed or did not validate against our published schema');
 
 /** An ID for a configuration given none, as S3 makes one: a random UUID, in base64. */
 const newId = (): string => Buffer.from(randomUUID()).toString('base64');
@@ -103,21 +101,14 @@ function filterOf(rules: Array<{ name: string; value: string }>): { prefix: stri
  * saying so; an empty configuration removes every rule.
  */
 export function rulesFromXml(xml: string): NotificationRule[] {
-  let root: XmlElement;
-  try {
-    root = readXml(xml);
-  } catch (error) {
-    if (error instanceof MalformedXml) throw malformed();
-    throw error;
-  }
-  if (root.name !== 'NotificationConfiguration') throw malformed();
+  const root = readS3Document(xml, 'NotificationConfiguration');
   return root.children.map((element) => {
     if (element.name === 'TopicConfiguration') throw invalidArgument("FF's buckets notify functions and queues: SNS topics come later");
     if (element.name === 'EventBridgeConfiguration') throw invalidArgument("FF's buckets notify functions and queues: EventBridge comes later");
     const target = element.name === 'QueueConfiguration' ? 'queue' : element.name === 'CloudFunctionConfiguration' ? 'function' : undefined;
-    if (!target) throw malformed();
+    if (!target) throw malformedXml();
     const arn = childText(element, target === 'queue' ? 'Queue' : 'CloudFunction');
-    if (!arn) throw malformed();
+    if (!arn) throw malformedXml();
     const [filter] = childrenNamed(element, 'Filter');
     const [key] = filter ? childrenNamed(filter, 'S3Key') : [];
     const filterRules = (key ? childrenNamed(key, 'FilterRule') : []).map((rule) => ({ name: childText(rule, 'Name') ?? '', value: childText(rule, 'Value') ?? '' }));

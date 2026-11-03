@@ -35,6 +35,7 @@ import { onePlan } from '../plans/test-fixtures';
 import { BucketEvents } from './bucket-events';
 import { BucketNotificationsService } from './bucket-notifications.service';
 import { BucketWebsitesService } from './bucket-websites.service';
+import { BucketsService } from './buckets.service';
 import { Bucket } from './bucket.entity';
 import { S3FrontDoor } from './front-door';
 import { SiteTransfer } from './site-transfer.service';
@@ -117,8 +118,9 @@ run("buckets' sites, from the S3 front door to a browser (L2)", () => {
       {} as BucketNotificationsService,
       new BucketEvents(),
       websites,
-      // Nor are its keys' uses: the front door's own suite has them.
+      // Nor are its keys' uses, nor buckets made or deleted through S3: the front door's own suite has them.
       notedUses(),
+      {} as BucketsService,
     );
     const endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
     client = new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: key.secret }, maxAttempts: 1 });

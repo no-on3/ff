@@ -34,7 +34,8 @@
 #   - Buckets and queues, through the S3 front door and the SQS endpoint: each
 #     account's key reaches its own account's alone; another's bucket is
 #     AccessDenied, another's queue one that doesn't exist, by its URL or its
-#     name, and its messages stay.
+#     name, and its messages stay; a key deletes no other account's bucket
+#     through S3, nor takes its name.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -362,7 +363,7 @@ s3_with() {
   shift 3
   AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
     "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$port" "$@" >/dev/null 2>"$work/s3.err" && echo accepted ||
-    echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|NoSuchBucket)\)' "$work/s3.err" | head -1 | tr -d '()')"
+    echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|NoSuchBucket|BucketAlreadyExists)\)' "$work/s3.err" | head -1 | tr -d '()')"
 }
 
 as_user_1() { with_token "$token_1" "$@"; }
@@ -1013,6 +1014,13 @@ check "B's key can neither read, set nor remove A's bucket's site, which A still
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-website --bucket l5-photos-a --website-configuration '{"IndexDocument": {"Suffix": "stolen.html"}}') \
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-website --bucket l5-photos-a) \
 $(site_of as_a l5-photos-a)"
+check "B's key can neither delete A's bucket through S3, AccessDenied, nor take its name, BucketAlreadyExists: it stays A's" \
+  "refused AccessDenied refused BucketAlreadyExists $account_a" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 rb s3://l5-photos-a) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 mb s3://l5-photos-a) \
+$(sql_value "SELECT account_id FROM buckets WHERE name = 'l5-photos-a'")"
+check "  ... and makes a bucket of B's own through S3, then deletes it" "accepted $account_b accepted 0" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 mb s3://l5-made-b) $(sql_value "SELECT account_id FROM buckets WHERE name = 'l5-made-b'") \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 rb s3://l5-made-b) $(sql_value "SELECT count(*) FROM buckets WHERE name = 'l5-made-b'")"
 as_b DELETE /buckets/l5-photos-b >/dev/null
 check "B deletes its own bucket" 204 "$(status)"
 }

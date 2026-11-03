@@ -1,6 +1,6 @@
-import { S3Error } from './s3-error';
+import { S3Error, invalidArgument, malformedXml, notImplemented } from './s3-error';
 import { S3_NAMESPACE, escapeXml } from './xml';
-import { MalformedXml, XmlElement, childText, childrenNamed, readXml } from './xml-reader';
+import { XmlElement, childText, childrenNamed, readS3Document } from './xml-reader';
 
 /**
  * A bucket's website configuration, as S3 keeps one, with one setting of FF's
@@ -30,8 +30,6 @@ export interface WebsiteConfigurationJson {
 /** The longest key S3 takes, and so the longest document's name. */
 const MAX_KEY = 1024;
 
-const invalidArgument = (message: string) => new S3Error(400, 'InvalidArgument', message);
-const malformed = () => new S3Error(400, 'MalformedXML', 'The XML you provided was not well-formed or did not validate against our published schema');
 
 /** S3's answer to GetBucketWebsite for a bucket that is no site. */
 export const noSuchWebsiteConfiguration = () => new S3Error(404, 'NoSuchWebsiteConfiguration', 'The specified bucket does not have a website configuration');
@@ -49,7 +47,7 @@ export function checkWebsite(website: WebsiteConfiguration): void {
 /** What FF's sites don't do yet, refused as S3 refuses what it doesn't implement. */
 function notYet(element: XmlElement | { name: string }): never {
   const what = element.name === 'RedirectAllRequestsTo' ? 'redirecting every request' : 'routing rules';
-  throw new S3Error(501, 'NotImplemented', `FF's sites answer their files, an index document and an error document: ${what} come later`);
+  throw notImplemented(`FF's sites answer their files, an index document and an error document: ${what} come later`);
 }
 
 /**
@@ -58,17 +56,10 @@ function notYet(element: XmlElement | { name: string }): never {
  * the bucket's configuration as it was.
  */
 export function websiteFromXml(xml: string, current: WebsiteConfiguration | null): WebsiteConfiguration {
-  let root: XmlElement;
-  try {
-    root = readXml(xml);
-  } catch (error) {
-    if (error instanceof MalformedXml) throw malformed();
-    throw error;
-  }
-  if (root.name !== 'WebsiteConfiguration') throw malformed();
+  const root = readS3Document(xml, 'WebsiteConfiguration');
   for (const element of root.children) {
     if (element.name === 'RedirectAllRequestsTo' || element.name === 'RoutingRules') notYet(element);
-    if (element.name !== 'IndexDocument' && element.name !== 'ErrorDocument') throw malformed();
+    if (element.name !== 'IndexDocument' && element.name !== 'ErrorDocument') throw malformedXml();
   }
   const [index] = childrenNamed(root, 'IndexDocument');
   const [error] = childrenNamed(root, 'ErrorDocument');

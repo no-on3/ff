@@ -1,5 +1,8 @@
 import {
+  BucketLocationConstraint,
   CopyObjectCommand,
+  CreateBucketCommand,
+  DeleteBucketCommand,
   DeleteBucketWebsiteCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
@@ -16,7 +19,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
-import { Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { IncomingMessage, Server, ServerResponse, createServer, request as httpRequest } from 'node:http';
 import { AddressInfo } from 'node:net';
@@ -25,6 +28,7 @@ import { text } from 'node:stream/consumers';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
+import { currentRequest } from '../common/request-context';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { plan } from '../plans/test-fixtures';
@@ -33,6 +37,7 @@ import { NotificationRule } from './bucket-notifications';
 import { BucketNotificationsService, ChangedBy } from './bucket-notifications.service';
 import { BucketWebsitesService } from './bucket-websites.service';
 import { Bucket, BucketStatus } from './bucket.entity';
+import { BucketsService } from './buckets.service';
 import { S3FrontDoor } from './front-door';
 import { CountedRequest } from './request-tally';
 import { RequestSignature, checkSignature, readSignature, signedForStore } from './s3-signature';
@@ -179,6 +184,20 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   const websites = { keep: async (bucket: Bucket, website: WebsiteConfiguration | null, by: ChangedBy) => void keptWebsites.push([bucket.name, website, by]) } as unknown as BucketWebsitesService;
   /** What each key used, as the front door noted it. */
   const keyUses = notedUses();
+  /** What FF's bucket service was asked, under whom the audit log would name; or the refusal it answers. */
+  const bucketChanges: string[] = [];
+  let bucketRefusal: Error | undefined;
+  const buckets = {
+    create: async (accountId: string, dto: { name: string }) => {
+      if (bucketRefusal) throw bucketRefusal;
+      bucketChanges.push(`create ${accountId} ${dto.name} by ${currentRequest()?.actor?.id}`);
+      return {};
+    },
+    remove: async (accountId: string, name: string, force: boolean) => {
+      if (bucketRefusal) throw bucketRefusal;
+      bucketChanges.push(`remove ${accountId} ${name} ${force ? 'forced' : 'empty'} by ${currentRequest()?.actor?.id}`);
+    },
+  } as unknown as BucketsService;
   const client = (key: ActiveKey = KEY, secret = key.secret) =>
     new S3Client({ endpoint, region: 'us-east-1', forcePathStyle: true, credentials: { accessKeyId: key.id, secretAccessKey: secret }, maxAttempts: 1 });
   /** The SDK's error for a refused call: its name and status. */
@@ -199,7 +218,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       storage: { base: 'http://s3.example.test:3002', region: 'tn-tunis-1' },
       objectStore: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
     });
-    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites, keyUses);
+    frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites, keyUses, buckets);
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
   });
 
@@ -217,6 +236,8 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     published.length = 0;
     keptWebsites.length = 0;
     keyUses.seen.length = 0;
+    bucketChanges.length = 0;
+    bucketRefusal = undefined;
   });
 
   it("notes what each key used, by S3's names, for the export's roles: a bucket, a copy's source as a read of it, the account's list, nothing refused", async () => {
@@ -475,6 +496,47 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
 
     expect(await Promise.all(asked.map((domain) => frontDoor.allowsCertificate(domain)))).toEqual([true, true, false, false, false, true]);
   });
+  describe("a bucket made and deleted through S3, by FF's bucket service", () => {
+    // AWS's SDK types its regions: FF's is none of AWS's.
+    const FF_REGION = 'tn-tunis-1' as BucketLocationConstraint;
+    const create = (name: string, key: ActiveKey = KEY) => client(key).send(new CreateBucketCommand({ Bucket: name, CreateBucketConfiguration: { LocationConstraint: FF_REGION } }));
+
+    it('makes one with CreateBucket, its Location its path, and deletes an empty one with DeleteBucket, 204, both under the key; the store never hears of them', async () => {
+      const made = await create('albums');
+      await client().send(new DeleteBucketCommand({ Bucket: 'exports' }));
+
+      expect(made.Location).toBe('/albums');
+      expect(bucketChanges).toEqual([`create ${KEY.accountId} albums by access_key:${KEY.id}`, `remove ${KEY.accountId} exports empty by access_key:${KEY.id}`]);
+      expect(counted.map((request) => `${request.bucketName} ${request.class} ${request.status}`)).toEqual(['exports free 204']);
+      expect(seen).toEqual([]);
+    });
+
+    it("says the service's refusals in S3's words: the plan's buckets, a name taken meanwhile, a store away, a bucket not empty", async () => {
+      bucketRefusal = new BadRequestException('The Beta plan allows 5 buckets, and the account has 5: delete one first');
+      const tooMany = await create('albums').then(
+        () => undefined,
+        (error: Error) => error,
+      );
+      expect([tooMany?.name, tooMany?.message]).toEqual(['TooManyBuckets', 'You have attempted to create more buckets than allowed: The Beta plan allows 5 buckets, and the account has 5: delete one first']);
+      bucketRefusal = new ConflictException('The bucket name "albums" is taken');
+      expect(await refused(create('albums'))).toBe('409 BucketAlreadyExists');
+      bucketRefusal = new ServiceUnavailableException("The store couldn't do it");
+      expect(await refused(create('albums'))).toBe('503 ServiceUnavailable');
+      bucketRefusal = new ConflictException("The bucket exports isn't empty");
+      expect(await refused(client().send(new DeleteBucketCommand({ Bucket: 'exports' })))).toBe('409 BucketNotEmpty');
+    });
+
+    it("answers a name already the account's, or another's, without asking the service; a read-only key, or one naming other buckets, AccessDenied", async () => {
+      expect(await refused(create('photos'))).toBe('409 BucketAlreadyOwnedByYou');
+      expect(await refused(create('theirs'))).toBe('409 BucketAlreadyExists');
+      expect(await refused(create('albums', READ_ONLY))).toBe('403 AccessDenied');
+      expect(await refused(create('albums', NARROW))).toBe('403 AccessDenied');
+      expect(await refused(client(READ_ONLY).send(new DeleteBucketCommand({ Bucket: 'exports' })))).toBe('403 AccessDenied');
+      expect(await refused(client().send(new DeleteBucketCommand({ Bucket: 'theirs' })))).toBe('403 AccessDenied');
+      expect(bucketChanges).toEqual([]);
+    });
+  });
+
   describe("a bucket's website configuration, as S3's", () => {
     const photos = BUCKETS[0];
 
