@@ -3,6 +3,7 @@
 | Document | What it is for |
 |---|---|
 | [Getting started](getting-started.md) | Set up FF locally from a fresh clone, and the everyday commands |
+| [SAM templates on FF](sam-templates.md) | FF's subset of SAM: what `ff deploy template.yaml` takes, what it refuses and why, the stack FF keeps, and `sam init`'s hello world as FF takes it |
 | [How FF works](how-it-works.html) | Every feature from request to result, as step-by-step simulations with the messages, records, and Kubernetes objects at each hop. Open it in a browser |
 | [Kubernetes dev guide](kubernetes-dev-guide.md) | The local cluster, runtime images, tests, the gVisor sandbox, the log pipeline, troubleshooting |
 | [Kubernetes migration plan](kubernetes-migration-plan.md) | How FF moved from Nomad to Kubernetes, task by task (K-00 to K-13) |

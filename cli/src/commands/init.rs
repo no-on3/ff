@@ -61,27 +61,68 @@ const TERRAFORM_PYTHON: [(&str, &str); 3] = [
     ("src/uploads.py", include_str!("../../templates/terraform/src/uploads.py")),
 ];
 
-/// A SAM application's files, by their path in it, but its code's: its template, samconfig.toml naming its stack, an
-/// event and a README.
+/// A SAM application's files, by their path in it, but its code's: `sam init`'s hello world as FF takes it, its
+/// template, samconfig.toml naming its stack, a function URL's request as its event, and a README.
 const SAM: [(&str, &str); 5] = [
     ("template.yaml", include_str!("../../templates/sam/template.yaml")),
     ("samconfig.toml", include_str!("../../templates/sam/samconfig.toml")),
     ("README.md", include_str!("../../templates/sam/README.md")),
     (".gitignore", include_str!("../../templates/sam/gitignore")),
-    ("events/event.json", EVENT),
+    ("events/event.json", include_str!("../../templates/sam/event.json")),
 ];
-const SAM_NODEJS: (&str, &str) = ("hello/app.mjs", include_str!("../../templates/sam/hello/app.mjs"));
-const SAM_PYTHON: (&str, &str) = ("hello/app.py", include_str!("../../templates/sam/hello/app.py"));
+/// Its code in each runtime's language, in the folder and with the handler `sam init`'s has, and the handler's test.
+const SAM_NODEJS: [(&str, &str); 3] = [
+    ("hello-world/app.mjs", include_str!("../../templates/sam/nodejs/hello-world/app.mjs")),
+    ("hello-world/package.json", include_str!("../../templates/sam/nodejs/hello-world/package.json")),
+    ("tests/unit/test-handler.mjs", include_str!("../../templates/sam/nodejs/tests/unit/test-handler.mjs")),
+];
+const SAM_PYTHON: [(&str, &str); 6] = [
+    ("hello_world/__init__.py", ""),
+    ("hello_world/app.py", include_str!("../../templates/sam/python/hello_world/app.py")),
+    ("hello_world/requirements.txt", include_str!("../../templates/sam/python/hello_world/requirements.txt")),
+    ("tests/__init__.py", ""),
+    ("tests/unit/__init__.py", ""),
+    ("tests/unit/test_handler.py", include_str!("../../templates/sam/python/tests/unit/test_handler.py")),
+];
+
+/// A SAM application's function in a runtime's language, as `sam init`'s hello world has it.
+struct SamCode {
+    files: &'static [(&'static str, &'static str)],
+    /// The folder of its code, its CodeUri.
+    code_uri: &'static str,
+    handler: &'static str,
+    /// What runs the handler's test.
+    test: &'static str,
+}
+
+const fn sam_code(runtime: Runtime) -> SamCode {
+    match runtime {
+        Runtime::Nodejs => {
+            SamCode { files: &SAM_NODEJS, code_uri: "hello-world/", handler: "app.lambdaHandler", test: "node --test" }
+        }
+        Runtime::Python => SamCode {
+            files: &SAM_PYTHON,
+            code_uri: "hello_world/",
+            handler: "app.lambda_handler",
+            test: "python3 -m unittest",
+        },
+    }
+}
 
 /// The files of a new SAM application, by their path in it: its name, its stack's, in them, and its function in the
 /// runtime's language.
 pub fn sam_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
-    let code = match runtime {
-        Runtime::Nodejs => SAM_NODEJS,
-        Runtime::Python => SAM_PYTHON,
+    let code = sam_code(runtime);
+    let fill = |template: &str| {
+        template
+            .replace("{{name}}", name)
+            .replace("{{runtime}}", runtime.lambda())
+            .replace("{{code_uri}}", code.code_uri)
+            .replace("{{handler}}", code.handler)
+            // The README's command, its comment in the column of the others'.
+            .replace("{{test}}", &format!("{:<41}", code.test))
     };
-    let fill = |template: &str| template.replace("{{name}}", name).replace("{{runtime}}", runtime.lambda());
-    SAM.iter().chain([&code]).map(|(path, template)| (*path, fill(template))).collect()
+    SAM.iter().chain(code.files).map(|(path, template)| (*path, fill(template))).collect()
 }
 
 /// Writes a SAM application's folder, which must not exist yet, or be empty.
@@ -284,9 +325,11 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
             created.key_command.as_deref().unwrap_or_default()
         ),
         Template::Sam => format!(
-            "created {}/, a SAM application: template.yaml, its function in hello/, samconfig.toml naming the stack {name}\n\
+            "created {}/, sam init's hello world as FF takes it: template.yaml, its function in {}, a URL in place of \
+             its API, samconfig.toml naming the stack {name}\n\
              then: cd {name} && ff deploy template.yaml, again after a change; sam deploy takes the same folder to AWS",
-            folder.display()
+            folder.display(),
+            sam_code(runtime).code_uri
         ),
     })
 }
@@ -441,40 +484,78 @@ mod tests {
     }
 
     #[test]
-    fn a_sam_application_is_one_function_with_its_alias_and_url_in_ffs_subset_which_ff_deploy_plans() {
+    fn a_sam_application_is_sam_inits_hello_world_with_a_url_for_its_api_in_ffs_subset_which_ff_deploy_plans() {
         use crate::sam::{parameters, plan, subset};
-        for (runtime, code) in [(Runtime::Nodejs, "app.mjs"), (Runtime::Python, "app.py")] {
+        let cases = [
+            (Runtime::Nodejs, include_str!("../sam/testdata/hello-node.yaml"), ["app.mjs", "package.json"].as_slice()),
+            (
+                Runtime::Python,
+                include_str!("../sam/testdata/hello-python.yaml"),
+                &["__init__.py", "app.py", "requirements.txt"],
+            ),
+        ];
+        for (runtime, sam_init, code) in cases {
             let dir = tempfile::TempDir::new().unwrap();
             let folder = dir.path().join("shop");
             let written = create_sam(&folder, "shop", runtime).unwrap();
 
-            let paths: Vec<String> =
+            let mut paths: Vec<String> =
                 written.iter().map(|path| path.strip_prefix(&folder).unwrap().display().to_string()).collect();
-            let code_path = format!("hello/{code}");
-            assert_eq!(
-                paths,
-                ["template.yaml", "samconfig.toml", "README.md", ".gitignore", "events/event.json", &code_path]
-            );
+            paths.sort();
+            let code_uri = sam_code(runtime).code_uri;
+            let mut expected: Vec<String> =
+                ["template.yaml", "samconfig.toml", "README.md", ".gitignore", "events/event.json"]
+                    .map(String::from)
+                    .into();
+            expected.extend(code.iter().map(|file| format!("{code_uri}{file}")));
+            expected.extend(match runtime {
+                Runtime::Nodejs => vec!["tests/unit/test-handler.mjs".to_owned()],
+                Runtime::Python => ["tests/__init__.py", "tests/unit/__init__.py", "tests/unit/test_handler.py"]
+                    .map(String::from)
+                    .into(),
+            });
+            expected.sort();
+            assert_eq!(paths, expected);
             assert!(
                 !sam_files("shop", runtime).iter().any(|(_, text)| text.contains("{{")),
                 "every placeholder is filled"
             );
             let read = |file: &str| std::fs::read_to_string(folder.join(file)).unwrap();
+
+            // sam init's own template, its Api event a URL, the output that named the API that URL, its role's output
+            // left out, and FF's runtime: nothing else changed.
             let template = crate::sam::read(&read("template.yaml")).unwrap();
+            let mut variant = crate::sam::read(sam_init).unwrap().value;
+            let function = variant["Resources"]["HelloWorldFunction"]["Properties"].as_object_mut().unwrap();
+            function.remove("Events");
+            function.insert("Runtime".into(), runtime.lambda().into());
+            function.insert("FunctionUrlConfig".into(), serde_json::json!({ "AuthType": "NONE" }));
+            let outputs = variant["Outputs"].as_object_mut().unwrap();
+            outputs.remove("HelloWorldFunctionIamRole");
+            let url =
+                crate::sam::read("Value: !GetAtt HelloWorldFunctionUrl.FunctionUrl").unwrap().value["Value"].clone();
+            outputs.insert(
+                "HelloWorldApi".into(),
+                serde_json::json!({ "Description": "Function URL for Hello World function", "Value": url }),
+            );
+            variant["Description"] = template.value["Description"].clone();
+            assert_eq!(template.value, variant);
+
             let config = parameters::samconfig(&read("samconfig.toml")).unwrap();
             assert_eq!(config.stack_name.as_deref(), Some("shop"));
             let values = parameters::values(&template, &config.parameter_overrides);
             assert_eq!(subset::check(&template, &values.values), []);
-
             let place = plan::Place { stack: "shop", region: "tn-tunis-1", account: "000000000001" };
             let planned = plan::plan(&template, &values.values, &place, &[], &folder, &mut || "ABCDEFGHIJKL".into());
             let [function] = &planned.unwrap().functions[..] else { panic!("one function") };
             assert_eq!(
-                (function.name.as_str(), function.runtime, function.description.as_str(), function.alias.as_deref()),
-                ("shop-HelloFunction-ABCDEFGHIJKL", runtime, "Says hello, in dev", Some("live"))
+                (function.name.as_str(), function.runtime, function.timeout, function.alias.as_deref()),
+                ("shop-HelloWorldFunction-ABCDEFGHIJKL", runtime, 3, None)
             );
-            assert_eq!(function.environment, [("STAGE".to_owned(), "dev".to_owned())].into());
-            assert_eq!(crate::package::handler_problem(&[code.to_owned()], &function.handler, runtime), None);
+            assert_eq!(function.url.as_ref().map(|url| url.auth_type.as_str()), Some("NONE"));
+            assert_eq!(function.code, folder.join(code_uri));
+            let files: Vec<String> = code.iter().map(|file| file.to_string()).collect();
+            assert_eq!(crate::package::handler_problem(&files, &function.handler, runtime), None);
         }
         assert_eq!(create_sam(&PathBuf::from("2shop"), "2shop", Runtime::Nodejs).unwrap_err().exit_code(), 2);
     }
