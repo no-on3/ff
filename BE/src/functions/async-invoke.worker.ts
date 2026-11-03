@@ -2,7 +2,7 @@ import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
@@ -65,6 +65,12 @@ const scheduleOf = (attributes: Record<string, unknown> | null): string | undefi
 /** A megabyte, as the plans count what messages hold. */
 const MB = 1024 * 1024;
 
+/** What an event that ended hands on: a write of the transaction that deletes it, and what is counted once that committed. */
+interface HandOver {
+  write: (manager: EntityManager) => Promise<void>;
+  committed: () => void;
+}
+
 /**
  * Runs functions' asynchronous calls (ADR 0010). As each call is kept,
  * PostgreSQL tells it (ff_async), whichever backend kept it, and it claims
@@ -81,10 +87,9 @@ const MB = 1024 * 1024;
  * settings, else Lambda's defaults (async-invoke.ts, EventInvokeConfigService).
  * An event that ends hands its record, Lambda's, to the destination its
  * function names for how it ended, a function or a queue, in the transaction
- * that deletes it. A
- * An event whose version or alias was deleted since is dropped, as one
- * whose function was, without a record. A
- * schedule's run is the schedule's call, its source `schedule`, and each
+ * that deletes it. An event whose version or alias was deleted since is
+ * dropped, as one whose function was, without a record. A schedule's run is
+ * the schedule's call, its source `schedule`, and each
  * attempt's outcome goes on the schedule, unless a later run has replaced it.
  * A backend that stops during an attempt leaves its event to come back when
  * its lease ends, the attempt counted as failed. Each call's age, each event
@@ -284,8 +289,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       const lastResponse = context?.response ? keptResponse(context.response) : undefined;
       kept = await this.queues.retryEvent(event, settlement.retryAt, { ...event.attributes, ...settlement.attempts, ...(lastResponse ? { lastResponse } : {}) });
     } else if (context && isRecorded(settlement.end)) {
-      const destination = settlement.end === EventEnd.SUCCEEDED ? context.settings.onSuccess : context.settings.onFailure;
-      kept = destination ? await this.deliver(event, settlement.end, destination, context) : await this.queues.deleteEvent(event);
+      kept = await this.handOver(event, settlement.end, context);
     } else {
       kept = await this.queues.deleteEvent(event);
     }
@@ -301,19 +305,35 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * The event deleted and its record handed to the destination: as an
-   * asynchronous call of a function's, or as a message of a queue's, its body,
-   * as Lambda sends one to SQS. A record that can't be delivered (its
-   * destination gone, over what the destination takes, the account's
-   * messages at the plan's limit, or a queue while FF has the account's
-   * queues off) is said, and the event deleted all the same.
+   * The event deleted, and what it hands on written in the same transaction,
+   * so that both stand or neither does: its record, to the destination its
+   * function names for how it ended. One that can't be handed on is said, and
+   * the event deleted all the same.
    */
-  private async deliver(
+  private async handOver(event: ClaimedEvent, end: RecordedEnd, context: { fn: Function; settings: AsyncSettings; response?: AttemptResponse; at: Date }): Promise<boolean> {
+    const destination = end === EventEnd.SUCCEEDED ? context.settings.onSuccess : context.settings.onFailure;
+    const handOvers = destination ? [await this.recordFor(event, end, destination, context)].filter((handOver) => handOver !== undefined) : [];
+    if (handOvers.length === 0) return this.queues.deleteEvent(event);
+    const kept = await this.queues.deleteEventAnd(event, async (manager) => {
+      for (const handOver of handOvers) await handOver.write(manager);
+    });
+    if (kept) for (const handOver of handOvers) handOver.committed();
+    return kept;
+  }
+
+  /**
+   * The event's record for its destination: as an asynchronous call of a
+   * function's, or as a message of a queue's, its body, as Lambda sends one to
+   * SQS. A record that can't be delivered (its destination gone, over what the
+   * destination takes, the account's messages at the plan's limit, or a queue
+   * while FF has the account's queues off) is said and counted; none then.
+   */
+  private async recordFor(
     event: ClaimedEvent,
     end: RecordedEnd,
     destination: string,
     context: { fn: Function; response?: AttemptResponse; at: Date },
-  ): Promise<boolean> {
+  ): Promise<HandOver | undefined> {
     const functionArn = this.configs.arnOf(context.fn);
     const record = invocationRecord({
       requestId: event.requestId,
@@ -327,10 +347,9 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     });
     const body = JSON.stringify(record);
     const size = Buffer.byteLength(body);
-    const undelivered = (reason: string) => {
+    const undelivered = (reason: string): undefined => {
       this.logger.warn(`The record of asynchronous call ${event.requestId} of function ${event.functionId} was not delivered: ${reason}`);
       this.asyncCounts.count({ functionId: event.functionId, accountId: event.accountId, destinationFailures: 1 });
-      return this.queues.deleteEvent(event);
     };
     const room = await this.roomFor(event.accountId, size);
     if (room) return undelivered(room);
@@ -341,17 +360,22 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       if (!queue) return undelivered(`its destination ${destination} is no queue of the account any more`);
       if (size > queue.maximumMessageSize) return undelivered(`its record is ${size} bytes, over the queue's maximum message size of ${queue.maximumMessageSize}`);
       const message = { messageId: randomUUID(), body, meta: { senderId: functionArn }, sizeBytes: size, delaySeconds: queue.delaySeconds };
-      const sent = await this.queues.deleteEventAnd(event, (manager) => this.customerQueues.send(queue, [message], context.at, manager));
-      // As the request Lambda makes to SQS.
-      if (sent) this.counts.count({ queueId: queue.id, accountId: queue.accountId, queueName: queue.name, requests: billedRequests(size), sentSizes: [size] });
-      return sent;
+      return {
+        write: (manager) => this.customerQueues.send(queue, [message], context.at, manager),
+        // As the request Lambda makes to SQS.
+        committed: () => this.counts.count({ queueId: queue.id, accountId: queue.accountId, queueName: queue.name, requests: billedRequests(size), sentSizes: [size] }),
+      };
     }
     const target = await this.configs.destinationFunction(event.accountId, destination);
     if (!target) return undelivered(`its destination ${destination} is no function of the account, or no version or alias of it, any more`);
     if (size > MAX_ASYNC_INPUT_BYTES) return undelivered(`its record is ${size} bytes, over an asynchronous call's ${MAX_ASYNC_INPUT_BYTES}`);
     const expiresAt = new Date(context.at.getTime() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
     // The record is a call that doesn't wait of what the destination names, as Lambda's: its version or alias.
-    return this.queues.deleteEventAndSend(event, target.function_, randomUUID(), body, expiresAt, qualifierAttributes(target.qualifier));
+    const attributes = qualifierAttributes(target.qualifier);
+    return {
+      write: (manager) => this.queues.sendEvent(target.function_, randomUUID(), body, expiresAt, { manager, attributes }),
+      committed: () => this.queues.kept(target.function_),
+    };
   }
 
   /** Why the account's messages have no room for a record of this size, as the plan limits what they hold together; undefined when they have. */

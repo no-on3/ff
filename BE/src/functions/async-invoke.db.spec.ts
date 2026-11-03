@@ -20,6 +20,7 @@
 import 'dotenv/config';
 import { Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { EntityManager } from 'typeorm';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
 import { ScratchDatabase, createScratchDatabase } from '../database/scratch-database';
@@ -510,7 +511,8 @@ run('asynchronous calls, in the database (L2)', () => {
     await send(orders, uuid(900));
     const [{ id }] = await db.dataSource.query<Array<{ id: string }>>(`SELECT id FROM queue_messages WHERE message_id = $1`, [uuid(900)]);
 
-    expect(await queues.deleteEventAndSend({ id, receiveCount: 5 }, failed, uuid(901), '{}', new Date(Date.now() + HOUR))).toBe(false);
+    const handOver = (manager: EntityManager) => queues.sendEvent(failed, uuid(901), '{}', new Date(Date.now() + HOUR), { manager });
+    expect(await queues.deleteEventAnd({ id, receiveCount: 5 }, handOver)).toBe(false);
     expect([await message(uuid(900)), await message(uuid(901))]).toEqual([expect.anything(), undefined]);
 
     await configs.put(ACCOUNT, orders.id, { maximumEventAgeInSeconds: 60 });
