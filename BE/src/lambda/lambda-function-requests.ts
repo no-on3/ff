@@ -8,6 +8,7 @@ import { LambdaUpdateFields } from '../functions/functions.service';
 import { PLATFORM_LIMITS, PlanView } from '../plans/plan-limits';
 import { tagsProblem } from '../tags/tag-rules';
 import { invalidParameterValue } from './lambda-error';
+import { defined, isObject, refuseUnknownFields, said } from './lambda-fields';
 import { LAMBDA_RUNTIMES } from './lambda-functions';
 import { LambdaCaller } from './lambda-operations';
 import { tagsOf } from './lambda-tags';
@@ -100,11 +101,6 @@ export interface CodeChange {
   revisionId?: string;
 }
 
-/** A value as a refusal shows it: a string as sent, anything else as JSON. */
-const said = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value));
-
-const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
-
 /** Sent with nothing in it: absent, null, false, empty, or an object of such, as the tools send a setting left at its default. */
 const isEmpty = (value: unknown): boolean =>
   value === undefined || value === null || value === false || value === '' || (Array.isArray(value) && value.length === 0) || (isObject(value) && Object.values(value).every(isEmpty));
@@ -136,12 +132,6 @@ function refuseArchitectures(architectures: unknown): void {
   if (architectures !== undefined && !(Array.isArray(architectures) && architectures.every((architecture) => architecture === 'x86_64'))) {
     throw invalidParameterValue('FF runs x86_64 alone: Architectures must be [x86_64].');
   }
-}
-
-/** A field an operation doesn't take: refused, never ignored. */
-export function refuseUnknownFields(input: Record<string, unknown>, operation: string, taken: ReadonlySet<string>): void {
-  const unknown = Object.keys(input).find((field) => !taken.has(field));
-  if (unknown !== undefined) throw invalidParameterValue(`FF doesn't take ${unknown} in ${operation}.`);
 }
 
 const refuseUnknown = (input: Record<string, unknown>, operation: Operation): void => refuseUnknownFields(input, operation, TAKEN[operation]);
@@ -272,9 +262,6 @@ function revisionIdOf(input: Record<string, unknown>): string | undefined {
   if (sent !== undefined && typeof sent !== 'string') throw invalidParameterValue('RevisionId must be the one that GetFunction answered.');
   return sent;
 }
-
-/** An object without the fields left undefined, as FF's DTOs take one. */
-const defined = <T extends object>(fields: T): T => Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as T;
 
 /**
  * CreateFunction's request, checked as Lambda checks it (ADR 0014, 2): each

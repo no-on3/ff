@@ -17,13 +17,11 @@ import { plan } from '../plans/test-fixtures';
 import { EncryptionService } from '../encryption/encryption.service';
 import { DEVELOPMENT_KEY } from '../encryption/key-ring';
 import { awsEndpointsOf } from '../common/aws-endpoint';
-import { LambdaError } from './lambda-error';
 import { LambdaCodeLinks } from './lambda-code-links';
 import { LambdaFunctionReads, lambdaTime, latestConfiguration, statesOf, versionConfiguration } from './lambda-functions';
-import { LambdaCall, LambdaCaller, LambdaHandlers, LambdaOperations, operationOf } from './lambda-operations';
+import { LambdaHandlers, LambdaOperations } from './lambda-operations';
+import { ACCOUNT, REGION, lambdaCall, lambdaCaller, refused } from './test-fixtures';
 
-const ACCOUNT = '000000000001';
-const REGION = 'tn-tunis-1';
 const ARN = `arn:aws:lambda:${REGION}:${ACCOUNT}:function`;
 const UPDATED = new Date('2026-11-02T10:20:30.456Z');
 
@@ -114,31 +112,14 @@ describe("Lambda's reads of functions (L1)", () => {
 
   /** The front door's work for a request: the operation by its path, the function a path names, the key's reach. */
   async function ask(method: string, target: string, { qualifier, readable = () => true }: { qualifier?: string; readable?: (name: string) => boolean } = {}) {
-    const [path, rawQuery = ''] = target.split('?');
-    const route = operationOf(method, path);
-    if (!route) throw new Error(`no operation at ${method} ${path}`);
-    const call: LambdaCall = { operation: route.operation, groups: route.groups, query: new URLSearchParams(rawQuery), input: {}, body: Buffer.alloc(0), headers: {} };
-    const named = route.groups[0];
-    const caller: LambdaCaller = {
-      accountId: ACCOUNT,
-      region: REGION,
-      key: {} as LambdaCaller['key'],
+    const call = lambdaCall(method, target);
+    const named = call.groups[0];
+    const caller = lambdaCaller({
       plan: plan({ codeStorageMb: 2048, quota: { pods: 20, cpu: '4', memory: '8Gi' } }),
       ...(named ? { function_: functions.find((function_) => function_.name === named), named: { name: named, ...(qualifier ? { qualifier } : {}) } } : {}),
       mayUse: (name) => readable(name),
-      actor: { id: 'access_key:AKFF', label: 'access key AKFF' },
-    };
-    return (await reads.handlers[route.operation.name](call, caller)).document as Record<string, unknown>;
-  }
-
-  /** The error an operation throws, as the front door answers it: its status, its type and its message. */
-  async function refused(answer: Promise<unknown>): Promise<[number, string, string]> {
-    const error = await answer.then(
-      () => undefined,
-      (thrown: unknown) => thrown,
-    );
-    if (!(error instanceof LambdaError)) throw new Error(`not refused in Lambda's words: ${String(error)}`);
-    return [error.status, error.type, error.message];
+    });
+    return (await reads.handlers[call.operation.name](call, caller)).document as Record<string, unknown>;
   }
 
   describe("a function's configuration", () => {

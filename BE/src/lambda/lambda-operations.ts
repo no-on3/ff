@@ -4,6 +4,7 @@ import { Function } from '../functions/entities/function.entity';
 import { PlanView } from '../plans/plan-limits';
 import { ActiveKey } from '../storage/storage-directory.service';
 import { FunctionAccess } from '../storage/storage-key.entity';
+import { invalidParameterValue } from './lambda-error';
 
 /**
  * Where an operation's function is named: in its path, in its JSON body's
@@ -276,6 +277,14 @@ export const ok = (document: unknown): LambdaAnswer => ({ status: 200, document 
 export function namedFunction(caller: LambdaCaller): Function {
   if (!caller.function_) throw new Error('The front door finds the function a path names before its operation runs');
   return caller.function_;
+}
+
+/** The function the request names, for an operation that names it without a version or an alias; one named with either refused. */
+export function unqualifiedFunction(caller: LambdaCaller, operation: string): Function {
+  const function_ = namedFunction(caller);
+  const qualifier = caller.named?.qualifier;
+  if (qualifier !== undefined) throw invalidParameterValue(`${operation} names the function alone, not its version or alias ${qualifier}: send ${function_.name}.`);
+  return function_;
 }
 
 /** A group of operations built over FF's services: each one's handler, by the operation's name. */

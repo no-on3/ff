@@ -1,13 +1,10 @@
 /** L1: Lambda's tags on a function (TagResource, UntagResource, ListTags), over FF's tags service. */
 import { Function } from '../functions/entities/function.entity';
 import { ResourceTagsService } from '../tags/resource-tags.service';
-import { plan } from '../plans/test-fixtures';
-import { LambdaError } from './lambda-error';
-import { LambdaCall, LambdaCaller, operationOf } from './lambda-operations';
 import { LambdaTags } from './lambda-tags';
+import { ACCOUNT, REGION, lambdaCall, lambdaCaller, refused } from './test-fixtures';
 
-const ACCOUNT = '000000000001';
-const ARN = `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders`;
+const ARN = `arn:aws:lambda:${REGION}:${ACCOUNT}:function:orders`;
 
 describe("Lambda's tags on a function (L1)", () => {
   let tagged: Record<string, Record<string, string>>;
@@ -28,30 +25,9 @@ describe("Lambda's tags on a function (L1)", () => {
 
   /** A request as the front door hands it on: its operation, the function its ARN names, found in the account. */
   function ask(method: string, target: string, input: Record<string, unknown> = {}, qualifier?: string) {
-    const [path, rawQuery = ''] = target.split('?');
-    const route = operationOf(method, path);
-    if (!route) throw new Error(`no operation at ${method} ${path}`);
-    const call: LambdaCall = { operation: route.operation, groups: route.groups, query: new URLSearchParams(rawQuery), input, body: Buffer.alloc(0), headers: {} };
-    const caller: LambdaCaller = {
-      accountId: ACCOUNT,
-      region: 'tn-tunis-1',
-      key: {} as LambdaCaller['key'],
-      plan: plan(),
-      function_: Object.assign(new Function(), { id: 'f-orders', accountId: ACCOUNT, name: 'orders' }),
-      named: { name: 'orders', ...(qualifier ? { qualifier } : {}) },
-      mayUse: () => true,
-      actor: { id: 'access_key:AKFF', label: 'access key AKFF' },
-    };
-    return lambdaTags.handlers[route.operation.name](call, caller);
-  }
-
-  async function refused(answer: Promise<unknown>): Promise<[number, string, string]> {
-    const error = await answer.then(
-      () => undefined,
-      (thrown: unknown) => thrown,
-    );
-    if (!(error instanceof LambdaError)) throw new Error(`not refused in Lambda's words: ${String(error)}`);
-    return [error.status, error.type, error.message];
+    const call = lambdaCall(method, target, input);
+    const function_ = Object.assign(new Function(), { id: 'f-orders', accountId: ACCOUNT, name: 'orders' });
+    return lambdaTags.handlers[call.operation.name](call, lambdaCaller({ function_, named: { name: 'orders', ...(qualifier ? { qualifier } : {}) } }));
   }
 
   const path = `/2017-03-31/tags/${encodeURIComponent(ARN)}`;

@@ -4,21 +4,19 @@
  * InProgress, the rollout after; a change while another runs refused in
  * Lambda's words; a function or one of its versions deleted.
  */
-import { BadRequestException, HttpException, Logger } from '@nestjs/common';
+import { BadRequestException, Logger } from '@nestjs/common';
 import { Readable } from 'node:stream';
 import { Function, FunctionStatus, PackageType, Runtime, UpdateStatus } from '../functions/entities/function.entity';
 import { ChangeUnderWayException } from '../functions/change-under-way';
 import { FunctionsService, WhenLive } from '../functions/functions.service';
 import { FunctionVersionsService } from '../functions/versions.service';
 import { PackagesService } from '../packages/packages.service';
-import { plan } from '../plans/test-fixtures';
 import { StorageDirectory } from '../storage/storage-directory.service';
 import { StoreBuckets } from '../storage/store-buckets';
 import { ResourceTagsService } from '../tags/resource-tags.service';
-import { LambdaError, lambdaErrorOf } from './lambda-error';
 import { LambdaFunctionChanges } from './lambda-function-changes';
-import { LambdaCall, LambdaCaller, operationOf } from './lambda-operations';
-import { ACCOUNT, CLI, REGION, ROLE, SHA, TERRAFORM, ZIP } from './test-fixtures';
+import { LambdaCaller } from './lambda-operations';
+import { ACCOUNT, CLI, REGION, ROLE, SHA, TERRAFORM, ZIP, lambdaCall, lambdaCaller, refused } from './test-fixtures';
 
 describe("Lambda's changes of functions (L1)", () => {
   let changes: LambdaFunctionChanges;
@@ -92,32 +90,13 @@ describe("Lambda's changes of functions (L1)", () => {
 
   /** A request as the front door hands it on: the function it names found, where a path names one. */
   function ask(method: string, target: string, input: Record<string, unknown> = {}, named?: LambdaCaller['named'], key: Partial<LambdaCaller['key']> = {}) {
-    const [path, rawQuery = ''] = target.split('?');
-    const route = operationOf(method, path);
-    if (!route) throw new Error(`no operation at ${method} ${path}`);
-    const call: LambdaCall = { operation: route.operation, groups: route.groups, query: new URLSearchParams(rawQuery), input, body: Buffer.alloc(0), headers: {} };
-    const caller: LambdaCaller = {
-      accountId: ACCOUNT,
-      region: REGION,
+    const call = lambdaCall(method, target, input);
+    const caller = lambdaCaller({
       key: { buckets: null, queues: null, functions: null, ...key } as LambdaCaller['key'],
-      plan: plan(),
-      ...(route.operation.namedIn === 'path' ? { function_: pathFunction } : {}),
+      ...(call.operation.namedIn === 'path' ? { function_: pathFunction } : {}),
       named: named ?? { name: 'orders' },
-      mayUse: () => true,
-      actor: { id: 'access_key:AKFF', label: 'access key AKFF' },
-    };
-    return changes.handlers[route.operation.name](call, caller);
-  }
-
-  /** A refusal as the front door answers it: FF's services' in Lambda's words. */
-  async function refused(answer: Promise<unknown>): Promise<[number, string, string]> {
-    const thrown = await answer.then(
-      () => undefined,
-      (failure: unknown) => failure,
-    );
-    const error = thrown instanceof HttpException ? lambdaErrorOf(thrown, REGION) : thrown;
-    if (!(error instanceof LambdaError)) throw new Error(`not refused in Lambda's words: ${String(error)}`);
-    return [error.status, error.type, error.message];
+    });
+    return changes.handlers[call.operation.name](call, caller);
   }
 
   const create = (input: Record<string, unknown>) => ask('POST', '/2015-03-31/functions', input);

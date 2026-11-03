@@ -4,7 +4,7 @@
  * ListAliases, each in Lambda's shape, a page at a time where Lambda pages;
  * what they send checked under Lambda's names, and refused as Lambda refuses.
  */
-import { ConflictException, HttpException, NotFoundException, PreconditionFailedException } from '@nestjs/common';
+import { ConflictException, NotFoundException, PreconditionFailedException } from '@nestjs/common';
 import { FunctionAliasesService } from '../functions/aliases.service';
 import { FunctionAliasView } from '../functions/dto/aliases.dto';
 import { FunctionVersionView } from '../functions/dto/versions.dto';
@@ -12,11 +12,8 @@ import { EventFormat, Function, FunctionStatus, PackageType, Runtime, UpdateStat
 import { FunctionsService } from '../functions/functions.service';
 import { FunctionVersionsService } from '../functions/versions.service';
 import { awsEndpointsOf } from '../common/aws-endpoint';
-import { plan } from '../plans/test-fixtures';
-import { LambdaError, lambdaErrorOf } from './lambda-error';
-import { LambdaCall, LambdaCaller, operationOf } from './lambda-operations';
 import { LambdaVersions } from './lambda-versions';
-import { ACCOUNT, REGION, ROLE } from './test-fixtures';
+import { ACCOUNT, REGION, ROLE, lambdaCall, lambdaCaller, refused } from './test-fixtures';
 
 const ARN = `arn:aws:lambda:${REGION}:${ACCOUNT}:function:orders`;
 /** Revisions as FF makes them, UUIDs: $LATEST's, and each alias's, by its name. */
@@ -126,33 +123,9 @@ describe("Lambda's versions and aliases (L1)", () => {
 
   /** A request as the front door hands it on: the function its path names found, a qualifier with its name if one. */
   async function ask(method: string, target: string, input: Record<string, unknown> = {}, qualifier?: string) {
-    const [path, rawQuery = ''] = target.split('?');
-    const route = operationOf(method, path);
-    if (!route) throw new Error(`no operation at ${method} ${path}`);
-    const call: LambdaCall = { operation: route.operation, groups: route.groups, query: new URLSearchParams(rawQuery), input, body: Buffer.alloc(0), headers: {} };
-    const caller: LambdaCaller = {
-      accountId: ACCOUNT,
-      region: REGION,
-      key: {} as LambdaCaller['key'],
-      plan: plan(),
-      function_,
-      named: { name: 'orders', ...(qualifier ? { qualifier } : {}) },
-      mayUse: () => true,
-      actor: { id: 'access_key:AKFF', label: 'access key AKFF' },
-    };
-    const answer = await handlers.handlers[route.operation.name](call, caller);
+    const call = lambdaCall(method, target, input);
+    const answer = await handlers.handlers[call.operation.name](call, lambdaCaller({ function_, named: { name: 'orders', ...(qualifier ? { qualifier } : {}) } }));
     return { status: answer.status, document: answer.document as Record<string, unknown> };
-  }
-
-  /** A refusal as the front door answers it: FF's services' in Lambda's words. */
-  async function refused(answer: Promise<unknown>): Promise<[number, string, string]> {
-    const thrown = await answer.then(
-      () => undefined,
-      (failure: unknown) => failure,
-    );
-    const error = thrown instanceof HttpException ? lambdaErrorOf(thrown, REGION) : thrown;
-    if (!(error instanceof LambdaError)) throw new Error(`not refused in Lambda's words: ${String(error)}`);
-    return [error.status, error.type, error.message];
   }
 
   const VERSIONS = '/2015-03-31/functions/orders/versions';

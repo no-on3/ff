@@ -21,10 +21,9 @@ import { FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError, Orc
 import { plan } from '../plans/test-fixtures';
 import { LambdaError } from './lambda-error';
 import { CLIENT_CONTEXT_BYTES, LambdaInvoke } from './lambda-invoke';
-import { LambdaAnswer, LambdaCaller, operationOf } from './lambda-operations';
+import { LambdaAnswer } from './lambda-operations';
+import { ACCOUNT, REGION, lambdaCall, lambdaCaller, lambdaRefusal } from './test-fixtures';
 
-const ACCOUNT = '000000000001';
-const REGION = 'tn-tunis-1';
 const MB = 1024 * 1024;
 
 const fn = (more: Partial<Function> = {}): Function =>
@@ -83,30 +82,15 @@ describe("Lambda's Invoke (L1)", () => {
 
   /** An Invoke as the front door hands it on: the function the path names, its headers and its body as sent. */
   function send({ qualifier, headers = {}, body = '' }: { qualifier?: string; headers?: Record<string, string>; body?: string | Buffer } = {}): Promise<LambdaAnswer> {
-    const route = operationOf('POST', '/2015-03-31/functions/orders/invocations');
-    if (!route) throw new Error('no Invoke route');
-    const caller: LambdaCaller = {
-      accountId: ACCOUNT,
-      region: REGION,
-      key: {} as LambdaCaller['key'],
-      plan: plan({ invokesPerSecond: 5 }),
-      function_,
-      named: { name: 'orders', ...(qualifier ? { qualifier } : {}) },
-      mayUse: () => true,
-      actor: { id: 'access_key:AKFF', label: 'access key AKFF' },
-    };
+    const caller = lambdaCaller({ plan: plan({ invokesPerSecond: 5 }), function_, named: { name: 'orders', ...(qualifier ? { qualifier } : {}) } });
     const lowered = Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
-    const call = { operation: route.operation, groups: route.groups, query: new URLSearchParams(), input: {}, body: Buffer.from(body), headers: lowered };
+    const call = { ...lambdaCall('POST', '/2015-03-31/functions/orders/invocations'), body: Buffer.from(body), headers: lowered };
     return withRequestContext({ requestId: 'req-1' }, () => invoke.handlers.Invoke(call, caller));
   }
 
   /** The error an Invoke throws, as the front door answers it: its status, its type, its message, and its Reason. */
   async function refused(answer: Promise<unknown>): Promise<Array<number | string>> {
-    const error = await answer.then(
-      () => undefined,
-      (thrown: unknown) => thrown,
-    );
-    if (!(error instanceof LambdaError)) throw new Error(`not refused in Lambda's words: ${String(error)}`);
+    const error = await lambdaRefusal(answer);
     return [error.status, error.type, error.message, ...(error.fields.Reason ? [error.fields.Reason] : [])];
   }
 

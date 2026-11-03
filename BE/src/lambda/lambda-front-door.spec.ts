@@ -27,9 +27,8 @@ import { ActiveKey, EXPIRED, StorageDirectory } from '../storage/storage-directo
 import { CODE_LINK_MS, LambdaCodeLinks } from './lambda-code-links';
 import { LambdaFrontDoor } from './lambda-front-door';
 import { LambdaCall, LambdaCaller, LambdaHandler, LambdaOperations, operationOf } from './lambda-operations';
+import { ACCOUNT, REGION } from './test-fixtures';
 
-const ACCOUNT = '000000000001';
-const REGION = 'tn-tunis-1';
 const ARN = `arn:aws:lambda:${REGION}:${ACCOUNT}:function`;
 
 const key = (id: string, more: Partial<ActiveKey>): ActiveKey => ({

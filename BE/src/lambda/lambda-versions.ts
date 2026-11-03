@@ -10,9 +10,9 @@ import { FunctionsService } from '../functions/functions.service';
 import { LATEST } from '../functions/qualifier';
 import { FunctionVersionsService } from '../functions/versions.service';
 import { invalidParameterValue, resourceConflict, resourceNotFound } from './lambda-error';
-import { refuseUnknownFields } from './lambda-function-requests';
+import { defined, refuseUnknownFields, text } from './lambda-fields';
 import { latestConfiguration, versionConfiguration } from './lambda-functions';
-import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, LambdaHandlers, namedFunction, ok } from './lambda-operations';
+import { LambdaAnswer, LambdaCall, LambdaCaller, LambdaHandler, LambdaHandlers, namedFunction, ok, unqualifiedFunction } from './lambda-operations';
 import { pageOf } from './lambda-pages';
 
 const DESCRIPTION_MAX = 256;
@@ -23,15 +23,6 @@ const TAKEN = {
   CreateAlias: new Set(['Name', 'FunctionVersion', 'Description', 'RoutingConfig']),
   UpdateAlias: new Set(['FunctionVersion', 'Description', 'RoutingConfig', 'RevisionId']),
 };
-
-/** A field sent as a string, as Lambda's model types it; undefined when not sent. */
-function text(input: Record<string, unknown>, field: string, max?: number): string | undefined {
-  const sent = input[field];
-  if (sent === undefined) return undefined;
-  if (typeof sent !== 'string') throw invalidParameterValue(`${field} must be a string.`);
-  if (max !== undefined && sent.length > max) throw invalidParameterValue(`${field} must be at most ${max} characters.`);
-  return sent;
-}
 
 /** What an alias points at: $LATEST, or a version by its number. */
 function functionVersion(input: Record<string, unknown>): string | undefined {
@@ -94,7 +85,7 @@ export class LambdaVersions implements LambdaHandlers {
    * Lambda's; refused while the function is created or changed, as Lambda refuses it, which the tools wait out.
    */
   private async publishVersion({ input, operation }: LambdaCall, caller: LambdaCaller): Promise<LambdaAnswer> {
-    const function_ = this.unqualified(operation.name, caller);
+    const function_ = unqualifiedFunction(caller, operation.name);
     refuseUnknownFields(input, operation.name, TAKEN.PublishVersion);
     const sent = { codeSha256: text(input, 'CodeSha256'), description: text(input, 'Description', DESCRIPTION_MAX), revisionId: text(input, 'RevisionId') };
     if (function_.status === FunctionStatus.CREATING || this.functions.isChanging(function_)) throw new ChangeUnderWayException(function_);
@@ -112,7 +103,7 @@ export class LambdaVersions implements LambdaHandlers {
 
   /** $LATEST, then each version, oldest first, a page at a time, as Lambda lists them. */
   private async listVersions({ query, operation }: LambdaCall, caller: LambdaCaller): Promise<LambdaAnswer> {
-    const function_ = this.unqualified(operation.name, caller);
+    const function_ = unqualifiedFunction(caller, operation.name);
     const numbers: Array<number | null> = [null, ...(await this.versions.list(caller.accountId, function_.id)).map((version) => Number(version.version))];
     const { page, nextMarker } = pageOf(query, numbers, (version) => [version], operation.name);
     const configurations = [];
@@ -127,7 +118,7 @@ export class LambdaVersions implements LambdaHandlers {
   }
 
   private async createAlias({ input, operation }: LambdaCall, caller: LambdaCaller): Promise<LambdaAnswer> {
-    const function_ = this.unqualified(operation.name, caller);
+    const function_ = unqualifiedFunction(caller, operation.name);
     refuseUnknownFields(input, operation.name, TAKEN.CreateAlias);
     const name = text(input, 'Name');
     if (name === undefined || !ALIAS_NAME.test(name)) {
@@ -177,7 +168,7 @@ export class LambdaVersions implements LambdaHandlers {
 
   /** The function's aliases, by name, a page at a time; with FunctionVersion, those that point at it. */
   private async listAliases({ query, operation }: LambdaCall, caller: LambdaCaller): Promise<LambdaAnswer> {
-    const function_ = this.unqualified(operation.name, caller);
+    const function_ = unqualifiedFunction(caller, operation.name);
     const version = query.get('FunctionVersion');
     if (version !== null && !FUNCTION_VERSION.test(version)) throw invalidParameterValue(`FunctionVersion must be $LATEST or a version's number, not ${version}.`);
     const aliases = (await this.aliases.list(caller.accountId, function_.id)).filter((alias) => version === null || alias.functionVersion === version);
@@ -187,7 +178,7 @@ export class LambdaVersions implements LambdaHandlers {
 
   /** The alias the path names, after the function's name; one the function hasn't, as Lambda says it. */
   private async alias({ groups, operation }: LambdaCall, caller: LambdaCaller): Promise<FunctionAliasView> {
-    const function_ = this.unqualified(operation.name, caller);
+    const function_ = unqualifiedFunction(caller, operation.name);
     const name = groups[1];
     try {
       return await this.aliases.get(caller.accountId, function_.id, name);
@@ -212,20 +203,7 @@ export class LambdaVersions implements LambdaHandlers {
     if (missing !== undefined) throw resourceNotFound(`Function not found: ${functionArn(caller.region, caller.accountId, function_.name)}:${missing}`);
   }
 
-  /** The function the request names, which these operations name without a version or an alias. */
-  private unqualified(operation: string, caller: LambdaCaller): Function {
-    const function_ = namedFunction(caller);
-    const qualifier = caller.named?.qualifier;
-    if (qualifier !== undefined) throw invalidParameterValue(`${operation} names the function alone, not its version or alias ${qualifier}: send ${function_.name}.`);
-    return function_;
-  }
-
   private aliasArn(function_: Function, caller: LambdaCaller, name: string): string {
     return `${functionArn(caller.region, caller.accountId, function_.name)}:${name}`;
   }
-}
-
-/** The fields sent, without those that weren't, for FF's checks of what is sent. */
-function defined<T extends Record<string, unknown>>(fields: T): Partial<T> {
-  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as Partial<T>;
 }
