@@ -1,0 +1,16 @@
+# Outside FF's subset: layers, a function's libraries kept apart from its code.
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Libraries:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      ContentUri: layer/
+      CompatibleRuntimes: [python3.13]
+  Report:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: report/
+      Handler: app.handler
+      Runtime: python3.13
+      Layers:
+        - !Ref Libraries

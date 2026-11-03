@@ -418,6 +418,11 @@ pub struct DoctorArgs {
     /// Check what is deployed in the account instead, as `ff export` reads it: what in it still points at FF
     #[arg(long, conflicts_with = "path")]
     pub deployed: bool,
+
+    /// A SAM template's parameters' values, as `sam deploy` takes them, in place of samconfig.toml's:
+    /// Key=Value or ParameterKey=Key,ParameterValue=Value, apart by spaces
+    #[arg(long, num_args = 1.., value_name = "KEY=VALUE", conflicts_with = "deployed")]
+    pub parameter_overrides: Vec<String>,
 }
 
 #[derive(Args)]

@@ -8,7 +8,7 @@ use super::roles::seen_between;
 use super::template::{Parameter, SCHEDULES_STATE, Template};
 use super::terraform::Terraform;
 use crate::api::types::name_in_arn;
-use crate::table::markdown_table;
+use crate::table::{in_words, markdown_table};
 
 const LAMBDA: &str = include_str!("../../../templates/export/data/lambda.md");
 const POSTGRES: &str = include_str!("../../../templates/export/data/postgres.md");
@@ -31,18 +31,9 @@ impl File {
     }
 }
 
-/// Items in a sentence: `a`, `a and b`, `a, b and c`.
-fn joined(items: &[String]) -> String {
-    match items {
-        [] => String::new(),
-        [only] => only.clone(),
-        [first @ .., last] => format!("{} and {last}", first.join(", ")),
-    }
-}
-
 /// Names in a sentence, each in backquotes.
 pub(super) fn listed(names: &[String]) -> String {
-    joined(&names.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>())
+    in_words(&names.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>())
 }
 
 /// What the account has of a kind: the database `shop`, the databases `shop` and `blog`.
@@ -182,7 +173,7 @@ fn data_pages(account: &Account) -> Vec<File> {
             })
             .collect();
         let kind = if databases.len() == 1 { "database" } else { "databases" };
-        pages.push(File::new("data/postgres.md", page(POSTGRES, &format!("the {kind} {}.", joined(&databases)))));
+        pages.push(File::new("data/postgres.md", page(POSTGRES, &format!("the {kind} {}.", in_words(&databases)))));
     }
     if !account.caches.is_empty() {
         let caches: Vec<String> = account.caches.iter().map(|cache| cache.name.clone()).collect();

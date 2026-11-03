@@ -1,10 +1,10 @@
 //! `ff doctor [path]`: what a function's folder, or a file, holds that works on FF and not on AWS
 //! Lambda, before a move: FF's API keys, its variables and hosts, its original event, files
 //! written outside `/tmp`, a TypeScript handler, a package over Lambda's size; and in its SAM
-//! template, what CloudFormation can't read and what is beyond Lambda's limits; in a Terraform
-//! project, its AWS provider's endpoints and settings for FF. Errors stop a move; warnings are for
-//! a person to judge, and fail it too with `--strict`. With `--deployed`, what in the account still
-//! points at FF.
+//! template, what CloudFormation can't read and what is beyond Lambda's limits, and what `ff deploy`
+//! doesn't take, outside FF's subset of SAM; in a Terraform project, its AWS provider's endpoints
+//! and settings for FF. Errors stop a move; warnings are for a person to judge, and fail it too with
+//! `--strict`. With `--deployed`, what in the account still points at FF.
 
 mod account;
 mod code;
@@ -156,8 +156,9 @@ fn size_finding(files: &[FolderFile]) -> Option<Finding> {
     })
 }
 
-/// The report of a folder, or of one file.
-fn report(path: &Path, hosts: &[String]) -> Result<Report, Error> {
+/// The report of a folder, or of one file: `overrides`, a template's parameters' values given in place of
+/// samconfig.toml's.
+fn report(path: &Path, hosts: &[String], overrides: Option<&[(String, String)]>) -> Result<Report, Error> {
     let mut findings = Vec::new();
     let (folder, files) = if path.is_dir() {
         let mut files = package::folder_files(path)?;
@@ -192,7 +193,7 @@ fn report(path: &Path, hosts: &[String]) -> Result<Report, Error> {
         files_read += 1;
         findings.extend(code::check(&file.name, &text, hosts));
         if template::NAMES.contains(&file.name.as_str()) {
-            findings.extend(template::check(&file.name, &text, folder, &today));
+            findings.extend(template::check(&file.name, &text, folder, &today, overrides));
         }
         if terraform::is_configuration(&file.name) {
             terraform::check(&file.name, &text, &mut findings);
@@ -236,7 +237,11 @@ pub fn run(args: DoctorArgs, context: &Context) -> Result<(), Error> {
     if !args.path.exists() {
         return Err(Error::usage(format!("{} isn't there", args.path.display())));
     }
-    let report = report(&args.path, &ff_hosts(context))?;
+    let overrides = (!args.parameter_overrides.is_empty())
+        .then(|| crate::sam::parameters::overrides(&args.parameter_overrides))
+        .transpose()
+        .map_err(|why| Error::usage(format!("--parameter-overrides: {why}")))?;
+    let report = report(&args.path, &ff_hosts(context), overrides.as_deref())?;
     // The findings on stdout; the summary of a failure again as the error, on stderr.
     context.out.result(&report, || text(&report))?;
     if report.errors > 0 {
@@ -274,7 +279,7 @@ mod tests {
         write(dir.path(), "ignored/a.js", "process.env.FUNCTION_NAME\n");
         write(dir.path(), ".ffignore", "ignored/\n");
 
-        let report = report(dir.path(), &[]).unwrap();
+        let report = report(dir.path(), &[], None).unwrap();
 
         assert_eq!(
             checks(&report),
@@ -288,19 +293,19 @@ mod tests {
     fn a_typescript_handler_alone_is_named_and_one_with_its_javascript_isnt() {
         let dir = tempfile::TempDir::new().unwrap();
         write(dir.path(), "function.ts", "export const handler = async () => 'hi';\n");
-        assert_eq!(checks(&report(dir.path(), &[]).unwrap()), [("function.ts", None, "typescript-handler")]);
+        assert_eq!(checks(&report(dir.path(), &[], None).unwrap()), [("function.ts", None, "typescript-handler")]);
         assert_eq!(
-            checks(&report(&dir.path().join("function.ts"), &[]).unwrap()),
+            checks(&report(&dir.path().join("function.ts"), &[], None).unwrap()),
             [("function.ts", None, "typescript-handler")]
         );
         write(dir.path(), "function.js", "exports.handler = async () => 'hi';\n");
-        assert_eq!(checks(&report(dir.path(), &[]).unwrap()), []);
+        assert_eq!(checks(&report(dir.path(), &[], None).unwrap()), []);
         // Python's folder has no TypeScript handler, whatever it holds.
         let python = tempfile::TempDir::new().unwrap();
         write(python.path(), "requirements.txt", "");
         write(python.path(), "lambda_function.py", "def lambda_handler(event, context): pass\n");
         write(python.path(), "tools/index.ts", "");
-        assert_eq!(checks(&report(python.path(), &[]).unwrap()), []);
+        assert_eq!(checks(&report(python.path(), &[], None).unwrap()), []);
     }
 
     #[test]
@@ -329,7 +334,7 @@ mod tests {
         write(dir.path(), "bundle.js", &"process.env.FUNCTION_NAME\n".repeat(50_000));
         std::fs::write(dir.path().join("image.png"), [0x89, b'P', b'N', b'G', 0xff, 0xfe]).unwrap();
 
-        let report = report(dir.path(), &[]).unwrap();
+        let report = report(dir.path(), &[], None).unwrap();
 
         assert_eq!((report.files_read, report.files_not_read, report.findings.len()), (1, 1, 0));
         assert_eq!(report.summary(), "0 errors, 0 warnings in 1 file read, 1 file over 1 MB not");
@@ -339,7 +344,7 @@ mod tests {
     fn the_text_names_each_finding_where_it_is_then_the_summary() {
         let dir = tempfile::TempDir::new().unwrap();
         write(dir.path(), "app.py", "import os\nname = os.environ['FUNCTION_NAME']\n");
-        let report = report(dir.path(), &[]).unwrap();
+        let report = report(dir.path(), &[], None).unwrap();
         assert_eq!(
             text(&report),
             "app.py:2: warning: reads FUNCTION_NAME, which FF's runtime sets: on Lambda, AWS_LAMBDA_FUNCTION_NAME, or \
@@ -347,7 +352,7 @@ mod tests {
         );
         write(dir.path(), "app.py", "print('hi')\n");
         assert_eq!(
-            text(&super::report(dir.path(), &[]).unwrap()),
+            text(&super::report(dir.path(), &[], None).unwrap()),
             "0 errors, 0 warnings in 1 file read: nothing found that works on FF alone"
         );
     }
@@ -355,22 +360,22 @@ mod tests {
     #[test]
     fn a_folders_template_is_checked_and_sams_build_output_isnt_read() {
         let dir = tempfile::TempDir::new().unwrap();
-        let template = "Resources:\n  Orders:\n    Type: AWS::Serverless::Function\n    Properties:\n      CodeUri: .\n      Handler: index.handler\n      Runtime: nodejs24.x\n      Timeout: 901\n";
+        let template = "Transform: AWS::Serverless-2016-10-31\nResources:\n  Orders:\n    Type: AWS::Serverless::Function\n    Properties:\n      CodeUri: .\n      Handler: index.handler\n      Runtime: nodejs24.x\n      Timeout: 901\n";
         write(dir.path(), "template.yaml", template);
         write(dir.path(), "index.ts", "export const handler = async () => 1;\n");
         write(dir.path(), ".aws-sam/build/Orders/index.js", "process.env.FUNCTION_NAME\n");
 
-        let report = report(dir.path(), &[]).unwrap();
+        let report = report(dir.path(), &[], None).unwrap();
 
         // The template's handler found once, by the template, not again as the folder's own.
         assert_eq!(
             checks(&report),
-            [("template.yaml", Some(6), "typescript-handler"), ("template.yaml", Some(8), "lambda-limits")]
+            [("template.yaml", Some(7), "typescript-handler"), ("template.yaml", Some(9), "lambda-limits")]
         );
         assert_eq!(report.files_read, 2);
         assert_eq!(
-            checks(&super::report(&dir.path().join("template.yaml"), &[]).unwrap()),
-            [("template.yaml", Some(6), "typescript-handler"), ("template.yaml", Some(8), "lambda-limits")]
+            checks(&super::report(&dir.path().join("template.yaml"), &[], None).unwrap()),
+            [("template.yaml", Some(7), "typescript-handler"), ("template.yaml", Some(9), "lambda-limits")]
         );
     }
 
@@ -396,7 +401,7 @@ mod tests {
         write(dir.path(), ".terraform/modules/x/main.tf", "provider \"aws\" {\n  skip_region_validation = true\n}\n");
         let hosts = ["ffunc.cloud".to_owned()];
 
-        let report = report(dir.path(), &hosts).unwrap();
+        let report = report(dir.path(), &hosts, None).unwrap();
 
         // The endpoints block one error, FF's hosts in it its own; the five settings each a warning.
         let providers = std::fs::read_to_string(dir.path().join("providers.tf")).unwrap();
@@ -418,7 +423,7 @@ mod tests {
         let start = providers.find("  # FF: from here").unwrap();
         let end = providers.find("  # ...to here.\n").unwrap() + "  # ...to here.\n".len();
         write(dir.path(), "providers.tf", &format!("{}{}", &providers[..start], &providers[end..]));
-        assert_eq!(checks(&super::report(dir.path(), &hosts).unwrap()), []);
+        assert_eq!(checks(&super::report(dir.path(), &hosts, None).unwrap()), []);
     }
 
     #[test]

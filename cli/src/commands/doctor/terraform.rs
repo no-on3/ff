@@ -6,6 +6,7 @@
 use std::ops::RangeInclusive;
 
 use super::{Finding, Level};
+use crate::table::in_words;
 
 /// Terraform's and OpenTofu's configuration files, which each reads in a module's folder.
 pub fn is_configuration(name: &str) -> bool {
@@ -137,15 +138,6 @@ fn argument(code: &str) -> Option<(&str, &str)> {
     let value = value.trim();
     let is_name = !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     (is_name && !value.starts_with('=')).then_some((name, value))
-}
-
-/// "lambda", "lambda and s3", "lambda, s3 and sqs".
-fn in_words(names: &[String]) -> String {
-    match names {
-        [] => String::new(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
 }
 
 fn endpoints_finding(file: &str, line: usize, services: &[String]) -> Finding {
@@ -292,12 +284,5 @@ mod tests {
             findings.iter().map(|finding| (finding.line, finding.check)).collect::<Vec<_>>(),
             [(Some(6), "ff-host"), (Some(2), "provider-endpoints")]
         );
-    }
-
-    #[test]
-    fn a_list_of_names_reads_as_words() {
-        let names = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect::<Vec<_>>();
-        assert_eq!(in_words(&names(&["lambda"])), "lambda");
-        assert_eq!(in_words(&names(&["lambda", "s3", "sqs", "sesv2"])), "lambda, s3, sqs and sesv2");
     }
 }

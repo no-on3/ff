@@ -65,12 +65,10 @@ fn reached(record: &FunctionRecord) -> Option<(String, &str)> {
             }
         })
         .collect();
-    let services = match services.split_last() {
-        Some((last, [])) => last.clone(),
-        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
-        None => return None,
-    };
-    Some((services, last))
+    if services.is_empty() {
+        return None;
+    }
+    Some((crate::table::in_words(&services), last))
 }
 
 fn function_findings(record: &FunctionRecord, lambda_name: &str) -> Vec<AccountFinding> {

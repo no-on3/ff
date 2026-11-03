@@ -1,0 +1,24 @@
+# Outside FF's subset: DynamoDB's tables, SAM's simple one and CloudFormation's.
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Orders:
+    Type: AWS::Serverless::SimpleTable
+  Sessions:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions: [{AttributeName: id, AttributeType: S}]
+      KeySchema: [{AttributeName: id, KeyType: HASH}]
+      BillingMode: PAY_PER_REQUEST
+  Api:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: api/
+      Handler: index.handler
+      Runtime: nodejs24.x
+      Environment:
+        Variables:
+          ORDERS: !Ref Orders
+          SESSIONS: !GetAtt Sessions.Arn
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Orders

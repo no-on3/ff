@@ -149,6 +149,53 @@ fn a_template_is_read_as_cloudformation_reads_it_and_lambdas_limits_checked() {
     ));
 }
 
+#[test]
+fn what_of_a_template_ff_deploy_wouldnt_take_is_a_warning_each_its_parameters_as_sam_deploy_gives_them() {
+    // sam init's hello world, with the samconfig.toml it writes: a stack's name, no parameters.
+    let code = folder(&[
+        ("template.yaml", include_str!("../src/sam/testdata/hello-python.yaml")),
+        ("samconfig.toml", "version = 0.1\n[default.global.parameters]\nstack_name = \"hello-python\"\n"),
+    ]);
+    let settings = tempfile::TempDir::new().unwrap();
+
+    let output = ff(&settings).arg("doctor").arg(code.path()).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<&str> = stdout.lines().map(|line| line.split(": ").next().unwrap()).collect();
+    assert_eq!(
+        lines,
+        [
+            "template.yaml:25",
+            "template.yaml:36",
+            "template.yaml:36",
+            "template.yaml:42",
+            "0 errors, 4 warnings in 2 files read"
+        ]
+    );
+    assert!(stdout.starts_with(
+        "template.yaml:25: warning: HelloWorldFunction's event HelloWorld: an Api event makes an API Gateway REST API, \
+         which FF hasn't: the function's FunctionUrlConfig gives it a URL, and HttpApi events, all of one function, go \
+         to that URL [sam-subset]\n"
+    ));
+    ff(&settings).arg("doctor").arg(code.path()).arg("--strict").assert().code(1);
+
+    // --parameter-overrides, as `sam deploy` reads it: a name the template hasn't said, one it can't read refused.
+    ff(&settings)
+        .arg("doctor")
+        .arg(code.path())
+        .args(["--parameter-overrides", "Stage=prod"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "template.yaml: warning: --parameter-overrides gives Stage, which the template has no parameter for: \
+             `sam deploy` passes it over, as `ff deploy` does [sam-parameter]\n",
+        ));
+    ff(&settings).arg("doctor").arg(code.path()).args(["--parameter-overrides", "Stage"]).assert().code(2).stderr(
+        "error: --parameter-overrides: Stage: a parameter's value is given as Key=Value or \
+         ParameterKey=Key,ParameterValue=Value\n",
+    );
+}
+
 const AT: &str = "2026-10-21T09:00:00.000Z";
 
 /// The replies, in the order `ff doctor --deployed` asks: the account, its function and what calls it or what its

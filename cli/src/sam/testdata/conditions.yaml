@@ -1,0 +1,21 @@
+# Outside FF's subset: conditions, which make a resource or pick a value by a parameter's.
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Parameters:
+  Stage:
+    Type: String
+    AllowedValues: [prod, test]
+    Default: test
+Conditions:
+  IsProd: !Equals [!Ref Stage, prod]
+Resources:
+  Orders:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: orders/
+      Handler: index.handler
+      Runtime: nodejs24.x
+      MemorySize: !If [IsProd, 1024, 128]
+  Archive:
+    Type: AWS::S3::Bucket
+    Condition: IsProd
