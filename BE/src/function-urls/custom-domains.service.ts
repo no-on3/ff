@@ -2,8 +2,9 @@ import { BadRequestException, ConflictException, Inject, Injectable, NotFoundExc
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
-import { QueryDeepPartialEntity, QueryFailedError, Repository } from 'typeorm';
+import { QueryDeepPartialEntity, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
+import { isUniqueViolation } from '../common/unique-violation';
 import { FunctionUrl } from '../functions/entities/function-url.entity';
 import { PlansService } from '../plans/plans.service';
 import { Bucket, BucketStatus } from '../storage/bucket.entity';
@@ -17,10 +18,6 @@ import { functionDomain, urlHost } from './url-address';
 
 /** The DNS questions the domains' checks ask: the backend's resolver, or a test's. */
 export const DOMAIN_RESOLVER = Symbol('DOMAIN_RESOLVER');
-
-/** PostgreSQL's unique_violation. */
-const UNIQUE_VIOLATION = '23505';
-const isUniqueViolation = (error: unknown) => error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION;
 
 /** What a domain serves, and where its CNAME points: a function's URL, or a bucket's site. */
 interface DomainTarget {

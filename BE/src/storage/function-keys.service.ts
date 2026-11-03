@@ -1,14 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, IsNull, Not, QueryFailedError, Repository } from 'typeorm';
+import { EntityManager, IsNull, Not, Repository } from 'typeorm';
 import { AWS_ENDPOINTS, AwsEndpoint } from '../common/aws-endpoint';
+import { isUniqueViolation } from '../common/unique-violation';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { newAccessKeyId, newSecretAccessKey } from './storage-names';
-
-/** PostgreSQL's unique_violation: another deploy of the function made its key meanwhile. */
-const UNIQUE_VIOLATION = '23505';
 
 /** How long a function's key works, as a Lambda role's session lasts at most (ADR 0014, 5). */
 export const FUNCTION_KEY_LIFE_MS = 12 * 60 * 60 * 1000;
@@ -182,7 +180,7 @@ export class FunctionKeys {
     try {
       return await this.insert(fn, now, this.keys.manager);
     } catch (error) {
-      if (!(error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION)) throw error;
+      if (!isUniqueViolation(error)) throw error;
       // A function has one current key, which its index keeps: the one the other deploy made.
       const made = await this.keyOf(fn.id);
       if (!made) throw error;

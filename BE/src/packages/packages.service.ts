@@ -7,9 +7,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { QueryFailedError, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
+import { isUniqueViolation } from '../common/unique-violation';
 import type { InlinePackage } from '../functions/inline-package';
 import { ObjectStoreService } from '../object-store/object-store.service';
 import { CodeImagesService } from './code-images.service';
@@ -26,7 +27,6 @@ const ZIP_TYPES = new Set(['application/zip', 'application/x-zip-compressed', 'a
  */
 export const MAX_UNUSED_PACKAGES = 20;
 export const UNUSED_PACKAGE_HOURS = 1;
-const UNIQUE_VIOLATION = '23505';
 
 /** A package as the API answers it: what it is, without its files, which can be thousands. */
 export type PackageView = Pick<Package, 'codeSha256' | 'codeSize' | 'unpackedSize' | 'fileCount' | 'createdAt'>;
@@ -136,7 +136,7 @@ export class PackagesService {
         });
       } catch (error) {
         // The same package, uploaded by another request meanwhile: the account has it once.
-        if (error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION) {
+        if (isUniqueViolation(error)) {
           const kept = await this.find(accountId, codeSha256);
           if (kept) return { created: false, package: kept };
         }

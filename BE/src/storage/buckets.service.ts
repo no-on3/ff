@@ -1,10 +1,11 @@
 import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, QueryFailedError, Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
+import { isUniqueViolation } from '../common/unique-violation';
 import { PlansService } from '../plans/plans.service';
 import { ResourceTagsService, taggedBucket } from '../tags/resource-tags.service';
 import { Bucket, BucketStatus } from './bucket.entity';
@@ -27,9 +28,6 @@ export interface MeasuredBucket {
   site: boolean;
   createdAt: Date;
 }
-
-/** PostgreSQL's unique_violation: a bucket of that name exists, whoever's it is. */
-const UNIQUE_VIOLATION = '23505';
 
 const unavailable = () => new ServiceUnavailableException("The store couldn't do it: nothing was lost, try again in a moment");
 
@@ -118,7 +116,7 @@ export class BucketsService {
         return saved;
       });
     } catch (error) {
-      if (error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION) {
+      if (isUniqueViolation(error)) {
         throw new ConflictException(`The bucket name "${dto.name}" is taken: bucket names are unique across FF, as on AWS`);
       }
       throw error;

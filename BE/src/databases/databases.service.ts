@@ -11,10 +11,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isIP } from 'node:net';
-import { In, Not, QueryFailedError, Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
+import { isUniqueViolation } from '../common/unique-violation';
 import { DataDbSettings } from '../config/configuration';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlanLimits } from '../plans/plan-limits';
@@ -24,9 +25,6 @@ import { newPassword, newServerName } from './database-names';
 import { Database, DatabaseStatus } from './database.entity';
 import { CreateDatabaseDto, DatabaseView, DatabaseWithPassword } from './dto/database.dto';
 import { scramVerifier } from './scram';
-
-/** PostgreSQL's unique_violation: the account has a database of that name. */
-const UNIQUE_VIOLATION = '23505';
 
 export const NO_DATA_SERVER = "This FF has no server for customers' databases (FF_DATA_DB_HOST)";
 
@@ -89,7 +87,7 @@ export class DatabasesService {
         return manager.save(Database, manager.create(Database, { accountId, name: dto.name, dbName: newServerName(), status: DatabaseStatus.CREATING }));
       });
     } catch (error) {
-      if (error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION) {
+      if (isUniqueViolation(error)) {
         throw new ConflictException(`The account has a database named "${dto.name}" already`);
       }
       throw error;

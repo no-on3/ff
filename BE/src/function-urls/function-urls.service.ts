@@ -1,8 +1,9 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, QueryDeepPartialEntity, QueryFailedError, Repository } from 'typeorm';
+import { IsNull, QueryDeepPartialEntity, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
+import { isUniqueViolation } from '../common/unique-violation';
 import { wrappedIn } from '../functions/aliases.service';
 import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { EventFormat, Function } from '../functions/entities/function.entity';
@@ -11,9 +12,6 @@ import { noSuchAlias } from '../functions/function-not-found';
 import { FunctionsService } from '../functions/functions.service';
 import { CreateFunctionUrlDto, FunctionUrlView, UpdateFunctionUrlDto } from './dto/function-url.dto';
 import { newUrlId, urlAddress } from './url-address';
-
-/** PostgreSQL's unique_violation: another request gave the function its URL first. */
-const UNIQUE_VIOLATION = '23505';
 
 /** A URL sends AWS Lambda's events, which a function that takes FF's original wrapped event can't read. */
 export const WRAPPED_FUNCTION_REFUSAL =
@@ -100,7 +98,7 @@ export class FunctionUrlsService {
       await this.urls.insert(url as QueryDeepPartialEntity<FunctionUrl>);
     } catch (error) {
       // Two requests at once: a function's or an alias's URL is its own once by the table's unique indexes, so the second one fails here.
-      if (error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION) throw alreadyHasOne(alias);
+      if (isUniqueViolation(error)) throw alreadyHasOne(alias);
       throw error;
     }
     await this.audit.record({
