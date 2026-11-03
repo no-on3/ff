@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # boto3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the endpoint, the region
 # and the key are given. A function through its life: made, waited for, listed, its code and its settings changed,
-# each change waited for, tagged, invoked, a version and an alias, a URL, a queue's mapping, refused as Lambda refuses, deleted; an operation FF doesn't offer yet refused once, by
+# each change waited for, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls' settings, refused as Lambda refuses, deleted; an operation FF doesn't offer yet refused once, by
 # its name, though boto3 retries by default. One JSON line per check, {client, want, got, what}, for hack/e2e.sh.
 #   ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> CODE=<zip> CODE_SHA=<its CodeSha256> \
 #   NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> QUEUE_ARN=<a queue of the account, none reading it> \
@@ -144,6 +144,17 @@ def mappings():
                   ["Enabled", 5, env["QUEUE_ARN"], "Disabled", [made["UUID"]], "Deleting", True])
 
 
+def async_settings():
+    put = client.put_function_event_invoke_config(FunctionName=NAME, MaximumRetryAttempts=1, MaximumEventAgeInSeconds=600)
+    changed = client.update_function_event_invoke_config(FunctionName=NAME, MaximumRetryAttempts=0)
+    read = client.get_function_event_invoke_config(FunctionName=NAME)
+    listed = [config["FunctionArn"] for config in client.list_function_event_invoke_configs(FunctionName=NAME)["FunctionEventInvokeConfigs"]]
+    client.delete_function_event_invoke_config(FunctionName=NAME)
+    refused_as(lambda: client.get_function_event_invoke_config(FunctionName=NAME), "ResourceNotFoundException")
+    recent = abs((put["LastModified"] - datetime.now(timezone.utc)).total_seconds()) < 600
+    return expect([changed["MaximumRetryAttempts"], changed["MaximumEventAgeInSeconds"], read["MaximumRetryAttempts"], listed, recent], [0, 600, 0, [put["FunctionArn"]], True])
+
+
 def tags():
     arn = client.get_function_configuration(FunctionName=NAME)["FunctionArn"]
     client.tag_resource(Resource=arn, Tags={"team": "shop"})
@@ -194,6 +205,8 @@ check("ok", "PublishVersion, then CreateAlias, GetAlias, UpdateAlias, ListAliase
 check("ok", "CreateFunctionUrlConfig, then GetFunctionUrlConfig, UpdateFunctionUrlConfig with Cors, ListFunctionUrlConfigs and DeleteFunctionUrlConfig", urls)
 check("ok", "CreateEventSourceMapping on a queue of the account, then GetEventSourceMapping, UpdateEventSourceMapping, ListEventSourceMappings and DeleteEventSourceMapping",
       mappings)
+check("ok", "PutFunctionEventInvokeConfig, then UpdateFunctionEventInvokeConfig, GetFunctionEventInvokeConfig, ListFunctionEventInvokeConfigs and DeleteFunctionEventInvokeConfig",
+      async_settings)
 check("ok", "TagResource, ListTags and UntagResource on its ARN", tags)
 check("ok", "refused as boto3 names Lambda's errors: a runtime FF lacks, a function the account hasn't", refusals)
 check("ok", "operations FF doesn't offer yet are UnknownOperationException, named, sent once by a client that retries by default", not_offered)

@@ -9,6 +9,7 @@ import { PackagesModule } from '../packages/packages.module';
 import { PlansModule } from '../plans/plans.module';
 import { StorageModule } from '../storage/storage.module';
 import { TagsModule } from '../tags/tags.module';
+import { LambdaAsyncSettings } from './lambda-async-settings';
 import { LambdaCodeLinks } from './lambda-code-links';
 import { LambdaFrontDoor } from './lambda-front-door';
 import { LambdaFunctionChanges } from './lambda-function-changes';
@@ -21,7 +22,7 @@ import { LambdaUrls } from './lambda-urls';
 import { LambdaVersions } from './lambda-versions';
 
 /** Each group of operations built so far; the others answer that FF doesn't offer them yet. */
-const GROUPS = [LambdaFunctionReads, LambdaFunctionChanges, LambdaTags, LambdaInvoke, LambdaVersions, LambdaUrls, LambdaMappings];
+const GROUPS = [LambdaFunctionReads, LambdaFunctionChanges, LambdaTags, LambdaInvoke, LambdaVersions, LambdaUrls, LambdaMappings, LambdaAsyncSettings];
 
 /**
  * Lambda's endpoint (ADR 0014), which main.ts starts on its port: AWS Lambda's

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // AWS's SDK for JavaScript v3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the
 // endpoint, the region and the key are given. A function through its life: made, waited for, listed, its code and its
-// settings changed, each change waited for, tagged, invoked, a version and an alias, a URL, a queue's mapping, refused as Lambda refuses, deleted; an operation FF doesn't offer
+// settings changed, each change waited for, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls' settings, refused as Lambda refuses, deleted; an operation FF doesn't offer
 // yet refused once, by its name, though the client retries by default. One JSON line per check,
 // {client, want, got, what}, for hack/e2e.sh.
 //   MODULES=<folder with node_modules> ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> \
@@ -153,6 +153,16 @@ await check('ok', 'CreateEventSourceMapping on a queue of the account, then GetE
   // LastModified is a date in seconds, as Lambda's: read as milliseconds, it would be in 1970.
   const recent = Math.abs(made.LastModified.getTime() - Date.now()) < 600_000;
   return expect([made.State, made.BatchSize, read.EventSourceArn, changed.State, listed, deleted.State, recent], ['Enabled', 5, QUEUE_ARN, 'Disabled', [made.UUID], 'Deleting', true]);
+});
+await check('ok', 'PutFunctionEventInvokeConfig, then UpdateFunctionEventInvokeConfig, GetFunctionEventInvokeConfig, ListFunctionEventInvokeConfigs and DeleteFunctionEventInvokeConfig', async () => {
+  const put = await send(lambda.PutFunctionEventInvokeConfigCommand, { FunctionName, MaximumRetryAttempts: 1, MaximumEventAgeInSeconds: 600 });
+  const changed = await send(lambda.UpdateFunctionEventInvokeConfigCommand, { FunctionName, MaximumRetryAttempts: 0 });
+  const read = await send(lambda.GetFunctionEventInvokeConfigCommand, { FunctionName });
+  const listed = (await send(lambda.ListFunctionEventInvokeConfigsCommand, { FunctionName })).FunctionEventInvokeConfigs.map((config) => config.FunctionArn);
+  await send(lambda.DeleteFunctionEventInvokeConfigCommand, { FunctionName });
+  await refusedAs(() => send(lambda.GetFunctionEventInvokeConfigCommand, { FunctionName }), 'ResourceNotFoundException');
+  const recent = Math.abs(put.LastModified.getTime() - Date.now()) < 600_000;
+  return expect([changed.MaximumRetryAttempts, changed.MaximumEventAgeInSeconds, read.MaximumRetryAttempts, listed, recent], [0, 600, 0, [put.FunctionArn], true]);
 });
 await check('ok', 'TagResource, ListTags and UntagResource on its ARN', async () => {
   const { FunctionArn } = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });

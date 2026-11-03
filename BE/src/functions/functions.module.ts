@@ -53,7 +53,7 @@ import { StoppedChanges } from './stopped-changes.service';
   ],
   controllers: [FunctionsController, EventInvokeConfigController, FunctionVersionsController, FunctionAliasesController],
   providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionKeyRenewal, StoppedChanges],
-  // Lambda's endpoint reads versions and aliases, and queues calls, as FF's API does.
-  exports: [FunctionsService, FunctionVersionsService, FunctionAliasesService, AsyncInvocationsService],
+  // Lambda's endpoint reads versions and aliases, queues calls and sets their settings, as FF's API does.
+  exports: [FunctionsService, FunctionVersionsService, FunctionAliasesService, AsyncInvocationsService, EventInvokeConfigService],
 })
 export class FunctionsModule {}

@@ -844,6 +844,52 @@ as_ver DELETE /queues/e2e-mapped-orders >/dev/null
 }
 section_def lambda_mappings section_lambda_mappings lambda_changes budget=35
 
+section_lambda_async() {
+section "Lambda's settings of a function's asynchronous calls with the AWS CLI: put, a failed call's record in a queue of the account, changed, read, listed, deleted; a version's refused, as FF keeps one for the function"
+async_set_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-async-set"
+async_failed="arn:aws:sqs:tn-tunis-1:$ver:e2e-async-failed"
+as_ver POST /queues '{"name": "e2e-async-failed"}' >/dev/null
+lambda_zip "$work/async-set.zip" 'export const handler = async (event) => { throw new Error(`no stock for order ${event.order}`); };' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-async-set --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/async-set.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-async-set >/dev/null 2>&1 || true
+put_settings="$(as_maker aws_lambda put-function-event-invoke-config --function-name e2e-async-set --maximum-retry-attempts 0 \
+  --destination-config "OnFailure={Destination=$async_failed}")"
+# A LastModified read in milliseconds where Lambda sends seconds would be in January 1970.
+check "PutFunctionEventInvokeConfig: no retry, a failed call's record to a queue of the account; \$LATEST's ARN, as Lambda's, changed this year" \
+  "$async_set_arn:\$LATEST 0 $async_failed $(date -u +%Y)" \
+  "$(jq -r '"\(.FunctionArn) \(.MaximumRetryAttempts) \(.DestinationConfig.OnFailure.Destination) \(.LastModified[0:4])"' <<<"$put_settings")"
+as_maker aws_lambda invoke --function-name e2e-async-set --invocation-type Event --cli-binary-format raw-in-base64-out --payload '{"order": 7}' /dev/null >/dev/null
+failed_record=''
+for _ in $(seq 60); do
+  failed_record="$(as_ver POST /queues/e2e-async-failed/receive '{"maxMessages": 1}' | jq -c '.[0].body // empty | fromjson')"
+  [ -n "$failed_record" ] && break
+  sleep 1
+done
+check "  ... a call that throws, tried once, its record in the queue as Lambda's: RetriesExhausted, the payload, the error" \
+  "RetriesExhausted 1 7 Unhandled no stock for order 7" \
+  "$(jq -r '"\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.requestPayload.order) \(.responseContext.functionError) \(.responsePayload.errorMessage)"' <<<"$failed_record")"
+check "UpdateFunctionEventInvokeConfig changes what it sends, the rest kept; Get reads it; List lists it, the one there is" \
+  "0 120 $async_failed 120 $async_set_arn:\$LATEST" \
+  "$(as_maker aws_lambda update-function-event-invoke-config --function-name e2e-async-set --maximum-event-age-in-seconds 120 |
+    jq -r '"\(.MaximumRetryAttempts) \(.MaximumEventAgeInSeconds) \(.DestinationConfig.OnFailure.Destination)"') \
+$(as_reader get-function-event-invoke-config --function-name e2e-async-set | jq -r .MaximumEventAgeInSeconds) \
+$(as_reader list-function-event-invoke-configs --function-name e2e-async-set | jq -r '[.FunctionEventInvokeConfigs[].FunctionArn] | join(",")')"
+check "refused: a version's, which FF keeps none of, a queue of another account, a key that may only read" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda put-function-event-invoke-config --function-name e2e-async-set --qualifier 1 --maximum-retry-attempts 1) \
+$(outcome as_maker aws_lambda put-function-event-invoke-config --function-name e2e-async-set --destination-config 'OnFailure={Destination=arn:aws:sqs:tn-tunis-1:000000000002:other}') \
+$(outcome as_reader delete-function-event-invoke-config --function-name e2e-async-set)"
+as_maker aws_lambda delete-function-event-invoke-config --function-name e2e-async-set
+check "DeleteFunctionEventInvokeConfig: gone, read as Lambda says it; the list empty" \
+  "refused ResourceNotFoundException The function $async_set_arn:\$LATEST doesn't have an EventInvokeConfig 0" \
+  "$(outcome as_reader get-function-event-invoke-config --function-name e2e-async-set) $(grep -oE "The function [^ ]+ doesn't have an EventInvokeConfig" "$work/aws.err") \
+$(as_reader list-function-event-invoke-configs --function-name e2e-async-set | jq '.FunctionEventInvokeConfigs | length')"
+as_maker aws_lambda delete-function --function-name e2e-async-set >/dev/null
+as_ver DELETE /queues/e2e-async-failed >/dev/null
+}
+section_def lambda_async section_lambda_async lambda_changes budget=30
+
 section_lambda_invoke() {
 section "Lambda's Invoke with the AWS CLI: the function's answer as it returned it, the version that ran, the call's log with LogType Tail, the ClientContext in Node.js and Python; an error and a timeout as the call's outcome; Event and DryRun; refused as Lambda refuses"
 invoker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-invoker", "functions": ["e2e-invoked", "e2e-invoked-py", "e2e-invoked-broken"], "functionAccess": "invoke"}')"
@@ -922,7 +968,7 @@ as_ver DELETE "/storage-keys/$(jq -r .id <<<"$invoker")" >/dev/null
 section_def lambda_invoke section_lambda_invoke lambda_changes budget=60
 
 section_lambda_sdks() {
-section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, a queue's mapping, refused as Lambda refuses, deleted"
+section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls' settings, refused as Lambda refuses, deleted"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0014 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
 lambda_clients="$FF_REPO_ROOT/hack/.cache/lambda-clients"
@@ -943,10 +989,10 @@ clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$make
 for queue_of in sdk boto3; do as_ver POST /queues "{\"name\": \"e2e-$queue_of-orders\"}" >/dev/null; done
 env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-sdk-orders" MODULES="$lambda_clients/node_modules" \
   node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
-client_checks "$work/lambda-sdk.jsonl" 15
+client_checks "$work/lambda-sdk.jsonl" 16
 env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-boto3-orders" \
   "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
-client_checks "$work/lambda-boto3.jsonl" 15
+client_checks "$work/lambda-boto3.jsonl" 16
 for queue_of in sdk boto3; do as_ver DELETE "/queues/e2e-$queue_of-orders" >/dev/null; done
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60

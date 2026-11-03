@@ -1129,6 +1129,16 @@ $(lambda_with "${lambda_b[@]}" list-event-source-mappings --function-name "$arn_
 $(lambda_with "${lambda_b[@]}" list-event-source-mappings --event-source-arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a" --query 'length(EventSourceMappings)') \
 $(lambda_with "${lambda_b[@]}" create-event-source-mapping --function-name "$arn_a" --event-source-arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a") \
 $([ "$(mapping_of_a)" = "$mapping_before_b" ] && echo true || echo false) $(mapping_of_a | awk '{print $1}')"
+lambda_with "${lambda_a[@]}" put-function-event-invoke-config --function-name l5-a --maximum-retry-attempts 1 >/dev/null
+check "  ... nor puts, changes, reads, lists or deletes the settings of its asynchronous calls: A's as they were" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException 1" \
+  "$(lambda_with "${lambda_b[@]}" put-function-event-invoke-config --function-name "$arn_a" --maximum-retry-attempts 0) \
+$(lambda_with "${lambda_b[@]}" update-function-event-invoke-config --function-name l5-a --maximum-retry-attempts 0) \
+$(lambda_with "${lambda_b[@]}" get-function-event-invoke-config --function-name l5-a) \
+$(lambda_with "${lambda_b[@]}" list-function-event-invoke-configs --function-name "$arn_a") \
+$(lambda_with "${lambda_b[@]}" delete-function-event-invoke-config --function-name l5-a) \
+$(lambda_with "${lambda_a[@]}" get-function-event-invoke-config --function-name l5-a --query MaximumRetryAttempts)"
+lambda_with "${lambda_a[@]}" delete-function-event-invoke-config --function-name l5-a >/dev/null
 check "  ... nor reads its tags, nor tags it, nor untags it, by its ARN" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" list-tags --resource "$arn_a") $(lambda_with "${lambda_b[@]}" tag-resource --resource "$arn_a" --tags owner=b) \
 $(lambda_with "${lambda_b[@]}" untag-resource --resource "$arn_a" --tag-keys owner)"
