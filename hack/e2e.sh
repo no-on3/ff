@@ -505,8 +505,10 @@ section_def versions section_versions backend budget=35
 section_lambda_reads() {
 section "Lambda's endpoint, read with the AWS CLI: a function, its version and its alias, the account's list and settings, its code's link"
 reader="$(as_ver POST /storage-keys '{"name": "e2e-lambda-reader", "functions": ["*"], "functionAccess": "read"}')"
+reader_id="$(jq -r .id <<<"$reader")"
+reader_secret="$(jq -r .secretAccessKey <<<"$reader")"
 # as_reader <aws lambda arguments…>: the AWS CLI at Lambda's endpoint with a key that may read the account's functions.
-as_reader() { AWS_KEY="$(jq -r .id <<<"$reader")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$reader")" aws_lambda "$@"; }
+as_reader() { AWS_KEY="$reader_id" AWS_SECRET="$reader_secret" aws_lambda "$@"; }
 versioned_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-versioned"
 latest="$(as_reader get-function --function-name e2e-versioned)"
 check "GetFunction gives \$LATEST under Lambda's names, Active, its memory raised since its version" \
@@ -523,6 +525,17 @@ check "ListFunctions lists the account's function, and with every version, its v
   "e2e-versioned:\$LATEST e2e-versioned:\$LATEST,e2e-versioned:1" \
   "$(as_reader list-functions | jq -r '[.Functions[] | "\(.FunctionName):\(.Version)"] | join(",")') \
 $(as_reader list-functions --function-version ALL | jq -r '[.Functions[] | "\(.FunctionName):\(.Version)"] | join(",")')"
+# A profile of AWS's config files with Lambda's endpoint in its services section, as the guide's way out has it: the
+# key, the region and the endpoint the profile's alone, no variable naming any, so that on AWS the same profile without
+# its services line reaches AWS. A profile named on the command line takes no key from the environment.
+printf '[profile ff]\nregion = tn-tunis-1\nservices = ff-endpoints\n\n[services ff-endpoints]\nlambda =\n  endpoint_url = http://localhost:%s\n' \
+  "$lambda_port" >"$work/aws-config-services"
+printf '[ff]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$reader_id" "$reader_secret" >"$work/aws-credentials-services"
+check "a profile whose services section names Lambda's endpoint reaches it, its key and region the profile's, as AWS's tools read one" \
+  "$versioned_arn" \
+  "$(env -u AWS_DEFAULT_REGION -u AWS_REGION -u AWS_ENDPOINT_URL -u AWS_ENDPOINT_URL_LAMBDA -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY \
+    AWS_CONFIG_FILE="$work/aws-config-services" AWS_SHARED_CREDENTIALS_FILE="$work/aws-credentials-services" \
+    "${aws_cli[@]}" --profile ff lambda get-function-configuration --function-name e2e-versioned --output json | jq -r .FunctionArn)"
 check "GetAccountSettings gives the plan's limits under Lambda's names, and the account's one function" "52428800 1" \
   "$(as_reader get-account-settings | jq -r '"\(.AccountLimit.CodeSizeZipped) \(.AccountUsage.FunctionCount)"')"
 check "GetFunctionCodeSigningConfig says FF signs no code, as Terraform's provider reads it" '""' \

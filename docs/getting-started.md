@@ -899,6 +899,81 @@ hack/k8s/app-database.sh down                               # afterwards: the da
 
 **In production** the database, the cache, the queue, the buckets and the mail are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on; the receipts go from a domain of yours, proved by its records, once FF's operator lets the account out of the sandbox. The same folder runs on AWS Lambda with an RDS database, an ElastiCache cache, an SQS queue, S3 buckets and SES, its page on S3 behind CloudFront: `ff package` writes its zip, the function's role gives the clients their credentials, and the export kit has the queue and its mapping ([`data/sqs.md`](../cli/templates/export/data/sqs.md)), the page ([`data/s3-website.md`](../cli/templates/export/data/s3-website.md)), the cache ([`data/elasticache.md`](../cli/templates/export/data/elasticache.md)) and the mail ([`data/ses.md`](../cli/templates/export/data/ses.md)).
 
+### The way out
+
+Leaving FF for AWS changes settings, not code. FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's and its mail SES's, and AWS's own tools reach each one with only the endpoint changed. This section is the map; the sections after it give each part in full.
+
+**AWS's tools against FF.** Each tool takes FF's endpoints as configuration, outside the code, and the move to AWS removes them:
+
+| Tool | FF's endpoints | On AWS |
+|---|---|---|
+| AWS CLI v2, AWS's SDK for JavaScript v3, boto3 | The seven variables `ff keys create` prints: the key, `AWS_REGION`, and `AWS_ENDPOINT_URL_LAMBDA`, `_S3`, `_SQS` and `_SESV2`. Or a profile of `~/.aws/config` with a `services` section (below) | The variables unset, or a profile without `services` |
+| The AWS CLI, one command | `--endpoint-url <endpoint>` | The option dropped |
+| An SDK's client made in code | `endpoint` (JavaScript) or `endpoint_url` (boto3) in its options, which puts FF in the code: prefer the variables | The option removed |
+| A function's own code, running on FF | Nothing to do: FF gives each function the four endpoints' variables, with a key of its own | Nothing to do: the function's role gives the SDK its credentials, and the SDK finds AWS's endpoints |
+| OpenTofu and Terraform, with AWS's provider | The provider block's `endpoints` and five `skip_*` settings ("Terraform", below) | Those lines removed, and an AWS region |
+| A SAM template | `ff deploy template.yaml`, which reads SAM's subset itself, as FF has no CloudFormation ("SAM templates", below) | `sam deploy` |
+| AWS's SDK for JavaScript v2, which AWS no longer supports | It reads no variable or profile for an endpoint: `endpoint` in each client | The option removed |
+
+**A profile with a `services` section,** as AWS's CLI and SDKs read it, keeps FF's endpoints in one place. On AWS, the same profile without its `services` line, or AWS's own profile:
+
+```ini
+# ~/.aws/config; the key goes in ~/.aws/credentials, under [ff]
+[profile ff]
+region   = tn-tunis-1
+services = ff-endpoints
+
+[services ff-endpoints]
+lambda =
+  endpoint_url = http://localhost:3006
+s3 =
+  endpoint_url = http://s3.localhost:3002
+sqs =
+  endpoint_url = http://localhost:3003
+sesv2 =
+  endpoint_url = http://localhost:3005
+```
+
+Then `AWS_PROFILE=ff aws lambda list-functions`, or `--profile ff`. In production the endpoints are `https://lambda.<domain>` and the others, as `GET /me` gives them with the account (`aws`), and as the console's Account page lists them. The versions checked are pinned: the AWS CLI 2.34.32, the SDK for JavaScript 3.1156.0 and boto3 1.43.118; L4 checks a profile like this one against Lambda's endpoint.
+
+**Versions and aliases** are Lambda's ("Versions, as Lambda's", above): a version published is frozen, an alias names one and can give a second one a share of its calls, and a function's URL, schedules, queues and buckets' events can each go through an alias. A release moved by steps, with the AWS CLI:
+
+```bash
+aws lambda publish-version --function-name hello                     # version 2, the code as it is
+aws lambda update-alias --function-name hello --name live --function-version 1 \
+  --routing-config '{"AdditionalVersionWeights": {"2": 0.1}}'         # a tenth of live's calls to version 2
+aws lambda update-alias --function-name hello --name live --function-version 2 \
+  --routing-config '{"AdditionalVersionWeights": {}}'                 # then all of them
+```
+
+**Terraform, SAM, the export.** Three ways to describe the same functions, queues and buckets, each of which AWS takes too:
+
+1. **Terraform:** `ff init <name> --template terraform` writes a project that OpenTofu and Terraform apply on FF with AWS's provider, and on AWS once its provider block is changed ("Terraform", below).
+2. **SAM:** `ff deploy template.yaml` takes FF's subset of SAM: functions, their events, queues, buckets, and their outputs; `ff doctor template.yaml` names what is outside it ("SAM templates", below, and [the page of its own](sam-templates.md)).
+3. **The export:** `ff export <folder>` writes the account as both, a SAM template and a Terraform project, with each function's code, its role, a runbook and the estimate; the template deploys back on FF too ("Moving to AWS: ff export", below).
+
+**The estimate:** `ff usage --aws`, the console's Usage page and the export's `cost-estimate.md` price the account's last three months at AWS's prices, beside FF's own total, with a line for each part of AWS's bill that FF doesn't charge for: start-up time, databases, caches, data sent out, logs, CloudFront and a NAT gateway ("At AWS's prices, an estimate", below).
+
+**`ff doctor`** reads what would break on AWS, before the move:
+
+- `ff doctor <folder>`: the function's code, such as an FF API key, FF's hosts and variables, and files written outside `/tmp`;
+- `ff doctor template.yaml`: the template, what CloudFormation can't read, what is past Lambda's limits, and what `ff deploy` doesn't take;
+- `ff doctor` in a Terraform project: its provider block's lines for FF;
+- `ff doctor --deployed`: the account, what in it still points at FF, such as a URL that takes FF's keys or a domain on a site.
+
+Errors stop a move. Warnings are for you to judge, and with `--strict` they fail too ("Check the code first", below).
+
+**The differences, said plainly.** What FF does otherwise, by design:
+
+1. **FF's regions, endpoints and account IDs are its own:** `tn-tunis-1`, FF's endpoints, and account numbers of FF's, in each ARN. They are configuration, never code: code that reads its region from `AWS_REGION`, as Lambda sets it too, moves unchanged; an ARN written out in the code, FF's region and account in it, has to change.
+2. **No IAM.** A function's role is kept, without effect, and so are Lambda's permissions. FF's access keys decide who reaches what, each naming its functions, buckets and queues, as a policy names them. The export writes each function's role from what its keys used on FF.
+3. **An account out of credit** is refused. FF's API answers `402 InsufficientCreditException`. Lambda's endpoint answers `429 TooManyRequestsException`, saying that the credit ran out. AWS has no such refusal: it bills.
+4. **Not offered:** SnapStart, a VPC, X-Ray (`TracingConfig` takes `PassThrough` alone), code signing, layers, container images, file systems and KMS keys. Lambda's endpoint refuses each one, saying why, unless it is sent at its default, as AWS's tools send it. There is no CloudFormation: `ff deploy` reads SAM's subset itself. There is no Lambda@Edge either.
+5. **47 of Lambda's operations aren't offered yet.** Each answers `UnknownOperationException`, naming it, and what FF offers instead where it does ("The 47 others refused, for later", below).
+6. **A bucket's name is unique across FF,** as on S3, and FF refuses dots in it. The export makes each bucket's name a parameter, as the name may be taken on AWS.
+7. **A secret is FF's own:** Lambda has variables alone. The export makes each secret a parameter CloudFormation doesn't show back (`NoEcho`), listed in `secrets.template.env` for you to fill, as FF never shows a secret's value; or keep it in AWS's Secrets Manager.
+8. **Tracked, decided one by one:** AWS's additions of 2025 and 2026, Lambda Managed Instances, tenant isolation, durable functions, Lambda MicroVMs and Lambda Web Functions. None is offered: the operations Lambda's model has for them, its capacity providers' and its durable executions', answer as not offered yet (5), and `CreateFunction` refuses a field it doesn't take, such as tenant isolation's `TenancyConfig`, rather than ignore it.
+
 ### Functions through Lambda's API
 
 AWS's CLI, its SDKs and Terraform's provider make, change and invoke functions on FF as on AWS Lambda, with only the endpoint changed ([ADR 0014](adr/0014-lambda-api.md)). The backend answers Lambda's API, its JSON at its dated paths, on a port of its own, `FF_LAMBDA_PORT` (3006), at `FF_LAMBDA_BASE` (`http://localhost:3006`; in production `https://lambda.<domain>`). Each request is signed with Signature Version 4 for `lambda` by one of the account's access keys that names functions ("An access key", under "Files in buckets", above): at `read` it lists and reads them, at `invoke` it calls them too, at `write` it makes, changes and deletes them, each change counted against the plan's changes a minute with FF's API's (`TooManyRequestsException` past them, with `Retry-After`). Another account's function answers as one that doesn't exist. A function's pods get `AWS_ENDPOINT_URL_LAMBDA` with a key of their own, which invokes the account's functions and does nothing else.
