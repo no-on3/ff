@@ -200,3 +200,5 @@ hack/.cache/
 hack/.ci/
 # The small app's page's API address, written at its deploy.
 examples/orders-app/site/config.json
+# Python's compiled files, wherever a script ran.
+__pycache__/
