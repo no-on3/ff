@@ -739,6 +739,59 @@ as_maker aws_lambda delete-function --function-name e2e-aliased >/dev/null
 }
 section_def lambda_aliases section_lambda_aliases lambda_changes budget=90
 
+section_lambda_urls() {
+section "Lambda's function URLs with the AWS CLI: \$LATEST's URL and an alias's, made, read, listed, called at their addresses, changed, deleted; refused as Lambda refuses"
+urled_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-urled"
+lambda_zip "$work/urled.zip" 'export const handler = async (event) => ({ statusCode: 200, body: JSON.stringify({ path: event.rawPath, version: process.env.FUNCTION_VERSION }) });' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-urled --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/urled.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-urled >/dev/null 2>&1 || true
+as_maker aws_lambda create-alias --function-name e2e-urled --name live --function-version 1 >/dev/null
+latest_url="$(as_maker aws_lambda create-function-url-config --function-name e2e-urled --auth-type NONE)"
+live_url="$(as_maker aws_lambda create-function-url-config --function-name e2e-urled --qualifier live --auth-type NONE \
+  --cors '{"AllowOrigins": ["https://shop.example.tn"], "MaxAge": 60}')"
+latest_address="$(jq -r .FunctionUrl <<<"$latest_url")"
+live_address="$(jq -r .FunctionUrl <<<"$live_url")"
+check "CreateFunctionUrlConfig: \$LATEST's URL, and the alias live's with its CORS, each at an address of its own, its ARN qualified as Lambda's" \
+  "$urled_arn NONE $urled_arn:live https://shop.example.tn 60 true" \
+  "$(jq -r '"\(.FunctionArn) \(.AuthType)"' <<<"$latest_url") $(jq -r '"\(.FunctionArn) \(.Cors.AllowOrigins[0]) \(.Cors.MaxAge)"' <<<"$live_url") \
+$([ "$latest_address" != "$live_address" ] && echo true || echo false)"
+# called_at <URL's address> <path>: the URL's answer to a GET of the path, its status after its body.
+called_at() {
+  local host="${1#http://}"
+  host="${host%%[:/]*}"
+  curl -sS -w ' %{http_code}' --resolve "$host:$url_port:127.0.0.1" "${1%/}$2"
+}
+check "  ... each called at its address: \$LATEST's runs \$LATEST, the alias's its version 1" \
+  '{"path":"/a","version":"$LATEST"} 200 {"path":"/b","version":"1"} 200' "$(called_at "$latest_address" /a) $(called_at "$live_address" /b)"
+check "GetFunctionUrlConfig reads the alias's by --qualifier; ListFunctionUrlConfigs lists \$LATEST's, then the alias's" \
+  "$live_address $latest_address,$live_address" \
+  "$(as_reader get-function-url-config --function-name e2e-urled --qualifier live | jq -r .FunctionUrl) \
+$(as_reader list-function-url-configs --function-name e2e-urled | jq -r '[.FunctionUrlConfigs[].FunctionUrl] | join(",")')"
+check "UpdateFunctionUrlConfig: AWS_IAM, the address kept, CORS kept; a call without credentials then refused" \
+  "AWS_IAM $latest_address $live_address https://shop.example.tn 403" \
+  "$(as_maker aws_lambda update-function-url-config --function-name e2e-urled --auth-type AWS_IAM | jq -r '"\(.AuthType) \(.FunctionUrl)"') \
+$(as_maker aws_lambda update-function-url-config --function-name e2e-urled:live --auth-type AWS_IAM | jq -r '"\(.FunctionUrl) \(.Cors.AllowOrigins[0])"') \
+$(called_at "$latest_address" / | awk '{print $NF}')"
+check "refused as Lambda refuses: a second URL, a version's, an alias the function hasn't, a key that may only read" \
+  "refused ResourceConflictException refused InvalidParameterValueException refused ResourceNotFoundException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda create-function-url-config --function-name e2e-urled --auth-type NONE) \
+$(outcome as_maker aws_lambda create-function-url-config --function-name e2e-urled --qualifier 1 --auth-type NONE) \
+$(outcome as_reader get-function-url-config --function-name e2e-urled --qualifier gone) \
+$(outcome as_reader delete-function-url-config --function-name e2e-urled)"
+check "  ... in Lambda's words, with the ARNs" "FunctionUrlConfig exists for this Lambda function Function not found: $urled_arn:gone" \
+  "$(outcome as_maker aws_lambda create-function-url-config --function-name e2e-urled --auth-type NONE >/dev/null; grep -oE 'FunctionUrlConfig exists for this Lambda function' "$work/aws.err") \
+$(outcome as_reader get-function-url-config --function-name e2e-urled --qualifier gone >/dev/null; grep -oE 'Function not found: [^ ]+' "$work/aws.err")"
+as_maker aws_lambda delete-function-url-config --function-name e2e-urled
+as_maker aws_lambda delete-function-url-config --function-name e2e-urled --qualifier live
+check "DeleteFunctionUrlConfig: each goes, read as Lambda says it, its address answering 404 at once" \
+  "refused ResourceNotFoundException The resource you requested does not exist. 404 404" \
+  "$(outcome as_reader get-function-url-config --function-name e2e-urled) $(grep -oE 'The resource you requested does not exist\.' "$work/aws.err") \
+$(called_at "$latest_address" / | awk '{print $NF}') $(called_at "$live_address" / | awk '{print $NF}')"
+as_maker aws_lambda delete-function --function-name e2e-urled >/dev/null
+}
+section_def lambda_urls section_lambda_urls lambda_changes budget=45
+
 section_lambda_invoke() {
 section "Lambda's Invoke with the AWS CLI: the function's answer as it returned it, the version that ran, the call's log with LogType Tail, the ClientContext in Node.js and Python; an error and a timeout as the call's outcome; Event and DryRun; refused as Lambda refuses"
 invoker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-invoker", "functions": ["e2e-invoked", "e2e-invoked-py", "e2e-invoked-broken"], "functionAccess": "invoke"}')"
@@ -817,7 +870,7 @@ as_ver DELETE "/storage-keys/$(jq -r .id <<<"$invoker")" >/dev/null
 section_def lambda_invoke section_lambda_invoke lambda_changes budget=60
 
 section_lambda_sdks() {
-section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, refused as Lambda refuses, deleted"
+section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, refused as Lambda refuses, deleted"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0014 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
 lambda_clients="$FF_REPO_ROOT/hack/.cache/lambda-clients"
@@ -835,9 +888,9 @@ clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$make
 };')"
   OTHER_FUNCTION=e2e-versioned)
 env "${clients_env[@]}" MODULES="$lambda_clients/node_modules" node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
-client_checks "$work/lambda-sdk.jsonl" 13
+client_checks "$work/lambda-sdk.jsonl" 14
 env "${clients_env[@]}" "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
-client_checks "$work/lambda-boto3.jsonl" 13
+client_checks "$work/lambda-boto3.jsonl" 14
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60
 

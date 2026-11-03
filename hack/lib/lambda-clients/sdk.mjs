@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // AWS's SDK for JavaScript v3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the
 // endpoint, the region and the key are given. A function through its life: made, waited for, listed, its code and its
-// settings changed, each change waited for, tagged, invoked, a version and an alias, refused as Lambda refuses, deleted; an operation FF doesn't offer
+// settings changed, each change waited for, tagged, invoked, a version and an alias, a URL, refused as Lambda refuses, deleted; an operation FF doesn't offer
 // yet refused once, by its name, though the client retries by default. One JSON line per check,
 // {client, want, got, what}, for hack/e2e.sh.
 //   MODULES=<folder with node_modules> ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> \
@@ -129,6 +129,18 @@ await check('ok', 'PublishVersion, then CreateAlias, GetAlias, UpdateAlias, List
   await refusedAs(() => send(lambda.GetAliasCommand, { FunctionName, Name: 'live' }), 'ResourceNotFoundException');
   const versions = (await send(lambda.ListVersionsByFunctionCommand, { FunctionName })).Versions.map((version) => version.Version);
   return expect([Version, changed.FunctionVersion, listed, versions], ['1', '$LATEST', ['live:$LATEST'], ['$LATEST', '1']]);
+});
+await check('ok', 'CreateFunctionUrlConfig, then GetFunctionUrlConfig, UpdateFunctionUrlConfig with Cors, ListFunctionUrlConfigs and DeleteFunctionUrlConfig', async () => {
+  const made = await send(lambda.CreateFunctionUrlConfigCommand, { FunctionName, AuthType: 'NONE' });
+  const read = await send(lambda.GetFunctionUrlConfigCommand, { FunctionName });
+  const changed = await send(lambda.UpdateFunctionUrlConfigCommand, { FunctionName, Cors: { AllowOrigins: ['https://shop.example.tn'] } });
+  const listed = (await send(lambda.ListFunctionUrlConfigsCommand, { FunctionName })).FunctionUrlConfigs.map((url) => url.FunctionUrl);
+  await send(lambda.DeleteFunctionUrlConfigCommand, { FunctionName });
+  await refusedAs(() => send(lambda.GetFunctionUrlConfigCommand, { FunctionName }), 'ResourceNotFoundException');
+  return expect(
+    [read.FunctionUrl === made.FunctionUrl, made.AuthType, changed.AuthType, changed.Cors.AllowOrigins, listed.length, listed[0] === made.FunctionUrl],
+    [true, 'NONE', 'NONE', ['https://shop.example.tn'], 1, true],
+  );
 });
 await check('ok', 'TagResource, ListTags and UntagResource on its ARN', async () => {
   const { FunctionArn } = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });

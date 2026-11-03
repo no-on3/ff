@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # boto3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the endpoint, the region
 # and the key are given. A function through its life: made, waited for, listed, its code and its settings changed,
-# each change waited for, tagged, invoked, a version and an alias, refused as Lambda refuses, deleted; an operation FF doesn't offer yet refused once, by
+# each change waited for, tagged, invoked, a version and an alias, a URL, refused as Lambda refuses, deleted; an operation FF doesn't offer yet refused once, by
 # its name, though boto3 retries by default. One JSON line per check, {client, want, got, what}, for hack/e2e.sh.
 #   ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> CODE=<zip> CODE_SHA=<its CodeSha256> \
 #   NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> python boto3_checks.py
@@ -118,6 +118,17 @@ def versions_and_aliases():
     return expect([version, changed["FunctionVersion"], listed, versions], ["1", "$LATEST", ["live:$LATEST"], ["$LATEST", "1"]])
 
 
+def urls():
+    made = client.create_function_url_config(FunctionName=NAME, AuthType="NONE")
+    read = client.get_function_url_config(FunctionName=NAME)
+    changed = client.update_function_url_config(FunctionName=NAME, Cors={"AllowOrigins": ["https://shop.example.tn"]})
+    listed = [url["FunctionUrl"] for url in client.list_function_url_configs(FunctionName=NAME)["FunctionUrlConfigs"]]
+    client.delete_function_url_config(FunctionName=NAME)
+    refused_as(lambda: client.get_function_url_config(FunctionName=NAME), "ResourceNotFoundException")
+    return expect([read["FunctionUrl"] == made["FunctionUrl"], made["AuthType"], changed["AuthType"], changed["Cors"]["AllowOrigins"], listed == [made["FunctionUrl"]]],
+                  [True, "NONE", "NONE", ["https://shop.example.tn"], True])
+
+
 def tags():
     arn = client.get_function_configuration(FunctionName=NAME)["FunctionArn"]
     client.tag_resource(Resource=arn, Tags={"team": "shop"})
@@ -165,6 +176,7 @@ check("ok", "a RevisionId read before those changes is PreconditionFailedExcepti
 check("ok", "Invoke waits for the call: $LATEST ran it, the function's answer as it returned it, the ClientContext in its context, its log with LogType Tail", invoked)
 check("ok", "a function that throws: 200, FunctionError Unhandled and Lambda's error document; Event 202; DryRun 204", invoked_otherwise)
 check("ok", "PublishVersion, then CreateAlias, GetAlias, UpdateAlias, ListAliases and DeleteAlias on it; ListVersionsByFunction", versions_and_aliases)
+check("ok", "CreateFunctionUrlConfig, then GetFunctionUrlConfig, UpdateFunctionUrlConfig with Cors, ListFunctionUrlConfigs and DeleteFunctionUrlConfig", urls)
 check("ok", "TagResource, ListTags and UntagResource on its ARN", tags)
 check("ok", "refused as boto3 names Lambda's errors: a runtime FF lacks, a function the account hasn't", refusals)
 check("ok", "operations FF doesn't offer yet are UnknownOperationException, named, sent once by a client that retries by default", not_offered)

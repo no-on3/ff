@@ -1,6 +1,6 @@
 import { invalidParameterValue } from './lambda-error';
 
-/** The most entries a page of Lambda's lists holds, and how many without MaxItems, as Lambda's. */
+/** The most entries a page of most of Lambda's lists holds, and how many without MaxItems, as Lambda's. */
 const MAX_ITEMS = 10_000;
 const DEFAULT_ITEMS = 50;
 
@@ -43,13 +43,14 @@ function compare(a: Place, b: Place): number {
 }
 
 /**
- * A page of `entries`, sorted by their places, as Lambda's lists give one: MaxItems of them, 50 by default, from after
- * the Marker that the page before gave as its NextMarker, which this page gives when more come after it.
+ * A page of `entries`, sorted by their places, as Lambda's lists give one: MaxItems of them, 50 by default, `most` at
+ * most, as the list's own, from after the Marker that the page before gave as its NextMarker, which this page gives
+ * when more come after it.
  */
-export function pageOf<T>(query: URLSearchParams, entries: readonly T[], place: (entry: T) => Place, operation: string): Page<T> {
+export function pageOf<T>(query: URLSearchParams, entries: readonly T[], place: (entry: T) => Place, operation: string, most = MAX_ITEMS): Page<T> {
   const sent = query.get('MaxItems');
-  const size = sent === null ? DEFAULT_ITEMS : Number(sent);
-  if (!Number.isInteger(size) || size < 1 || size > MAX_ITEMS) throw invalidParameterValue(`MaxItems must be a whole number from 1 to ${MAX_ITEMS}, not ${sent}.`);
+  const size = sent === null ? Math.min(DEFAULT_ITEMS, most) : Number(sent);
+  if (!Number.isInteger(size) || size < 1 || size > most) throw invalidParameterValue(`MaxItems must be a whole number from 1 to ${most}, not ${sent}.`);
   const marker = query.get('Marker');
   const sorted = [...entries].sort((a, b) => compare(place(a), place(b)));
   const from = marker === null ? undefined : placeOf(marker, operation);

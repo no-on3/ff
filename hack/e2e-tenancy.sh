@@ -1107,6 +1107,16 @@ check "  ... nor publishes a version of it, nor makes, changes or deletes an ali
   "$(lambda_with "${lambda_b[@]}" publish-version --function-name "$arn_a") $(lambda_with "${lambda_b[@]}" create-alias --function-name l5-a --name b --function-version 1) \
 $(lambda_with "${lambda_b[@]}" update-alias --function-name "$arn_a" --name live --function-version 1) $(lambda_with "${lambda_b[@]}" delete-alias --function-name l5-a --name live) \
 $(lambda_with "${lambda_b[@]}" list-versions-by-function --function-name "$arn_a") $(lambda_with "${lambda_b[@]}" list-aliases --function-name l5-a)"
+# A's URLs as A's key lists them, before B's attempts and after.
+urls_of_a() { lambda_with "${lambda_a[@]}" list-function-url-configs --function-name l5-a --query 'FunctionUrlConfigs[].[FunctionArn, AuthType]'; }
+urls_before_b="$(urls_of_a)"
+check "  ... nor gives it a URL, nor reads, changes, lists or deletes its URLs, \$LATEST's or its alias's: A's as they were" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException true" \
+  "$(lambda_with "${lambda_b[@]}" create-function-url-config --function-name l5-a --auth-type NONE) \
+$(lambda_with "${lambda_b[@]}" get-function-url-config --function-name "$arn_a" --qualifier live) \
+$(lambda_with "${lambda_b[@]}" update-function-url-config --function-name l5-a:live --auth-type NONE) \
+$(lambda_with "${lambda_b[@]}" list-function-url-configs --function-name "$arn_a") $(lambda_with "${lambda_b[@]}" delete-function-url-config --function-name l5-a) \
+$([ "$(urls_of_a)" = "$urls_before_b" ] && echo true || echo false)"
 check "  ... nor reads its tags, nor tags it, nor untags it, by its ARN" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" list-tags --resource "$arn_a") $(lambda_with "${lambda_b[@]}" tag-resource --resource "$arn_a" --tags owner=b) \
 $(lambda_with "${lambda_b[@]}" untag-resource --resource "$arn_a" --tag-keys owner)"
