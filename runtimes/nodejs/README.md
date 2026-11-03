@@ -168,7 +168,7 @@ The stack trace points at the lines of the TypeScript source (source maps are on
 - **A line left open,** by `process.stdout.write` without a newline, is ended before the runtime's next line, so that `START`, `END`, `REPORT` and the JSON lines always start a line.
 - **A worker that dies after its handler returned,** because work left running filled the heap or exited, doesn't fail that call: it keeps its answer, and the crash is logged after its `REPORT`, without a request ID. The next call gets a fresh worker.
 
-The Python runtime needs none of this: its worker is a process that writes to the same stdout and stderr, unbuffered (`PYTHONUNBUFFERED`), before it sends its result.
+The Python runtime's main process forwards its worker's output the same way, end-of-call markers and all, so that it has each call's output too.
 
 ## What changed in v3
 

@@ -623,6 +623,62 @@ class AcceptLoop(unittest.TestCase):
             connection.close()
 
 
+def outside_their_call(output, request_ids):
+    """The lines of each call, which start with its ID, found outside its START and END."""
+    lines = output.splitlines()
+    outside = []
+    for request_id in request_ids:
+        start = lines.index(f"START RequestId: {request_id} Version: $LATEST")
+        end = lines.index(f"END RequestId: {request_id}")
+        outside += [line for at, line in enumerate(lines) if line.startswith(f"{request_id}:") and not start < at < end]
+    return outside
+
+
+class CallOutput(RuntimeTest):
+    """The log store tags each line with the call between its pod's START and REPORT lines (ADR 0005), so a line that
+    came after END would go untagged. The worker's output reaches the container's through the main process, which
+    prints END once the worker has marked the end of the call's output on both streams."""
+
+    def test_writes_every_line_of_a_call_before_its_end_on_stdout_and_stderr_and_never_the_end_of_call_markers(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="5000")
+        rt.ready()
+
+        # Calls that write mostly to stdout, and calls that write only to stderr: END waits for both streams.
+        calls = [(f"req-order-{i}", {"lines": 0, "errors": 20, "open": False} if i % 2 else {"lines": 20, "errors": 1})
+                 for i in range(1, 21)]
+        for request_id, body in calls:
+            self.assertEqual(rt.invoke(body, {"x-ff-request-id": request_id}).status, 200)
+
+        output = rt.logs()
+        self.assertNotIn("ff-end-of-call", output, "an end-of-call marker reached the output")
+        self.assertEqual(outside_their_call(output, [request_id for request_id, _ in calls]), [], output)
+
+    def test_starts_its_own_lines_on_a_line_of_their_own_when_the_call_left_one_open_and_adds_no_empty_line_otherwise(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="5000")
+        rt.ready()
+
+        rt.invoke({"lines": 1, "errors": 0}, {"x-ff-request-id": "req-open"})
+        rt.invoke({"lines": 1, "errors": 0, "open": False}, {"x-ff-request-id": "req-closed"})
+
+        output = rt.logs()
+        self.assertRegex(output, r"\nreq-open: line 1\nreq-open: left open\nEND RequestId: req-open\nREPORT RequestId: req-open\t")
+        self.assertRegex(output, r"\nSTART RequestId: req-closed Version: \$LATEST\nreq-closed: line 1\nEND RequestId: req-closed\nREPORT ")
+
+    def test_writes_what_a_call_wrote_before_its_timeout_ahead_of_the_timeout_and_its_end(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="500")
+        rt.ready()
+
+        res = rt.invoke({"lines": 3, "errors": 1, "open": False, "hangMs": 3000}, {"x-ff-request-id": "req-late"})
+
+        self.assertFunctionError(res, 504, "Sandbox.Timedout")
+        lines = rt.logs().splitlines()
+        timed_out = next(at for at, line in enumerate(lines) if '"msg": "task timed out; restarting worker"' in line)
+        written = [at for at, line in enumerate(lines) if line.startswith("req-late:")]
+        self.assertEqual(len(written), 4, lines)  # three lines on stdout, one on stderr
+        self.assertLess(max(written), timed_out)
+        self.assertLess(timed_out, lines.index("END RequestId: req-late"))
+
+
 class Secrets(RuntimeTest):
     def test_never_writes_environment_variables_to_the_logs(self):
         sentinel = "s3cr3t-value-7f1d"

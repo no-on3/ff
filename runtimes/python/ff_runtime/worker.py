@@ -187,6 +187,20 @@ def run_once(handler, request_id, event, deadline_ms):
     return ["result", body]
 
 
+def end_output(request_id):
+    """Marks the end of the call's output on both streams, after what it wrote: main.py prints END once it has both."""
+    marker = protocol.END_OF_CALL + request_id.encode() + b"\n"
+    for stream, fd in ((sys.stdout, 1), (sys.stderr, 2)):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001 - the code may have closed or replaced the stream
+            pass
+        try:
+            os.write(fd, marker)
+        except OSError:
+            pass  # main.py then waits its second, and goes on
+
+
 def serve(sock, handler):
     while True:
         try:
@@ -197,6 +211,7 @@ def serve(sock, handler):
             message = run_once(handler, request_id, event, deadline_ms)
         except MemoryError:
             message = None  # leave the except block first so the hoarded memory is released
+        end_output(request_id)
         if message is None:
             protocol.send(sock, "error", "Runtime.OutOfMemory", "Runtime exceeded its memory limit")
             return  # the heap may be in a bad state: main.py starts a fresh worker

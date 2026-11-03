@@ -154,6 +154,12 @@ REPORT RequestId: <id>	Duration: 12.34 ms	Billed Duration: 13 ms	Memory Size: 12
 
 A worker replaced after `Runtime.OutOfMemory` is logged as `function worker crashed; restarting`, with the request ID, as on the Node.js runtime. **Environment variables are never logged.**
 
+**A call's output comes before its `END`,** as the log collector needs it to give each line its call's request ID ([ADR 0005](../../docs/adr/0005-log-pipeline.md)). The worker's stdout and stderr are pipes that the main process reads, each on a thread of its own, and forwards as they come (`ff_runtime/output.py`), as the Node.js runtime's main thread forwards its worker's:
+- **The end of a call's output is marked.** Before it sends a call's result, the worker flushes `sys.stdout` and `sys.stderr` and writes an end-of-call marker to each, with the call's request ID; the main process takes the markers out of what it forwards, and writes `END` and `REPORT` once both have come.
+- **It waits a second at most,** for markers that a blocked or closed stream holds up, and, when the worker is stopped at a timeout or has died, for its streams to end: what the call wrote before comes ahead of the timeout's line and `END`. `Duration` stops when the result comes, so the wait is never billed.
+- **A line left open,** by `sys.stdout.write` without a newline, is ended before the runtime's next line, so that `START`, `END`, `REPORT` and the JSON lines always start a line.
+- **Lines written after the handler returned,** by a thread it left running, come after `END`, as on Lambda.
+
 ## What changed in v3
 
 Protocol v3 (2026-10-21, step-1 plan U-03, [ADR 0007](../../docs/adr/0007-function-events.md)) changes the event, as for Node.js, and nothing else: the handler gets the payload itself, any JSON value, unless `FF_EVENT_FORMAT=wrapped`, which every function made before v3 has, and which builds v2's wrapper. The startup line says `"protocol": 3`, with `"eventFormat"`, and the server header `ff-runtime-python/3`.

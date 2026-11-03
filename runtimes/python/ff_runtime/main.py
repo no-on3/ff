@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
 from ff_runtime import protocol
+from ff_runtime.output import Output, WorkerStreams
 from ff_runtime.protocol import (
     FUNCTION_VERSION,
     HANDLER,
@@ -85,6 +86,12 @@ NOT_RUN = (503, json.dumps({"errorType": "ServiceUnavailableException", "errorMe
 # How long the backend keeps a connection to a function unused before it closes it (kubernetes.orchestrator.ts): a
 # runtime that stops waits as long for its callers to close their connections.
 CALLER_IDLE_CLOSE_MS = 5000
+# How long END waits for the call's output once its result has come, or once the worker is gone: it comes within a
+# millisecond unless work the handler left running blocks the worker. Under the 2 s the backend allows past a call's
+# queue wait and timeout (kubernetes.orchestrator.ts), as the Node.js runtime's.
+OUTPUT_WAIT_S = 1.0
+# This process's stdout and stderr: the worker's output, and the runtime's own lines (output.py).
+OUTPUT = Output()
 
 
 class Supervisor:
@@ -100,22 +107,28 @@ class Supervisor:
         self.pending = 0  # admitted invocations whose response is not written yet
         self.process = None
         self.sock = None
+        self.streams = None  # the worker's stdout and stderr, which this process forwards
         self.start_worker()
 
     def start_worker(self):
         try:
             ours, theirs = socket.socketpair()
+            streams = WorkerStreams(OUTPUT, start_thread)
+            stdout, stderr = streams.give_worker()
             process = subprocess.Popen(
                 [sys.executable, "-P", "-m", "ff_runtime.worker", str(theirs.fileno()), str(os.getpid())],
                 pass_fds=[theirs.fileno()],
                 stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
             )
-        except (OSError, MemoryError) as error:
+            streams.worker_started()
+        except (OSError, MemoryError, RuntimeError) as error:
             fatal(f"cannot start the worker process: {error!r}")
         theirs.close()
         with self.lock:
             self.state, self.init_error = "starting", None
-            self.process, self.sock = process, ours
+            self.process, self.sock, self.streams = process, ours, streams
         try:
             start_thread(self._await_init, process, ours)
         except (RuntimeError, MemoryError) as error:
@@ -233,15 +246,15 @@ class Supervisor:
                 if self.state != "ready":
                     error = self.init_error or {"errorType": "Runtime.Unavailable", "errorMessage": "Runtime is not ready"}
                     return 500, json.dumps(error), {"x-ff-function-error": "Unhandled"}
-                process, sock = self.process, self.sock
-            return self._run(process, sock, request_id, event)
+                process, sock, streams = self.process, self.sock, self.streams
+            return self._run(process, sock, streams, request_id, event)
         finally:
             with self.lock:
                 self.running = False
                 self.lock.notify_all()
 
-    def _run(self, process, sock, request_id, event):
-        print(f"START RequestId: {request_id} Version: {FUNCTION_VERSION}", flush=True)
+    def _run(self, process, sock, streams, request_id, event):
+        OUTPUT.line(f"START RequestId: {request_id} Version: {FUNCTION_VERSION}")
         started = time.perf_counter()
         try:
             protocol.send(sock, "invoke", request_id, event, time.time() * 1000 + TIMEOUT_MS)
@@ -259,6 +272,8 @@ class Supervisor:
         }
 
         status, body, replace = 200, message[-1], False
+        if message[0] in ("result", "error"):
+            streams.wait_for_call(request_id, OUTPUT_WAIT_S)  # the worker marked the end of the call's output
         if message[0] == "error":
             status, error_type, error_message = 500, message[1], message[2]
             replace = error_type == "Runtime.OutOfMemory"  # the worker exits after reporting it
@@ -268,12 +283,14 @@ class Supervisor:
         elif message[0] == "timeout":
             status, error_type = 504, "Sandbox.Timedout"
             error_message = f"Task timed out after {TIMEOUT_MS / 1000:.2f} seconds"
-            log(level="error", msg="task timed out; restarting worker", requestId=request_id, timeoutMs=TIMEOUT_MS)
             self.stop_worker(process, sock)
+            streams.wait_for_end(OUTPUT_WAIT_S)  # what the call wrote before it was stopped comes first
+            log(level="error", msg="task timed out; restarting worker", requestId=request_id, timeoutMs=TIMEOUT_MS)
             replace = True
         elif message[0] == "exited":
             # The socket closes while the interpreter is still exiting: wait for its exit status.
             status, (error_type, error_message) = 500, crash_error(self.stop_worker(process, sock, grace_s=2))
+            streams.wait_for_end(OUTPUT_WAIT_S)
             log(level="error", msg="function worker crashed; restarting", errorType=error_type,
                 errorMessage=error_message, requestId=request_id)
             replace = True
@@ -284,12 +301,11 @@ class Supervisor:
             self.stop_worker(process, sock, grace_s=2)
             self.start_worker()
 
-        print(f"END RequestId: {request_id}", flush=True)
-        print(
+        OUTPUT.line(f"END RequestId: {request_id}")
+        OUTPUT.line(
             f"REPORT RequestId: {request_id}\tDuration: {duration_ms:.2f} ms\t"
             f"Billed Duration: {math.ceil(duration_ms)} ms\tMemory Size: {MEMORY_MB} MB\t"
-            f"Max Memory Used: {memory_mb} MB",
-            flush=True,
+            f"Max Memory Used: {memory_mb} MB"
         )
         return status, body, headers
 
@@ -498,6 +514,7 @@ def listen(port):
 
 def main():
     global SUPERVISOR
+    protocol.write_lines_with(OUTPUT.line)
     if protocol.EVENT_FORMAT not in protocol.EVENT_FORMATS:
         # A function given the wrong event would fail at every call, or worse, misread it: refuse to start instead.
         log(level="error", msg="unknown FF_EVENT_FORMAT", expected=list(protocol.EVENT_FORMATS))
