@@ -41,29 +41,13 @@ import { filesOf, zipOf } from '../packages/test-fixtures';
 import { RegistryError } from '../packages/registry';
 import { FunctionKeys } from '../storage/function-keys.service';
 import { FunctionsService, workloadOf } from './functions.service';
-import { memoryEnvironments } from './test-fixtures';
+import { meetsWhere, memoryEnvironments } from './test-fixtures';
 import { TAIL_ENDED, TAIL_UNAVAILABLE } from './live-tail';
 import { Observable } from 'rxjs';
 
 /** What the caller sees of a platform failure (D4): no details, and the request ID. */
 const internal = (action: string) => new RegExp(`^${action} failed because of an internal error \\(request [0-9a-f-]{36}\\)\\.$`);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-
-/** Whether a row's value meets a condition of TypeORM's, as PostgreSQL decides it: a value, a time, or Not, IsNull or LessThan of one. */
-function meets(value: unknown, condition: unknown): boolean {
-  if (condition instanceof FindOperator) {
-    if (condition.type === 'not') return !meets(value, condition.value);
-    if (condition.type === 'isNull') return value === null || value === undefined;
-    if (condition.type === 'lessThan') return value instanceof Date && value.getTime() < (condition.value as Date).getTime();
-    throw new Error(`no ${condition.type} here`);
-  }
-  if (condition instanceof Date) return value instanceof Date && value.getTime() === condition.getTime();
-  return value === condition;
-}
-
-/** Whether a row meets each of a condition's values; an undefined one is no condition, as TypeORM leaves it out. */
-const matches = (row: Function, condition: Partial<Record<keyof Function, unknown>>): boolean =>
-  Object.entries(condition).every(([field, wanted]) => wanted === undefined || meets(row[field as keyof Function], wanted));
 
 describe('FunctionsService (orchestrator-agnostic)', () => {
   let service: FunctionsService;
@@ -97,7 +81,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
     const id = conditions[0].id as string;
     // A function a test read but never saved: its row as read, which its change's take writes first.
     const row = rows.get(id) ?? (Array.isArray(where) ? ({ id, revisionId: conditions[0].revisionId } as Function) : undefined);
-    if (!row || !conditions.some((condition) => matches(row, condition))) return { affected: 0 };
+    if (!row || !conditions.some((condition) => meetsWhere(row, condition))) return { affected: 0 };
     Object.assign(row, changes);
     rows.set(id, row);
     if (changes.status !== undefined) savedStatuses.push(row.status);

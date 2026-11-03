@@ -29,6 +29,22 @@ export const FUNCTION_DEFAULTS: Partial<Function> = {
 };
 
 
+/** Whether a row's value meets a condition of TypeORM's, as PostgreSQL decides it: a value, a time, or Not, IsNull or LessThan of one. */
+export function meetsCondition(value: unknown, condition: unknown): boolean {
+  if (condition instanceof FindOperator) {
+    if (condition.type === 'not') return !meetsCondition(value, condition.value);
+    if (condition.type === 'isNull') return value === null || value === undefined;
+    if (condition.type === 'lessThan') return value instanceof Date && value.getTime() < (condition.value as Date).getTime();
+    throw new Error(`no ${condition.type} here`);
+  }
+  if (condition instanceof Date) return value instanceof Date && value.getTime() === condition.getTime();
+  return value === condition;
+}
+
+/** Whether a row meets each of a condition's values; an undefined one is no condition, as TypeORM leaves it out. */
+export const meetsWhere = (row: object, where: object): boolean =>
+  Object.entries(where).every(([field, wanted]) => wanted === undefined || meetsCondition((row as Record<string, unknown>)[field], wanted));
+
 /**
  * A repository that keeps rows in memory and, like a database, hands out copies
  * and fills in column defaults (pass the entity's, e.g. FUNCTION_DEFAULTS).
@@ -60,20 +76,30 @@ export class MemoryRepository<T extends { id?: string }> {
     this.rows.set(entity.id, { ...entity });
   }
 
-  /** The first row whose fields equal every value of `where`, as the account-scoped queries need. */
-  async findOne(options: { where: Partial<T> }): Promise<T | null> {
+  /** The first row that meets every value of `where`, as the account-scoped queries need. */
+  async findOne(options: { where: object }): Promise<T | null> {
     const [row] = await this.find(options);
     return row ?? null;
   }
 
-  /** Rows whose fields equal every value of `where`, or differ from it for a Not(), as the name checks ask. */
-  async find(options: { where?: Partial<T> } = {}): Promise<T[]> {
-    const where = Object.entries(options.where ?? {});
-    const matches = (actual: unknown, wanted: unknown) =>
-      wanted instanceof FindOperator ? wanted.type === 'not' && actual !== wanted.value : actual === wanted;
-    return [...this.rows.values()]
-      .filter((row) => where.every(([key, value]) => matches((row as Record<string, unknown>)[key], value)))
-      .map((row) => ({ ...row }));
+  /** Rows that meet every value of `where`, as PostgreSQL decides it: see meetsCondition. */
+  async find(options: { where?: object } = {}): Promise<T[]> {
+    return [...this.rows.values()].filter((row) => meetsWhere(row, options.where ?? {})).map((row) => ({ ...row }));
+  }
+
+  /**
+   * A conditional UPDATE, as TypeORM runs it: the rows that meet `where`, an array of conditions an OR, changed, their
+   * update time with them; how many.
+   */
+  async update(where: object | object[], changes: Partial<T>): Promise<{ affected: number }> {
+    const conditions = Array.isArray(where) ? where : [where];
+    let affected = 0;
+    for (const [id, row] of this.rows) {
+      if (!conditions.some((condition) => meetsWhere(row, condition))) continue;
+      this.rows.set(id, { ...row, ...changes, updatedAt: new Date() });
+      affected++;
+    }
+    return { affected };
   }
 
   /** Whether a row matches, as the name checks ask: EntityManager.existsBy. */
@@ -82,8 +108,9 @@ export class MemoryRepository<T extends { id?: string }> {
   }
 
   /**
-   * Enough of TypeORM's EntityManager for FunctionsService: its lookups, and its transactions, the create and the
-   * end of an invocation, which get the same manager: one process, so locks are ignored. Another table's
+   * Enough of TypeORM's EntityManager for FunctionsService: its lookups, its conditional updates, which take a function
+   * for a change and end it, and its transactions, the create and the end of an invocation, which get the same
+   * manager: one process, so locks are ignored. Another table's
    * rows, such as a function's versions, are none: this repository holds the functions alone.
    */
   get manager() {
@@ -92,8 +119,14 @@ export class MemoryRepository<T extends { id?: string }> {
       find: async () => [],
       countBy: async (_target: unknown, where: Partial<T>) => (await this.find({ where })).length,
       existsBy: (target: unknown, where: Partial<T>) => this.existsBy(target, where),
-      findOne: async (_target: unknown, options: { where: Partial<T> }) => this.findOne(options),
+      findOne: async (_target: unknown, options: { where: object }) => this.findOne(options),
+      findOneByOrFail: async (_target: unknown, where: object) => {
+        const row = await this.findOne({ where });
+        if (!row) throw new Error(`no row meets ${JSON.stringify(where)}`);
+        return row;
+      },
       save: async (_target: unknown, entity: T) => this.save(entity),
+      update: async (_target: unknown, where: object | object[], changes: Partial<T>) => this.update(where, changes),
       transaction: async <R>(work: (manager: unknown) => Promise<R>): Promise<R> => work(manager),
     };
     return manager;
