@@ -208,15 +208,16 @@ run('the log pipeline on the dev cluster (L3)', () => {
     await orchestrator.invoke(python, { nonce }, { requestId: pythonCall });
     const called = Date.now();
 
-    // Node.js: START, two lines, one on stderr, END, REPORT. Python: START, its print, END, REPORT.
+    // Node.js: START, two lines, one on stderr, END, REPORT. Python: START, its print, END, REPORT. In the store's
+    // order, as the backend reads them: its _time drops a fraction's trailing zeros, which a comparison of the
+    // strings would put after a later time's longer fraction.
     const lines = await until<StoredLine[]>("the two calls' 10 lines", 30_000, async () => {
-      const got = await query(`{namespace="${nsA}"} request_id:in("${nodeCall}", "${pythonCall}") _time:10m`);
+      const got = await query(`{namespace="${nsA}"} request_id:in("${nodeCall}", "${pythonCall}") _time:10m | sort by (_time, _msg)`);
       return got.length === 10 ? { done: got } : { last: got.map((l) => l._msg) };
     });
     const delayMs = Date.now() - called;
 
-    const of = (call: string) =>
-      lines.filter((l) => l.request_id === call).sort((a, b) => a._time.localeCompare(b._time) || a._msg.localeCompare(b._msg));
+    const of = (call: string) => lines.filter((l) => l.request_id === call);
     const node = of(nodeCall);
     expect(node[0]._msg).toBe(`START RequestId: ${nodeCall} Version: $LATEST`);
     expect(node.at(-1)?._msg).toMatch(new RegExp(`^REPORT RequestId: ${nodeCall}\\tDuration: `));
