@@ -10,7 +10,8 @@
 #             in the history (gitleaks): what a push that changes only documents runs
 #   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the cache
 #             and mail servers' agents', the small app's handlers, the ff command's and its binary's (L1, L2),
-#             the alert rules' and the log collector's filter (these two in their own images)
+#             every SAM template kept as a fixture, which the SAM CLI's sam validate --lint takes, the alert rules'
+#             and the log collector's filter (these two in their own images)
 #   db        the backend's database tests (L2) and the migrations' drift check, on a PostgreSQL of its own,
 #             with servers of customers' databases and caches, and a store for buckets
 #   security  the dependencies' advisories (npm audit, but those .npmauditignore accepts until a date), and every
@@ -100,11 +101,11 @@ free_ports() {
   return 1
 }
 
-# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, and the AWS tools the
-# ff suite checks an export with. A stage that runs the backend here needs its packages; the images build in Docker
+# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, the SAM CLI the unit
+# tests lint the SAM fixtures with, and the AWS tools the ff suite checks an export with. A stage that runs the backend here needs its packages; the images build in Docker
 # with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
-  [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust" [db]=BE [security]=''
+  [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust sam" [db]=BE [security]=''
   [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [aws-tools]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
 )
 stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[aws-tools]} ${stage_uses[images]}"
@@ -118,7 +119,10 @@ stage_deps() {
     case "$uses" in *" $dir "*) prepare "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund ;; esac
   done
   case "$uses" in *" rust "*) prepare "Rust for the ff command" hack/install-tools.sh rust ;; esac
-  case "$uses" in *" aws "*) prepare "the SAM CLI, OpenTofu and AWS's provider, pinned and checked" hack/install-tools.sh tofu aws-provider sam ;; esac
+  case "$uses" in
+    *" aws "*) prepare "the SAM CLI, OpenTofu and AWS's provider, pinned and checked" hack/install-tools.sh tofu aws-provider sam ;;
+    *" sam "*) prepare "the SAM CLI, pinned and checked" hack/install-tools.sh sam ;;
+  esac
 }
 
 # The page's one script, which a syntax error stops entirely (and with it every scenario).
@@ -202,6 +206,7 @@ stage_unit() {
   step "the mail server's agent: unit tests" node --test deploy/mail/agent.test.mjs
   step "the small app: its handlers, their clients stubbed" node --test examples/orders-app/test/handlers.test.js
   step "ff: unit tests, and its binary's against a scripted API (L1, L2)" in_dir cli cargo test --locked
+  step "the SAM fixtures, which sam validate --lint takes, cfn-lint inside it" hack/test-sam-fixtures.sh
   step "alert rules and dashboards" hack/k8s/test-monitoring-rules.sh
   step "log collector: configuration and filter" hack/k8s/test-logging-filter.sh
 }

@@ -17,7 +17,7 @@ Parameters:
   WwwBucketName:
     Type: String
     Default: www
-    Description: 'The site www''s bucket on S3, for the roles that use it: the output Bucket of data/s3-website.md''s stack, FF''s name until it is made'
+    Description: 'The site www''s bucket on S3, for the functions that use it: the output Bucket of data/s3-website.md''s stack, FF''s name until it is made'
   SendReceiptsLogLevel:
     Type: String
     Description: 'send-receipts''s variable LOG_LEVEL, which `ff env list send-receipts --show` gives'

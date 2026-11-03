@@ -1777,19 +1777,27 @@ mod tests {
         s3_endpoint: "https://s3.ffunc.cloud",
     };
 
+    /// A template's folder: a function's code as a folder and as a .zip, and the code ff export's template names.
     fn folder() -> tempfile::TempDir {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(dir.path().join("orders")).unwrap();
         std::fs::write(dir.path().join("reports.zip"), "PK").unwrap();
+        std::fs::create_dir(dir.path().join("code")).unwrap();
+        for function in ["make-thumbnail", "report_v1", "send-receipts"] {
+            std::fs::write(dir.path().join(format!("code/{function}.zip")), "PK").unwrap();
+        }
         dir
     }
 
+    /// The plan of a template, its parameters' values the given, else their Default, as `ff deploy` takes them.
     fn planned(text: &str, last: &[StackResource], values: &[(&str, &str)]) -> Result<Plan, Problems> {
         let dir = folder();
-        let values: BTreeMap<String, Value> =
-            values.iter().map(|(name, value)| (name.to_string(), Value::from(*value))).collect();
+        let template = read(text).unwrap();
+        let given: Vec<(String, String)> =
+            values.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect();
+        let values = crate::sam::parameters::values(&template, &given).values;
         let mut n = 0;
-        plan(&read(text).unwrap(), &values, &PLACE, last, dir.path(), &mut || {
+        plan(&template, &values, &PLACE, last, dir.path(), &mut || {
             n += 1;
             format!("SUFFIX{n:06}")
         })
@@ -2563,6 +2571,117 @@ Resources:
         ];
         assert_eq!(removed, Removed { deleted: deleted.into(), kept: [retained("Site", BUCKET, Some("site"))].into() });
         assert_eq!(in_words(&removed.deleted[1]), "the bucket photos (Photos)");
+    }
+
+    /// The way back: the template ff export's tests write from their account, planned as a deploy under another account
+    /// plans it, makes that account's resources, but for what MIGRATION.md says changes on the way.
+    #[test]
+    fn plans_the_template_ff_export_writes_as_the_account_it_read() {
+        let values = [("SendReceiptsLogLevel", "info"), ("SendReceiptsDatabaseUrl", "postgresql://shop@db/shop")];
+        let plan = planned(include_str!("../commands/export/testdata/shop-template.yaml"), &[], &values).unwrap();
+
+        let functions: Vec<_> = plan
+            .functions
+            .iter()
+            .map(|function| {
+                let settings =
+                    (function.runtime.as_str(), function.handler.as_str(), function.memory, function.timeout);
+                (function.name.as_str(), settings, function.instances(), function.alias.as_deref())
+            })
+            .collect();
+        assert_eq!(
+            functions,
+            [
+                // Its alias beta names a version, which no template holds: live, which its warm instance keeps warm.
+                ("make-thumbnail", ("python", "app.handler", 512, 30), (1, 10), Some("live")),
+                // Lambda's name for report.v1, as it would be named on AWS.
+                ("report_v1", ("nodejs", "function.handler", 128, 3), (0, DEFAULT_MAX_INSTANCES), None),
+                ("send-receipts", ("nodejs", "function.handler", 256, 60), (0, DEFAULT_MAX_INSTANCES), Some("live")),
+            ]
+        );
+        let receipts = &plan.functions[2];
+        // Its variable, and its secret as a variable, as Lambda has no other.
+        assert_eq!(
+            receipts.environment,
+            BTreeMap::from([
+                ("DATABASE_URL".to_owned(), "postgresql://shop@db/shop".to_owned()),
+                ("LOG_LEVEL".to_owned(), "info".to_owned())
+            ])
+        );
+        let url = receipts.url.as_ref().unwrap();
+        assert_eq!(
+            (url.auth_type.as_str(), url.cors.clone()),
+            ("AWS_IAM", Some(json!({ "allowOrigins": ["https://shop.tn"], "allowMethods": ["POST"], "maxAge": 300 })))
+        );
+        assert_eq!(
+            receipts.event_invoke_config,
+            Some(json!({ "maximumRetryAttempts": 1, "destinationConfig": {
+                "onSuccess": { "destination": "arn:aws:lambda:tn-tunis-1:000000000001:function:audit" },
+                "onFailure": { "destination": "arn:aws:sqs:tn-tunis-1:000000000001:failed-receipts" } } }))
+        );
+        // Both schedules off, nightly until ScheduleState says the move is done, so that none runs twice.
+        let schedules: Vec<_> = receipts
+            .schedules
+            .iter()
+            .map(|schedule| {
+                (schedule.name.as_str(), schedule.expression.as_str(), schedule.input.clone(), schedule.enabled)
+            })
+            .collect();
+        assert_eq!(
+            schedules,
+            [
+                ("Nightly", "cron(0 2 * * ? *)", Some(json!({ "report": true })), false),
+                ("Weekly", "rate(7 days)", None, false)
+            ]
+        );
+        let mapping = &receipts.mappings[0];
+        assert_eq!(
+            (mapping.queue(), mapping.batch_size, mapping.batching_window, mapping.report_batch_item_failures),
+            ("orders", 10, 2, true)
+        );
+        assert_eq!((mapping.max_concurrency, mapping.enabled), (Some(5), true));
+
+        let queues: Vec<_> = plan
+            .queues
+            .iter()
+            .map(|queue| (queue.name.as_str(), queue.attributes["visibilityTimeout"].clone(), queue.dead_letter()))
+            .collect();
+        // Each dead-letter queue before the queues that use it, as the deploy makes them.
+        assert_eq!(
+            queues,
+            [
+                ("failed-receipts", json!(30), None),
+                ("orders-dlq", json!(30), None),
+                ("orders", json!(60), Some("orders-dlq"))
+            ]
+        );
+        // The bucket's own notification, its two events one configuration as S3 keeps them, and the function's, on its
+        // alias; the site is left to data/s3-website.md's own template.
+        let photos = &plan.buckets[0];
+        let notifications: Vec<_> = photos
+            .notifications
+            .iter()
+            .map(|notification| {
+                let filter = (notification.prefix.as_deref(), notification.suffix.as_deref());
+                (notification.arn.as_str(), notification.events.join(","), filter)
+            })
+            .collect();
+        assert_eq!((plan.buckets.len(), photos.name.as_str(), photos.website.is_none()), (1, "photos", true));
+        assert_eq!(
+            notifications,
+            [
+                (
+                    "arn:aws:sqs:tn-tunis-1:000000000001:orders",
+                    "s3:ObjectRemoved:Delete,s3:ObjectRemoved:DeleteMarkerCreated".to_owned(),
+                    (None, None)
+                ),
+                (
+                    "arn:aws:lambda:tn-tunis-1:000000000001:function:make-thumbnail:live",
+                    "s3:ObjectCreated:*".to_owned(),
+                    (Some("in/"), Some(".jpg"))
+                ),
+            ]
+        );
     }
 
     #[test]

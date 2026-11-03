@@ -18,7 +18,7 @@ inputs:
     description: >-
       The name of the job's cache of the AWS tools hack/install-tools.sh installs, for a job that runs them: export for
       the ff suite's (the SAM CLI, OpenTofu and AWS's provider), terraform for AWS's tools' suite (OpenTofu, Terraform's
-      CLI and both providers); none for the others
+      CLI and both providers), sam for the unit tests' (the SAM CLI, which lints the SAM fixtures); none for the others
     default: ''
 runs:
   using: composite

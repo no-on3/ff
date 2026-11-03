@@ -38,7 +38,8 @@
 # that writes its receipt to a bucket and e-mails it through the SES endpoint from an address proved by its
 # link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called
 # without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; the account exported
-# to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's role what its keys used; and
+# to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's role what its keys used, the
+# template deployed back on FF by another account, which makes the same; and
 # ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
@@ -79,6 +80,9 @@ ff() {
 out() { cat "$work/out"; }
 err() { cat "$work/err"; }
 code() { cat "$work/code"; }
+# in_folder <folder> <args...>: ff in an application's folder, where a template's CodeUri starts and samconfig.toml
+# names the stack.
+in_folder() { local folder=$1; shift; (cd "$folder" && ff "$@"); }
 
 # sql <statement>: run on FF's database, its answer dropped.
 sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
@@ -462,8 +466,6 @@ section "SAM templates as stacks: ff init --template sam deployed and called at 
 check "ff init --template sam makes sam init's hello world as FF takes it: its template, code, event and test, samconfig.toml naming the stack" \
   ".gitignore README.md events/event.json hello-world/app.mjs hello-world/package.json samconfig.toml template.yaml tests/unit/test-handler.mjs" \
   "$(cd "$work/cli-sam" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | paste -sd' ')"
-# in_folder <folder> <args...>: ff in an application's folder, where samconfig.toml names the stack.
-in_folder() { local folder=$1; shift; (cd "$folder" && ff "$@"); }
 in_folder "$work/cli-sam" deploy template.yaml --output json
 hello="$(out | jq -r '.functions[0].name')"
 check "ff deploy makes its function in the stack samconfig.toml names, its outputs the function's URL and ARN" \
@@ -1397,7 +1399,7 @@ check "ff usage lists the queue's month after the buckets, deleted since: its re
 section_def queues_counted section_queues_counted queues budget=5
 
 section_small_app_exported() {
-section "the small app exported to AWS, minutes after: ff export's template and terraform/, which the SAM CLI and OpenTofu take, each function's role what its keys used; then the app removed"
+section "the small app exported to AWS, minutes after: ff export's template and terraform/, which the SAM CLI and OpenTofu take, each function's role what its keys used"
 # Its keys' uses are written at the minute's turn: by now the small app's; run alone, they are waited for, as long as
 # before.
 receipts_id="$("$ff_bin" get shop-receipts --output json | jq -r .id)"
@@ -1472,6 +1474,81 @@ initialized="$(code)"
 tool "${tofu[@]}" validate -no-color
 check "  ... terraform/, which tofu fmt leaves as it is, and tofu init and validate take" "0 0 0 Success! The configuration is valid." \
   "$formatted $initialized $(code) $(out | head -1)"
+}
+section_def small_app_exported section_small_app_exported small_app budget=120
+
+section_small_app_round_trip() {
+section "the small app's way back: the template ff export wrote, deployed on FF by account B, makes what A has, compared through FF's API; then the app removed from both"
+trip="$work/shop-round-trip"
+rm -rf "$trip"
+# The small app's functions alone, with what they use, whatever the sections before left in the account.
+ff export "$trip" --functions shop-api,shop-receipts,shop-nightly --with-values --output json
+check "ff export --with-values writes the variables' values in the template, the secrets left to fill" "0 true" \
+  "$(code) $(grep -E '^[A-Za-z0-9]+=$' "$trip/secrets.template.env" >/dev/null && echo true || echo false)"
+# As on AWS: S3's names are global, on FF too, so B names each bucket anew, as its parameter lets, its Default A's
+# name; and the secrets, which FF never shows back, are filled.
+overrides=()
+renamed='{}'
+while read -r parameter bucket; do
+  overrides+=("$parameter=$bucket-b")
+  renamed="$(jq -c --arg bucket "$bucket" '.[$bucket] = $bucket + "-b"' <<<"$renamed")"
+done < <(awk '/^  [A-Za-z0-9]+BucketName:$/ { p = substr($1, 1, length($1) - 1) } p && $1 == "Default:" { print p, $2; p = "" }' \
+  "$trip/template.yaml")
+for parameter in $(sed -n 's/^\([A-Za-z0-9]*\)=$/\1/p' "$trip/secrets.template.env"); do overrides+=("$parameter=filled-by-b"); done
+in_folder "$trip" --profile b deploy template.yaml --stack-name shop --parameter-overrides "${overrides[@]}" --yes
+check "account B deploys it as the stack shop: A's three functions, its queue and its bucket, under the name B gave it" \
+  "0 shop-api,shop-nightly,shop-receipts cli-new-orders cli-receipts-b" \
+  "$(code) $("$ff_bin" --profile b list --output json | jq -r '[.[].name] | sort | join(",")') \
+$("$ff_bin" --profile b queues list --output json | jq -r '[.[].name] | join(",")') \
+$("$ff_bin" --profile b buckets list --output json | jq -r '[.[].name] | join(",")')"
+# What A has, as B should have it: a secret a variable, as Lambda has no other, its value B's; a variable that holds a
+# bucket's name holding B's, which the template gives it. What each account's API gives: a function's settings, code
+# and variables, and its URL.
+function_facts() { # <a|b> <function>
+  local profile=() function secrets url
+  [ "$1" = a ] || profile=(--profile "$1")
+  function="$("$ff_bin" "${profile[@]}" get "$2" --output json)"
+  secrets="$("$ff_bin" "${profile[@]}" secrets list "$2" --output json)"
+  url="$("$ff_bin" "${profile[@]}" url show "$2" --output json 2>/dev/null || echo '{}')"
+  jq -cnS --arg account "$1" --argjson renamed "$renamed" --argjson function "$function" --argjson secrets "$secrets" \
+    --argjson url "$url" '
+    def as_b: if $account == "a" then (map_values(if type == "string" then $renamed[.] // . else . end)
+      + ($secrets.secrets | map({ key: .name, value: "filled-by-b" }) | from_entries)) else . end;
+    $function | { runtime, handler, memory, timeout, eventFormat, minInstances, maxInstances, scaleToZero, codeSha256,
+      description, deadLetterTargetArn, tags, variables: ((.environment // {}) | as_b),
+      url: ($url.url // null | if . then { authType, cors } else . end) }'
+}
+same=()
+for function in shop-api shop-receipts shop-nightly; do
+  if [ "$(function_facts a "$function")" = "$(function_facts b "$function")" ]; then same+=(true); else
+    same+=(false); echo "  $function, A's then B's:"; function_facts a "$function"; function_facts b "$function"; fi
+done
+check "each function B made is A's: its runtime, handler, memory, timeout, instances, code and variables, and its URL with its CORS" \
+  "true true true" "${same[*]}"
+aliases_of() { "$ff_bin" "${@:2}" alias list "$1" --output json | jq -r '[.[].name] | if . == [] then "none" else join(",") end'; }
+check "  ... shop-receipts's alias live, its AutoPublishAlias, B's naming the version its deploy published; shop-api's stable, which names a version, A's alone, as MIGRATION.md says" \
+  "live live 1 stable none" \
+  "$(aliases_of shop-receipts) $(aliases_of shop-receipts --profile b) \
+$("$ff_bin" --profile b alias list shop-receipts --output json | jq -r '.[0].functionVersion') $(aliases_of shop-api) $(aliases_of shop-api --profile b)"
+mapping_facts() { "$ff_bin" "$@" event-sources list --function shop-receipts --output json | jq -c '[.[] | {
+  queue: (.eventSourceArn | split(":") | last), function: (.functionArn | split(":")[6]), batchSize,
+  maximumBatchingWindowInSeconds, functionResponseTypes, scalingConfig, state }]'; }
+queue_facts() { "$ff_bin" "$@" queues get cli-new-orders --output json | jq -c '{ visibilityTimeout, messageRetentionPeriod,
+  delaySeconds, maximumMessageSize, receiveMessageWaitTimeSeconds, redrivePolicy, tags }'; }
+bucket_facts() { "$ff_bin" "${@:2}" buckets get "$1" --output json | jq -c '{ tags }'
+  "$ff_bin" "${@:2}" buckets notifications "$1" --output json | jq -c .; }
+check "  ... the queue's attributes A's, its mapping to shop-receipts A's, on the alias in B, as SAM's SQS event under AutoPublishAlias" \
+  "true true true" \
+  "$([ "$(queue_facts)" = "$(queue_facts --profile b)" ] && echo true || echo false) \
+$([ "$(mapping_facts)" = "$(mapping_facts --profile b)" ] && echo true || echo false) \
+$("$ff_bin" --profile b event-sources list --function shop-receipts --output json | jq '.[0].functionArn | endswith(":shop-receipts:live")')"
+check "  ... and the bucket A's, its tags and notifications" "true" \
+  "$([ "$(bucket_facts cli-receipts)" = "$(bucket_facts cli-receipts-b --profile b)" ] && echo true || echo false)"
+ff --profile b delete-stack shop --yes
+check "B's stack deleted, with all it made; A's app untouched" "0 0 0 0 shop-api,shop-nightly,shop-receipts" \
+  "$(code) $("$ff_bin" --profile b list --output json | jq length) $("$ff_bin" --profile b queues list --output json | jq length) \
+$("$ff_bin" --profile b buckets list --output json | jq length) \
+$("$ff_bin" list --output json | jq -r '[.[].name | select(startswith("shop-"))] | sort | join(",")')"
 ff queues delete cli-new-orders --yes
 check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
 ff buckets delete cli-receipts --force --yes
@@ -1484,7 +1561,7 @@ ff delete shop-nightly --yes
 ff delete shop-receipts --yes
 ff delete shop-api --yes
 }
-section_def small_app_exported section_small_app_exported small_app budget=120
+section_def small_app_round_trip section_small_app_round_trip small_app_exported budget=50
 
 section_account() {
 section "the account: who, its plan, what it used and owes, how its functions ran"

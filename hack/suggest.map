@@ -74,6 +74,7 @@ hack/e2e-aws-tools.sh                   static aws-tools
 hack/lib/provider_log.py                static aws-tools
 hack/e2e-platform.sh                    static platform
 hack/test-images.sh                     static images
+hack/test-sam-fixtures.sh               static unit
 hack/test-evidence.sh                   static l3
 hack/k8s/test-it.sh                     static l3
 hack/lib/s3-clients/*                   static l4:buckets
@@ -88,6 +89,7 @@ hack/lib/evidence.sh                    static l3 l4 l5 cli aws-tools
 hack/lib/latest-tools.sh                static tools
 hack/install-tools.sh                   static unit tools aws-tools
 hack/k8s/*                              static l3 l4 l5 cli aws-tools images
+hack/spikes/lambda/sam/*                static unit
 hack/spikes/*                           static
 hack/*                                  static
 

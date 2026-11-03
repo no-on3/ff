@@ -170,3 +170,22 @@ checks it too, with one of AWS's regions, since FF's isn't in its list:
 ```bash
 sam validate --lint --region eu-west-3
 ```
+
+Every SAM template the repository keeps, the fixtures of `ff`'s tests, `ff init --template sam`'s and the one `ff export`
+writes among them, passes it in the unit tests (`hack/test-sam-fixtures.sh`).
+
+## A template `ff export` wrote
+
+`ff export` writes its template inside the subset, and `ff deploy` takes it back, on FF, in another account too: the
+same functions, with their code, settings, variables and URLs, the same queues, with their attributes and their
+readers, and the same buckets, with their notifications, which the `ff` suite compares through FF's API. What differs
+is what differs on AWS:
+
+1. **The buckets' names** are parameters, as a bucket's name is its own across FF: give each another. A function's
+   variable that held a bucket's name takes its parameter, and one that held a queue's name the queue's `QueueName`.
+2. **The secrets** are variables, their values the ones `secrets.template.env` asks for, as Lambda has no other: to
+   keep one a secret on FF, take it out of the template and give it with `ff secrets set`.
+3. **The schedules** are off until `ScheduleState` is `ENABLED`, so that none runs in both places.
+4. **An alias that named `$LATEST`** is the function's `AutoPublishAlias`: the deploy publishes a version and points
+   the alias at it, and the function's queues and buckets call the alias, as SAM's events do. An alias that names a
+   version, and its own URL, stay out, as `MIGRATION.md` says, with the commands that make them.
