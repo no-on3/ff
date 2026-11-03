@@ -945,6 +945,52 @@ A request that is none of Lambda's operations answers the same, with its method 
 
 **In the console,** a function's page has its AWS CLI commands to copy: the region and Lambda's endpoint to export, beside one of the account's access keys, then the function read, called with its log, given new code and published as a version, by its name. The Account page lists FF's region and its four endpoints, Lambda's beside S3's, SQS's and SES's, and the variables to export, as `GET /me` gives them with each account (`aws`).
 
+### Terraform
+
+`ff init <name> --template terraform --runtime nodejs|python` writes an app's Terraform project that OpenTofu and Terraform's CLI apply on FF with AWS's own provider and, with only its provider block changed, on AWS. Its four modules, in `modules/`, each used once by `main.tf`: a function with a URL anyone may call on its alias `live`, which each change of its code publishes and moves, and its asynchronous calls' settings; a queue with its dead-letter queue and a function reading it; a bucket whose new files run a function, with S3's permission; a site, a bucket with its website configuration, its files from `site/`. Its code is in `src/`, its README says the rest. `ff init` reads FF's region and endpoints, and the account, from `GET /me`, asks the API nothing more, and prints the command of the key the provider takes:
+
+```bash
+ff init shop --template terraform --runtime nodejs
+cd shop
+eval "$(ff keys create --name shop-terraform --function shop-api --function shop-jobs --function shop-uploads --function-access write \
+  --bucket shop-uploads --bucket shop-site --queue shop-jobs --queue shop-jobs-dead-letters | grep '^export ')"
+tofu init && tofu apply                          # or terraform's: 22 resources
+tofu plan                                        # No changes.
+curl "$(tofu output -raw api_url)"               # the API, on its alias live
+aws s3 cp ./photo.jpg s3://shop-uploads/in/photo.jpg   # runs shop-uploads with S3's event
+aws s3 rm s3://shop-uploads --recursive && tofu destroy   # a bucket that holds files isn't deleted, as on S3
+```
+
+**A key reaches what it names,** as an IAM policy does: this one the project's three functions at `write`, its two buckets and its two queues, named before they are made. A function, bucket or queue added to `main.tf` needs a key that names it too.
+
+**The provider block,** in `providers.tf`, as `ff init` writes it here:
+
+```hcl
+provider "aws" {
+  region = "tn-tunis-1"
+
+  # FF: from here...
+  skip_credentials_validation = true   # no STS to check the key with
+  skip_requesting_account_id  = true   # nor to ask the account's ID of
+  skip_metadata_api_check     = true   # no instance metadata service
+  skip_region_validation      = true   # FF's region isn't in AWS's list
+  s3_use_path_style           = true   # FF's S3 at the endpoint's path, http://s3.localhost:3002/<bucket>
+  endpoints {
+    lambda = "http://localhost:3006"
+    s3     = "http://s3.localhost:3002"
+    sqs    = "http://localhost:3003"
+    sesv2  = "http://localhost:3005"
+  }
+  # ...to here.
+}
+```
+
+The provider resolves names with Go's own resolver, which finds `localhost` but, on a machine without one that knows its subdomains, not `s3.localhost` (`no such host`): there, `s3 = "http://127.0.0.1:3002"`, which FF's S3 takes path-style. In production the endpoints are `https://lambda.<domain>` and the others, as `GET /me` gives them.
+
+**Kept without effect,** so that the modules apply unchanged on both: each function's role, an ARN of the account's, as FF has no IAM and a function's own key stands for it; Lambda's permissions, the two the provider adds for a URL anyone may call and the one that lets S3 call a function ("Permissions are kept, without effect", above); a site's bucket policy and public access block, as on FF a website configuration alone makes a bucket public. **What the provider waits for:** a new queue about 25 seconds, as it reads it until it has its attributes six times; and the plan's changes a minute, 60 on beta, Lambda's own and the API's together: over them, Lambda's endpoint answers `TooManyRequestsException` with `Retry-After`, which the provider retries until each change goes through. **A bucket's ARN** the provider builds from its region's partition, of which FF's region has none (`arn::s3:::photos`, which a permission's `source_arn` refuses): the modules write it in AWS's, `arn:aws:s3:::photos`, as a project's other ARNs are.
+
+**Moving to AWS:** in `providers.tf`, an AWS region, the lines between the two "FF" comments removed, and `function_role` set to `null`, so that each module makes its function's role; then `apply` with an AWS account's key. `ff doctor` in the project's folder names what is left of FF's: the `endpoints` block an error (`provider-endpoints`), each of the five settings a warning (`provider-setting`), Terraform's `.terraform/` left out, the functions' code read as for any move (below). `hack/e2e-aws-tools.sh` applies the project, calls each part, plans it again, destroys it and readies it for AWS, with OpenTofu and with Terraform's CLI ("Run the tests", in [Everyday tasks](#5-everyday-tasks)).
+
 ### Moving to AWS: ff export
 
 FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's, its mail SES's: an account moves to AWS with its code as it is. `ff export` writes what the move needs in a new folder, from the account's own resources, with `functions:read` and the other services' reads, and `usage:read` for its estimate:
@@ -970,7 +1016,7 @@ ff export ./to-aws --with-values                              # the functions' v
 
 **Versions and aliases:** the export has each function's code as it is, `$LATEST`'s. Its alias naming `$LATEST`, the first by name if it has several, becomes the template's `AutoPublishAlias` and Terraform's `aws_lambda_alias`, which each deploy points at a new version of the code; the function's URL, schedules, queues read and settings for calls that don't wait then go through it, as SAM attaches them to it. A function kept warm without one gets `live`, which holds its provisioned concurrency. `MIGRATION.md` says the rest, each with the AWS CLI's command that makes it on AWS: another alias naming `$LATEST`; an alias naming a version, whose code the export hasn't; an alias's own URL, with its domains, whose callers the cutover moves with the function's; and a schedule, a queue reader, a bucket's notification or a destination that names a version or an alias the files don't publish, which the files have call the function, or the alias they publish. `ff doctor --deployed` names an alias's URL that takes FF's keys, and its domains, as it names the function's.
 
-**Check the code first:** `ff doctor <folder>` reads a function's code, its libraries' folders and `.env` files left out, and names each line that works on FF and not on AWS Lambda, as `file:line: level: message [check]`. An error stops a move: an FF API key in the code (`ffk_…`), a secret to revoke, and a folder over Lambda's 250 MB unzipped. A warning is yours to judge: a variable FF's runtime sets (`FUNCTION_NAME`, which Lambda calls `AWS_LAMBDA_FUNCTION_NAME`) or one starting with `FF_`; FF's hosts, your profile's domain and the cluster's `.svc.cluster.local`; `event.body` read as an object, as FF's original event gave the payload ([ADR 0007](adr/0007-function-events.md)); a file written outside `/tmp`, which is all Lambda lets a function write; and a TypeScript handler without its JavaScript, which `ff package --compile` makes. A `template.yaml` beside the code is read as CloudFormation reads it: what CloudFormation can't read is an error at its line, and so is a function's memory or timeout beyond Lambda's (128 to 10,240 MB, 900 s); a runtime Lambda has deprecated, Node.js 20 or Python 3.10 and older in November 2026, is a warning, and an error once Lambda creates no function on it; a TypeScript handler is a warning there too, unless its `Metadata: BuildMethod: esbuild` has `sam build` compile it. It reads lines, not what the code means, so a finding is a line to look at. It exits 1 on an error, and with `--strict` on a warning too, for a CI job; `--output json` lists the findings.
+**Check the code first:** `ff doctor <folder>` reads a function's code, its libraries' folders and `.env` files left out, and names each line that works on FF and not on AWS Lambda, as `file:line: level: message [check]`. An error stops a move: an FF API key in the code (`ffk_…`), a secret to revoke, and a folder over Lambda's 250 MB unzipped. A warning is yours to judge: a variable FF's runtime sets (`FUNCTION_NAME`, which Lambda calls `AWS_LAMBDA_FUNCTION_NAME`) or one starting with `FF_`; FF's hosts, your profile's domain and the cluster's `.svc.cluster.local`; `event.body` read as an object, as FF's original event gave the payload ([ADR 0007](adr/0007-function-events.md)); a file written outside `/tmp`, which is all Lambda lets a function write; and a TypeScript handler without its JavaScript, which `ff package --compile` makes. A `template.yaml` beside the code is read as CloudFormation reads it: what CloudFormation can't read is an error at its line, and so is a function's memory or timeout beyond Lambda's (128 to 10,240 MB, 900 s); a runtime Lambda has deprecated, Node.js 20 or Python 3.10 and older in November 2026, is a warning, and an error once Lambda creates no function on it; a TypeScript handler is a warning there too, unless its `Metadata: BuildMethod: esbuild` has `sam build` compile it. A Terraform project's `.tf` files are read for their AWS provider block: an `endpoints` block is an error, and each setting FF needs (the four skips, `s3_use_path_style`) a warning ("Terraform", above), `.terraform/` left out. It reads lines, not what the code means, so a finding is a line to look at. It exits 1 on an error, and with `--strict` on a warning too, for a CI job; `--output json` lists the findings.
 
 **What still points at FF:** `ff doctor --deployed` reads the account as `ff export` does and names, a line each, what a move has to change that the code doesn't show: a function that gets FF's original event, or whose name is outside Lambda's rule; one kept warm, which AWS bills as provisioned concurrency; a URL that takes FF's API keys, where AWS asks for a request signed with AWS's keys; a domain on a URL or a site, which moves behind CloudFront; a function whose key reached FF's S3, SQS or SES, from its key's daily uses; and, for an owner, the account's storage keys, with when each was used last. Each is a warning: with `--strict`, it fails until nothing points at FF any more, the last step of a move.
 

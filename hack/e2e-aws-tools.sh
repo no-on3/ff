@@ -10,8 +10,10 @@
 # settings, a queue with its dead-letter queue and a function reading it, a bucket whose new files run a function, and
 # a site. Each then works: the URL answers, the site serves its page and its 404, a message sent runs the worker, a file
 # uploaded runs the uploads' function. A second plan finds nothing to change; with the uploads' bucket emptied, destroy
-# removes it all, and the account holds none of it. Then the plan's limit on changes: on a plan of 3 a minute, Lambda's
-# endpoint answers TooManyRequestsException with Retry-After, which the provider retries until its apply goes through.
+# removes it all, and the account holds none of it. Then the move to AWS as the project's README says it: ff doctor
+# names the provider block's lines for FF, and once they are removed, nothing, and validate takes the project. Then the
+# plan's limit on changes: on a plan of 3 a minute, Lambda's endpoint answers TooManyRequestsException with Retry-After,
+# which the provider retries until its apply goes through.
 # Removes its compose project, its namespaces and the backend on exit; keeps the cluster. Its sections run alone too
 # (hack/lib/sections.sh): --list names them, --only and --from choose; --keep and --reuse as hack/lib/e2e-stack.sh says.
 #   hack/e2e-aws-tools.sh [--teardown | --keep] [--reuse] [--list | --only <section>[,<section>…] | --from <section>]
@@ -155,7 +157,7 @@ check "ff's profile acts as the account" "0" "$(code)"
 section_def backend section_backend stack budget=120
 
 # applied <tool> <app> <runtime>: the project ff init writes, taken by the tool: written, applied, each of its four
-# parts called, planned again with nothing to change, its bucket of uploads emptied, destroyed.
+# parts called, planned again with nothing to change, its bucket of uploads emptied, destroyed; then readied for AWS.
 applied() {
   local name=$1 app=$2 runtime=$3 status
   project "$app" "$runtime"
@@ -205,6 +207,17 @@ $(curl -sS -o "$work/$app/missing.html" -w '%{http_code}' "$site/missing") $(gre
   status="$(tool "$name" "$app" destroy destroy -auto-approve -no-color)"
   check "$name destroy removes it all, and the account holds none of it" "0 Destroy complete! Resources: 22 destroyed. none" \
     "$status $(grep -o '^Destroy complete!.*' "$work/$app/destroy.out" || true) $(names_left "$app")"
+
+  # The move to AWS as the project's README says it. Its providers.tf alone, where the suite's logs are beside it.
+  ff doctor "$work/$app/providers.tf" --output json
+  check "ff doctor names the provider block's lines for FF: the endpoints block an error, its five settings warnings" \
+    "1 provider-endpoints:1 provider-setting:5" \
+    "$(code) $(out | jq -r '[.findings[].check] | group_by(.) | map("\(.[0]):\(length)") | join(" ")')"
+  sed -i -e '/# FF: from here/,/# \.\.\.to here\./d' -e 's/^\(  region = \).*/\1"eu-west-1"/' \
+    -e 's/^\(  function_role = \).*/\1null/' "$work/$app/providers.tf"
+  ff doctor "$work/$app/providers.tf" --strict
+  check "  ... and nothing once they are removed, an AWS region given and the roles the modules' own, which $name validate takes" \
+    "0 0" "$(code) $(tool "$name" "$app" validate-aws validate -no-color)"
 }
 
 section_tofu() {

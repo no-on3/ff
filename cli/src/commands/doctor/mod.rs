@@ -1,13 +1,15 @@
 //! `ff doctor [path]`: what a function's folder, or a file, holds that works on FF and not on AWS
 //! Lambda, before a move: FF's API keys, its variables and hosts, its original event, files
 //! written outside `/tmp`, a TypeScript handler, a package over Lambda's size; and in its SAM
-//! template, what CloudFormation can't read and what is beyond Lambda's limits. Errors stop a
-//! move; warnings are for a person to judge, and fail it too with `--strict`. With `--deployed`,
-//! what in the account still points at FF.
+//! template, what CloudFormation can't read and what is beyond Lambda's limits; in a Terraform
+//! project, its AWS provider's endpoints and settings for FF. Errors stop a move; warnings are for
+//! a person to judge, and fail it too with `--strict`. With `--deployed`, what in the account still
+//! points at FF.
 
 mod account;
 mod code;
 mod template;
+mod terraform;
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -25,6 +27,9 @@ const LIBRARY_FOLDERS: [&str; 5] = ["node_modules", ".venv", "venv", "site-packa
 
 /// `sam build`'s output, copies of the code, which the folder's own files are read for.
 const SAM_BUILD: &str = ".aws-sam/";
+
+/// What `terraform init` downloads, the providers and the modules of others, which aren't the project's own.
+const TERRAFORM_DOWNLOADS: &str = ".terraform/";
 
 /// Bigger files aren't read: a bundle's or a data file's lines aren't the function's own code.
 const MAX_READ_BYTES: u64 = 1024 * 1024;
@@ -156,7 +161,7 @@ fn report(path: &Path, hosts: &[String]) -> Result<Report, Error> {
     let mut findings = Vec::new();
     let (folder, files) = if path.is_dir() {
         let mut files = package::folder_files(path)?;
-        files.retain(|file| !file.name.starts_with(SAM_BUILD));
+        files.retain(|file| !file.name.starts_with(SAM_BUILD) && !file.name.starts_with(TERRAFORM_DOWNLOADS));
         findings.extend(size_finding(&files));
         // A template names its functions' handlers, which its checks find.
         if !files.iter().any(|file| template::NAMES.contains(&file.name.as_str())) {
@@ -188,6 +193,9 @@ fn report(path: &Path, hosts: &[String]) -> Result<Report, Error> {
         findings.extend(code::check(&file.name, &text, hosts));
         if template::NAMES.contains(&file.name.as_str()) {
             findings.extend(template::check(&file.name, &text, folder, &today));
+        }
+        if terraform::is_configuration(&file.name) {
+            terraform::check(&file.name, &text, &mut findings);
         }
     }
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
@@ -364,6 +372,53 @@ mod tests {
             checks(&super::report(&dir.path().join("template.yaml"), &[]).unwrap()),
             [("template.yaml", Some(6), "typescript-handler"), ("template.yaml", Some(8), "lambda-limits")]
         );
+    }
+
+    #[test]
+    fn a_terraform_project_as_ff_init_writes_it_names_its_ff_lines_and_once_they_are_removed_nothing() {
+        let aws = crate::api::types::AwsEndpoints {
+            region: "tn-tunis-1".into(),
+            s3_endpoint: "https://s3.ffunc.cloud".into(),
+            sqs_endpoint: "https://sqs.ffunc.cloud".into(),
+            ses_endpoint: "https://email.ffunc.cloud".into(),
+            lambda_endpoint: "https://lambda.ffunc.cloud".into(),
+        };
+        let dir = tempfile::TempDir::new().unwrap();
+        for (path, text) in
+            crate::commands::init::terraform_files("shop", Runtime::Nodejs, "123456789012", &aws).unwrap()
+        {
+            write(dir.path(), path, &text);
+        }
+        // What init downloads: a provider's binary, over Lambda's size were it counted, and others' modules.
+        let provider = dir.path().join(".terraform/providers/terraform-provider-aws");
+        std::fs::create_dir_all(provider.parent().unwrap()).unwrap();
+        std::fs::File::create(&provider).unwrap().set_len(300 * 1024 * 1024).unwrap();
+        write(dir.path(), ".terraform/modules/x/main.tf", "provider \"aws\" {\n  skip_region_validation = true\n}\n");
+        let hosts = ["ffunc.cloud".to_owned()];
+
+        let report = report(dir.path(), &hosts).unwrap();
+
+        // The endpoints block one error, FF's hosts in it its own; the five settings each a warning.
+        let providers = std::fs::read_to_string(dir.path().join("providers.tf")).unwrap();
+        let line_of = |text: &str| providers.lines().position(|line| line.trim_start().starts_with(text)).unwrap() + 1;
+        assert_eq!(
+            checks(&report),
+            [
+                ("providers.tf", Some(line_of("skip_credentials_validation")), "provider-setting"),
+                ("providers.tf", Some(line_of("skip_requesting_account_id")), "provider-setting"),
+                ("providers.tf", Some(line_of("skip_metadata_api_check")), "provider-setting"),
+                ("providers.tf", Some(line_of("skip_region_validation")), "provider-setting"),
+                ("providers.tf", Some(line_of("s3_use_path_style")), "provider-setting"),
+                ("providers.tf", Some(line_of("endpoints {")), "provider-endpoints"),
+            ]
+        );
+        assert!(report.findings[5].message.contains("its calls to lambda, s3, sqs and sesv2 elsewhere than AWS"));
+
+        // As its README says to move to AWS: the lines between the two "FF" comments removed.
+        let start = providers.find("  # FF: from here").unwrap();
+        let end = providers.find("  # ...to here.\n").unwrap() + "  # ...to here.\n".len();
+        write(dir.path(), "providers.tf", &format!("{}{}", &providers[..start], &providers[end..]));
+        assert_eq!(checks(&super::report(dir.path(), &hosts).unwrap()), []);
     }
 
     #[test]

@@ -41,4 +41,5 @@ public access block (on FF the website configuration alone makes a bucket public
 
 In `providers.tf`: set an AWS region, remove the lines between the two "FF" comments, and set `function_role` to
 `null`, so that each module makes its function's role. Then `terraform apply` with an AWS account's key. Nothing
-else changes.
+else changes. `ff doctor` in the folder names what is left of FF's: the `endpoints` block an error, each setting a
+warning, with the functions' code read as for any move.
