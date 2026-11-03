@@ -2,9 +2,9 @@
 // AWS's SDK for JavaScript v3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the
 // endpoint, the region and the key are given. A function through its life: made, waited for, listed, its code and its
 // settings changed, each change waited for, tagged, invoked, a version and an alias, a URL, a queue's mapping, its
-// asynchronous calls' settings, its dead-letter queue, its reserved concurrency, refused as Lambda refuses, deleted; an
-// operation FF doesn't offer yet refused once, by its name, though the client retries by default. One JSON line per check,
-// {client, want, got, what}, for hack/e2e.sh.
+// asynchronous calls' settings, its dead-letter queue, its reserved concurrency, its permissions, refused as Lambda
+// refuses, deleted; an operation FF doesn't offer yet refused once, by its name, though the client retries by default.
+// One JSON line per check, {client, want, got, what}, for hack/e2e.sh.
 //   MODULES=<folder with node_modules> ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> \
 //   CODE=<zip> CODE_SHA=<its CodeSha256> NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> \
 //   QUEUE_ARN=<a queue of the account, none reading it> node sdk.mjs
@@ -179,6 +179,14 @@ await check('ok', 'PutFunctionConcurrency, then GetFunctionConcurrency and GetFu
   await send(lambda.DeleteFunctionConcurrencyCommand, { FunctionName });
   const none = await send(lambda.GetFunctionConcurrencyCommand, { FunctionName });
   return expect([put.ReservedConcurrentExecutions, read.ReservedConcurrentExecutions, Concurrency?.ReservedConcurrentExecutions, none.ReservedConcurrentExecutions ?? 'none'], [2, 2, 2, 'none']);
+});
+await check('ok', 'AddPermission, then GetPolicy reads the statement as Lambda writes it, kept without effect; RemovePermission, then none', async () => {
+  const added = await send(lambda.AddPermissionCommand, { FunctionName, StatementId: 's3', Action: 'lambda:InvokeFunction', Principal: 's3.amazonaws.com', SourceAccount: '000000000000' });
+  const { Policy } = await send(lambda.GetPolicyCommand, { FunctionName });
+  await send(lambda.RemovePermissionCommand, { FunctionName, StatementId: 's3' });
+  await refusedAs(() => send(lambda.GetPolicyCommand, { FunctionName }), 'ResourceNotFoundException');
+  const kept = JSON.parse(Policy).Statement;
+  return expect([JSON.parse(added.Statement).Sid, kept.length, kept[0].Principal, kept[0].Condition], ['s3', 1, { Service: 's3.amazonaws.com' }, { StringEquals: { 'AWS:SourceAccount': '000000000000' } }]);
 });
 await check('ok', 'TagResource, ListTags and UntagResource on its ARN', async () => {
   const { FunctionArn } = await send(lambda.GetFunctionConfigurationCommand, { FunctionName });

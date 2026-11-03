@@ -43,6 +43,7 @@ export const accessDenied = (message: string) => new LambdaError(403, 'AccessDen
 export const resourceNotFound = (message: string) => new LambdaError(404, 'ResourceNotFoundException', message);
 export const resourceConflict = (message: string) => new LambdaError(409, 'ResourceConflictException', message);
 export const invalidParameterValue = (message: string) => new LambdaError(400, 'InvalidParameterValueException', message);
+export const preconditionFailed = (message: string) => new LambdaError(412, 'PreconditionFailedException', message);
 export const invalidRequestContent = (message: string) => new LambdaError(400, 'InvalidRequestContentException', message);
 export const requestEntityTooLarge = (limit: number, operation: string) =>
   new LambdaError(413, 'RequestEntityTooLargeException', `Request must be smaller than ${limit} bytes for the ${operation} operation`);

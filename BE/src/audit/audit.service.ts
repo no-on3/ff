@@ -34,6 +34,9 @@ export type AuditAction =
   // A function's tags, as AWS's: put (a key there taking its new value), removed by key.
   | 'function.tag'
   | 'function.untag'
+  // A statement of Lambda's permissions, kept without effect: added to a policy by its ID, and removed.
+  | 'function.add_permission'
+  | 'function.remove_permission'
   // A function's version, as Lambda's: published with its number and code, and deleted.
   | 'function.publish'
   | 'version.delete'

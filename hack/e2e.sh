@@ -956,6 +956,63 @@ as_maker aws_lambda delete-function --function-name e2e-concurrency >/dev/null
 }
 section_def lambda_concurrency section_lambda_concurrency lambda_changes budget=30
 
+section_lambda_permissions() {
+section "Lambda's permissions with the AWS CLI, kept as sent and given back without effect: a bucket's statement, a public URL's two, a version's and an alias's policy apart; removed; the function called as before; refused as Lambda refuses"
+lambda_zip "$work/permissions.zip" 'export const handler = async () => ({ ran: true });' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-permissions --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/permissions.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-permissions >/dev/null 2>&1 || true
+as_maker aws_lambda create-alias --function-name e2e-permissions --name live --function-version 1 >/dev/null
+permissions_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-permissions"
+# statements <aws lambda get-policy arguments…>: the policy's statements' IDs, in its order.
+statements() { as_reader get-policy --function-name e2e-permissions "$@" | jq -r '[.Policy | fromjson | .Statement[].Sid] | join(",")'; }
+added="$(as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id s3 --action lambda:InvokeFunction \
+  --principal s3.amazonaws.com --source-arn arn:aws:s3:::e2e-photos --source-account "$ver")"
+check "AddPermission: the statement as Lambda writes it, the principal a service's, its limits its conditions" \
+  "s3 Allow s3.amazonaws.com lambda:InvokeFunction $permissions_arn $ver arn:aws:s3:::e2e-photos" \
+  "$(jq -r '.Statement | fromjson | "\(.Sid) \(.Effect) \(.Principal.Service) \(.Action) \(.Resource) \(.Condition.StringEquals["AWS:SourceAccount"]) \(.Condition.ArnLike["AWS:SourceArn"])"' <<<"$added")"
+as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id FunctionURLAllowPublicAccess --action lambda:InvokeFunctionUrl \
+  --principal '*' --function-url-auth-type NONE >/dev/null
+as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id FunctionURLAllowInvokeAction --action lambda:InvokeFunction \
+  --principal '*' --invoked-via-function-url >/dev/null
+policy="$(as_reader get-policy --function-name e2e-permissions)"
+check "GetPolicy, with a key that may read: Lambda's document, the three in the order they came, a public URL's two conditions, the function's RevisionId" \
+  "2012-10-17 s3,FunctionURLAllowPublicAccess,FunctionURLAllowInvokeAction NONE true $(as_reader get-function --function-name e2e-permissions | jq -r .Configuration.RevisionId)" \
+  "$(jq -r '.Policy | fromjson | "\(.Version) \([.Statement[].Sid] | join(",")) \(.Statement[1].Condition.StringEquals["lambda:FunctionUrlAuthType"]) \(.Statement[2].Condition.Bool["lambda:InvokedViaFunctionUrl"])"' <<<"$policy") \
+$(jq -r .RevisionId <<<"$policy")"
+as_maker aws_lambda add-permission --function-name e2e-permissions --qualifier 1 --statement-id v1 --action lambda:InvokeFunction \
+  --principal events.amazonaws.com >/dev/null
+as_maker aws_lambda add-permission --function-name e2e-permissions:live --statement-id s3 --action lambda:InvokeFunction --principal "$ver" >/dev/null
+check "  ... a version's policy and an alias's apart from the function's, the same ID in each, each statement's Resource its qualified ARN" \
+  "v1 $permissions_arn:1 s3 $permissions_arn:live arn:aws:iam::$ver:root s3,FunctionURLAllowPublicAccess,FunctionURLAllowInvokeAction" \
+  "$(as_reader get-policy --function-name e2e-permissions --qualifier 1 | jq -r '.Policy | fromjson | .Statement[0] | "\(.Sid) \(.Resource)"') \
+$(as_reader get-policy --function-name e2e-permissions:live | jq -r '.Policy | fromjson | .Statement[0] | "\(.Sid) \(.Resource) \(.Principal.AWS)"') \
+$(statements)"
+check "  ... kept without effect: the maker's key calls the function as before, a key that may only read is refused as before, a statement for * notwithstanding" \
+  "200 refused AccessDeniedException" \
+  "$(as_maker aws_lambda invoke --function-name e2e-permissions /dev/null | jq -r .StatusCode) $(outcome as_reader invoke --function-name e2e-permissions /dev/null)"
+as_maker aws_lambda remove-permission --function-name e2e-permissions --statement-id s3
+check "RemovePermission by its ID: the policy without it, the alias's s3 kept; again refused, as Lambda says a statement it hasn't; an old RevisionId refused" \
+  "FunctionURLAllowPublicAccess,FunctionURLAllowInvokeAction s3 refused ResourceNotFoundException refused PreconditionFailedException" \
+  "$(statements) $(statements --qualifier live) $(outcome as_maker aws_lambda remove-permission --function-name e2e-permissions --statement-id s3) \
+$(outcome as_maker aws_lambda remove-permission --function-name e2e-permissions --statement-id v1 --qualifier 1 --revision-id moved-since)"
+for sid in FunctionURLAllowPublicAccess FunctionURLAllowInvokeAction; do
+  as_maker aws_lambda remove-permission --function-name e2e-permissions --statement-id "$sid"
+done
+check "  ... a policy without statements is none, refused as Lambda refuses it" "refused ResourceNotFoundException" \
+  "$(outcome as_reader get-policy --function-name e2e-permissions)"
+check "refused: a statement ID the policy has, a principal and an organization out of their form, a version the function hasn't, a key that may only read" \
+  "refused ResourceConflictException refused InvalidParameterValueException refused InvalidParameterValueException refused ResourceNotFoundException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda add-permission --function-name e2e-permissions:live --statement-id s3 --action lambda:InvokeFunction --principal '*') \
+$(outcome as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id p --action lambda:InvokeFunction --principal 'two words') \
+$(outcome as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id p --action lambda:InvokeFunction --principal '*' \
+  --principal-org-id organization-one) \
+$(outcome as_maker aws_lambda add-permission --function-name e2e-permissions --qualifier 7 --statement-id p --action lambda:InvokeFunction --principal '*') \
+$(outcome as_reader add-permission --function-name e2e-permissions --statement-id p --action lambda:InvokeFunction --principal '*')"
+as_maker aws_lambda delete-function --function-name e2e-permissions >/dev/null
+}
+section_def lambda_permissions section_lambda_permissions lambda_changes budget=30
+
 section_lambda_invoke() {
 section "Lambda's Invoke with the AWS CLI: the function's answer as it returned it, the version that ran, the call's log with LogType Tail, the ClientContext in Node.js and Python; an error and a timeout as the call's outcome; Event and DryRun; refused as Lambda refuses"
 invoker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-invoker", "functions": ["e2e-invoked", "e2e-invoked-py", "e2e-invoked-broken"], "functionAccess": "invoke"}')"
@@ -1034,7 +1091,7 @@ as_ver DELETE "/storage-keys/$(jq -r .id <<<"$invoker")" >/dev/null
 section_def lambda_invoke section_lambda_invoke lambda_changes budget=60
 
 section_lambda_sdks() {
-section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls' settings, its dead-letter queue, its reserved concurrency, refused as Lambda refuses, deleted"
+section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls' settings, its dead-letter queue, its reserved concurrency, its permissions, refused as Lambda refuses, deleted"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0014 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
 lambda_clients="$FF_REPO_ROOT/hack/.cache/lambda-clients"
@@ -1055,10 +1112,10 @@ clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$make
 for queue_of in sdk boto3; do as_ver POST /queues "{\"name\": \"e2e-$queue_of-orders\"}" >/dev/null; done
 env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-sdk-orders" MODULES="$lambda_clients/node_modules" \
   node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
-client_checks "$work/lambda-sdk.jsonl" 18
+client_checks "$work/lambda-sdk.jsonl" 19
 env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-boto3-orders" \
   "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
-client_checks "$work/lambda-boto3.jsonl" 18
+client_checks "$work/lambda-boto3.jsonl" 19
 for queue_of in sdk boto3; do as_ver DELETE "/queues/e2e-$queue_of-orders" >/dev/null; done
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60

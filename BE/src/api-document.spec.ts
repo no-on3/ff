@@ -11,7 +11,7 @@ import { AccountsController } from './accounts/accounts.controller';
 import { AccountsService } from './accounts/accounts.service';
 import { ApiKeysController } from './api-keys/api-keys.controller';
 import { ApiKeysService } from './api-keys/api-keys.service';
-import { apiDocument } from './api-document';
+import { API_DESCRIPTION, apiDocument } from './api-document';
 import { Principal } from './auth/principal';
 import { FunctionsController } from './functions/functions.controller';
 import { AsyncInvocationsService } from './functions/async-invocations.service';
@@ -194,6 +194,11 @@ describe('the OpenAPI document (L1, P-08)', () => {
   });
 
   afterAll(() => app.close());
+
+  it("says what FF keeps of Lambda's without effect: its permissions, as a function's role", () => {
+    expect(document.info.description).toBe(API_DESCRIPTION);
+    expect(API_DESCRIPTION).toContain("Lambda's permissions (AddPermission, RemovePermission, GetPolicy) are kept as sent and given back, without effect");
+  });
 
   it('documents, for every route, the success status the route answers', async () => {
     const routes = Object.entries(document.paths).flatMap(([path, item]) =>

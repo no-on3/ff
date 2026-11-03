@@ -1147,6 +1147,14 @@ $(lambda_with "${lambda_b[@]}" get-function-concurrency --function-name l5-a) \
 $(lambda_with "${lambda_b[@]}" delete-function-concurrency --function-name l5-a) \
 $(lambda_with "${lambda_a[@]}" get-function-concurrency --function-name l5-a --query ReservedConcurrentExecutions)"
 lambda_with "${lambda_a[@]}" delete-function-concurrency --function-name l5-a >/dev/null
+lambda_with "${lambda_a[@]}" add-permission --function-name l5-a --statement-id l5-a --action lambda:InvokeFunction --principal '*' >/dev/null
+check "  ... nor adds to its policy, reads it or removes from it, by its ARN or its name: A's as it was" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException l5-a" \
+  "$(lambda_with "${lambda_b[@]}" add-permission --function-name "$arn_a" --statement-id l5-b --action lambda:InvokeFunction --principal '*') \
+$(lambda_with "${lambda_b[@]}" get-policy --function-name l5-a) \
+$(lambda_with "${lambda_b[@]}" remove-permission --function-name "$arn_a" --statement-id l5-a) \
+$(lambda_with "${lambda_a[@]}" get-policy --function-name l5-a --query Policy | jq -r '[.Statement[].Sid] | join(",")')"
+lambda_with "${lambda_a[@]}" remove-permission --function-name l5-a --statement-id l5-a >/dev/null
 check "  ... nor reads its tags, nor tags it, nor untags it, by its ARN" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" list-tags --resource "$arn_a") $(lambda_with "${lambda_b[@]}" tag-resource --resource "$arn_a" --tags owner=b) \
 $(lambda_with "${lambda_b[@]}" untag-resource --resource "$arn_a" --tag-keys owner)"

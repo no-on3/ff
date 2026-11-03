@@ -2,8 +2,9 @@
 # boto3 against FF's Lambda endpoint, with its defaults, as a customer's code has them: only the endpoint, the region
 # and the key are given. A function through its life: made, waited for, listed, its code and its settings changed,
 # each change waited for, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls'
-# settings, its dead-letter queue, its reserved concurrency, refused as Lambda refuses, deleted; an operation FF doesn't
-# offer yet refused once, by its name, though boto3 retries by default. One JSON line per check, {client, want, got, what}, for hack/e2e.sh.
+# settings, its dead-letter queue, its reserved concurrency, its permissions, refused as Lambda refuses, deleted; an
+# operation FF doesn't offer yet refused once, by its name, though boto3 retries by default. One JSON line per check,
+# {client, want, got, what}, for hack/e2e.sh.
 #   ENDPOINT=http://localhost:<port> KEY=… SECRET=… ROLE=<an IAM role's ARN> CODE=<zip> CODE_SHA=<its CodeSha256> \
 #   NEW_CODE=<zip> NEW_CODE_SHA=… OTHER_FUNCTION=<another function's name> QUEUE_ARN=<a queue of the account, none reading it> \
 #   python boto3_checks.py
@@ -176,6 +177,15 @@ def concurrency():
                   [2, 2, 2, False])
 
 
+def permissions():
+    added = client.add_permission(FunctionName=NAME, StatementId="s3", Action="lambda:InvokeFunction", Principal="s3.amazonaws.com", SourceAccount="000000000000")
+    kept = json.loads(client.get_policy(FunctionName=NAME)["Policy"])["Statement"]
+    client.remove_permission(FunctionName=NAME, StatementId="s3")
+    refused_as(lambda: client.get_policy(FunctionName=NAME), "ResourceNotFoundException")
+    return expect([json.loads(added["Statement"])["Sid"], len(kept), kept[0]["Principal"], kept[0]["Condition"]],
+                  ["s3", 1, {"Service": "s3.amazonaws.com"}, {"StringEquals": {"AWS:SourceAccount": "000000000000"}}])
+
+
 def tags():
     arn = client.get_function_configuration(FunctionName=NAME)["FunctionArn"]
     client.tag_resource(Resource=arn, Tags={"team": "shop"})
@@ -230,6 +240,7 @@ check("ok", "PutFunctionEventInvokeConfig, then UpdateFunctionEventInvokeConfig,
       async_settings)
 check("ok", "UpdateFunctionConfiguration with a DeadLetterConfig of a queue of the account, at once, read back; an empty TargetArn removing it", dead_letter_queue)
 check("ok", "PutFunctionConcurrency, then GetFunctionConcurrency and GetFunction read it; DeleteFunctionConcurrency, none again", concurrency)
+check("ok", "AddPermission, then GetPolicy reads the statement as Lambda writes it, kept without effect; RemovePermission, then none", permissions)
 check("ok", "TagResource, ListTags and UntagResource on its ARN", tags)
 check("ok", "refused as boto3 names Lambda's errors: a runtime FF lacks, a function the account hasn't", refusals)
 check("ok", "operations FF doesn't offer yet are UnknownOperationException, named, sent once by a client that retries by default", not_offered)

@@ -1908,6 +1908,7 @@ run('database schema (L2, real PostgreSQL)', () => {
         'function_event_invoke_configs',
         'function_invocations',
         'function_metrics',
+        'function_policies',
         'function_urls',
         'function_versions',
         'functions',

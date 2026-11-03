@@ -76,6 +76,7 @@ import { FunctionDescriptions1793650000000 } from './1793650000000-FunctionDescr
 import { FunctionUpdates1793660000000 } from './1793660000000-FunctionUpdates';
 import { FunctionDeadLetterQueues1793670000000 } from './1793670000000-FunctionDeadLetterQueues';
 import { FunctionCallsStopped1793680000000 } from './1793680000000-FunctionCallsStopped';
+import { FunctionPolicies1793690000000 } from './1793690000000-FunctionPolicies';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -161,4 +162,5 @@ export const MIGRATIONS: Array<new () => object> = [
   FunctionUpdates1793660000000,
   FunctionDeadLetterQueues1793670000000,
   FunctionCallsStopped1793680000000,
+  FunctionPolicies1793690000000,
 ];

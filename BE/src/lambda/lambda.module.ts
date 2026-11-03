@@ -17,6 +17,7 @@ import { LambdaFunctionChanges } from './lambda-function-changes';
 import { LambdaFunctionReads } from './lambda-functions';
 import { LambdaInvoke } from './lambda-invoke';
 import { LambdaMappings } from './lambda-mappings';
+import { LambdaPermissions } from './lambda-permissions';
 import { LambdaHandlers, LambdaOperations } from './lambda-operations';
 import { LambdaTags } from './lambda-tags';
 import { LambdaUrls } from './lambda-urls';
@@ -33,6 +34,7 @@ const GROUPS = [
   LambdaMappings,
   LambdaAsyncSettings,
   LambdaConcurrency,
+  LambdaPermissions,
 ];
 
 /**

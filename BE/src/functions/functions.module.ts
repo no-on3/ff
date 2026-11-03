@@ -19,6 +19,7 @@ import { EventInvokeConfigController } from './event-invoke-config.controller';
 import { EventInvokeConfigService } from './event-invoke-config.service';
 import { FunctionEnvironment } from './entities/function-environment.entity';
 import { FunctionAlias } from './entities/function-alias.entity';
+import { FunctionPolicyStatement } from './entities/function-policy-statement.entity';
 import { FunctionVersion } from './entities/function-version.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { FunctionInvocation } from './entities/function-invocation.entity';
@@ -31,11 +32,12 @@ import { FunctionAliasesService } from './aliases.service';
 import { FunctionVersionsController } from './versions.controller';
 import { FunctionVersionsService } from './versions.service';
 import { FunctionKeyRenewal } from './key-renewal.service';
+import { FunctionPoliciesService } from './policies.service';
 import { StoppedChanges } from './stopped-changes.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Function, FunctionInvocation, FunctionEnvironment, FunctionEventInvokeConfig, FunctionVersion, FunctionAlias, Account, Schedule]),
+    TypeOrmModule.forFeature([Function, FunctionInvocation, FunctionEnvironment, FunctionEventInvokeConfig, FunctionVersion, FunctionAlias, FunctionPolicyStatement, Account, Schedule]),
     ObjectStoreModule,
     OrchestratorModule,
     MetricsModule,
@@ -52,8 +54,8 @@ import { StoppedChanges } from './stopped-changes.service';
     QueuesModule,
   ],
   controllers: [FunctionsController, EventInvokeConfigController, FunctionVersionsController, FunctionAliasesController],
-  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionKeyRenewal, StoppedChanges],
-  // Lambda's endpoint reads versions and aliases, queues calls and sets their settings, as FF's API does.
-  exports: [FunctionsService, FunctionVersionsService, FunctionAliasesService, AsyncInvocationsService, EventInvokeConfigService],
+  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionPoliciesService, FunctionKeyRenewal, StoppedChanges],
+  // Lambda's endpoint reads versions and aliases, queues calls and sets their settings, as FF's API does, and keeps its permissions.
+  exports: [FunctionsService, FunctionVersionsService, FunctionAliasesService, FunctionPoliciesService, AsyncInvocationsService, EventInvokeConfigService],
 })
 export class FunctionsModule {}
