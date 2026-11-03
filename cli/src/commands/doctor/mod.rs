@@ -381,13 +381,7 @@ mod tests {
 
     #[test]
     fn a_terraform_project_as_ff_init_writes_it_names_its_ff_lines_and_once_they_are_removed_nothing() {
-        let aws = crate::api::types::AwsEndpoints {
-            region: "tn-tunis-1".into(),
-            s3_endpoint: "https://s3.ffunc.cloud".into(),
-            sqs_endpoint: "https://sqs.ffunc.cloud".into(),
-            ses_endpoint: "https://email.ffunc.cloud".into(),
-            lambda_endpoint: "https://lambda.ffunc.cloud".into(),
-        };
+        let aws = crate::api::types::AwsEndpoints::ffunc();
         let dir = tempfile::TempDir::new().unwrap();
         for (path, text) in
             crate::commands::init::terraform_files("shop", Runtime::Nodejs, "123456789012", &aws).unwrap()

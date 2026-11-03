@@ -158,6 +158,7 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
       onePlan(PLAN),
       { admit: async () => undefined } as unknown as CreditService,
       directory,
+      tags,
       new ConfigService({ sqs: { base: BASE, region: REGION } }),
     );
     endpoint = `http://127.0.0.1:${(await frontDoor.listen(0, '127.0.0.1')).port}`;
@@ -518,6 +519,25 @@ run("customers' queues through the SQS endpoint, in FF's database (L2)", () => {
       ]);
       await sqs.send(new DeleteQueueCommand({ QueueUrl }));
       expect(await db.dataSource.getRepository(ResourceTag).countBy({ accountId: ACCOUNT })).toBe(0);
+    });
+
+    it("takes a queue's tags through FF's API too: a new queue's, replaced whole by a change, {} removing them, in its own answer", async () => {
+      expect((await api.create(owner, { name: 'labelled', tags: { team: 'shop', stage: 'dev' } })).tags).toEqual({ stage: 'dev', team: 'shop' });
+      const QueueUrl = `${BASE}/${ACCOUNT}/labelled`;
+      expect((await sqs.send(new ListQueueTagsCommand({ QueueUrl }))).Tags).toEqual({ stage: 'dev', team: 'shop' });
+      const changed = await api.update(owner, 'labelled', { tags: { stage: 'prod' } });
+      expect([changed.tags, changed.visibilityTimeout]).toEqual([{ stage: 'prod' }, 30]);
+      expect((await api.update(owner, 'labelled', { delaySeconds: 2 })).tags).toEqual({ stage: 'prod' });
+      expect((await api.update(owner, 'labelled', { tags: {} })).tags).toEqual({});
+      expect((await api.list(ACCOUNT)).map((queue) => queue.tags)).toEqual([undefined]);
+
+      const entries = await db.dataSource.getRepository(AuditEntry).find({ where: { accountId: ACCOUNT, resource: 'queue:labelled' }, order: { at: 'ASC' } });
+      expect(entries.map((entry) => [entry.action, entry.details])).toEqual([
+        ['queue.create', { attributes: {}, tags: { team: 'shop', stage: 'dev' } }],
+        ['queue.tag', { tags: { stage: 'prod' }, replaced: true }],
+        ['queue.update', { attributes: { delaySeconds: 2 } }],
+        ['queue.untag', { keys: ['stage'] }],
+      ]);
     });
 
     it('makes no queue whose tags SQS would refuse, and takes 50 at most, InvalidParameterValue', async () => {

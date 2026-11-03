@@ -77,8 +77,8 @@ describe('/queues (L1)', () => {
 
     expect((await call('POST', '/queues', body)).status).toBe(201);
     expect(queues.create).toHaveBeenCalledWith(principal, body);
-    expect((await call('PATCH', '/queues/orders', { redrivePolicy: null, delaySeconds: 10 })).status).toBe(200);
-    expect(queues.update).toHaveBeenCalledWith(principal, 'orders', { redrivePolicy: null, delaySeconds: 10 });
+    expect((await call('PATCH', '/queues/orders', { redrivePolicy: null, delaySeconds: 10, tags: { team: 'shop' } })).status).toBe(200);
+    expect(queues.update).toHaveBeenCalledWith(principal, 'orders', { redrivePolicy: null, delaySeconds: 10, tags: { team: 'shop' } });
   });
 
   it.each([
@@ -90,6 +90,8 @@ describe('/queues (L1)', () => {
     [{ name: 'orders', receiveMessageWaitTimeSeconds: 21 }, 'receiveMessageWaitTimeSeconds must not be greater than 20'],
     [{ name: 'orders', redrivePolicy: { deadLetterTargetArn: 'arn:aws:sqs:tn-tunis-1:000000000001:dlq', maxReceiveCount: 0 } }, 'redrivePolicy.maxReceiveCount must not be less than 1'],
     [{ name: 'orders', fifoQueue: true }, 'property fifoQueue should not exist'],
+    [{ name: 'orders', tags: { 'aws:team': 'shop' } }, 'The key aws:team starts with aws:, which AWS keeps for its own tags.'],
+    [{ name: 'orders', tags: ['shop'] }, "Tags are an object, each tag's value by its key."],
   ])('refuses %j to make a queue, saying why', async (body, problem) => {
     const res = await call('POST', '/queues', body);
 

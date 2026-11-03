@@ -375,16 +375,6 @@ mod tests {
         assert!(files[2].1.contains("in TypeScript, for Node.js: `function.ts`"));
     }
 
-    fn ff_endpoints() -> AwsEndpoints {
-        AwsEndpoints {
-            region: "tn-tunis-1".into(),
-            s3_endpoint: "https://s3.ffunc.cloud".into(),
-            sqs_endpoint: "https://sqs.ffunc.cloud".into(),
-            ses_endpoint: "https://email.ffunc.cloud".into(),
-            lambda_endpoint: "https://lambda.ffunc.cloud".into(),
-        }
-    }
-
     #[test]
     fn a_terraform_project_s_key_names_its_functions_buckets_and_queues_as_main_tf_does_and_its_readme_gives_it() {
         assert_eq!(
@@ -392,7 +382,7 @@ mod tests {
             "ff keys create --name shop-terraform --function shop-api --function shop-jobs --function shop-uploads \
              --function-access write --bucket shop-uploads --bucket shop-site --queue shop-jobs --queue shop-jobs-dead-letters"
         );
-        let files = terraform_files("shop", Runtime::Nodejs, "123456789012", &ff_endpoints()).unwrap();
+        let files = terraform_files("shop", Runtime::Nodejs, "123456789012", &AwsEndpoints::ffunc()).unwrap();
         let file = |path: &str| &files.iter().find(|(name, _)| *name == path).unwrap().1;
         assert!(file("README.md").contains(&format!("```sh\n{}\n", terraform_key_command("shop"))));
         for name in ["${local.app}-api", "${local.app}-jobs", "${local.app}-uploads", "${local.app}-site"] {
@@ -405,7 +395,7 @@ mod tests {
 
     #[test]
     fn a_terraform_project_s_provider_block_names_ffs_region_endpoints_and_the_account_in_its_functions_role() {
-        let files = terraform_files("shop", Runtime::Nodejs, "123456789012", &ff_endpoints()).unwrap();
+        let files = terraform_files("shop", Runtime::Nodejs, "123456789012", &AwsEndpoints::ffunc()).unwrap();
         let file = |path: &str| &files.iter().find(|(name, _)| *name == path).unwrap().1;
 
         let providers = file("providers.tf");
@@ -434,7 +424,7 @@ mod tests {
 
     #[test]
     fn a_terraform_project_holds_four_modules_and_its_functions_code_in_the_runtime_s_language() {
-        let files = terraform_files("shop", Runtime::Python, "123456789012", &ff_endpoints()).unwrap();
+        let files = terraform_files("shop", Runtime::Python, "123456789012", &AwsEndpoints::ffunc()).unwrap();
         let paths: Vec<&str> = files.iter().map(|(path, _)| *path).collect();
 
         for module in ["function", "queue-worker", "bucket-function", "site"] {
@@ -450,11 +440,11 @@ mod tests {
 
     #[test]
     fn without_ses_its_line_is_left_out_and_without_lambda_s3_or_sqs_it_says_which_it_lacks() {
-        let without_ses = AwsEndpoints { ses_endpoint: String::new(), ..ff_endpoints() };
+        let without_ses = AwsEndpoints { ses_endpoint: String::new(), ..AwsEndpoints::ffunc() };
         let files = terraform_files("shop", Runtime::Nodejs, "123456789012", &without_ses).unwrap();
         assert!(!files[0].1.contains("sesv2"));
 
-        let without_lambda = AwsEndpoints { lambda_endpoint: String::new(), ..ff_endpoints() };
+        let without_lambda = AwsEndpoints { lambda_endpoint: String::new(), ..AwsEndpoints::ffunc() };
         let refused = terraform_files("shop", Runtime::Nodejs, "123456789012", &without_lambda).unwrap_err();
         assert_eq!(
             refused.message,

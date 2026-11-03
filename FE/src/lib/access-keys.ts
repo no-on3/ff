@@ -39,8 +39,8 @@ export const ENDPOINT_LABELS: Record<string, string> = {
   AWS_ENDPOINT_URL_LAMBDA: "Lambda's API, for functions",
 };
 
-/** The variables that say where FF is to AWS's SDKs and CLI: its region and its endpoints. */
-export function endpointVariables(aws: AwsEndpoints): Variables {
+/** The variables that say where FF is to AWS's SDKs and CLI: its region and its endpoints, functions' own aside. */
+export function endpointVariables(aws: Omit<AwsEndpoints, 'sqsFunctionEndpoint'>): Variables {
   return [
     ['AWS_REGION', aws.region],
     ['AWS_ENDPOINT_URL_S3', aws.s3Endpoint],

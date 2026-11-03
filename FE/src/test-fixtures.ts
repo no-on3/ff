@@ -46,6 +46,7 @@ export const AWS_ENDPOINTS: AwsEndpoints = {
   region: 'tn-tunis-1',
   s3Endpoint: 'https://s3.ffunc.cloud',
   sqsEndpoint: 'https://sqs.ffunc.cloud',
+  sqsFunctionEndpoint: 'http://10.43.0.251:3003',
   sesEndpoint: 'https://email.ffunc.cloud',
   lambdaEndpoint: 'https://lambda.ffunc.cloud',
 };

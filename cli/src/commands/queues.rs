@@ -45,6 +45,9 @@ pub(super) struct Queue {
     pub(super) maximum_message_size: u64,
     pub(super) receive_message_wait_time_seconds: u64,
     pub(super) redrive_policy: Option<RedrivePolicy>,
+    /// Its tags, in a queue's own answer alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) tags: Option<BTreeMap<String, String>>,
     messages: Messages,
     size_bytes: u64,
     created_at: String,
@@ -606,6 +609,7 @@ mod tests {
             "maximumMessageSize": 1_048_576,
             "receiveMessageWaitTimeSeconds": 20,
             "redrivePolicy": { "deadLetterTargetArn": "arn:aws:sqs:tn-tunis-1:000000000001:orders-dlq", "maxReceiveCount": 3 },
+            "tags": { "team": "shop" },
             "messages": { "available": 3, "inFlight": 1, "delayed": 0 },
             "sizeBytes": 2048,
             "createdAt": "2026-10-24T08:00:00.000Z",

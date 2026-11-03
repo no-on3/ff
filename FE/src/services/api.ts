@@ -937,6 +937,8 @@ export interface AwsEndpoints {
   region: string;
   s3Endpoint: string;
   sqsEndpoint: string;
+  /** SQS's endpoint as functions reach it, inside the cluster, for `ff deploy`'s queue URLs in their variables: not for AWS's tools. */
+  sqsFunctionEndpoint: string;
   sesEndpoint: string;
   lambdaEndpoint: string;
 }
@@ -1716,6 +1718,8 @@ export interface Queue {
   maximumMessageSize: number;
   receiveMessageWaitTimeSeconds: number;
   redrivePolicy: RedrivePolicy | null;
+  /** Its tags, in a queue's own answer alone. */
+  tags?: Record<string, string>;
   messages: QueueMessages;
   /** What its messages hold together, as the plan counts them. */
   sizeBytes: number;
@@ -1734,6 +1738,7 @@ export const QUEUE_FIELDS = [
   'maximumMessageSize',
   'receiveMessageWaitTimeSeconds',
   'redrivePolicy',
+  'tags',
   'messages',
   'sizeBytes',
   'createdAt',

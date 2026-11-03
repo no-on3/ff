@@ -24,7 +24,7 @@ import { User } from './entities/user.entity';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 /** FF's region and endpoints as GET /me gives them, from the settings below: SQS's and SES's not set. */
-const AWS = { region: 'tn-tunis-1', s3Endpoint: 'https://s3.ff.example', sqsEndpoint: '', sesEndpoint: '', lambdaEndpoint: 'https://lambda.ff.example' };
+const AWS = { region: 'tn-tunis-1', s3Endpoint: 'https://s3.ff.example', sqsEndpoint: '', sqsFunctionEndpoint: '', sesEndpoint: '', lambdaEndpoint: 'https://lambda.ff.example' };
 
 run('accounts, users and memberships (L2, P-12)', () => {
   let db: ScratchDatabase;

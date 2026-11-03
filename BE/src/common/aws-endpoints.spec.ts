@@ -15,11 +15,12 @@ const settingsOf = (values: Record<string, string>) =>
   }) as unknown as ConfigService;
 
 describe("FF's endpoints for AWS's tools (L1)", () => {
-  it("gives the region, S3's origin without the bucket's path, and SQS's, SES's and Lambda's as set", () => {
+  it("gives the region, S3's origin without the bucket's path, and SQS's, functions' SQS, SES's and Lambda's as set", () => {
     const config = settingsOf({
       'storage.region': 'tn-tunis-1',
       'storage.base': 'https://s3.ffunc.cloud/',
       'sqs.base': 'https://sqs.ffunc.cloud',
+      'sqs.functionEndpoint': 'http://10.43.0.251:3003',
       'ses.base': 'https://email.ffunc.cloud',
       'lambda.base': 'https://lambda.ffunc.cloud',
     });
@@ -28,15 +29,19 @@ describe("FF's endpoints for AWS's tools (L1)", () => {
       region: 'tn-tunis-1',
       s3Endpoint: 'https://s3.ffunc.cloud',
       sqsEndpoint: 'https://sqs.ffunc.cloud',
+      sqsFunctionEndpoint: 'http://10.43.0.251:3003',
       sesEndpoint: 'https://email.ffunc.cloud',
       lambdaEndpoint: 'https://lambda.ffunc.cloud',
     });
   });
 
-  it('gives an endpoint FF has no setting for as empty, and needs the region and S3', () => {
+  it("gives an endpoint FF has no setting for as empty, functions' SQS SQS's own, and needs the region and S3", () => {
     const config = settingsOf({ 'storage.region': 'tn-tunis-1', 'storage.base': 'http://localhost:3002' });
 
-    expect(awsEndpoints(config)).toEqual({ region: 'tn-tunis-1', s3Endpoint: 'http://localhost:3002', sqsEndpoint: '', sesEndpoint: '', lambdaEndpoint: '' });
+    expect(awsEndpoints(config)).toEqual({ region: 'tn-tunis-1', s3Endpoint: 'http://localhost:3002', sqsEndpoint: '', sqsFunctionEndpoint: '', sesEndpoint: '', lambdaEndpoint: '' });
+    expect(awsEndpoints(settingsOf({ 'storage.region': 'tn-tunis-1', 'storage.base': 'http://localhost:3002', 'sqs.base': 'http://localhost:3003', 'sqs.functionEndpoint': '' })).sqsFunctionEndpoint).toBe(
+      'http://localhost:3003',
+    );
     expect(() => awsEndpoints(settingsOf({ 'storage.base': 'http://localhost:3002' }))).toThrow('storage.region');
   });
 });

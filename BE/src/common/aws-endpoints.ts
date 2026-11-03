@@ -6,6 +6,11 @@ export class AwsEndpoints {
   @ApiProperty({ example: 'tn-tunis-1', description: "FF's region, AWS_REGION" }) region: string;
   @ApiProperty({ example: 'https://s3.ffunc.cloud', description: "The S3 endpoint, AWS_ENDPOINT_URL_S3, for the account's buckets" }) s3Endpoint: string;
   @ApiProperty({ example: 'https://sqs.ffunc.cloud', description: "The SQS endpoint, AWS_ENDPOINT_URL_SQS, for its queues; empty where FF has none" }) sqsEndpoint: string;
+  @ApiProperty({
+    example: 'http://10.43.0.251:3003',
+    description: "The SQS endpoint as functions reach it, inside the cluster: a queue's URL in a function's variables is under it, as `ff deploy` writes a template's `!Ref` of a queue; SQS's own where FF sets none",
+  })
+  sqsFunctionEndpoint: string;
   @ApiProperty({ example: 'https://email.ffunc.cloud', description: "The SES endpoint, AWS_ENDPOINT_URL_SESV2, for its mail; empty where FF has none" }) sesEndpoint: string;
   @ApiProperty({ example: 'https://lambda.ffunc.cloud', description: "Lambda's endpoint, AWS_ENDPOINT_URL_LAMBDA, for its functions; empty where FF has none" })
   lambdaEndpoint: string;
@@ -17,6 +22,7 @@ export function awsEndpoints(config: ConfigService): AwsEndpoints {
     region: config.getOrThrow<string>('storage.region'),
     s3Endpoint: new URL(config.getOrThrow<string>('storage.base')).origin,
     sqsEndpoint: config.get<string>('sqs.base') ?? '',
+    sqsFunctionEndpoint: config.get<string>('sqs.functionEndpoint') || (config.get<string>('sqs.base') ?? ''),
     sesEndpoint: config.get<string>('ses.base') ?? '',
     lambdaEndpoint: config.get<string>('lambda.base') ?? '',
   };

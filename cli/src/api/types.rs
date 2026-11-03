@@ -267,10 +267,28 @@ pub struct AwsEndpoints {
     pub s3_endpoint: String,
     #[serde(default)]
     pub sqs_endpoint: String,
+    /// SQS's endpoint as functions reach it, inside the cluster, which a queue's URL in their variables is under.
+    #[serde(default)]
+    pub sqs_function_endpoint: String,
     #[serde(default)]
     pub ses_endpoint: String,
     #[serde(default)]
     pub lambda_endpoint: String,
+}
+
+#[cfg(test)]
+impl AwsEndpoints {
+    /// FF's endpoints at ffunc.cloud, as the tests take them.
+    pub fn ffunc() -> Self {
+        AwsEndpoints {
+            region: "tn-tunis-1".into(),
+            s3_endpoint: "https://s3.ffunc.cloud".into(),
+            sqs_endpoint: "https://sqs.ffunc.cloud".into(),
+            sqs_function_endpoint: "http://10.43.0.251:3003".into(),
+            ses_endpoint: "https://email.ffunc.cloud".into(),
+            lambda_endpoint: "https://lambda.ffunc.cloud".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -425,6 +443,13 @@ mod tests {
             "revisionId": "r-1", "createdAt": "2026-11-02T08:00:00.000Z", "updatedAt": "2026-11-02T08:00:00.000Z"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn the_endpoints_have_the_apis_fields() {
+        use crate::backend_source::{class_fields, sorted, sorted_keys};
+        let api = class_fields(include_str!("../../../BE/src/common/aws-endpoints.ts"), "AwsEndpoints");
+        assert_eq!(sorted_keys(&AwsEndpoints::ffunc()), sorted(api));
     }
 
     #[test]
