@@ -206,6 +206,25 @@ local function main()
     eq(out.message, exact, "16,384 bytes: kept whole")
   end)
 
+  test("counts a line in its own second to the nanosecond, as time_as_table gives the time and the store files it", function()
+    -- Today's times as a number are a quarter of a microsecond apart: a second's last nanosecond is the next second.
+    local second = 1762131823
+    eq(math.floor(second + 0.999999999), second + 1, "the last nanosecond as a number")
+    local codes = {}
+    for i = 1, 3 do codes[#codes + 1] = (send("ff-t-edge", "fn-13-abc", "f-13", { sec = second, nsec = i }, "edge " .. i)) end
+    codes[#codes + 1] = (send("ff-t-edge", "fn-13-abc", "f-13", { sec = second, nsec = 999999999 }, "the second's last nanosecond"))
+    codes[#codes + 1] = (send("ff-t-edge", "fn-13-abc", "f-13", { sec = second + 1, nsec = 0 }, "the next second's first"))
+    eq(table.concat(codes, " "), "2 2 2 -1 2", "codes")
+    -- The tick's time as a table too: the second's notice, once it is two seconds past.
+    eq((tick({ sec = second + 2, nsec = 999999999 })), -1, "a tick within two seconds")
+    local code, notices = tick({ sec = second + 3, nsec = 0 })
+    eq(code, 2, "a tick two seconds past")
+    eq(#notices, 1, "notices")
+    eq(notices[1].function_id, "f-13", "the notice's function")
+    eq(notices[1].message:match("^FF dropped (%d+) .* written at (.-) UTC"), "1", "the notice's count")
+    eq(select(2, notices[1].message:match("^FF dropped (%d+) .* written at (.-) UTC")), os.date("!%Y-%m-%d %H:%M:%S", second), "the notice's second")
+  end)
+
   print(string.format("%d passed, %d failed", passed, failed))
   return failed == 0 and 0 or 1
 end

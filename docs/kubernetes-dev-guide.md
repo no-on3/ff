@@ -258,7 +258,7 @@ What it installs is in [`deploy/k8s/README.md`](../deploy/k8s/README.md#logging)
 
 **Each line** keeps its namespace (the account), its function ID, its pod, its stream (`stdout` or `stderr`), and the request ID of its call: the lines from its pod's `START` line to its `REPORT`. The runtimes write a call's output before its `END` (P-42 part 1), so every line the handler writes before it returns has its call. The namespace and the function ID are the stream fields, which every query names. They come from the pod's metadata, or, when the collector can't get it, from the log file's name and the pod's name (`fn-<function ID>-…`).
 
-**The limit:** each account's namespace keeps 2,000 lines and 1 MiB a second, counted by the lines' own time, so a backlog read after a restart keeps each second's budget. Past it, lines are dropped. Once that second is two seconds past, the store gets one line per function, with `stream` `ff`, saying how many:
+**The limit:** each account's namespace keeps 2,000 lines and 1 MiB a second, counted by the lines' own time, so a backlog read after a restart keeps each second's budget, and to the nanosecond: the collector gets each line's time as its seconds and nanoseconds apart (`time_as_table`), so it counts each line in the second the store files it in. Past it, lines are dropped. Once that second is two seconds past, the store gets one line per function, with `stream` `ff`, saying how many:
 
 ```
 FF dropped 23412 of this function's log lines written at 2026-10-17 21:30:05 UTC: its account wrote more than 2000 lines, or 1048576 bytes, in that second.
