@@ -17,6 +17,7 @@ import {
   ValidatorConstraintInterface,
 } from 'class-validator';
 import { FUNCTION_NAME } from '../../functions/dto/create-function.dto';
+import { IsTags, TAG_LIMITS } from '../../tags/tag-rules';
 import { BucketStatus } from '../bucket.entity';
 import { ALL_FUNCTIONS, FUNCTION_ACCESS, FunctionAccess } from '../storage-key.entity';
 import { bucketNameProblem } from '../storage-names';
@@ -52,8 +53,23 @@ class FunctionNamesRule implements ValidatorConstraintInterface {
 /** Whether a key's request names functions or a level for them: then both are needed. */
 const namesFunctions = (dto: CreateStorageKeyDto): boolean => dto.functions !== undefined || dto.functionAccess !== undefined;
 
+/** PATCH /buckets/:name: what is given changes, the rest stays. */
+export class UpdateBucketDto {
+  @ApiPropertyOptional({
+    description:
+      `Its tags, as S3's: ${TAG_LIMITS.perResource} at most, a key of ${TAG_LIMITS.keyLength} characters, a value of ${TAG_LIMITS.valueLength}. ` +
+      "A new bucket's, as CreateBucket's; on a change, those sent replace them all, {} removing them, as PutBucketTagging does and a template's deploy gives them",
+    type: 'object',
+    additionalProperties: { type: 'string' },
+    example: { team: 'photos' },
+  })
+  @ValidateIf((_dto, value) => value !== undefined)
+  @IsTags()
+  tags?: Record<string, string>;
+}
+
 /** POST /buckets. */
-export class CreateBucketDto {
+export class CreateBucketDto extends UpdateBucketDto {
   @ApiProperty({ example: 'photos', description: "The bucket's name, AWS's rules without dots: 3 to 63 lower-case letters, digits and hyphens, unique across FF" })
   @IsString()
   @MaxLength(63)
@@ -89,6 +105,9 @@ export class BucketView {
 
   @ApiProperty({ nullable: true, type: String, example: 'https://photos.site.ffunc.cloud', description: "Its site's address, public to read, once its website configuration is set; null for none" })
   siteUrl: string | null;
+
+  @ApiPropertyOptional({ type: 'object', additionalProperties: { type: 'string' }, example: { team: 'photos' }, description: "Its tags, in a bucket's own answer, as S3's GetBucketTagging gives them; not in the list" })
+  tags?: Record<string, string>;
 
   @ApiProperty()
   createdAt: Date;

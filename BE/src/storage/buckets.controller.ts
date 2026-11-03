@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, Post, Put, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Put, Query } from '@nestjs/common';
 import { ApiOperation, ApiQuery, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Principal } from '../auth/principal';
 import { RequireActiveAccount, RequireRole, RequireScope, WRITERS } from '../auth/route-rules';
@@ -7,7 +7,7 @@ import { BucketNotificationsService } from './bucket-notifications.service';
 import { BucketWebsitesService } from './bucket-websites.service';
 import { BucketsService } from './buckets.service';
 import { NotificationConfigurationDto, NotificationConfigurationView } from './dto/notifications.dto';
-import { BucketView, CreateBucketDto } from './dto/storage.dto';
+import { BucketView, CreateBucketDto, UpdateBucketDto } from './dto/storage.dto';
 import { WebsiteConfigurationDto, WebsiteView } from './dto/website.dto';
 
 /**
@@ -52,11 +52,22 @@ export class BucketsController {
 
   @Get(':name')
   @RequireScope('storage:read')
-  @ApiOperation({ summary: 'A bucket: its endpoint, address and region' })
+  @ApiOperation({ summary: 'A bucket: its endpoint, address, region and tags' })
   @ApiResponse({ status: 200, type: BucketView })
   @ApiResponse({ status: 404, description: 'No such bucket in the account' })
   get(@Param('name') name: string, @Principal() principal: Principal): Promise<BucketView> {
     return this.buckets.get(principal.accountId, name);
+  }
+
+  @Patch(':name')
+  @RequireScope('storage:write')
+  @RequireRole(...WRITERS)
+  @ApiOperation({ summary: 'Change a bucket', description: "What is given changes, the rest stays: its tags, replaced whole, as S3's PutBucketTagging replaces them." })
+  @ApiResponse({ status: 200, type: BucketView })
+  @ApiResponse({ status: 400, description: 'A tag was refused' })
+  @ApiResponse({ status: 404, description: 'No such bucket in the account' })
+  update(@Param('name') name: string, @Body() dto: UpdateBucketDto, @Principal() principal: Principal): Promise<BucketView> {
+    return this.buckets.update(principal.accountId, name, dto);
   }
 
   @Get(':name/notifications')

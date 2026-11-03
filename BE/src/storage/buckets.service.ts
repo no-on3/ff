@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
@@ -9,9 +9,9 @@ import { isUniqueViolation } from '../common/unique-violation';
 import { PlansService } from '../plans/plans.service';
 import { ResourceTagsService, taggedBucket } from '../tags/resource-tags.service';
 import { Bucket, BucketStatus } from './bucket.entity';
-import { BucketView, CreateBucketDto } from './dto/storage.dto';
+import { BucketView, CreateBucketDto, UpdateBucketDto } from './dto/storage.dto';
 import { StorageKey } from './storage-key.entity';
-import { newStoreName } from './storage-names';
+import { bucketNotFound, newStoreName } from './storage-names';
 import { StoreBuckets } from './store-buckets';
 import { siteUrl } from './website';
 
@@ -63,10 +63,18 @@ export class BucketsService {
     return (await this.measured(accountId)).map((row) => this.view(row));
   }
 
+  /** A bucket, with its tags, which the list leaves out. */
   async get(accountId: string, name: string): Promise<BucketView> {
     const [row] = await this.measured(accountId, name);
-    if (!row) throw new NotFoundException(`The account has no bucket named "${name}"`);
-    return this.view(row);
+    if (!row) throw bucketNotFound(name);
+    return { ...this.view(row), tags: await this.tagsOf(await this.bucketOf(accountId, name)) };
+  }
+
+  /** What is given changes: its tags, replaced whole. */
+  async update(accountId: string, name: string, dto: UpdateBucketDto): Promise<BucketView> {
+    const bucket = await this.bucketOf(accountId, name);
+    if (dto.tags !== undefined) await this.replaceTags(accountId, bucket, dto.tags);
+    return this.get(accountId, name);
   }
 
   /** The account's buckets, or the one named, as FF's operators see them too: their names in the store, and what each held at its last hourly measure. */
@@ -96,10 +104,10 @@ export class BucketsService {
   /**
    * A new bucket, within the plan: counted under a lock on the account, so
    * that two at once can't pass it together, with its tags if it has some, as
-   * S3's CreateBucket gives them; then made in the store, and its row taken
-   * back if the store can't.
+   * S3's CreateBucket and FF's API give them; then made in the store, and its
+   * row taken back if the store can't.
    */
-  async create(accountId: string, dto: CreateBucketDto, tags: Record<string, string> = {}): Promise<BucketView> {
+  async create(accountId: string, dto: CreateBucketDto, tags: Record<string, string> = dto.tags ?? {}): Promise<BucketView> {
     const account = await this.buckets.manager.findOneBy(Account, { id: accountId });
     if (account?.storageDisabledAt) throw new ForbiddenException(`FF turned this account's databases, buckets and queues off: ${account.storageDisabledReason}`);
     const plan = await this.plans.forAccount(accountId);
@@ -175,7 +183,7 @@ export class BucketsService {
 
   private async bucketOf(accountId: string, name: string): Promise<Bucket> {
     const row = await this.buckets.findOneBy({ accountId, name });
-    if (!row) throw new NotFoundException(`The account has no bucket named "${name}"`);
+    if (!row) throw bucketNotFound(name);
     return row;
   }
 

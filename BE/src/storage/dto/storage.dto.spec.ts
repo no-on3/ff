@@ -1,8 +1,8 @@
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
-import { CreateBucketDto, CreateStorageKeyDto } from './storage.dto';
+import { CreateBucketDto, CreateStorageKeyDto, UpdateBucketDto } from './storage.dto';
 
 /** A body as the API validates it, with main.ts's pipe: the instance it passes on, or why it answers 400. */
-async function validated(metatype: typeof CreateBucketDto | typeof CreateStorageKeyDto, body: object): Promise<object | string[]> {
+async function validated(metatype: typeof CreateBucketDto | typeof UpdateBucketDto | typeof CreateStorageKeyDto, body: object): Promise<object | string[]> {
   const pipe = new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true });
   try {
     return (await pipe.transform(body, { type: 'body', metatype })) as object;
@@ -23,6 +23,21 @@ describe("a bucket's name, as the API takes it: AWS's rule, without dots", () =>
     ["with a prefix AWS keeps", 'xn--photos', 'AWS keeps names with "xn--" for itself'],
   ])('refuses one %s, saying why', async (_case, name, why) => {
     expect(await validated(CreateBucketDto, { name })).toEqual([expect.stringContaining(why)]);
+  });
+});
+
+describe("a bucket's tags, as the API takes them at its make and its change", () => {
+  it('takes them, {} among them, and a change without them', async () => {
+    expect(await validated(CreateBucketDto, { name: 'photos', tags: { team: 'photos' } })).toMatchObject({ tags: { team: 'photos' } });
+    expect(await validated(UpdateBucketDto, { tags: {} })).toMatchObject({ tags: {} });
+    expect(await validated(UpdateBucketDto, {})).toEqual({});
+  });
+
+  it.each([
+    [{ tags: { 'aws:team': 'photos' } }, 'The key aws:team starts with aws:, which AWS keeps for its own tags.'],
+    [{ tags: ['photos'] }, "Tags are an object, each tag's value by its key."],
+  ])('refuses %j, saying why', async (body, why) => {
+    expect(await validated(UpdateBucketDto, body)).toEqual([why]);
   });
 });
 

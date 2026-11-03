@@ -109,6 +109,7 @@ Terraform's provider puts its `default_tags` on each bucket it makes, by `PutBuc
 - **The audit log names the key** for each change: `bucket.tag` with the tags and `replaced`, and `bucket.untag` with the keys removed, by an empty set or `DeleteBucketTagging`.
 - **`ff export`** gives a role that tags buckets `s3:GetBucketTagging` and `s3:PutBucketTagging`, which S3 also asks for a removal.
 - **Measured** with the SDK for JavaScript (`CreateBucket`'s tags, a set replacing them, a key AWS keeps refused, `NoSuchTagSet` after the removal), boto3 and the AWS CLI (`s3api put-bucket-tagging`, `get-bucket-tagging`) in L4, and in L5 a key of one account that neither reads nor changes another's.
+- **In FF's API too** (X-13, part 2), which a SAM template's buckets are made through: `POST /buckets` takes `tags`, as `CreateBucket`'s configuration does; `PATCH /buckets/<name>`, a route of its own, replaces them whole, `{}` removing them, as `PutBucketTagging` does; `GET /buckets/<name>` gives them, the list leaving them out, as a queue's answers do. The same rules and the same audit entries; in L5, an account that neither changes nor reads another's.
 
 ## As built: a bucket's other settings, read as S3 answers a bucket without them (X-11, part 1, 2026-11-03)
 

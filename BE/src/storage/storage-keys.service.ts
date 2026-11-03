@@ -10,7 +10,7 @@ import { CreateStorageKeyDto, CreatedDeployKey, CreatedStorageKey, StorageKeyVie
 import { Bucket, BucketStatus } from './bucket.entity';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
-import { newAccessKeyId, newSecretAccessKey } from './storage-names';
+import { bucketNotFound, newAccessKeyId, newSecretAccessKey } from './storage-names';
 
 /** How long a deploy's key works: an hour, as an STS session lasts by default. */
 export const DEPLOY_KEY_MS = 60 * 60_000;
@@ -111,7 +111,7 @@ export class StorageKeysService {
 
   private async bucketOf(accountId: string, name: string): Promise<void> {
     const found = await this.keys.manager.existsBy(Bucket, { accountId, name, status: BucketStatus.ACTIVE });
-    if (!found) throw new NotFoundException(`The account has no bucket named "${name}"`);
+    if (!found) throw bucketNotFound(name);
   }
 
   private view(row: StorageKey): StorageKeyView {

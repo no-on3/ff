@@ -7,6 +7,7 @@ import { ChangedBy, bucketChange } from './bucket-changes';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { WebsiteView } from './dto/website.dto';
 import { S3Error } from './s3-error';
+import { bucketNotFound } from './storage-names';
 import { WebsiteConfiguration, WebsiteConfigurationJson, siteUrl, websiteFromJson, websiteJson } from './website';
 
 /**
@@ -66,7 +67,7 @@ export class BucketWebsitesService {
 
   private async bucketOf(accountId: string, name: string): Promise<Bucket> {
     const bucket = await this.buckets.findOneBy({ accountId, name, status: BucketStatus.ACTIVE });
-    if (!bucket) throw new NotFoundException(`The account has no bucket named "${name}"`);
+    if (!bucket) throw bucketNotFound(name);
     return bucket;
   }
 }

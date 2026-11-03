@@ -1539,7 +1539,7 @@ export interface CacheMetrics {
 }
 
 /** A bucket's fields, as the API's BucketView names them: contract.test.ts checks them. */
-export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'siteUrl', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
+export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'siteUrl', 'tags', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
 
 /** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
 export const STORAGE_KEY_FIELDS = ['id', 'name', 'buckets', 'queues', 'readOnly', 'functions', 'functionAccess', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
@@ -1568,6 +1568,8 @@ export interface Bucket {
   measuredAt: string | null;
   /** Its site's address, public to read, once its website configuration is set; null for none. */
   siteUrl: string | null;
+  /** Its tags, in a bucket's own answer; not in the list. */
+  tags?: Record<string, string>;
   createdAt: string;
 }
 

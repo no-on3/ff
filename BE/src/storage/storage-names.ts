@@ -1,4 +1,8 @@
+import { NotFoundException } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
+
+/** The refusal of a bucket the account hasn't, by its name, which every route on a bucket gives. */
+export const bucketNotFound = (name: string) => new NotFoundException(`The account has no bucket named "${name}"`);
 
 /**
  * A bucket's name, as AWS names general purpose buckets, without dots, so that

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
@@ -14,6 +14,7 @@ import { ChangedBy, bucketChange } from './bucket-changes';
 import { NotificationConfigurationJson, NotificationRule, checkRules, rulesFromJson, rulesJson, testEvent } from './bucket-notifications';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { S3Error, invalidArgument } from './s3-error';
+import { bucketNotFound } from './storage-names';
 
 /**
  * A bucket's notification configuration, as S3's (ADR 0010): the functions and
@@ -108,7 +109,7 @@ export class BucketNotificationsService {
 
   private async bucketOf(accountId: string, name: string): Promise<Bucket> {
     const bucket = await this.buckets.findOneBy({ accountId, name, status: BucketStatus.ACTIVE });
-    if (!bucket) throw new NotFoundException(`The account has no bucket named "${name}"`);
+    if (!bucket) throw bucketNotFound(name);
     return bucket;
   }
 }

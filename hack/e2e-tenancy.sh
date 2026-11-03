@@ -720,10 +720,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b POST /buckets '{"name": "l5-photos-b"}' >/dev/null
       check "  ... and makes one of its own, which A's list doesn't show" "201 0" "$(status) $(as_a GET /buckets | jq 'map(select(.name == "l5-photos-b")) | length')"
       ;;
-    "GET /buckets/{name}" | "DELETE /buckets/{name}")
-      as_b "$method" /buckets/l5-photos-a >/dev/null
+    "GET /buckets/{name}" | "PATCH /buckets/{name}" | "DELETE /buckets/{name}")
+      as_b "$method" /buckets/l5-photos-a "$([ "$method" = PATCH ] && echo '{"tags": {"owner": "b"}}' || true)" >/dev/null
       check "$route: B gets 404 for A's bucket" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
-      check "  ... which A still has" "l5-photos-a 200" "$(as_a GET /buckets/l5-photos-a | jq -r .name) $(status)"
+      check "  ... which A still has, untagged" "l5-photos-a 0 200" "$(as_a GET /buckets/l5-photos-a | jq -r '"\(.name) \(.tags | length)"') $(status)"
       ;;
     "GET /buckets/{name}/notifications" | "PUT /buckets/{name}/notifications")
       as_b "$method" /buckets/l5-photos-a/notifications "$([ "$method" = PUT ] && echo '{}' || true)" >/dev/null
@@ -1561,10 +1561,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 POST /buckets '{"name": "l5-photos-2"}' >/dev/null
       check "  ... and makes one of its own, which account 1's list doesn't show" "201 0" "$(status) $(as_user_1 GET /buckets | jq 'map(select(.name == "l5-photos-2")) | length')"
       ;;
-    "GET /buckets/{name}" | "DELETE /buckets/{name}")
-      as_user_2 "$method" /buckets/l5-photos-1 >/dev/null
+    "GET /buckets/{name}" | "PATCH /buckets/{name}" | "DELETE /buckets/{name}")
+      as_user_2 "$method" /buckets/l5-photos-1 "$([ "$method" = PATCH ] && echo '{"tags": {"owner": "2"}}' || true)" >/dev/null
       check "$route: account 2 gets 404 for account 1's bucket" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
-      check "  ... which account 1 still has" "l5-photos-1 200" "$(as_user_1 GET /buckets/l5-photos-1 | jq -r .name) $(status)"
+      check "  ... which account 1 still has, untagged" "l5-photos-1 0 200" "$(as_user_1 GET /buckets/l5-photos-1 | jq -r '"\(.name) \(.tags | length)"') $(status)"
       ;;
     "GET /buckets/{name}/notifications" | "PUT /buckets/{name}/notifications")
       as_user_2 "$method" /buckets/l5-photos-1/notifications "$([ "$method" = PUT ] && echo '{}' || true)" >/dev/null
