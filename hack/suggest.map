@@ -80,6 +80,7 @@ hack/k8s/test-it.sh                     static l3
 hack/lib/s3-clients/*                   static l4:buckets
 hack/lib/sqs-clients/*                  static l4:queues
 hack/lib/mail-receiver.mjs              static l4:mail_sent
+hack/lib/orders-app.sh                  static cli:small_app
 hack/lib/dkim-verify.mjs                static l4:mail_sent
 hack/lib/e2e-stack.sh                   static l4 l5 cli aws-tools
 hack/lib/backend-build.sh               static l4 l5 cli aws-tools

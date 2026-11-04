@@ -59,6 +59,7 @@ export FF_PG_PORT="${FF_CLI_E2E_PG_PORT:-25436}"
 export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-29007}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
+source "$FF_REPO_ROOT/hack/lib/orders-app.sh"
 sections_options "$@"
 e2e_options "${sections_rest[@]}"
 
@@ -1315,10 +1316,8 @@ cp -r "$app/site" "$work/shop-site"
 printf '{"api": "%s"}\n' "$shop_url" >"$work/shop-site/config.json"
 ff sites deploy cli-shop-site "$work/shop-site"
 check "the app's page deployed to its bucket's site" "0 $site_origin" "$(code) $(out | tail -1)"
-check "  ... a browser gets the page, and the API's address beside it" "200 Orders $shop_url" \
-  "$(curl -s -o "$work/shop-page.html" -w '%{http_code}' "$site_origin/") $(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$work/shop-page.html") $(curl -s "$site_origin/config.json" | jq -r .api)"
-check "  ... and the function URL lets the page's origin in, as the template's CORS says and a browser's preflight asks" "$site_origin" \
-  "$(curl -s -o /dev/null -D - -X OPTIONS "$shop_url/orders" -H "Origin: $site_origin" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
+orders_page_check "$site_origin" "$shop_url" "$work/shop-page.html"
+orders_cors_check "$shop_url" "$site_origin"
 # The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
 ff keys create --bucket cli-receipts --read-only
 out | grep '^export AWS_' >"$work/receipts.env"

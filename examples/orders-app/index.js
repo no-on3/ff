@@ -1,16 +1,17 @@
 // A small app on FF, as it would run on AWS Lambda: its page a site (site/, ff sites deploy), orders taken at a web
 // address and kept in PostgreSQL, the latest listed from a cache, each order's receipt made in the background, kept in
-// a bucket and e-mailed, and a report each night. One package, three functions:
-//   orders-api       handler index.http      its function URL: POST /orders, GET /orders, GET /orders/<id>/receipt
-//   orders-receipts  handler index.receipts  reads the queue of new orders (ff event-sources add): each one's receipt
-//   orders-nightly   handler index.nightly   a schedule, cron(0 2 * * ? *): yesterday's orders counted, those older
-//                                            than 90 days removed, with their receipts
-// orders-api and orders-nightly read DATABASE_URL, a secret (ff db create orders --secret-for orders-api), and
-// REDIS_URL, another (ff caches create orders-cache --secret-for orders-api): the latest orders are kept there a
-// minute, and a new order clears them; without it, the list is read from the database each time. A new order goes to
-// the queue RECEIPTS_QUEUE names, for orders-receipts to write its receipt to the bucket RECEIPTS_BUCKET names, where
-// orders-api reads it back, and to e-mail it from the address RECEIPTS_FROM names when the order gives an address;
-// without the queue, orders-api does both itself, and without the bucket, orders go without receipts. The key, region
+// a bucket and e-mailed, and a report each night. One package, three functions, as template.yaml makes them:
+//   shop-api       handler index.http      its function URL: POST /orders, GET /orders, GET /orders/<id>/receipt
+//   shop-receipts  handler index.receipts  reads the queue of new orders (its SQS event): each one's receipt
+//   shop-nightly   handler index.nightly   a schedule, cron(0 2 * * ? *): yesterday's orders counted, those older
+//                                          than 90 days removed, with their receipts
+// shop-api and shop-nightly read DATABASE_URL, a secret (ff db create shop --secret-for shop-api), and REDIS_URL,
+// another (ff caches create shop-cache --secret-for shop-api): the latest orders are kept there a minute, and a new
+// order clears them; without it, the list is read from the database each time. A receipt is read without the
+// database, so that a stack without one, as AWS's monthly run deploys it, still serves them. A new order goes to the
+// queue RECEIPTS_QUEUE names, for shop-receipts to write its receipt to the bucket RECEIPTS_BUCKET names, where
+// shop-api reads it back, and to e-mail it from the address RECEIPTS_FROM names when the order gives an address;
+// without the queue, shop-api does both itself, and without the bucket, orders go without receipts. The key, region
 // and endpoints are the function's own, in its environment, as AWS Lambda gives a function its role's:
 // new S3Client({}), new SQSClient({}) and new SESv2Client({}) need nothing more, on FF as on AWS.
 const { Pool } = require('pg');
@@ -134,7 +135,6 @@ async function tryMailReceipt(order) {
 // AWS Lambda's event for function URLs in, the response out.
 exports.http = async (event) => {
   const { method, path } = event.requestContext.http;
-  const db = await database();
   if (method === 'POST' && path === '/orders') {
     const text = event.isBase64Encoded ? Buffer.from(event.body ?? '', 'base64').toString() : (event.body ?? '');
     let order;
@@ -150,7 +150,7 @@ exports.http = async (event) => {
     ) {
       return answer(400, { message: 'An order is {"item": "<what>", "quantity": <a whole number above 0>}, and "email": "<an address>" for its receipt' });
     }
-    const { rows } = await db.query(
+    const { rows } = await (await database()).query(
       'INSERT INTO orders (item, quantity, email) VALUES ($1, $2, $3) RETURNING id, item, quantity, email, created_at',
       [order.item, order.quantity, email],
     );
@@ -183,7 +183,7 @@ exports.http = async (event) => {
   }
   // The latest orders, without the addresses they gave: the site lists them for anyone.
   if (method === 'GET' && path === '/orders') {
-    const { rows, from } = await latestOrders(db);
+    const { rows, from } = await latestOrders(await database());
     return answer(200, rows, { 'x-cache': from });
   }
   const wanted = method === 'GET' && /^\/orders\/([0-9]+)\/receipt$/.exec(path);

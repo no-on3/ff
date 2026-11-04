@@ -72,8 +72,8 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 - **Still to change:** nothing.
 
 **63. The way out is checked offline in every run** (`sam validate --lint`, cfn-lint, `tofu validate`, Moto), **and on a real AWS account once a month once you have one.** ✅ Your answer: as recommended. Until then the docs say the export is checked offline.
-- **Changed already:** offline in every run: the export's template through `sam validate --lint` and cfn-lint, and its Terraform through `tofu validate` (X-02); every SAM template the repository keeps, the small app's among them, in the unit stage (X-13, X-15); and the AWS tools' own job (T-10's part 2).
-- **Still to change:** the monthly run on AWS itself (T-10's part 3), once you have an account.
+- **Changed already:** offline in every run: the export's template through `sam validate --lint` and cfn-lint, and its Terraform through `tofu validate` (X-02); every SAM template the repository keeps, the small app's among them, in the unit stage (X-13, X-15); and the AWS tools' own job (T-10's part 2). The monthly run on AWS itself built (T-10's part 3): `.github/workflows/aws.yml` and `hack/e2e-aws.sh`, the small app's template deployed with `sam deploy`, checked and deleted, skipped until the repository names an AWS role.
+- **Still to change:** the account, and its role for GitHub's OIDC as the guide's pipeline section says; then the run's first pass, by hand, on `master`.
 
 **64. Beta's limits: 5 GB of code storage per account, 10 access keys, no count of versions, aliases or stacks;** Lambda's API under the plan's 60 changes a minute, its reads free. ✅ Your answer: as recommended. In the plan like every limit, changed in the admin app.
 - **Changed already:** the plan's code storage, 5,120 MB on beta (X-05), and its access keys, 10 (X-07), each changed in the admin app; Lambda's changes counted against the plan's 60 a minute, its reads free (X-09).

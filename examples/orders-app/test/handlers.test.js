@@ -13,10 +13,11 @@ let calls;
 let world;
 let errors;
 
-// The app as a new instance loads it, with these variables.
+// The app as a new instance loads it, with these variables; a variable given as null is left unset.
 function instance(env) {
   for (const name of ['DATABASE_URL', 'REDIS_URL', 'RECEIPTS_QUEUE', 'RECEIPTS_BUCKET', 'RECEIPTS_FROM']) delete process.env[name];
   Object.assign(process.env, { DATABASE_URL: 'postgresql://orders@db.example.tn/orders' }, env);
+  for (const [name, value] of Object.entries(env)) if (value === null) delete process.env[name];
   delete require.cache[app];
   return require(app);
 }
@@ -67,6 +68,12 @@ const stubs = {
       async send(sent) {
         calls.push(['s3', sent.constructor.name, sent.input.Key ?? '']);
         if (world.s3Fails) throw Object.assign(new Error('the store is away'), { name: 'ServiceUnavailable' });
+        const { Key, Body } = sent.input;
+        if (sent.constructor.name === 'PutObjectCommand') world.objects.set(Key, Body);
+        if (sent.constructor.name === 'GetObjectCommand') {
+          if (!world.objects.has(Key)) throw Object.assign(new Error('The specified key does not exist.'), { name: 'NoSuchKey' });
+          return { Body: { transformToString: async () => world.objects.get(Key) } };
+        }
         return sent.constructor.name === 'DeleteObjectsCommand' ? { Deleted: sent.input.Delete.Objects } : {};
       }
     },
@@ -109,10 +116,10 @@ const made = (kind) => calls.filter((call) => call[0] === kind);
 beforeEach(() => {
   calls = [];
   errors = [];
-  world = { orders: [], nextId: 1, kept: new Map(), removed: [], cacheDown: false, sesFails: false, s3Fails: false };
+  world = { orders: [], nextId: 1, kept: new Map(), objects: new Map(), removed: [], cacheDown: false, sesFails: false, s3Fails: false };
 });
 
-describe('the API, orders-api', () => {
+describe('the API, shop-api', () => {
   it('without a cache lists the orders from the database, X-Cache none, and queues an order for its receipt', async () => {
     const { http: api } = instance({ RECEIPTS_QUEUE: 'new-orders', RECEIPTS_BUCKET: 'shop-receipts' });
     const order = await api(http('POST', '/orders', { item: 'harissa', quantity: 2 }));
@@ -166,9 +173,22 @@ describe('the API, orders-api', () => {
     world.cacheDown = false;
     assert.equal((await api(http('GET', '/orders'))).headers['x-cache'], 'miss');
   });
+
+  it('reads a receipt, and answers a path it lacks, without the database, which a stack without one has none of', async () => {
+    const { http: api, receipts } = instance({ DATABASE_URL: null, RECEIPTS_BUCKET: 'shop-receipts' });
+    const order = { id: 7, item: 'harissa', quantity: 2, email: null, created_at: '2026-11-04T09:00:00Z' };
+    await receipts({ Records: [{ messageId: 'm-1', body: JSON.stringify(order) }] });
+    const read = await api(http('GET', '/orders/7/receipt'));
+    assert.deepEqual([read.statusCode, read.body], [200, 'Order 7\n2 × harissa\n2026-11-04T09:00:00.000Z\n']);
+    assert.deepEqual(
+      [(await api(http('GET', '/orders/8/receipt'))).statusCode, (await api(http('GET', '/elsewhere'))).statusCode],
+      [404, 404],
+    );
+    await assert.rejects(api(http('GET', '/orders')), /DATABASE_URL is not set/);
+  });
 });
 
-describe('the queue\'s reader, orders-receipts', () => {
+describe('the queue\'s reader, shop-receipts', () => {
   const records = [
     { messageId: 'a', body: JSON.stringify({ id: 7, item: 'harissa', quantity: 2, email: 'ana@shop.example.tn', created_at: '2026-10-30T09:00:00Z' }) },
     { messageId: 'b', body: JSON.stringify({ id: 8, item: 'bsissa', quantity: 1, email: null, created_at: '2026-10-30T09:00:00Z' }) },
@@ -190,7 +210,7 @@ describe('the queue\'s reader, orders-receipts', () => {
   });
 });
 
-describe('the night, orders-nightly', () => {
+describe('the night, shop-nightly', () => {
   it('removes the old orders with their receipts, and clears the latest orders in the cache', async () => {
     const { nightly } = instance({ REDIS_URL: 'rediss://default:pw@cache.example.tn:6400', RECEIPTS_BUCKET: 'shop-receipts' });
     world.removed = [3, 4];
