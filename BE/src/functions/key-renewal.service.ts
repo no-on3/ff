@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 import { describeError } from '../common/describe-error';
 import { withJobLock } from '../database/job-lock';
 import { ORCHESTRATOR, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
+import { readyTimeoutMs } from '../orchestrator/ready-timeout';
 import { FunctionKeys, KeysToRenew } from '../storage/function-keys.service';
 import { FunctionsService, differsByKeyAlone } from './functions.service';
 
@@ -107,7 +108,7 @@ export class FunctionKeyRenewal implements OnModuleInit, OnModuleDestroy {
         return;
       }
       await this.orchestrator.renewEnvironment(workload);
-      await this.orchestrator.waitUntilReady(workload, this.readyTimeoutMs());
+      await this.orchestrator.waitUntilReady(workload, readyTimeoutMs(this.config));
       rolled++;
     }
     report.rolled += rolled;
@@ -128,10 +129,6 @@ export class FunctionKeyRenewal implements OnModuleInit, OnModuleDestroy {
     const current = new Set(deployments.map((deployment) => deployment.revision ?? ''));
     const pods = await this.orchestrator.podRevisions({ id: keys.functionId, accountId: keys.accountId });
     return pods.some((revision) => !current.has(revision));
-  }
-
-  private readyTimeoutMs(): number {
-    return this.config.get<number>('orchestrator.readyTimeoutSeconds', 90) * 1000;
   }
 }
 

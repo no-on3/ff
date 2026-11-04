@@ -1,8 +1,9 @@
 """Each request Terraform's AWS provider sent, from its log at DEBUG (TF_LOG=DEBUG): one tab-separated line a request,
 in the order sent: the time it was answered, the step's RPC (PlanResourceChange, ApplyResourceChange, ReadResource, ImportResourceState), the
 resource's type, the service and operation, the attempt, the answer's status and, when refused, the error's code.
+hack/e2e-aws-tools.sh reads a throttled change's retries from it, and hack/spikes/lambda/front-doors.sh every request.
 
-    python3 provider_log.py <debug.log>
+    python3 hack/lib/provider_log.py <debug.log>
 
 A record of the log spans several lines when a field holds one (a body): each starts with its timestamp."""
 
@@ -18,8 +19,13 @@ def field(record, name):
 
 
 def error_code(record):
-    """S3's <Code> in its XML, SQS's __type in its JSON (after the #), or the query error's header."""
-    for pattern in (r"<Code>([^<]+)</Code>", r'\\?"__type\\?"\s*:\s*\\?"(?:[^"#\\]*#)?([^"\\]+)', r"x_amzn_query_error=\"?([^;\" ]+)"):
+    """S3's <Code> in its XML, SQS's __type in its JSON (after the #), the query error's header, or Lambda's."""
+    for pattern in (
+        r"<Code>([^<]+)</Code>",
+        r'\\?"__type\\?"\s*:\s*\\?"(?:[^"#\\]*#)?([^"\\]+)',
+        r"x_amzn_query_error=\"?([^;\" ]+)",
+        r"x_amzn_errortype=\"?([^:;\" ]+)",
+    ):
         found = re.search(pattern, record)
         if found:
             return found.group(1)

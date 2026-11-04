@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use super::Context;
 use crate::api::{Call, Client};
 use crate::cli::QueueAttributeArgs;
+use crate::config::is_queue_name;
 use crate::error::{Error, Kind};
 use crate::table::{table, time};
 
@@ -45,6 +46,9 @@ pub(super) struct Queue {
     pub(super) maximum_message_size: u64,
     pub(super) receive_message_wait_time_seconds: u64,
     pub(super) redrive_policy: Option<RedrivePolicy>,
+    /// Its tags, in a queue's own answer alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) tags: Option<BTreeMap<String, String>>,
     messages: Messages,
     size_bytes: u64,
     created_at: String,
@@ -77,12 +81,6 @@ struct Received {
     /// Whether `--delete` deleted it: then it isn't received again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     deleted: Option<bool>,
-}
-
-/// SQS's rule for a standard queue's name, as the API's: 1 to 80 letters, digits, hyphens and underscores.
-pub fn is_queue_name(name: &str) -> bool {
-    (1..=80).contains(&name.len())
-        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 pub fn checked_name(name: &str) -> Result<&str, Error> {
@@ -606,6 +604,7 @@ mod tests {
             "maximumMessageSize": 1_048_576,
             "receiveMessageWaitTimeSeconds": 20,
             "redrivePolicy": { "deadLetterTargetArn": "arn:aws:sqs:tn-tunis-1:000000000001:orders-dlq", "maxReceiveCount": 3 },
+            "tags": { "team": "shop" },
             "messages": { "available": 3, "inFlight": 1, "delayed": 0 },
             "sizeBytes": 2048,
             "createdAt": "2026-10-24T08:00:00.000Z",

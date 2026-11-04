@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, LessThan, QueryFailedError, Repository } from 'typeorm';
+import { In, LessThan, Repository } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { Currency } from '../billing/currency.entity';
@@ -9,6 +9,7 @@ import { formatMinor } from '../billing/money';
 import { PriceBook } from '../billing/price-book.entity';
 import { PriceDocument, priceDocumentProblems, keysLeftOut } from '../billing/price-book';
 import { PricingService, monthBounds } from '../billing/pricing.service';
+import { isUniqueViolation } from '../common/unique-violation';
 import { BookStatus, PriceBookPreviewView, PriceBookView } from './admin-prices.dto';
 import { Operator } from './operator';
 
@@ -82,7 +83,7 @@ export class AdminPricesService {
       return view(book, 'scheduled');
     } catch (error) {
       // The unique index on valid_from: one book an hour.
-      if (error instanceof QueryFailedError && (error as QueryFailedError & { code?: string }).code === '23505') throw new ConflictException(taken);
+      if (isUniqueViolation(error)) throw new ConflictException(taken);
       throw error;
     }
   }

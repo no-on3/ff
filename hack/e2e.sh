@@ -46,7 +46,9 @@
 # AWS's SDK for JavaScript v3, boto3 and the AWS CLI through the S3 front door,
 # only their endpoint changed (uploads, downloads, ranges, listings, 100 MB in
 # parts, presigned URLs, a wrong signature, an expired URL, another account's
-# bucket); a read-only key, a revoked one, a suspended account and one whose
+# bucket, a bucket made, tagged, its settings read and deleted as Terraform and
+# the CLI do, with the API's checks, its policy and public access block kept as a
+# site's on AWS needs them); a read-only key, a revoked one, a suspended account and one whose
 # storage is off refused; two functions, AWS's SDK for JavaScript v3 and boto3
 # with no setting at all, writing to the account's bucket with keys of their own
 # and refused another's, a function's key revoked with it; the bucket measured
@@ -56,7 +58,7 @@
 # first when asked, its alarm with it. Then customers' queues: the AWS CLI, AWS's
 # SDK for JavaScript v3 and boto3 through the SQS endpoint, only their endpoint
 # changed (queues made and listed, messages with attributes sent and received,
-# long polls, batches, visibility, a dead-letter queue, a queue that isn't there,
+# long polls, batches, visibility, a dead-letter queue, tags, a queue that isn't there,
 # another account's, a wrong secret, an unknown key); two functions with no
 # setting at all, the SDK's own queue URL inside the cluster and boto3 with one
 # from outside, which the SDK for JavaScript sends to its host; a queue as a
@@ -222,6 +224,32 @@ aws_ff() { AWS_ACCESS_KEY_ID="${AWS_KEY:-$key_id}" AWS_SECRET_ACCESS_KEY="${AWS_
 # outcome <command…>: accepted, or refused with the error's code, as AWS's CLI prints any service's: S3's, SQS's query
 # code (AWS.SimpleQueueService.NonExistentQueue), SES's name (NotFoundException).
 outcome() { "$@" >/dev/null 2>"$work/aws.err" && echo accepted || echo "refused $(grep -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/aws.err" | head -1 | sed -E 's/.*\((.*)\)/\1/')"; }
+
+# aws_lambda <arguments…>: the AWS CLI at Lambda's endpoint, from AWS_ENDPOINT_URL_LAMBDA alone, with AWS_KEY's key.
+aws_lambda() { AWS_ACCESS_KEY_ID="$AWS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
+  AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_LAMBDA="http://localhost:$lambda_port" "${aws_cli[@]}" lambda "$@" --output json; }
+# lambda_zip <zip> <code> [file]: a package of one module, index.mjs unless named, as Lambda takes one; its CodeSha256
+# printed. Defined here, as a section passes on only the functions it adds: one it defines again, as zip_of, stays the
+# suite's in the next.
+lambda_zip() {
+  python3 - "$@" <<'PY'
+import base64, hashlib, sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w') as archive:
+    archive.writestr(sys.argv[3] if len(sys.argv) > 3 else 'index.mjs', sys.argv[2])
+print(base64.b64encode(hashlib.sha256(open(sys.argv[1], 'rb').read()).digest()).decode())
+PY
+}
+
+# boto3_python: the Python of the clients' venv, with boto3 pinned to the version ADR 0009 measured, made once in
+# hack/.cache; its path printed.
+boto3_python() {
+  local venv="$FF_REPO_ROOT/hack/.cache/s3-clients/venv"
+  if [ ! -x "$venv/bin/python" ]; then
+    python3 -m venv "$venv"
+    "$venv/bin/pip" install --quiet --disable-pip-version-check boto3==1.43.118 >&2
+  fi
+  echo "$venv/bin/python"
+}
 
 # written_within <seconds> <table> <id> <since>: true when the backend wrote the table's first row for the id within
 # that many seconds of <since> (seconds since the epoch), else how long after, as its log says: in development, each
@@ -473,6 +501,639 @@ check "  ... and a request to it runs the version the alias names" '200 {"ran":"
 (sleep 65 && sql "UPDATE plans SET limits = limits || '{\"idleSeconds\": 1}' WHERE id = 'e2e-versions'") >/dev/null 2>&1 &
 }
 section_def versions section_versions backend budget=35
+
+section_lambda_reads() {
+section "Lambda's endpoint, read with the AWS CLI: a function, its version and its alias, the account's list and settings, its code's link"
+reader="$(as_ver POST /storage-keys '{"name": "e2e-lambda-reader", "functions": ["*"], "functionAccess": "read"}')"
+reader_id="$(jq -r .id <<<"$reader")"
+reader_secret="$(jq -r .secretAccessKey <<<"$reader")"
+# as_reader <aws lambda arguments…>: the AWS CLI at Lambda's endpoint with a key that may read the account's functions.
+as_reader() { AWS_KEY="$reader_id" AWS_SECRET="$reader_secret" aws_lambda "$@"; }
+versioned_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-versioned"
+latest="$(as_reader get-function --function-name e2e-versioned)"
+check "GetFunction gives \$LATEST under Lambda's names, Active, its memory raised since its version" \
+  "$versioned_arn nodejs24.x \$LATEST 256 function.handler Active Successful" \
+  "$(jq -r '.Configuration | "\(.FunctionArn) \(.Runtime) \(.Version) \(.MemorySize) \(.Handler) \(.State) \(.LastUpdateStatus)"' <<<"$latest")"
+check "  ... and its code as a link of FF's, unsigned, which answers its zip" "200 function.ts" \
+  "$(curl -sS -o "$work/lambda-code.zip" -w '%{http_code}' "$(jq -r .Code.Location <<<"$latest")") \
+$(python3 -c 'import sys, zipfile; print(",".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$work/lambda-code.zip")"
+check "  ... through its alias live, the version it names, as published" "$versioned_arn:1 1 128" \
+  "$(as_reader get-function --function-name e2e-versioned --qualifier live | jq -r '.Configuration | "\(.FunctionArn) \(.Version) \(.MemorySize)"')"
+check "GetFunctionConfiguration takes the version in the name, as a partial ARN" "1 Active" \
+  "$(as_reader get-function-configuration --function-name e2e-versioned:1 | jq -r '"\(.Version) \(.State)"')"
+check "ListFunctions lists the account's function, and with every version, its version after it" \
+  "e2e-versioned:\$LATEST e2e-versioned:\$LATEST,e2e-versioned:1" \
+  "$(as_reader list-functions | jq -r '[.Functions[] | "\(.FunctionName):\(.Version)"] | join(",")') \
+$(as_reader list-functions --function-version ALL | jq -r '[.Functions[] | "\(.FunctionName):\(.Version)"] | join(",")')"
+# A profile of AWS's config files with Lambda's endpoint in its services section, as the guide's way out has it: the
+# key, the region and the endpoint the profile's alone, no variable naming any, so that on AWS the same profile without
+# its services line reaches AWS. A profile named on the command line takes no key from the environment.
+printf '[profile ff]\nregion = tn-tunis-1\nservices = ff-endpoints\n\n[services ff-endpoints]\nlambda =\n  endpoint_url = http://localhost:%s\n' \
+  "$lambda_port" >"$work/aws-config-services"
+printf '[ff]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$reader_id" "$reader_secret" >"$work/aws-credentials-services"
+check "a profile whose services section names Lambda's endpoint reaches it, its key and region the profile's, as AWS's tools read one" \
+  "$versioned_arn" \
+  "$(env -u AWS_DEFAULT_REGION -u AWS_REGION -u AWS_ENDPOINT_URL -u AWS_ENDPOINT_URL_LAMBDA -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY \
+    AWS_CONFIG_FILE="$work/aws-config-services" AWS_SHARED_CREDENTIALS_FILE="$work/aws-credentials-services" \
+    "${aws_cli[@]}" --profile ff lambda get-function-configuration --function-name e2e-versioned --output json | jq -r .FunctionArn)"
+check "GetAccountSettings gives the plan's limits under Lambda's names, and the account's one function" "52428800 1" \
+  "$(as_reader get-account-settings | jq -r '"\(.AccountLimit.CodeSizeZipped) \(.AccountUsage.FunctionCount)"')"
+check "GetFunctionCodeSigningConfig says FF signs no code, as Terraform's provider reads it" '""' \
+  "$(as_reader get-function-code-signing-config --function-name e2e-versioned | jq .CodeSigningConfigArn)"
+check "the CLI's waiter function-active-v2 finds it active" accepted "$(outcome as_reader wait function-active-v2 --function-name e2e-versioned)"
+check "a function the account hasn't, and a version its function hasn't, are ResourceNotFoundException" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException" \
+  "$(outcome as_reader get-function --function-name e2e-missing) $(outcome as_reader get-function --function-name e2e-versioned --qualifier 7)"
+# not_offered <aws lambda command> <arguments…>: how many requests the CLI sent, as its debug log counts them, then the
+# operation it called and the one FF's refusal names; the CLI's words in $work/not-offered-<command>.err.
+not_offered() {
+  local err="$work/not-offered-$1.err"
+  as_reader "$@" --debug >/dev/null 2>"$err" || true # refused, as each should be
+  echo "$(grep -c 'Sending http request' "$err") $(sed -nE "s/.*\(UnknownOperationException\) when calling the ([A-Za-z]+) operation: FF doesn't offer ([A-Za-z]+) of Lambda's API yet\..*/\1 \2/p" "$err" | tail -1)"
+}
+check "Lambda's operations FF doesn't offer yet are UnknownOperationException naming the one called, a request each, which the CLI doesn't send again" \
+  "1 ListLayers ListLayers 1 GetLayerVersionByArn GetLayerVersionByArn 1 PutProvisionedConcurrencyConfig PutProvisionedConcurrencyConfig" \
+  "$(not_offered list-layers) $(not_offered get-layer-version-by-arn --arn "arn:aws:lambda:tn-tunis-1:$ver:layer:shared:1") \
+$(not_offered put-provisioned-concurrency-config --function-name e2e-versioned --qualifier live --provisioned-concurrent-executions 1)"
+check "  ... saying what FF offers instead, where it does" "FF doesn't offer ListLayers of Lambda's API yet. A function's zip carries its libraries." \
+  "$(grep -oE "FF doesn't offer ListLayers .*" "$work/not-offered-list-layers.err" | tail -1)"
+}
+section_def lambda_reads section_lambda_reads versions budget=25
+
+section_lambda_tags() {
+section "Lambda's tags on a function, with the AWS CLI: put, a key's value changed, read, removed, by a key that may change it, which the audit log names"
+writer="$(as_ver POST /storage-keys '{"name": "e2e-lambda-writer", "functions": ["e2e-versioned"], "functionAccess": "write"}')"
+# as_writer <aws lambda arguments…>: the AWS CLI at Lambda's endpoint with a key that may change the versioned function.
+as_writer() { AWS_KEY="$(jq -r .id <<<"$writer")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$writer")" aws_lambda "$@"; }
+as_writer tag-resource --resource "$versioned_arn" --tags team=shop,stage=dev >/dev/null
+as_writer tag-resource --resource "$versioned_arn" --tags stage=prod >/dev/null
+check "TagResource puts the tags, a key there taking its new value; ListTags and GetFunction give them" \
+  '{"stage":"prod","team":"shop"} {"stage":"prod","team":"shop"}' \
+  "$(as_reader list-tags --resource "$versioned_arn" | jq -c -S .Tags) $(as_reader get-function --function-name e2e-versioned | jq -c -S .Tags)"
+as_writer untag-resource --resource "$versioned_arn" --tag-keys stage >/dev/null
+check "UntagResource removes a tag by its key" '{"team":"shop"}' "$(as_reader list-tags --resource "$versioned_arn" | jq -c .Tags)"
+check "a key that may only read the function can't tag it, and tags go on the function, not on its alias" \
+  "refused AccessDeniedException refused InvalidParameterValueException" \
+  "$(outcome as_reader tag-resource --resource "$versioned_arn" --tags team=x) $(outcome as_writer tag-resource --resource "$versioned_arn:live" --tags team=x)"
+check "the audit log names each change, and the key that made it" \
+  "function.tag function.tag function.untag access_key:$(jq -r .id <<<"$writer")" \
+  "$(as_ver GET /audit-log | jq -r --arg r "function:$versioned_id" \
+    '[.entries[] | select(.resource == $r and (.action == "function.tag" or .action == "function.untag"))] | reverse | "\(map(.action) | join(" ")) \(map(.actor) | unique | join(" "))"')"
+}
+section_def lambda_tags section_lambda_tags lambda_reads budget=15
+
+section_lambda_changes() {
+section "Lambda's CreateFunction and DeleteFunction with the AWS CLI: a zip sent or in a bucket, answered Pending, then Active or Failed; a version, then the function, deleted"
+as_ver POST /buckets '{"name": "e2e-lambda-code"}' >/dev/null
+maker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-maker", "functions": ["*"], "functionAccess": "write", "buckets": ["e2e-lambda-code"]}')"
+check "a key that may change every function of the account, and reach the bucket of its code" 201 "$(status)"
+# as_maker <aws arguments…>: the AWS CLI with that key, at Lambda's endpoint (aws_lambda) or at the buckets' (aws_ff).
+as_maker() { AWS_KEY="$(jq -r .id <<<"$maker")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$maker")" "$@"; }
+made_sha="$(lambda_zip "$work/made.zip" 'export const handler = async (event) => ({ made: "by the AWS CLI", stage: process.env.STAGE, event });')"
+role="arn:aws:iam::$ver:role/e2e-made"
+created="$(as_maker aws_lambda create-function --function-name e2e-made --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/made.zip" --description "Made by the AWS CLI" --environment 'Variables={STAGE=e2e}' --tags team=e2e --publish)"
+check "CreateFunction answers at once, Pending, with the zip's CodeSha256 and what it kept: the role, the description" \
+  "Pending Creating \$LATEST $made_sha $role Made by the AWS CLI" \
+  "$(jq -r '"\(.State) \(.StateReasonCode) \(.Version) \(.CodeSha256) \(.Role) \(.Description)"' <<<"$created")"
+check "  ... and the CLI's waiter function-active-v2 waits for it to be Active" accepted "$(outcome as_maker aws_lambda wait function-active-v2 --function-name e2e-made)"
+check "GetFunction reads it Active, its tags with it; its version 1 published with the function's description, as Terraform's provider asks" \
+  "Active Successful e2e {\"STAGE\":\"e2e\"} 1 Made by the AWS CLI" \
+  "$(as_reader get-function --function-name e2e-made | jq -r '"\(.Configuration.State) \(.Configuration.LastUpdateStatus) \(.Tags.team) \(.Configuration.Environment.Variables | tojson)"') \
+$(as_reader get-function-configuration --function-name e2e-made --qualifier 1 | jq -r '"\(.Version) \(.Description)"')"
+made_id="$(as_ver GET '/functions?name=e2e-made' | jq -r '.[0].id')"
+check "  ... and it runs its zip, through FF's API too" '201 "by the AWS CLI" "e2e"' \
+  "$(as_ver POST "/functions/$made_id/invoke" '{"input": {}}' >/dev/null; status) $(jq -c '.output.made, .output.stage' "$work/body" | paste -sd ' ')"
+check "the audit log names the create and the key that made it" "function.create access_key:$(jq -r .id <<<"$maker")" \
+  "$(as_ver GET /audit-log | jq -r --arg r "function:$made_id" '[.entries[] | select(.resource == $r and .action == "function.create")][0] | "\(.action) \(.actor)"')"
+
+as_maker aws_ff s3 cp "$work/made.zip" s3://e2e-lambda-code/builds/made.zip --only-show-errors
+as_maker aws_lambda create-function --function-name e2e-made-s3 --runtime nodejs24.x --role "$role" --handler index.handler \
+  --code S3Bucket=e2e-lambda-code,S3Key=builds/made.zip >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-made-s3 >/dev/null 2>&1 || true
+check "its code read from the account's bucket instead, the same zip; Lambda's defaults, 128 MB and 3 seconds" "Active $made_sha 128 3" \
+  "$(as_reader get-function-configuration --function-name e2e-made-s3 | jq -r '"\(.State) \(.CodeSha256) \(.MemorySize) \(.Timeout)"')"
+
+lambda_zip "$work/broken.zip" 'throw new Error("boom at import");' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-made-broken --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/broken.zip" >/dev/null
+check "a function whose code fails at its import: the waiter stops at Failed" refused "$(outcome as_maker aws_lambda wait function-active-v2 --function-name e2e-made-broken | xargs)"
+check "  ... GetFunction says why, FF's diagnosis as its reason" "Failed true" \
+  "$(as_reader get-function-configuration --function-name e2e-made-broken | jq -r '"\(.State) \(.StateReason | contains("boom at import"))"')"
+
+check "refused as Lambda refuses: a runtime FF lacks, a name taken, a key that may only read, a zip not in the bucket" \
+  "refused InvalidParameterValueException refused ResourceConflictException refused AccessDeniedException refused InvalidParameterValueException" \
+  "$(outcome as_maker aws_lambda create-function --function-name e2e-made-22 --runtime nodejs22.x --role "$role" --handler index.handler --zip-file "fileb://$work/made.zip") \
+$(outcome as_maker aws_lambda create-function --function-name e2e-made --runtime nodejs24.x --role "$role" --handler index.handler --zip-file "fileb://$work/made.zip") \
+$(outcome as_reader create-function --function-name e2e-made-r --runtime nodejs24.x --role "$role" --handler index.handler --zip-file "fileb://$work/made.zip") \
+$(outcome as_maker aws_lambda create-function --function-name e2e-made-none --runtime nodejs24.x --role "$role" --handler index.handler --code S3Bucket=e2e-lambda-code,S3Key=builds/none.zip)"
+
+as_maker aws_lambda delete-function --function-name e2e-made --qualifier 1 >/dev/null
+check "DeleteFunction with a version deletes that version alone" "refused ResourceNotFoundException Active" \
+  "$(outcome as_reader get-function --function-name e2e-made --qualifier 1) $(as_reader get-function --function-name e2e-made | jq -r .Configuration.State)"
+check "  ... never \$LATEST alone, which would be the function" "refused InvalidParameterValueException" \
+  "$(outcome as_maker aws_lambda delete-function --function-name e2e-made --qualifier '$LATEST')"
+for made in e2e-made e2e-made-s3 e2e-made-broken; do as_maker aws_lambda delete-function --function-name "$made" >/dev/null; done
+check "  ... and without one, the function, its record gone from FF's API too" "refused ResourceNotFoundException 404" \
+  "$(outcome as_reader get-function --function-name e2e-made) $(as_ver GET "/functions/$made_id" >/dev/null; status)"
+as_maker aws_ff s3 rm s3://e2e-lambda-code/builds/made.zip --only-show-errors
+as_ver DELETE /buckets/e2e-lambda-code >/dev/null
+}
+section_def lambda_changes section_lambda_changes lambda_reads budget=90
+
+section_lambda_updates() {
+section "Lambda's UpdateFunctionCode and UpdateFunctionConfiguration with the AWS CLI: answered InProgress, then Successful; a change while one runs refused, a RevisionId read before one too; new code that fails rolled back; a version once new code is live"
+# updated_code <zip> <name>: a package whose handler answers its code's name and its STAGE; its CodeSha256 printed.
+updated_code() { lambda_zip "$1" "export const handler = async () => ({ code: \"$2\", stage: process.env.STAGE });"; }
+# runs: the code's name and its STAGE, as the function answers through FF's API.
+runs() { as_ver POST "/functions/$updated_id/invoke" '{"input": {}}' >/dev/null; jq -c '[.output.code, .output.stage]' "$work/body"; }
+updated_code "$work/v1.zip" v1 >/dev/null
+as_maker aws_lambda create-function --function-name e2e-updated --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/v1.zip" --environment 'Variables={STAGE=one}' >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-updated >/dev/null 2>&1 || true
+updated_id="$(as_ver GET '/functions?name=e2e-updated' | jq -r '.[0].id')"
+read_revision="$(as_reader get-function-configuration --function-name e2e-updated | jq -r .RevisionId)"
+v2_sha="$(updated_code "$work/v2.zip" v2)"
+answer="$(as_maker aws_lambda update-function-code --function-name e2e-updated --zip-file "fileb://$work/v2.zip" --revision-id "$read_revision")"
+check "UpdateFunctionCode answers at once, the function Active, its last update InProgress, with the new zip's CodeSha256 and a new RevisionId" \
+  "Active InProgress $v2_sha true" \
+  "$(jq -r --arg read "$read_revision" '"\(.State) \(.LastUpdateStatus) \(.CodeSha256) \(.RevisionId != $read)"' <<<"$answer")"
+# FF's API first: its call is the quicker, while the new version rolls out.
+check "  ... while it rolls out, another change is refused, through FF's API and Lambda's" "409 refused ResourceConflictException" \
+  "$(as_ver PUT "/functions/$updated_id" '{"timeout": 10}' >/dev/null; status) $(outcome as_maker aws_lambda update-function-configuration --function-name e2e-updated --timeout 10)"
+check "  ... the CLI's waiter function-updated-v2 waits for it to be Successful, and the new code runs" 'accepted ["v2","one"]' \
+  "$(outcome as_maker aws_lambda wait function-updated-v2 --function-name e2e-updated) $(runs)"
+
+configured="$(as_maker aws_lambda update-function-configuration --function-name e2e-updated --timeout 10 --description "Updated by the AWS CLI" \
+  --environment 'Variables={STAGE=two}')"
+check "UpdateFunctionConfiguration changes what it sends, InProgress, the code as it was" "InProgress 10 Updated by the AWS CLI {\"STAGE\":\"two\"} $v2_sha" \
+  "$(jq -r '"\(.LastUpdateStatus) \(.Timeout) \(.Description) \(.Environment.Variables | tojson) \(.CodeSha256)"' <<<"$configured")"
+as_maker aws_lambda wait function-updated-v2 --function-name e2e-updated >/dev/null 2>&1 || true
+check "  ... live once Successful, its new variables with it" 'Successful 10 ["v2","two"]' \
+  "$(as_reader get-function-configuration --function-name e2e-updated | jq -r '"\(.LastUpdateStatus) \(.Timeout)"') $(runs)"
+check "a RevisionId read before a change is refused, as Lambda refuses it" "refused PreconditionFailedException" \
+  "$(outcome as_maker aws_lambda update-function-configuration --function-name e2e-updated --timeout 12 --revision-id "$read_revision")"
+
+lambda_zip "$work/broken-update.zip" 'throw new Error("boom at import");' >/dev/null
+as_maker aws_lambda update-function-code --function-name e2e-updated --zip-file "fileb://$work/broken-update.zip" >/dev/null
+check "new code that fails at its import: the waiter stops at Failed" refused "$(outcome as_maker aws_lambda wait function-updated-v2 --function-name e2e-updated | xargs)"
+check "  ... the function still Active, its last update Failed with FF's diagnosis, rolled back: the code before it still runs" \
+  "Active Failed true true $v2_sha [\"v2\",\"two\"]" \
+  "$(as_reader get-function-configuration --function-name e2e-updated | jq -r \
+    '"\(.State) \(.LastUpdateStatus) \(.LastUpdateStatusReason | contains("boom at import")) \(.LastUpdateStatusReason | contains("rolled back")) \(.CodeSha256)"') $(runs)"
+
+as_ver POST /buckets '{"name": "e2e-lambda-code"}' >/dev/null
+v3_sha="$(updated_code "$work/v3.zip" v3)"
+as_maker aws_ff s3 cp "$work/v3.zip" s3://e2e-lambda-code/builds/v3.zip --only-show-errors
+check "with DryRun, the code in the bucket read and nothing changed" "Failed $v2_sha" \
+  "$(as_maker aws_lambda update-function-code --function-name e2e-updated --s3-bucket e2e-lambda-code --s3-key builds/v3.zip --dry-run | jq -r '"\(.LastUpdateStatus) \(.CodeSha256)"')"
+as_maker aws_lambda update-function-code --function-name e2e-updated --s3-bucket e2e-lambda-code --s3-key builds/v3.zip --publish >/dev/null
+as_maker aws_lambda wait function-updated-v2 --function-name e2e-updated >/dev/null 2>&1 || true
+check "with Publish, its code from the account's bucket: version 1, of the new code, once it is live" "1 $v3_sha $v3_sha [\"v3\",\"two\"]" \
+  "$(as_reader get-function-configuration --function-name e2e-updated --qualifier 1 | jq -r '"\(.Version) \(.CodeSha256)"') \
+$(as_reader get-function-configuration --function-name e2e-updated | jq -r .CodeSha256) $(runs)"
+check "the audit log names each update, and the key that made it" "function.update access_key:$(jq -r .id <<<"$maker")" \
+  "$(as_ver GET /audit-log | jq -r --arg r "function:$updated_id" '[.entries[] | select(.resource == $r and .action == "function.update")] | "\(map(.action) | unique | join(" ")) \(map(.actor) | unique | join(" "))"')"
+as_maker aws_lambda delete-function --function-name e2e-updated >/dev/null
+as_maker aws_ff s3 rm s3://e2e-lambda-code/builds/v3.zip --only-show-errors
+as_ver DELETE /buckets/e2e-lambda-code >/dev/null
+}
+section_def lambda_updates section_lambda_updates lambda_changes budget=120
+
+section_lambda_aliases() {
+section "Lambda's versions and aliases with the AWS CLI: versions published and listed after \$LATEST; an alias made, its calls shared with another version, read, listed, invoked, changed, deleted, its versions kept; refused as Lambda refuses"
+aliased_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-aliased"
+# aliased_zip <zip> <its answer's code>: a function that names the version that ran it.
+aliased_zip() { lambda_zip "$1" "export const handler = async () => ({ code: \"$2\", version: process.env.FUNCTION_VERSION });" >/dev/null; }
+aliased_zip "$work/aliased-1.zip" one
+as_maker aws_lambda create-function --function-name e2e-aliased --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/aliased-1.zip" >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-aliased >/dev/null 2>&1 || true
+check "PublishVersion: version 1, its ARN, its description; published again with nothing changed, version 1 again" "1 $aliased_arn:1 first 1" \
+  "$(as_maker aws_lambda publish-version --function-name e2e-aliased --description first | jq -r '"\(.Version) \(.FunctionArn) \(.Description)"') \
+$(as_maker aws_lambda publish-version --function-name e2e-aliased | jq -r .Version)"
+aliased_zip "$work/aliased-2.zip" two
+as_maker aws_lambda update-function-code --function-name e2e-aliased --zip-file "fileb://$work/aliased-2.zip" >/dev/null
+as_maker aws_lambda wait function-updated-v2 --function-name e2e-aliased >/dev/null 2>&1 || true
+check "  ... new code, version 2; ListVersionsByFunction lists \$LATEST, then 1 and 2, each its own code" '2 $LATEST,1,2' \
+  "$(as_maker aws_lambda publish-version --function-name e2e-aliased | jq -r .Version) \
+$(as_reader list-versions-by-function --function-name e2e-aliased | jq -r '[.Versions[].Version] | join(",")')"
+created="$(as_maker aws_lambda create-alias --function-name e2e-aliased --name live --function-version 1 --description shop \
+  --routing-config '{"AdditionalVersionWeights": {"2": 0.5}}')"
+check "CreateAlias: live at version 1, half its calls to 2" "$aliased_arn:live 1 0.5 shop" \
+  "$(jq -r '"\(.AliasArn) \(.FunctionVersion) \(.RoutingConfig.AdditionalVersionWeights["2"]) \(.Description)"' <<<"$created")"
+check "  ... GetAlias reads it as made; ListAliases lists it" "$(jq -r .RevisionId <<<"$created") live" \
+  "$(as_reader get-alias --function-name e2e-aliased --name live | jq -r .RevisionId) $(as_reader list-aliases --function-name e2e-aliased | jq -r '[.Aliases[].Name] | join(",")')"
+ran=''
+for _ in $(seq 20); do
+  as_maker aws_lambda invoke --function-name e2e-aliased --qualifier live "$work/aliased.json" >"$work/aliased.meta"
+  ran+="$(jq -r .ExecutedVersion "$work/aliased.meta")=$(jq -r '"\(.version):\(.code)"' "$work/aliased.json") "
+done
+check "  ... invoked through it, its calls run by both versions, each its own code, ExecutedVersion naming it" "1=1:one 2=2:two" \
+  "$(tr ' ' '\n' <<<"$ran" | grep . | sort -u | paste -sd ' ')"
+stale="$(jq -r .RevisionId <<<"$created")"
+updated="$(as_maker aws_lambda update-alias --function-name e2e-aliased --name live --function-version 2 --routing-config '{"AdditionalVersionWeights": {}}')"
+check "UpdateAlias: live at version 2 alone, a new revision; a change from the revision before refused" \
+  "2 none true refused PreconditionFailedException" \
+  "$(jq -r '"\(.FunctionVersion) \(.RoutingConfig.AdditionalVersionWeights // {} | keys | first // "none") \(.RevisionId != "'"$stale"'")"' <<<"$updated") \
+$(outcome as_maker aws_lambda update-alias --function-name e2e-aliased --name live --description again --revision-id "$stale")"
+check "refused as Lambda refuses: a name taken, a version the function hasn't, an alias it hasn't, a key that may only read" \
+  "refused ResourceConflictException refused ResourceNotFoundException refused ResourceNotFoundException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda create-alias --function-name e2e-aliased --name live --function-version 1) \
+$(outcome as_maker aws_lambda create-alias --function-name e2e-aliased --name next --function-version 9) \
+$(outcome as_reader get-alias --function-name e2e-aliased --name gone) \
+$(outcome as_reader create-alias --function-name e2e-aliased --name next --function-version 1)"
+check "  ... in Lambda's words, with the ARNs" "Alias already exists: $aliased_arn:live Alias not found: $aliased_arn:gone" \
+  "$(outcome as_maker aws_lambda create-alias --function-name e2e-aliased --name live --function-version 1 >/dev/null; grep -oE 'Alias already exists: [^ ]+' "$work/aws.err") \
+$(outcome as_reader get-alias --function-name e2e-aliased --name gone >/dev/null; grep -oE 'Alias not found: [^ ]+' "$work/aws.err")"
+as_maker aws_lambda delete-alias --function-name e2e-aliased --name live
+check "DeleteAlias: it goes, its versions stay" 'refused ResourceNotFoundException $LATEST,1,2' \
+  "$(outcome as_reader get-alias --function-name e2e-aliased --name live) \
+$(as_reader list-versions-by-function --function-name e2e-aliased | jq -r '[.Versions[].Version] | join(",")')"
+as_maker aws_lambda delete-function --function-name e2e-aliased >/dev/null
+}
+section_def lambda_aliases section_lambda_aliases lambda_changes budget=90
+
+section_lambda_urls() {
+section "Lambda's function URLs with the AWS CLI: \$LATEST's URL and an alias's, made, read, listed, called at their addresses, changed, deleted; refused as Lambda refuses"
+urled_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-urled"
+lambda_zip "$work/urled.zip" 'export const handler = async (event) => ({ statusCode: 200, body: JSON.stringify({ path: event.rawPath, version: process.env.FUNCTION_VERSION }) });' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-urled --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/urled.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-urled >/dev/null 2>&1 || true
+as_maker aws_lambda create-alias --function-name e2e-urled --name live --function-version 1 >/dev/null
+latest_url="$(as_maker aws_lambda create-function-url-config --function-name e2e-urled --auth-type NONE)"
+live_url="$(as_maker aws_lambda create-function-url-config --function-name e2e-urled --qualifier live --auth-type NONE \
+  --cors '{"AllowOrigins": ["https://shop.example.tn"], "MaxAge": 60}')"
+latest_address="$(jq -r .FunctionUrl <<<"$latest_url")"
+live_address="$(jq -r .FunctionUrl <<<"$live_url")"
+check "CreateFunctionUrlConfig: \$LATEST's URL, and the alias live's with its CORS, each at an address of its own, its ARN qualified as Lambda's" \
+  "$urled_arn NONE $urled_arn:live https://shop.example.tn 60 true" \
+  "$(jq -r '"\(.FunctionArn) \(.AuthType)"' <<<"$latest_url") $(jq -r '"\(.FunctionArn) \(.Cors.AllowOrigins[0]) \(.Cors.MaxAge)"' <<<"$live_url") \
+$([ "$latest_address" != "$live_address" ] && echo true || echo false)"
+# called_at <URL's address> <path>: the URL's answer to a GET of the path, its status after its body.
+called_at() {
+  local host="${1#http://}"
+  host="${host%%[:/]*}"
+  curl -sS -w ' %{http_code}' --resolve "$host:$url_port:127.0.0.1" "${1%/}$2"
+}
+check "  ... each called at its address: \$LATEST's runs \$LATEST, the alias's its version 1" \
+  '{"path":"/a","version":"$LATEST"} 200 {"path":"/b","version":"1"} 200' "$(called_at "$latest_address" /a) $(called_at "$live_address" /b)"
+check "GetFunctionUrlConfig reads the alias's by --qualifier; ListFunctionUrlConfigs lists \$LATEST's, then the alias's" \
+  "$live_address $latest_address,$live_address" \
+  "$(as_reader get-function-url-config --function-name e2e-urled --qualifier live | jq -r .FunctionUrl) \
+$(as_reader list-function-url-configs --function-name e2e-urled | jq -r '[.FunctionUrlConfigs[].FunctionUrl] | join(",")')"
+check "UpdateFunctionUrlConfig: AWS_IAM, the address kept, CORS kept; a call without credentials then refused" \
+  "AWS_IAM $latest_address $live_address https://shop.example.tn 403" \
+  "$(as_maker aws_lambda update-function-url-config --function-name e2e-urled --auth-type AWS_IAM | jq -r '"\(.AuthType) \(.FunctionUrl)"') \
+$(as_maker aws_lambda update-function-url-config --function-name e2e-urled:live --auth-type AWS_IAM | jq -r '"\(.FunctionUrl) \(.Cors.AllowOrigins[0])"') \
+$(called_at "$latest_address" / | awk '{print $NF}')"
+check "refused as Lambda refuses: a second URL, a version's, an alias the function hasn't, a key that may only read" \
+  "refused ResourceConflictException refused InvalidParameterValueException refused ResourceNotFoundException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda create-function-url-config --function-name e2e-urled --auth-type NONE) \
+$(outcome as_maker aws_lambda create-function-url-config --function-name e2e-urled --qualifier 1 --auth-type NONE) \
+$(outcome as_reader get-function-url-config --function-name e2e-urled --qualifier gone) \
+$(outcome as_reader delete-function-url-config --function-name e2e-urled)"
+check "  ... in Lambda's words, with the ARNs" "FunctionUrlConfig exists for this Lambda function Function not found: $urled_arn:gone" \
+  "$(outcome as_maker aws_lambda create-function-url-config --function-name e2e-urled --auth-type NONE >/dev/null; grep -oE 'FunctionUrlConfig exists for this Lambda function' "$work/aws.err") \
+$(outcome as_reader get-function-url-config --function-name e2e-urled --qualifier gone >/dev/null; grep -oE 'Function not found: [^ ]+' "$work/aws.err")"
+as_maker aws_lambda delete-function-url-config --function-name e2e-urled
+as_maker aws_lambda delete-function-url-config --function-name e2e-urled --qualifier live
+check "DeleteFunctionUrlConfig: each goes, read as Lambda says it, its address answering 404 at once" \
+  "refused ResourceNotFoundException The resource you requested does not exist. 404 404" \
+  "$(outcome as_reader get-function-url-config --function-name e2e-urled) $(grep -oE 'The resource you requested does not exist\.' "$work/aws.err") \
+$(called_at "$latest_address" / | awk '{print $NF}') $(called_at "$live_address" / | awk '{print $NF}')"
+as_maker aws_lambda delete-function --function-name e2e-urled >/dev/null
+}
+section_def lambda_urls section_lambda_urls lambda_changes budget=45
+
+section_lambda_mappings() {
+section "Lambda's event source mappings with the AWS CLI: a function reading a queue of its account through its alias, its batches in SQS's event, read, listed, changed, disabled, deleted; refused as Lambda refuses"
+mapped_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-mapped"
+mapped_queue="arn:aws:sqs:tn-tunis-1:$ver:e2e-mapped-orders"
+as_ver POST /queues '{"name": "e2e-mapped-orders", "visibilityTimeout": 30}' >/dev/null
+lambda_zip "$work/mapped.zip" 'export const handler = async (event) => { console.log("batch", event.Records.map((record) => record.body).join(",")); return {}; };' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-mapped --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/mapped.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-mapped >/dev/null 2>&1 || true
+as_maker aws_lambda create-alias --function-name e2e-mapped --name reader --function-version 1 >/dev/null
+mapped_id="$(as_ver GET '/functions?name=e2e-mapped' | jq -r '.[0].id')"
+created="$(as_maker aws_lambda create-event-source-mapping --function-name e2e-mapped:reader --event-source-arn "$mapped_queue" \
+  --batch-size 5 --function-response-types ReportBatchItemFailures)"
+mapping_uuid="$(jq -r .UUID <<<"$created")"
+check "CreateEventSourceMapping: the function reads the queue through its alias, 5 a batch, partial batch responses, Enabled at once" \
+  "$mapped_queue $mapped_arn:reader 5 ReportBatchItemFailures Enabled arn:aws:lambda:tn-tunis-1:$ver:event-source-mapping:$mapping_uuid" \
+  "$(jq -r '"\(.EventSourceArn) \(.FunctionArn) \(.BatchSize) \(.FunctionResponseTypes[0]) \(.State) \(.EventSourceMappingArn)"' <<<"$created")"
+for n in 1 2 3; do as_ver POST /queues/e2e-mapped-orders/messages "{\"body\": \"order $n\"}" >/dev/null; done
+read_bodies=''
+for _ in $(seq 30); do
+  read_bodies="$(as_ver GET "/functions/$mapped_id/invocations" | jq -r '[.invocations[] | select(.source == "sqs") | .input.Records[].body] | sort | join(",")')"
+  [ "$read_bodies" = 'order 1,order 2,order 3' ] && break
+  sleep 1
+done
+check "  ... its messages handed to version 1 through the alias, in SQS's event, each once" 'order 1,order 2,order 3 reader' \
+  "$read_bodies $(as_ver GET "/functions/$mapped_id/invocations" | jq -r '[.invocations[] | select(.source == "sqs") | .alias] | unique | join(",")')"
+check "GetEventSourceMapping reads it; ListEventSourceMappings lists it by the function and its alias, and by the queue" \
+  "$mapping_uuid $mapping_uuid $mapping_uuid" \
+  "$(as_reader get-event-source-mapping --uuid "$mapping_uuid" | jq -r .UUID) \
+$(as_reader list-event-source-mappings --function-name e2e-mapped:reader | jq -r '[.EventSourceMappings[].UUID] | join(",")') \
+$(as_reader list-event-source-mappings --event-source-arn "$mapped_queue" | jq -r '[.EventSourceMappings[].UUID] | join(",")')"
+check "UpdateEventSourceMapping: 10 a batch, disabled; then \$LATEST reads it, by the function's name alone" \
+  "10 Disabled $mapped_arn" \
+  "$(as_maker aws_lambda update-event-source-mapping --uuid "$mapping_uuid" --batch-size 10 --no-enabled | jq -r '"\(.BatchSize) \(.State)"') \
+$(as_maker aws_lambda update-event-source-mapping --uuid "$mapping_uuid" --function-name e2e-mapped | jq -r .FunctionArn)"
+check "refused as Lambda refuses: a second mapping of the queue, a stream's ARN, a stream's setting, a mapping the account hasn't, a key that may only read" \
+  "refused ResourceConflictException refused InvalidParameterValueException refused InvalidParameterValueException refused ResourceNotFoundException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda create-event-source-mapping --function-name e2e-mapped --event-source-arn "$mapped_queue") \
+$(outcome as_maker aws_lambda create-event-source-mapping --function-name e2e-mapped --event-source-arn "arn:aws:kinesis:tn-tunis-1:$ver:stream/orders") \
+$(outcome as_maker aws_lambda update-event-source-mapping --uuid "$mapping_uuid" --maximum-retry-attempts 2) \
+$(outcome as_reader get-event-source-mapping --uuid 6c2a1e8b-7d4c-4a9e-8f1a-2b3c4d5e6f70) \
+$(outcome as_reader delete-event-source-mapping --uuid "$mapping_uuid")"
+check "  ... in Lambda's words" "Please update or delete the existing mapping with UUID $mapping_uuid The resource you requested does not exist." \
+  "$(outcome as_maker aws_lambda create-event-source-mapping --function-name e2e-mapped --event-source-arn "$mapped_queue" >/dev/null; grep -oE 'Please update or delete the existing mapping with UUID [0-9a-f-]+' "$work/aws.err") \
+$(outcome as_reader get-event-source-mapping --uuid 6c2a1e8b-7d4c-4a9e-8f1a-2b3c4d5e6f70 >/dev/null; grep -oE 'The resource you requested does not exist\.' "$work/aws.err")"
+check "DeleteEventSourceMapping: answered Deleting, then gone" "Deleting refused ResourceNotFoundException" \
+  "$(as_maker aws_lambda delete-event-source-mapping --uuid "$mapping_uuid" | jq -r .State) $(outcome as_reader get-event-source-mapping --uuid "$mapping_uuid")"
+as_maker aws_lambda delete-function --function-name e2e-mapped >/dev/null
+as_ver DELETE /queues/e2e-mapped-orders >/dev/null
+}
+section_def lambda_mappings section_lambda_mappings lambda_changes budget=35
+
+section_lambda_async() {
+section "Lambda's settings of a function's asynchronous calls with the AWS CLI: put, a failed call's record in a queue of the account, its event in the function's dead-letter queue, changed, read, listed, deleted; a version's refused, as FF keeps one for the function"
+async_set_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-async-set"
+async_failed="arn:aws:sqs:tn-tunis-1:$ver:e2e-async-failed"
+async_dead="arn:aws:sqs:tn-tunis-1:$ver:e2e-async-dead"
+as_ver POST /queues '{"name": "e2e-async-failed"}' >/dev/null
+as_ver POST /queues '{"name": "e2e-async-dead"}' >/dev/null
+# first_from <queue> <jq condition>: the first message of the queue the condition selects, received within a minute; the
+# others received meanwhile come back after the queue's visibility timeout.
+first_from() {
+  local found=''
+  for _ in $(seq 60); do
+    found="$(as_ver POST "/queues/$1/receive" '{"maxMessages": 10}' | jq -c "[.[] | select($2)][0] // empty")"
+    [ -n "$found" ] && break
+    sleep 1
+  done
+  printf '%s' "$found"
+}
+lambda_zip "$work/async-set.zip" 'export const handler = async (event) => { throw new Error(`no stock for order ${event.order}`); };' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-async-set --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/async-set.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-async-set >/dev/null 2>&1 || true
+put_settings="$(as_maker aws_lambda put-function-event-invoke-config --function-name e2e-async-set --maximum-retry-attempts 0 \
+  --destination-config "OnFailure={Destination=$async_failed}")"
+# A LastModified read in milliseconds where Lambda sends seconds would be in January 1970.
+check "PutFunctionEventInvokeConfig: no retry, a failed call's record to a queue of the account; \$LATEST's ARN, as Lambda's, changed this year" \
+  "$async_set_arn:\$LATEST 0 $async_failed $(date -u +%Y)" \
+  "$(jq -r '"\(.FunctionArn) \(.MaximumRetryAttempts) \(.DestinationConfig.OnFailure.Destination) \(.LastModified[0:4])"' <<<"$put_settings")"
+as_maker aws_lambda invoke --function-name e2e-async-set --invocation-type Event --cli-binary-format raw-in-base64-out --payload '{"order": 7}' /dev/null >/dev/null
+failed_record="$(first_from e2e-async-failed '.body | fromjson | .requestPayload.order == 7' | jq -c '.body | fromjson')"
+check "  ... a call that throws, tried once, its record in the queue as Lambda's: RetriesExhausted, the payload, the error" \
+  "RetriesExhausted 1 7 Unhandled no stock for order 7" \
+  "$(jq -r '"\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.requestPayload.order) \(.responseContext.functionError) \(.responsePayload.errorMessage)"' <<<"$failed_record")"
+dead_config="$(as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config "TargetArn=$async_dead")"
+check "UpdateFunctionConfiguration gives the function a dead-letter queue of the account, at once; its version follows it" \
+  "$async_dead Successful $async_dead $async_dead" \
+  "$(jq -r '"\(.DeadLetterConfig.TargetArn) \(.LastUpdateStatus)"' <<<"$dead_config") \
+$(as_reader get-function-configuration --function-name e2e-async-set | jq -r .DeadLetterConfig.TargetArn) \
+$(as_reader get-function-configuration --function-name e2e-async-set --qualifier 1 | jq -r .DeadLetterConfig.TargetArn)"
+as_maker aws_lambda invoke --function-name e2e-async-set --invocation-type Event --cli-binary-format raw-in-base64-out --payload '{"order": 8}' /dev/null >/dev/null
+dead_letter="$(first_from e2e-async-dead '.body | fromjson | .order == 8')"
+dead_request="$(first_from e2e-async-failed '.body | fromjson | .requestPayload.order == 8' | jq -r '.body | fromjson | .requestContext.requestId')"
+check "  ... a call that throws: its event in the dead-letter queue as it was sent, its record's RequestID beside it, Lambda's ErrorCode and ErrorMessage" \
+  '{"order":8} true Number 200 no stock for order 8' \
+  "$(jq -r --arg id "$dead_request" '"\(.body | fromjson | tojson) \(.attributes.RequestID.stringValue == $id) \(.attributes.ErrorCode.dataType) \(.attributes.ErrorCode.stringValue) \(.attributes.ErrorMessage.stringValue)"' <<<"$dead_letter")"
+check "refused: a dead-letter queue the account lacks, an SNS topic, another account's queue; an empty TargetArn removes it, as on Lambda" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException refused InvalidParameterValueException none" \
+  "$(outcome as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config "TargetArn=arn:aws:sqs:tn-tunis-1:$ver:e2e-no-such-queue") \
+$(outcome as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config "TargetArn=arn:aws:sns:tn-tunis-1:$ver:failed") \
+$(outcome as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config 'TargetArn=arn:aws:sqs:tn-tunis-1:000000000002:other') \
+$(as_maker aws_lambda update-function-configuration --function-name e2e-async-set --dead-letter-config '{"TargetArn": ""}' | jq -r '.DeadLetterConfig.TargetArn // "none"')"
+check "UpdateFunctionEventInvokeConfig changes what it sends, the rest kept; Get reads it; List lists it, the one there is" \
+  "0 120 $async_failed 120 $async_set_arn:\$LATEST" \
+  "$(as_maker aws_lambda update-function-event-invoke-config --function-name e2e-async-set --maximum-event-age-in-seconds 120 |
+    jq -r '"\(.MaximumRetryAttempts) \(.MaximumEventAgeInSeconds) \(.DestinationConfig.OnFailure.Destination)"') \
+$(as_reader get-function-event-invoke-config --function-name e2e-async-set | jq -r .MaximumEventAgeInSeconds) \
+$(as_reader list-function-event-invoke-configs --function-name e2e-async-set | jq -r '[.FunctionEventInvokeConfigs[].FunctionArn] | join(",")')"
+check "refused: a version's, which FF keeps none of, a queue of another account, a key that may only read" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda put-function-event-invoke-config --function-name e2e-async-set --qualifier 1 --maximum-retry-attempts 1) \
+$(outcome as_maker aws_lambda put-function-event-invoke-config --function-name e2e-async-set --destination-config 'OnFailure={Destination=arn:aws:sqs:tn-tunis-1:000000000002:other}') \
+$(outcome as_reader delete-function-event-invoke-config --function-name e2e-async-set)"
+as_maker aws_lambda delete-function-event-invoke-config --function-name e2e-async-set
+check "DeleteFunctionEventInvokeConfig: gone, read as Lambda says it; the list empty" \
+  "refused ResourceNotFoundException The function $async_set_arn:\$LATEST doesn't have an EventInvokeConfig 0" \
+  "$(outcome as_reader get-function-event-invoke-config --function-name e2e-async-set) $(grep -oE "The function [^ ]+ doesn't have an EventInvokeConfig" "$work/aws.err") \
+$(as_reader list-function-event-invoke-configs --function-name e2e-async-set | jq '.FunctionEventInvokeConfigs | length')"
+as_maker aws_lambda delete-function --function-name e2e-async-set >/dev/null
+as_ver DELETE /queues/e2e-async-failed >/dev/null
+as_ver DELETE /queues/e2e-async-dead >/dev/null
+}
+section_def lambda_async section_lambda_async lambda_changes budget=30
+
+section_lambda_concurrency() {
+section "Lambda's reserved concurrency with the AWS CLI: none at FF's default, a reservation onto the function's instances, 0 stopping every call as Lambda throttles it, deleted; past the plan and a version's refused"
+lambda_zip "$work/concurrency.zip" 'export const handler = async () => ({ ran: true });' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-concurrency --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/concurrency.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-concurrency >/dev/null 2>&1 || true
+concurrency_id="$(as_ver GET '/functions?name=e2e-concurrency' | jq -r '.[0].id')"
+# reserved: the function's reservation as GetFunctionConcurrency answers it; none for Lambda's empty answer, which the CLI prints as nothing.
+reserved() {
+  local said
+  said="$(as_reader get-function-concurrency --function-name e2e-concurrency)"
+  if [ -z "$said" ]; then echo none; else jq -r .ReservedConcurrentExecutions <<<"$said"; fi
+}
+check "GetFunctionConcurrency: none at FF's default, as Lambda answers a function without a reservation" "none" "$(reserved)"
+check "PutFunctionConcurrency 2: the function's most instances, as FF's scaling says too; GetFunctionConcurrency and GetFunction read it" \
+  "2 2 2 2" \
+  "$(as_maker aws_lambda put-function-concurrency --function-name e2e-concurrency --reserved-concurrent-executions 2 | jq -r .ReservedConcurrentExecutions) \
+$(as_ver GET "/functions/$concurrency_id/scaling-config" | jq -r .maxInstances) \
+$(reserved) $(as_reader get-function --function-name e2e-concurrency | jq -r .Concurrency.ReservedConcurrentExecutions)"
+as_maker aws_lambda put-function-concurrency --function-name e2e-concurrency --reserved-concurrent-executions 0 >/dev/null
+check "  ... 0 stops every call, \$LATEST's and its version's, refused as Lambda throttles them; the history keeps them THROTTLED, not run" \
+  "refused TooManyRequestsException refused TooManyRequestsException THROTTLED true" \
+  "$(outcome as_maker aws_lambda invoke --function-name e2e-concurrency /dev/null) $(outcome as_maker aws_lambda invoke --function-name e2e-concurrency:1 /dev/null) \
+$(as_ver GET "/functions/$concurrency_id/invocations?limit=1" | jq -r '.invocations[0] | "\(.status) \(.error | test("reserved concurrency is 0"))"')"
+check "  ... a call that doesn't wait is taken, 202, as Lambda takes one, to be retried as a throttle is" "202" \
+  "$(as_maker aws_lambda invoke --function-name e2e-concurrency --invocation-type Event /dev/null | jq -r .StatusCode)"
+as_maker aws_lambda delete-function-concurrency --function-name e2e-concurrency
+check "DeleteFunctionConcurrency: none again, FF's default of 3 instances, and calls run again" "none 3 200" \
+  "$(reserved) $(as_ver GET "/functions/$concurrency_id/scaling-config" | jq -r .maxInstances) \
+$(as_maker aws_lambda invoke --function-name e2e-concurrency /dev/null | jq -r .StatusCode)"
+check "refused: past the plan's instances, a version's, a key that may only read" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda put-function-concurrency --function-name e2e-concurrency --reserved-concurrent-executions 1000) \
+$(outcome as_maker aws_lambda put-function-concurrency --function-name e2e-concurrency:1 --reserved-concurrent-executions 1) \
+$(outcome as_reader delete-function-concurrency --function-name e2e-concurrency)"
+as_maker aws_lambda delete-function --function-name e2e-concurrency >/dev/null
+}
+section_def lambda_concurrency section_lambda_concurrency lambda_changes budget=30
+
+section_lambda_permissions() {
+section "Lambda's permissions with the AWS CLI, kept as sent and given back without effect: a bucket's statement, a public URL's two, a version's and an alias's policy apart; removed; the function called as before; refused as Lambda refuses"
+lambda_zip "$work/permissions.zip" 'export const handler = async () => ({ ran: true });' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-permissions --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/permissions.zip" --publish >/dev/null
+as_maker aws_lambda wait function-active-v2 --function-name e2e-permissions >/dev/null 2>&1 || true
+as_maker aws_lambda create-alias --function-name e2e-permissions --name live --function-version 1 >/dev/null
+permissions_arn="arn:aws:lambda:tn-tunis-1:$ver:function:e2e-permissions"
+# statements <aws lambda get-policy arguments…>: the policy's statements' IDs, in its order.
+statements() { as_reader get-policy --function-name e2e-permissions "$@" | jq -r '[.Policy | fromjson | .Statement[].Sid] | join(",")'; }
+added="$(as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id s3 --action lambda:InvokeFunction \
+  --principal s3.amazonaws.com --source-arn arn:aws:s3:::e2e-photos --source-account "$ver")"
+check "AddPermission: the statement as Lambda writes it, the principal a service's, its limits its conditions" \
+  "s3 Allow s3.amazonaws.com lambda:InvokeFunction $permissions_arn $ver arn:aws:s3:::e2e-photos" \
+  "$(jq -r '.Statement | fromjson | "\(.Sid) \(.Effect) \(.Principal.Service) \(.Action) \(.Resource) \(.Condition.StringEquals["AWS:SourceAccount"]) \(.Condition.ArnLike["AWS:SourceArn"])"' <<<"$added")"
+as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id FunctionURLAllowPublicAccess --action lambda:InvokeFunctionUrl \
+  --principal '*' --function-url-auth-type NONE >/dev/null
+as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id FunctionURLAllowInvokeAction --action lambda:InvokeFunction \
+  --principal '*' --invoked-via-function-url >/dev/null
+policy="$(as_reader get-policy --function-name e2e-permissions)"
+check "GetPolicy, with a key that may read: Lambda's document, the three in the order they came, a public URL's two conditions, the function's RevisionId" \
+  "2012-10-17 s3,FunctionURLAllowPublicAccess,FunctionURLAllowInvokeAction NONE true $(as_reader get-function --function-name e2e-permissions | jq -r .Configuration.RevisionId)" \
+  "$(jq -r '.Policy | fromjson | "\(.Version) \([.Statement[].Sid] | join(",")) \(.Statement[1].Condition.StringEquals["lambda:FunctionUrlAuthType"]) \(.Statement[2].Condition.Bool["lambda:InvokedViaFunctionUrl"])"' <<<"$policy") \
+$(jq -r .RevisionId <<<"$policy")"
+as_maker aws_lambda add-permission --function-name e2e-permissions --qualifier 1 --statement-id v1 --action lambda:InvokeFunction \
+  --principal events.amazonaws.com >/dev/null
+as_maker aws_lambda add-permission --function-name e2e-permissions:live --statement-id s3 --action lambda:InvokeFunction --principal "$ver" >/dev/null
+check "  ... a version's policy and an alias's apart from the function's, the same ID in each, each statement's Resource its qualified ARN" \
+  "v1 $permissions_arn:1 s3 $permissions_arn:live arn:aws:iam::$ver:root s3,FunctionURLAllowPublicAccess,FunctionURLAllowInvokeAction" \
+  "$(as_reader get-policy --function-name e2e-permissions --qualifier 1 | jq -r '.Policy | fromjson | .Statement[0] | "\(.Sid) \(.Resource)"') \
+$(as_reader get-policy --function-name e2e-permissions:live | jq -r '.Policy | fromjson | .Statement[0] | "\(.Sid) \(.Resource) \(.Principal.AWS)"') \
+$(statements)"
+check "  ... kept without effect: the maker's key calls the function as before, a key that may only read is refused as before, a statement for * notwithstanding" \
+  "200 refused AccessDeniedException" \
+  "$(as_maker aws_lambda invoke --function-name e2e-permissions /dev/null | jq -r .StatusCode) $(outcome as_reader invoke --function-name e2e-permissions /dev/null)"
+as_maker aws_lambda remove-permission --function-name e2e-permissions --statement-id s3
+check "RemovePermission by its ID: the policy without it, the alias's s3 kept; again refused, as Lambda says a statement it hasn't; an old RevisionId refused" \
+  "FunctionURLAllowPublicAccess,FunctionURLAllowInvokeAction s3 refused ResourceNotFoundException refused PreconditionFailedException" \
+  "$(statements) $(statements --qualifier live) $(outcome as_maker aws_lambda remove-permission --function-name e2e-permissions --statement-id s3) \
+$(outcome as_maker aws_lambda remove-permission --function-name e2e-permissions --statement-id v1 --qualifier 1 --revision-id moved-since)"
+for sid in FunctionURLAllowPublicAccess FunctionURLAllowInvokeAction; do
+  as_maker aws_lambda remove-permission --function-name e2e-permissions --statement-id "$sid"
+done
+check "  ... a policy without statements is none, refused as Lambda refuses it" "refused ResourceNotFoundException" \
+  "$(outcome as_reader get-policy --function-name e2e-permissions)"
+check "refused: a statement ID the policy has, a principal and an organization out of their form, a version the function hasn't, a key that may only read" \
+  "refused ResourceConflictException refused InvalidParameterValueException refused InvalidParameterValueException refused ResourceNotFoundException refused AccessDeniedException" \
+  "$(outcome as_maker aws_lambda add-permission --function-name e2e-permissions:live --statement-id s3 --action lambda:InvokeFunction --principal '*') \
+$(outcome as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id p --action lambda:InvokeFunction --principal 'two words') \
+$(outcome as_maker aws_lambda add-permission --function-name e2e-permissions --statement-id p --action lambda:InvokeFunction --principal '*' \
+  --principal-org-id organization-one) \
+$(outcome as_maker aws_lambda add-permission --function-name e2e-permissions --qualifier 7 --statement-id p --action lambda:InvokeFunction --principal '*') \
+$(outcome as_reader add-permission --function-name e2e-permissions --statement-id p --action lambda:InvokeFunction --principal '*')"
+as_maker aws_lambda delete-function --function-name e2e-permissions >/dev/null
+}
+section_def lambda_permissions section_lambda_permissions lambda_changes budget=30
+
+section_lambda_invoke() {
+section "Lambda's Invoke with the AWS CLI: the function's answer as it returned it, the version that ran, the call's log with LogType Tail, the ClientContext in Node.js and Python; an error and a timeout as the call's outcome; Event and DryRun; refused as Lambda refuses"
+invoker="$(as_ver POST /storage-keys '{"name": "e2e-lambda-invoker", "functions": ["e2e-invoked", "e2e-invoked-py", "e2e-invoked-broken"], "functionAccess": "invoke"}')"
+# as_invoker <aws lambda arguments…>: the AWS CLI at Lambda's endpoint with a key that may invoke this section's functions.
+as_invoker() { AWS_KEY="$(jq -r .id <<<"$invoker")" AWS_SECRET="$(jq -r .secretAccessKey <<<"$invoker")" aws_lambda "$@"; }
+# invoked <function> <aws lambda invoke arguments…>: the call's metadata as the CLI prints it; its payload in $work/invoked.json.
+invoked() { as_invoker invoke --function-name "$1" --cli-binary-format raw-in-base64-out "${@:2}" "$work/invoked.json"; }
+# log_of <metadata>: the call's log, X-Amz-Log-Result decoded.
+log_of() { jq -r '.LogResult // ""' <<<"$1" | base64 -d; }
+lambda_zip "$work/invoked.zip" 'export const handler = async (event, context) => {
+  if (event.fail) throw new TypeError("bad input");
+  if (event.sleepMs) await new Promise((resolve) => setTimeout(resolve, event.sleepMs));
+  console.log("invoked with", JSON.stringify(event));
+  return { event, clientContext: context.clientContext ?? null, version: process.env.FUNCTION_VERSION };
+};' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-invoked --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/invoked.zip" --timeout 2 --publish >/dev/null
+lambda_zip "$work/invoked-py.zip" 'def handler(event, context):
+    print("invoked with", event)
+    said = context.client_context
+    return {"app": said.client.app_title if said and said.client else None, "custom": said.custom if said else None}' index.py >/dev/null
+as_maker aws_lambda create-function --function-name e2e-invoked-py --runtime python3.13 --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/invoked-py.zip" >/dev/null
+lambda_zip "$work/invoked-broken.zip" 'throw new Error("boom at import");' >/dev/null
+as_maker aws_lambda create-function --function-name e2e-invoked-broken --runtime nodejs24.x --role "$role" --handler index.handler \
+  --zip-file "fileb://$work/invoked-broken.zip" >/dev/null
+for made in e2e-invoked e2e-invoked-py e2e-invoked-broken; do as_maker aws_lambda wait function-active-v2 --function-name "$made" >/dev/null 2>&1 || true; done
+invoked_id="$(as_ver GET '/functions?name=e2e-invoked' | jq -r '.[0].id')"
+
+called="$(invoked e2e-invoked --payload '{"n": 1}')"
+check "Invoke waits for the call: 200, \$LATEST ran it, the function's answer as it returned it" '200 $LATEST none {"n":1}' \
+  "$(jq -r '"\(.StatusCode) \(.ExecutedVersion) \(.FunctionError // "none")"' <<<"$called") $(jq -c .event "$work/invoked.json")"
+called="$(invoked e2e-invoked --payload '{"n": 2}' --log-type Tail)"
+check "  ... with --log-type Tail, the call's log from its START to its REPORT, the function's line in it" "1 1 1" \
+  "$(log_of "$called" | grep -c '^START RequestId: ') $(log_of "$called" | grep -c '^invoked with {"n":2}$') $(log_of "$called" | grep -c '^REPORT RequestId: ')"
+invoked e2e-invoked --payload '{}' --client-context "$(printf '{"custom": {"cart": "7"}}' | base64 -w0)" >/dev/null
+check "  ... with --client-context, the caller's ClientContext in the handler's context.clientContext" '{"custom":{"cart":"7"}}' \
+  "$(jq -c .clientContext "$work/invoked.json")"
+called="$(invoked e2e-invoked-py --payload '{}' --log-type Tail --client-context "$(printf '{"client": {"app_title": "shop"}, "custom": {"cart": "8"}}' | base64 -w0)")"
+check "  ... and in Python's context.client_context, as Lambda's Python runtime gives it, the call's log with it" '{"app":"shop","custom":{"cart":"8"}} 1 1' \
+  "$(jq -c . "$work/invoked.json") $(log_of "$called" | grep -c '^invoked with {}$') $(log_of "$called" | grep -c '^REPORT RequestId: ')"
+called="$(invoked e2e-invoked --payload '{"n": 3}' --qualifier 1)"
+check "  ... through its version 1, which ran it, as ExecutedVersion says" "1 1" "$(jq -r .ExecutedVersion <<<"$called") $(jq -r .version "$work/invoked.json")"
+called="$(invoked e2e-invoked --payload '{"fail": true}')"
+check "a function that throws: the call's outcome, 200 with FunctionError Unhandled and Lambda's error document" \
+  '200 Unhandled {"errorType":"TypeError","errorMessage":"bad input"}' \
+  "$(jq -r '"\(.StatusCode) \(.FunctionError)"' <<<"$called") $(jq -c . "$work/invoked.json")"
+called="$(invoked e2e-invoked --payload '{"sleepMs": 4000}')"
+check "  ... and one past its timeout too, Sandbox.Timedout" "200 Unhandled Sandbox.Timedout" \
+  "$(jq -r '"\(.StatusCode) \(.FunctionError)"' <<<"$called") $(jq -r .errorType "$work/invoked.json")"
+called="$(invoked e2e-invoked --payload '{"marker": "e2e-event"}' --invocation-type Event)"
+event_ran=none
+for _ in $(seq 30); do
+  event_ran="$(as_ver GET "/functions/$invoked_id/invocations" | jq -r '[.invocations[] | select(.source == "async" and .input.marker == "e2e-event")][0].status // "none"')"
+  [ "$event_ran" = COMPLETED ] && break
+  sleep 1
+done
+check "Event: 202 at once, and the call runs without the caller, its attempt in the function's history" "202 COMPLETED" \
+  "$(jq -r .StatusCode <<<"$called") $event_ran"
+check "DryRun: 204, nothing run" 204 "$(invoked e2e-invoked --payload '{}' --invocation-type DryRun | jq -r .StatusCode)"
+head -c $((6 * 1024 * 1024)) /dev/zero | tr '\0' 'a' | sed 's/.*/"&"/' >"$work/invoked-big.json"
+head -c $((1024 * 1024)) /dev/zero | tr '\0' 'a' | sed 's/.*/"&"/' >"$work/invoked-event.json"
+check "refused as Lambda refuses: a payload past 6 MB, an Event's past 1 MB, one that isn't JSON, a function Failed, a key that may only read it" \
+  "refused RequestEntityTooLargeException refused RequestEntityTooLargeException refused InvalidRequestContentException refused ResourceConflictException refused AccessDeniedException" \
+  "$(outcome invoked e2e-invoked --payload "fileb://$work/invoked-big.json") \
+$(outcome invoked e2e-invoked --payload "fileb://$work/invoked-event.json" --invocation-type Event) \
+$(outcome invoked e2e-invoked --payload 'not json') $(outcome invoked e2e-invoked-broken --payload '{}') \
+$(outcome as_reader invoke --function-name e2e-invoked "$work/invoked.json")"
+check "  ... the function Failed named in its words, and the payload's limit in Lambda's" \
+  "The function is currently in the following state: Failed Request must be smaller than 6291456 bytes for the InvokeFunction operation" \
+  "$(outcome invoked e2e-invoked-broken --payload '{}' >/dev/null; grep -oE 'The function is currently in the following state: [A-Za-z]+' "$work/aws.err") \
+$(outcome invoked e2e-invoked --payload "fileb://$work/invoked-big.json" >/dev/null; grep -oE 'Request must be smaller than [0-9]+ bytes for the [A-Za-z]+ operation' "$work/aws.err")"
+for made in e2e-invoked e2e-invoked-py e2e-invoked-broken; do as_maker aws_lambda delete-function --function-name "$made" >/dev/null; done
+as_ver DELETE "/storage-keys/$(jq -r .id <<<"$invoker")" >/dev/null
+}
+section_def lambda_invoke section_lambda_invoke lambda_changes budget=60
+
+section_lambda_sdks() {
+section "Lambda's endpoint with AWS's SDK for JavaScript v3 and boto3, only their endpoint given: a function made and waited for, listed by pages, its code and settings changed and each change waited for, a change meanwhile and an old RevisionId refused, tagged, invoked, a version and an alias, a URL, a queue's mapping, its asynchronous calls' settings, its dead-letter queue, its reserved concurrency, its permissions, refused as Lambda refuses, deleted"
+# AWS's SDK for JavaScript v3, pinned to the version ADR 0014 measured, fetched once into hack/.cache; boto3 from the
+# buckets' clients.
+lambda_clients="$FF_REPO_ROOT/hack/.cache/lambda-clients"
+if [ ! -d "$lambda_clients/node_modules/@aws-sdk/client-lambda" ]; then
+  npm install --prefix "$lambda_clients" --no-audit --no-fund --silent @aws-sdk/client-lambda@3.1156.0 >/dev/null
+fi
+# What both clients are given: the endpoint, the key that may change every function of the account, a role, a package
+# and the next one, and the account's other function, which their lists find too.
+clients_env=(ENDPOINT="http://localhost:$lambda_port" KEY="$(jq -r .id <<<"$maker")" SECRET="$(jq -r .secretAccessKey <<<"$maker")" ROLE="$role"
+  CODE="$work/sdks-v1.zip" CODE_SHA="$(lambda_zip "$work/sdks-v1.zip" 'export const handler = async () => ({ code: "v1" });')"
+  NEW_CODE="$work/sdks-v2.zip" NEW_CODE_SHA="$(lambda_zip "$work/sdks-v2.zip" 'export const handler = async (event, context) => {
+  if (event.fail) throw new TypeError("bad input");
+  console.log("invoked with", JSON.stringify(event));
+  return { code: "v2", event, clientContext: context.clientContext ?? null };
+};')"
+  OTHER_FUNCTION=e2e-versioned)
+# A queue for each client's mapping, so that one left by a client that failed refuses nothing to the other.
+for queue_of in sdk boto3; do as_ver POST /queues "{\"name\": \"e2e-$queue_of-orders\"}" >/dev/null; done
+env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-sdk-orders" MODULES="$lambda_clients/node_modules" \
+  node "$FF_REPO_ROOT/hack/lib/lambda-clients/sdk.mjs" >"$work/lambda-sdk.jsonl" 2>"$work/lambda-sdk.log" || true
+client_checks "$work/lambda-sdk.jsonl" 19
+env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-boto3-orders" \
+  "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
+client_checks "$work/lambda-boto3.jsonl" 19
+for queue_of in sdk boto3; do as_ver DELETE "/queues/e2e-$queue_of-orders" >/dev/null; done
+}
+section_def lambda_sdks section_lambda_sdks lambda_changes budget=60
 
 section_schedules() {
 section "a function on a schedule: its schedules made, their runs checked a few sections on"
@@ -1198,10 +1859,7 @@ clients="$FF_REPO_ROOT/hack/.cache/s3-clients"
 if [ ! -d "$clients/node_modules/@aws-sdk/lib-storage" ]; then
   npm install --prefix "$clients" --no-audit --no-fund --silent @aws-sdk/client-s3@3.1156.0 @aws-sdk/s3-request-presigner@3.1156.0 @aws-sdk/lib-storage@3.1156.0 >/dev/null
 fi
-if [ ! -x "$clients/venv/bin/python" ]; then
-  python3 -m venv "$clients/venv"
-  "$clients/venv/bin/pip" install --quiet --disable-pip-version-check boto3==1.43.118
-fi
+boto3_python >/dev/null # in $clients/venv
 if [ ! -d "$clients/python/boto3" ]; then
   "$clients/venv/bin/pip" install --quiet --disable-pip-version-check --target "$clients/python" boto3==1.43.118
 fi
@@ -1276,10 +1934,10 @@ aws_ff s3 cp s3://e2e-photos/no-such-file.txt "$work/none" --only-show-errors 2>
 head -c $((100 * 1024 * 1024)) /dev/urandom >"$work/big.bin"
 MODULES="$clients/node_modules" ENDPOINT="$s3_endpoint" IP_ENDPOINT="http://127.0.0.1:$storage_port" KEY="$key_id" SECRET="$key_secret" \
   BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" node "$FF_REPO_ROOT/hack/lib/s3-clients/sdk.mjs" >"$work/sdk.jsonl" 2>"$work/sdk.log" || true
-client_checks "$work/sdk.jsonl" 14
+client_checks "$work/sdk.jsonl" 19
 ENDPOINT="$s3_endpoint" KEY="$key_id" SECRET="$key_secret" BUCKET=e2e-photos OTHER_BUCKET=e2e-theirs BIG="$work/big.bin" \
   "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/s3-clients/boto3_checks.py" >"$work/boto3.jsonl" 2>"$work/boto3.log" || true
-client_checks "$work/boto3.jsonl" 11
+client_checks "$work/boto3.jsonl" 16
 aws_ff s3 cp "$work/big.bin" s3://e2e-photos/cli/big.bin --only-show-errors
 aws_ff s3 cp s3://e2e-photos/cli/big.bin "$work/big.out" --only-show-errors
 check "aws: 100 MB up in parts and down again, byte for byte" "104857600 0" \
@@ -1303,6 +1961,27 @@ check "aws: a wrong secret, SignatureDoesNotMatch" "refused SignatureDoesNotMatc
 check "aws: another account's bucket, AccessDenied" "refused AccessDenied" "$(outcome aws_ff s3 ls s3://e2e-theirs)"
 check "a read-only key lists, and writes nothing: AccessDenied" "accepted refused AccessDenied" \
   "$(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 ls s3://e2e-photos/site/) $(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 cp "$work/site/index.html" s3://e2e-photos/site/new.html)"
+# Buckets made and deleted through S3 itself, as Terraform and the CLI do, with the checks of FF's API.
+made_by_cli="$(aws_ff s3 mb s3://e2e-from-cli 2>&1)"
+made_region="$(http GET /buckets/e2e-from-cli | jq -r .region)"
+check "aws: s3 mb makes a bucket in FF's region, as the API shows it, made by the key in the audit log" "make_bucket: e2e-from-cli 200 tn-tunis-1 access_key:$key_id" \
+  "$made_by_cli $(status) $made_region $(env_q "SELECT actor FROM audit_log WHERE action = 'bucket.create' AND resource = 'bucket:e2e-from-cli'")"
+made_store="$(env_q "SELECT store_name FROM buckets WHERE name = 'e2e-from-cli'")"
+aws_ff s3 cp "$work/site/index.html" s3://e2e-from-cli/index.html --only-show-errors
+aws_ff s3api put-bucket-tagging --bucket e2e-from-cli --tagging 'TagSet=[{Key=team,Value=web},{Key=stage,Value=dev}]'
+check "aws: s3api put-bucket-tagging keeps a bucket's tags, read back by get-bucket-tagging, put by the key in the audit log" "stage=dev team=web access_key:$key_id" \
+  "$(aws_ff s3api get-bucket-tagging --bucket e2e-from-cli --query 'TagSet[].[Key,Value]' --output text | sort | tr '\t' = | xargs) \
+$(env_q "SELECT actor FROM audit_log WHERE action = 'bucket.tag' AND resource = 'bucket:e2e-from-cli'")"
+check "aws: s3api reads a bucket's settings it hasn't as S3 answers a bucket without them: no policy, the owner paying, versioning never on" \
+  "refused NoSuchBucketPolicy BucketOwner never" \
+  "$(outcome aws_ff s3api get-bucket-policy --bucket e2e-from-cli) $(aws_ff s3api get-bucket-request-payment --bucket e2e-from-cli --query Payer --output text) \
+$(aws_ff s3api get-bucket-versioning --bucket e2e-from-cli --query "Status || 'never'" --output text)"
+check "aws: s3 rb refuses it with a file, BucketNotEmpty; s3 rb --force empties it, then deletes it, gone from the store too" "refused BucketNotEmpty accepted 404 gone" \
+  "$(outcome aws_ff s3 rb s3://e2e-from-cli) $(outcome aws_ff s3 rb s3://e2e-from-cli --force) $(http GET /buckets/e2e-from-cli >/dev/null; status) $(held store_s3 s3api head-bucket --bucket "$made_store")"
+check "aws: another account's name, BucketAlreadyExists; another region, IllegalLocationConstraintException; a read-only key, AccessDenied" \
+  "refused BucketAlreadyExists refused IllegalLocationConstraintException refused AccessDenied" \
+  "$(outcome aws_ff s3 mb s3://e2e-theirs) $(outcome aws_ff s3api create-bucket --bucket e2e-elsewhere --create-bucket-configuration LocationConstraint=eu-west-1) \
+$(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 mb s3://e2e-read-only)"
 http DELETE "/storage-keys/$ro_id" >/dev/null
 check "a revoked key opens nothing at once: InvalidAccessKeyId" "204 refused InvalidAccessKeyId" "$(status) $(AWS_KEY="$ro_id" AWS_SECRET="$ro_secret" outcome aws_ff s3 ls s3://e2e-photos)"
 # The other account's buckets, measured full while the clients ran; run alone, waited for, as long as before.
@@ -1419,6 +2098,11 @@ check "another account's queue of the same name is its own: its URL under its ac
   "$sqs_endpoint/$other/e2e-cli-orders refused AWS.SimpleQueueService.NonExistentQueue" \
   "$other_url $(outcome aws_sqs send-message --queue-url "$other_url" --message-body 'not mine')"
 check "  ... nor lists" "$cli_url" "$(aws_sqs list-queues --query 'QueueUrls' --output text)"
+check "  ... tags its queue and reads its tags, put by the key in the audit log; the other account's key finds no queue to tag" \
+  "shop dev access_key:$queue_key_id refused AWS.SimpleQueueService.NonExistentQueue" \
+  "$(aws_sqs tag-queue --queue-url "$cli_url" --tags team=shop,stage=dev; aws_sqs list-queue-tags --queue-url "$cli_url" --query '[Tags.team, Tags.stage]' --output text | xargs) \
+$(env_q "SELECT actor FROM audit_log WHERE account_id = '$tenant' AND action = 'queue.tag' AND resource = 'queue:e2e-cli-orders'") \
+$(as_other_sqs outcome aws_sqs tag-queue --queue-url "$cli_url" --tags team=theirs)"
 # AWS's SDK for JavaScript v3, pinned to the version ADR 0010 measured, fetched once into hack/.cache; boto3 from the
 # buckets' clients.
 sqs_clients="$FF_REPO_ROOT/hack/.cache/sqs-clients"
@@ -1427,10 +2111,10 @@ if [ ! -d "$sqs_clients/node_modules/@aws-sdk/client-sqs" ]; then
 fi
 MODULES="$sqs_clients/node_modules" ENDPOINT="$sqs_endpoint" ACCOUNT="$tenant" KEY="$queue_key_id" SECRET="$queue_key_secret" OTHER_URL="$other_url" \
   node "$FF_REPO_ROOT/hack/lib/sqs-clients/sdk.mjs" >"$work/sqs-sdk.jsonl" 2>"$work/sqs-sdk.log" || true
-client_checks "$work/sqs-sdk.jsonl" 13
+client_checks "$work/sqs-sdk.jsonl" 14
 ENDPOINT="$sqs_endpoint" ACCOUNT="$tenant" KEY="$queue_key_id" SECRET="$queue_key_secret" OTHER_URL="$other_url" \
   "$clients/venv/bin/python" "$FF_REPO_ROOT/hack/lib/sqs-clients/boto3_checks.py" >"$work/sqs-boto3.jsonl" 2>"$work/sqs-boto3.log" || true
-client_checks "$work/sqs-boto3.jsonl" 8
+client_checks "$work/sqs-boto3.jsonl" 9
 # Two messages left waiting in a queue, and an alarm on them, as a dead-letter queue is watched: judged at the end of
 # the queues' sections, by when a minute has sampled them.
 aws_sqs create-queue --queue-name e2e-waiting >/dev/null
@@ -1844,15 +2528,13 @@ copied_key() { jq -n --arg id "$(function_secret "$key_fn" AWS_ACCESS_KEY_ID)" -
 copied="$(copied_key)"
 first_key="$(jq -r .id <<<"$copied")"
 as_copied() { AWS_KEY="$first_key" AWS_SECRET="$(jq -r .secretAccessKey <<<"$copied")" "$@"; }
-# aws_lambda <arguments…>: the AWS CLI at Lambda's endpoint, from AWS_ENDPOINT_URL_LAMBDA alone, with AWS_KEY's key.
-aws_lambda() { AWS_ACCESS_KEY_ID="$AWS_KEY" AWS_SECRET_ACCESS_KEY="$AWS_SECRET" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null \
-  AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_ENDPOINT_URL_LAMBDA="http://localhost:$lambda_port" "${aws_cli[@]}" lambda "$@" --output json; }
 check "a function's key lasts 12 hours" "12" "$(key_life "$first_key")"
 check "  ... copied out of it, it opens S3, SQS and SES" "accepted accepted accepted" \
   "$(as_copied outcome aws_ff s3 ls) $(as_copied outcome aws_sqs list-queues) $(as_copied outcome aws_ses list-email-identities)"
-check "  ... and at Lambda's endpoint it invokes its account's functions, as a role allowed to invoke them, Invoke not offered there yet; and does nothing else" \
-  "refused UnknownOperationException refused AccessDeniedException" \
-  "$(as_copied outcome aws_lambda invoke --function-name e2e-key-life /dev/null) $(as_copied outcome aws_lambda get-function --function-name e2e-key-life)"
+# A DryRun, which leaves the function at zero for the start on a fresh key below.
+check "  ... and at Lambda's endpoint it invokes its account's functions, as a role allowed to invoke them, and does nothing else" \
+  "accepted refused AccessDeniedException" \
+  "$(as_copied outcome aws_lambda invoke --function-name e2e-key-life --invocation-type DryRun /dev/null) $(as_copied outcome aws_lambda get-function --function-name e2e-key-life)"
 sql "UPDATE storage_keys SET created_at = now() - interval '12 hours 1 second', expires_at = now() - interval '1 second' WHERE id = '$first_key'"
 check "past its end, each front door refuses it at once, in its service's words: S3's ExpiredToken, SQS's, SES's and Lambda's ExpiredTokenException" \
   "refused ExpiredToken refused ExpiredToken refused ExpiredTokenException refused ExpiredTokenException" \
@@ -2123,6 +2805,11 @@ check "its record: a timeout, billed the function's timeout" "timeout 3000" \
   "$(q "SELECT u.status, u.billed_ms FROM usage_records u JOIN function_invocations i ON i.id = u.request_id
           WHERE i.function_id = '$meter_id' AND i.status = 'TIMEOUT'")"
 
+# A function whose change the backend stops during, below: usage_lost reads how the change ended.
+stopped_id="$(http POST /functions "$(jq -n --arg code "$meter" '{name: "e2e-stopped", runtime: "nodejs", code: $code, memory: 128, timeout: 3}')" | jq -r .id)"
+check "a function to stop a change of is created" 201 "$(status)"
+stopped_image="$(code_image_of "$stopped_id")"
+
 # A call lost: the backend is killed while it waits for the answer.
 be_pid="${e2e_pids[${#e2e_pids[@]}-1]}"
 (http POST "/functions/$meter_id/invoke" '{"input":{"sleepMs":2500}}' >/dev/null 2>&1 || true) &
@@ -2137,6 +2824,12 @@ check "a slow call is running" true "$([ -n "$lost" ] && echo true || echo false
 kill -9 "$be_pid"
 e2e_gone "$be_pid"
 wait "$call_pid" 2>/dev/null || true
+# A change stopped with the backend, mid-rollout: the function's record as it was, its Deployment rolling out an image
+# that never comes, and the change under way for 10 minutes, past its bound (twice the 90 s a rollout waits, and a
+# minute). The restarted backend takes it over at its start.
+kubectl -n "$tenant_ns" patch deployment "fn-$stopped_id" \
+  -p "{\"spec\":{\"template\":{\"spec\":{\"volumes\":[{\"name\":\"code\",\"image\":{\"reference\":\"${stopped_image%@*}@sha256:$(printf '1%.0s' $(seq 1 64))\"}}]}}}}" >/dev/null
+sql "UPDATE functions SET update_status = 'InProgress', update_started_at = now() - interval '10 minutes' WHERE id = '$stopped_id'"
 # Restarted at once, as a supervisor would, with a 1 s cold-start limit. Its reaper marks the call LOST once the longest
 # a call can take has passed (2 × 3 s + the 1 s cold-start limit + 30 s), at the next run of the minute: read after the
 # alarms' section, whose minutes pass meanwhile (usage_lost).
@@ -2233,7 +2926,7 @@ http DELETE "/functions/$alarmed_id" >/dev/null
 section_def alarms section_alarms backend budget=185
 
 section_usage_lost() {
-section "usage records: the call lost, marked LOST by the restarted backend, read once its minute has passed"
+section "usage records: the call lost, marked LOST by the restarted backend, read once its minute has passed; the change it stopped during, ended"
 # The reaper's minute has passed in the alarms' section; run alone, it is waited for, as long as before.
 state=""
 for _ in $(seq 1 120); do
@@ -2247,6 +2940,19 @@ check "the history says why" "Lost: the backend restarted during the call, so it
   "$(http GET "/functions/$meter_id/invocations" | jq -r --arg id "$lost" '.invocations[] | select(.id == $id) | .error')"
 check "one record per invocation, none without one" "5 5" \
   "$(q "SELECT (SELECT count(*) FROM function_invocations WHERE function_id = '$meter_id'), (SELECT count(*) FROM usage_records WHERE function_id = '$meter_id')")"
+# The change stopped with the backend, taken over at the restarted one's start; run alone, waited for.
+stopped_state=""
+for _ in $(seq 1 120); do
+  stopped_state="$(q "SELECT status, update_status FROM functions WHERE id = '$stopped_id'")"
+  [ "$stopped_state" != "ACTIVE InProgress" ] && break
+  sleep 1
+done
+check "the change the backend stopped during: taken over by the restarted backend, the function's version rolled out again, which serves" \
+  "ACTIVE Failed $stopped_image true" \
+  "$stopped_state $(code_image_of "$stopped_id") $(kubectl -n "$tenant_ns" rollout status deployment "fn-$stopped_id" --timeout=120s >/dev/null 2>&1 && echo true || echo false)"
+check "  ... the change Failed, saying why, in the audit log by FF" \
+  "The backend stopped during this change, which was undone: the version before it is still live. Send the change again.|system" \
+  "$(q "SELECT update_reason FROM functions WHERE id = '$stopped_id'")|$(q "SELECT actor FROM audit_log WHERE resource = 'function:$stopped_id' AND action = 'function.update' AND details->>'outcome' LIKE 'stopped by the backend%'")"
 }
 section_def usage_lost section_usage_lost usage_records budget=5
 

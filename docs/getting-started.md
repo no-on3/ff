@@ -303,6 +303,8 @@ curl -s -X PUT "$FF/functions/$ID/scaling-config" -H 'content-type: application/
 # {"minInstances":0,"maxInstances":5,"scaleToZero":true}
 ```
 
+Lambda's reserved concurrency is the same limit: `aws lambda put-function-concurrency --function-name hello --reserved-concurrent-executions 5` sets `maxInstances` to 5, within the plan's instances and no fewer than `minInstances`, and `get-function-concurrency` reads it back. FF's default of 3 reads as no reservation, and `delete-function-concurrency` puts it back. A reservation of 0 stops every call of the function, its versions' and aliases' too, as on Lambda: each is throttled, `TooManyRequestsException` through Lambda's endpoint and 429 through FF's API and its URL, kept in its history as `THROTTLED`; a call that doesn't wait is tried again as a throttled one is, and a queue the function reads waits. `GET /functions/<id>` shows it as `"callsStopped": true`, and `maxInstances` stays as it was meanwhile; a reservation above 0, or `delete-function-concurrency`, starts them again.
+
 **Environment variables**, as AWS Lambda's: names and string values your code reads as `process.env.NAME` in Node.js, `os.environ["NAME"]` in Python. Set them on create, or replace them all with an update, which rolls out a new version as a change of code does; `{}` removes them. A name starts with a letter, then letters, digits or underscores, two characters at least. The names Lambda sets itself (`AWS_REGION`, `AWS_LAMBDA_FUNCTION_NAME` and the rest of its list) and FF's runtimes' (`FUNCTION_TIMEOUT`, `PORT`, `PATH`, every `FF_` name) are refused, and all of them together take at most 4 KB as JSON text, as Lambda counts it. `TZ` is yours: the runtimes run in UTC otherwise.
 
 ```bash
@@ -469,6 +471,7 @@ ff list
 ff delete hello --yes
 ff local invoke examples/hello.py --data '{"name": "here"}'   # on this machine, in Docker, as FF runs it
 ff init orders --runtime python                   # a new function's folder: its handler and an event
+ff init shop --template terraform --runtime nodejs   # an app's Terraform project, for FF and, its provider changed, AWS
 ff deploy ./orders                                # a folder: packaged with its libraries, uploaded when new
 ff package ./orders                               # the same zip, for AWS Lambda too: ./orders/.ff/orders.zip
 ff account                                        # its plan's limits, and whether functions reach the internet
@@ -506,7 +509,7 @@ curl -s -X POST "$FF/databases" -H 'content-type: application/json' -d '{"name":
 Buckets for files come as AWS S3 gives them ([ADR 0009](adr/0009-buckets.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers their requests on a port of its own, `FF_STORAGE_PORT` (3002), at `FF_STORAGE_BASE` (`http://s3.localhost:3002`): path-style there (`http://s3.localhost:3002/photos/a.jpg`, as boto3 and the CLI address it, and every SDK an IP address), and virtual-hosted under it (`http://photos.s3.localhost:3002/a.jpg`, as the SDK for JavaScript addresses a host name). In front of the store, SeaweedFS in development (`FF_OBJECT_STORE_*`), it:
 - checks each request's AWS Signature Version 4, in its `Authorization` header or as a presigned URL (up to 7 days), with one of the account's access keys; nothing anonymous;
 - lets a key into its own account's buckets only, those it names if it names some, and writes only with a read-write key: AWS's errors otherwise (`SignatureDoesNotMatch`, `InvalidAccessKeyId`, `AccessDenied`, `NoSuchBucket`), in S3's XML;
-- serves `PutObject`, `GetObject` with ranges, `HeadObject`, `DeleteObject`, `DeleteObjects`, `CopyObject`, `ListObjectsV2` and `ListObjects`, the multipart upload's steps, `HeadBucket`, `GetBucketLocation` (`tn-tunis-1`) and `ListBuckets`; anything else answers `NotImplemented`;
+- serves `PutObject`, `GetObject` with ranges, `HeadObject`, `DeleteObject`, `DeleteObjects`, `CopyObject`, `ListObjectsV2` and `ListObjects`, the multipart upload's steps, `HeadBucket`, `GetBucketLocation` (`tn-tunis-1`) and `ListBuckets`, `CreateBucket` and `DeleteBucket`, a bucket's tags, and its policy and public access block (below); reads a bucket's settings FF's buckets don't have as S3 answers a bucket without them, as Terraform reads them at each plan: `GetBucketCors`, `GetBucketLifecycleConfiguration`, `GetBucketReplication`, `GetBucketEncryption` and `GetObjectLockConfiguration` answer S3's `404` for none (`NoSuchCORSConfiguration`, …), `GetBucketVersioning`, `GetBucketAccelerateConfiguration` and `GetBucketLogging` never turned on, `GetBucketRequestPayment` the owner paying, `GetBucketAcl` the owner's full control alone and `GetBucketOwnershipControls` `BucketOwnerEnforced`; anything else, setting them among it, answers `NotImplemented`;
 - checks a body as it streams to the store: its signed SHA-256, each chunk of the SDKs' `aws-chunked` uploads and its trailer, the checksum it carries (CRC-32, CRC-32C, CRC-64/NVME, SHA-1, SHA-256); a body that fails never completes in the store, which gets FF's own signature, the bucket's name there (`ff-` and 24 characters), and no checksum;
 - counts each request let into a bucket in its minute, by AWS's two classes of request (deletes free), with its bytes in and out, written once a minute to `storage_request_counts`.
 
@@ -532,7 +535,9 @@ ff usage                       # its month: GB-months, its requests by S3's two 
 
 `GET /buckets` and `GET /buckets/<name>` give each bucket's last measure too (`sizeBytes`, `objects`, `measuredAt`), and `GET /me` how full the account's buckets are together (`bucketStorageNotice`: 80, 100, or null under 80%).
 
-**A bucket's name** is AWS's, without dots (3 to 63 lower-case letters, digits and hyphens), and unique across FF, as on AWS: whoever has `photos`, nobody else may, until it is deleted. In the store it is a name of FF's, `ff-` and 24 characters, which says nothing of whose it is. The plan sets how many an account has (five on beta), what they hold together (5 GB), the requests a second (100) and the largest file in one `PutObject` (5 GB; a multipart upload sends more). `GET /buckets` and `GET /buckets/<name>` show them; `DELETE /buckets/<name>` deletes an empty one, as S3 does, and `?force=true` deletes its files first, and the uploads under way.
+**Or through S3 itself,** as Terraform and `aws s3 mb s3://photos` make them, with a read-write key that reaches the name (one that names no bucket, or names that one). `CreateBucket` has the API's checks, in S3's words: the name's rules (`InvalidBucketName`), the plan's buckets (`TooManyBuckets`), a name once across FF (`BucketAlreadyExists`, or `BucketAlreadyOwnedByYou` for one the account has), and FF's region, `tn-tunis-1`, as its `LocationConstraint`, or none (another answers `IllegalLocationConstraintException`). The bucket's owner owns every object, as S3's new buckets do, so an ACL other than `private` is refused (`InvalidBucketAclWithObjectOwnership`), and Object Lock answers `NotImplemented`. `DeleteBucket` deletes an empty bucket, and answers `409 BucketNotEmpty` otherwise, as S3's; `aws s3 rb --force` deletes its files first. **A bucket's tags,** as Terraform's `default_tags` puts them, are kept as S3 keeps them, 50 at most: `PutBucketTagging` replaces them all (`aws s3api put-bucket-tagging --bucket photos --tagging 'TagSet=[{Key=team,Value=web}]'`), `GetBucketTagging` reads them, `404 NoSuchTagSet` when there are none, `DeleteBucketTagging` removes them, and `CreateBucket`'s configuration may give them; a tag AWS would refuse, as for a function's, answers `InvalidTag`. **A bucket's policy and public access block,** which a site's bucket needs on AWS, are kept as S3 keeps them, without effect on FF, so that one Terraform module for a site applies on both: on FF a bucket's website configuration alone makes it public, and its S3 API stays signed whatever its policy says. `PutBucketPolicy` keeps the JSON as sent (a `Statement`, 20 KB at most, else `MalformedPolicy`), `GetBucketPolicy` reads it back, `404 NoSuchBucketPolicy` when there is none, and `DeleteBucketPolicy` removes it; `PutPublicAccessBlock`, `GetPublicAccessBlock` (`404 NoSuchPublicAccessBlockConfiguration` for none) and `DeletePublicAccessBlock` keep, read and remove its four switches. The audit log names the key for each `bucket.create`, `bucket.delete`, `bucket.tag`, `bucket.untag`, `bucket.policy` and `bucket.public_access_block`.
+
+**A bucket's name** is AWS's, without dots (3 to 63 lower-case letters, digits and hyphens), and unique across FF, as on AWS: whoever has `photos`, nobody else may, until it is deleted. In the store it is a name of FF's, `ff-` and 24 characters, which says nothing of whose it is. The plan sets how many an account has (five on beta), what they hold together (5 GB), the requests a second (100) and the largest file in one `PutObject` (5 GB; a multipart upload sends more). `GET /buckets` and `GET /buckets/<name>` show them, a bucket's own answer with its tags; `POST /buckets` takes its tags too (`{"name": "photos", "tags": {"team": "shop"}}`), as `CreateBucket` does, and `PATCH /buckets/<name>` replaces them all (`{"tags": {}}` removing them), as `PutBucketTagging` does; `DELETE /buckets/<name>` deletes an empty one, as S3 does, and `?force=true` deletes its files first, and the uploads under way.
 
 **An access key** (`POST /storage-keys`) is an ID like AWS's, `AKFF` and 16 characters, and a secret of 40, in that answer only: FF keeps it sealed, as the front door needs it to check signatures. It has a `name`, as an IAM user has, 1 to 64 letters, digits and `+=,.@_-`, once among the account's working keys (its ID when none is given). Naming nothing, it reaches all the account's buckets and queues and its mail, and no function; naming `buckets`, `queues` or `functions`, those alone ("Queues, as Amazon SQS", below), read-write or, with `readOnly`, reading and listing only. `functions` names the account's functions, or `["*"]` for all of them, at one `functionAccess`, as IAM groups Lambda's actions: `read` (its List and Read actions), `invoke` (those, and `InvokeFunction`, and so its `AWS_IAM` URL: "A web address for a function", above) or `write` (every operation); a function's own key may invoke every function of its account, and change none; a key made before reaches none, and a key stays as it was made: another reach is another key. An account has as many as its plan's `accessKeys`, 10 on beta; `DELETE /storage-keys/<id>` revokes one, at once. Only owners see, make and revoke them; an API key makes one that reaches functions only with the scope of its level, `functions:read`, `functions:invoke` or `functions:write`; owners and developers make and delete buckets; every member lists them. An API key needs `storage:read` and `storage:write`. The audit log names each `bucket.create`, `bucket.delete`, `storage_key.create` and `storage_key.delete`.
 
@@ -623,6 +628,12 @@ curl -s "$FF/functions/$ID/invocations?limit=3" | jq -c '.invocations[] | {reque
   curl -s -X PUT "$FF/functions/$ID/event-invoke-config" -H 'content-type: application/json' \
     -d "{\"maximumRetryAttempts\": 0, \"destinationConfig\": {\"onFailure\": {\"destination\": \"arn:aws:lambda:tn-tunis-1:$ACCOUNT:function:failed-orders\"}}}" | jq -c
   ```
+- **A dead-letter queue, as Lambda's `DeadLetterConfig`,** set through Lambda's endpoint ("Functions through Lambda's API", below): a queue of the account, which gets each call that failed for good, its retries used up or too old, beside the `onFailure` destination's record, as Lambda sends one: the event as it was sent, as the message's body, with the message attributes `RequestID`, `ErrorCode`, the last attempt's status (200 when the function threw), and `ErrorMessage`, the first kilobyte of its error; a call that aged out before any attempt has its `RequestID` alone. The function's versions and aliases follow it. A message its queue can't take (gone since, over its largest message, the plan's room full) is lost, which the backend's log says. FF's API leaves it as it is, and shows it in `GET /functions/<id>` as `deadLetterTargetArn`.
+
+  ```bash
+  aws lambda update-function-configuration --function-name orders --dead-letter-config "TargetArn=arn:aws:sqs:tn-tunis-1:$ACCOUNT:orders-dlq"
+  aws lambda update-function-configuration --function-name orders --dead-letter-config '{"TargetArn": ""}'   # none again
+  ```
 - **The worker:** as soon as a call is kept, PostgreSQL tells every backend (`NOTIFY`), and each claims the calls due, at most ten running at once (`FF_ASYNC_CONCURRENCY`); every 5 s too (`FF_ASYNC_INTERVAL_SECONDS`; 0 for a backend that runs none), for the retries come due and the calls a stopped backend left. A record that can't go to its destination (gone since, over what it takes, or the account's messages at the plan's limit) is said in the server log, and its call ends all the same.
 - **Its metrics, as Lambda's:** `GET /functions/<id>/metrics`, and the account's `GET /metrics`, give `AsyncEventsReceived` (the calls kept), `AsyncEventAge` (how long a call waited until each attempt, its `Average` and `Maximum` in ms, `null` in a period without an attempt), `AsyncEventsDropped` (the calls that ended without the function succeeding, past their retries or their age, whether their record went to a destination or not, or whose version or alias was deleted) and `DestinationDeliveryFailures` (records a destination didn't take), each backend counting them a minute at a time. Alarms watch them as they watch `Errors`. In the console, the Invocations tab's "Calls that don't wait" panel says the last day's in a line; `ff metrics` ends its totals with the calls kept and dropped, and the records their destination didn't take.
 - **In the console**, a function's Invocations tab invokes without waiting when "Don't wait for the answer" is ticked: it says the call's request ID, and its attempts join the history, each "asynchronously, attempt n", linked to its request's log lines. **With `ff`**, `ff invoke <name> --async` prints the request ID at once (`--raw`: the ID alone), `ff history <name>` lists the attempts, and `--dry-run` only checks.
@@ -630,8 +641,8 @@ curl -s "$FF/functions/$ID/invocations?limit=3" | jq -c '.invocations[] | {reque
 ### Queues, as Amazon SQS
 
 Queues come as Amazon SQS gives its standard queues ([ADR 0010](adr/0010-queue.md)): AWS's SDKs and CLI work with only their endpoint changed. The backend answers their requests on a port of its own, `FF_SQS_PORT` (3003), at `FF_SQS_BASE` (`http://localhost:3003`). A queue's URL is `<FF_SQS_BASE>/<account>/<queue>`, and its ARN `arn:aws:sqs:tn-tunis-1:<account>:<queue>`. The endpoint:
-- speaks SQS's JSON protocol, as AWS's current SDKs and CLI do, each request signed with AWS Signature Version 4 for the service `sqs` by one of the account's access keys, the same keys as buckets' ("An access key", above): a read-write key does everything, a read-only one lists queues, reads their attributes and receives;
-- serves `CreateQueue`, `GetQueueUrl`, `ListQueues`, `GetQueueAttributes`, `SetQueueAttributes`, `DeleteQueue`, `PurgeQueue`, `SendMessage` and `SendMessageBatch`, `ReceiveMessage` with long polling, `DeleteMessage` and `DeleteMessageBatch`, `ChangeMessageVisibility` and `ChangeMessageVisibilityBatch`; anything else answers `UnsupportedOperation`, and FIFO queues, tags, access policies and KMS keys are refused, saying why;
+- speaks SQS's JSON protocol, as AWS's current SDKs and CLI do, each request signed with AWS Signature Version 4 for the service `sqs` by one of the account's access keys, the same keys as buckets' ("An access key", above): a read-write key does everything, a read-only one lists queues, reads their attributes and tags, and receives;
+- serves `CreateQueue`, `GetQueueUrl`, `ListQueues`, `GetQueueAttributes`, `SetQueueAttributes`, `DeleteQueue`, `PurgeQueue`, `SendMessage` and `SendMessageBatch`, `ReceiveMessage` with long polling, `DeleteMessage` and `DeleteMessageBatch`, `ChangeMessageVisibility` and `ChangeMessageVisibilityBatch`, and a queue's tags, `TagQueue`, `UntagQueue`, `ListQueueTags` and `CreateQueue`'s `tags`, 50 a queue by AWS's rules, as for a function's (a tag AWS would refuse answers `InvalidParameterValue`), each change in the audit log (`queue.tag`, `queue.untag`) under the key; anything else answers `UnsupportedOperation`, and FIFO queues, access policies and KMS keys are refused, saying why;
 - takes SQS's attributes, with SQS's defaults and ranges: `VisibilityTimeout` (30 s, up to 12 hours), `MessageRetentionPeriod` (4 days, from a minute to 14 days), `DelaySeconds` (up to 15 minutes), `ReceiveMessageWaitTimeSeconds` (up to 20 s), `MaximumMessageSize` (1 MiB at most), and a `RedrivePolicy`: another queue of the account, the dead-letter queue, takes a message once it has been received `maxReceiveCount` times;
 - answers SQS's errors (`QueueDoesNotExist`, `InvalidParameterValue`, `AccessDenied`, `OverLimit`, …) by both their names, the body's `__type` and the `x-amzn-query-error` header, and gives the MD5 sums of each message's body and attributes that AWS's SDKs check.
 
@@ -645,7 +656,7 @@ aws sqs send-message --queue-url "$queue" --message-body '{"item": "harissa", "q
 aws sqs receive-message --queue-url "$queue" --wait-time-seconds 10   # then delete-message with its ReceiptHandle
 ```
 
-**In FF's API too,** beside the endpoint, the same queues the same way, as SQS's own operations run there: `GET /queues` lists the account's, each with its URL, ARN, attributes and messages counted (`available`, `inFlight`, `delayed`); `POST /queues` makes one (`{"name": "orders", "visibilityTimeout": 60}`, SQS's attributes by their names; a name the account has, 409); `GET`, `PATCH` (what is given changes; `"redrivePolicy": null` removes it) and `DELETE /queues/<name>`; `POST /queues/<name>/purge`. To debug a queue, `POST /queues/<name>/messages` sends a message (`{"body": "…", "attributes": {"item": {"dataType": "String", "stringValue": "harissa"}}}`), `POST /queues/<name>/receive` receives up to ten (`maxMessages`, `visibilityTimeout`, `waitTimeSeconds`), each hidden and counted as any receive, and `DELETE /queues/<name>/messages/<receiptHandle>` deletes one. Every member lists them; owners and developers change them; an API key needs `queues:read` and `queues:write`. The audit log names each `queue.create`, `queue.update`, `queue.purge` and `queue.delete`, whichever way it came, an SDK's under its access key.
+**In FF's API too,** beside the endpoint, the same queues the same way, as SQS's own operations run there: `GET /queues` lists the account's, each with its URL, ARN, attributes and messages counted (`available`, `inFlight`, `delayed`); `POST /queues` makes one (`{"name": "orders", "visibilityTimeout": 60, "tags": {"team": "shop"}}`, SQS's attributes by their names, its tags as CreateQueue's; a name the account has, 409); `GET` (with its tags), `PATCH` (what is given changes; `"redrivePolicy": null` removes it; `tags` replace them all, `{}` removing them) and `DELETE /queues/<name>`; `POST /queues/<name>/purge`. To debug a queue, `POST /queues/<name>/messages` sends a message (`{"body": "…", "attributes": {"item": {"dataType": "String", "stringValue": "harissa"}}}`), `POST /queues/<name>/receive` receives up to ten (`maxMessages`, `visibilityTimeout`, `waitTimeSeconds`), each hidden and counted as any receive, and `DELETE /queues/<name>/messages/<receiptHandle>` deletes one. Every member lists them; owners and developers change them; an API key needs `queues:read` and `queues:write`. The audit log names each `queue.create`, `queue.update`, `queue.purge` and `queue.delete`, whichever way it came, an SDK's under its access key.
 
 **In the console,** the Queues page lists the account's queues, each with its messages (waiting, in flight, delayed) and what they hold, and makes one; a queue's page has its URL, ARN and endpoint, the AWS CLI's commands for it, its attributes, which owners and developers change there, a dead-letter queue among them, and, to debug it, sending a message, receiving up to ten (each received as by any receive: hidden for the visibility timeout, its receive counted) and deleting those received, a purge and the queue's deletion. The access keys that reach them are made on the Access keys page, as buckets' are, and a key just made comes with its seven variables, `AWS_ENDPOINT_URL_SQS` among them. A function's "Calls that don't wait" offer the account's queues as destinations.
 
@@ -795,60 +806,46 @@ ff caches get sessions                                  # its memory used, its c
 
 [`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: its page a static site, orders taken at a web address and kept in PostgreSQL, the latest listed from a cache, each order's receipt made in the background, kept in a bucket and e-mailed, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, `@redis/client`, a Valkey client, and AWS's S3, SQS and SES clients, `@aws-sdk/client-s3`, `@aws-sdk/client-sqs` and `@aws-sdk/client-sesv2`, makes its three functions; `site/` is its page. On FF it keeps its orders in one of FF's databases, the latest in one of FF's caches, its new orders in one of FF's queues and its receipts in one of FF's buckets, sends its mail through FF's SES endpoint, and its page is a site of a bucket of FF's, as it would use RDS, ElastiCache, SQS, S3, SES and S3 with CloudFront on AWS: its functions reach them all with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL`, `REDIS_URL`, `RECEIPTS_QUEUE`, `RECEIPTS_BUCKET` and `RECEIPTS_FROM`. In development, functions get their own keys to buckets, queues and mail once the backend knows where they reach its front doors (`FF_STORAGE_FUNCTION_ENDPOINT`, `FF_SQS_FUNCTION_ENDPOINT` and `FF_SES_FUNCTION_ENDPOINT`, in "Files in buckets", "Queues, as Amazon SQS" and "E-mail from apps" above), and the servers of customers' databases, caches and mail run (setup's steps 10 to 12).
 
-**The three functions.** From the app's folder; the second and the third have the same package, so nothing goes up again:
+**The app as one template.** [`template.yaml`](../examples/orders-app/template.yaml) is the app as SAM writes it: its three functions, each a handler of `index.js`, from the one package; `shop-api`'s URL, open to anyone, which lets the page's origin in (CORS); `shop-receipts` reading the queue of new orders, as Lambda's event source mapping for SQS, naming the messages it failed; `shop-nightly`'s schedule, each night at 02:00 UTC; the queue; the receipts' bucket; and the page's, a site. Each function's variables name the bucket (`!Ref ReceiptsBucket`), the API's the queue too (`!GetAtt NewOrders.QueueName`), and their `Policies` are for AWS, where a role gives the clients their credentials. [`samconfig.toml`](../examples/orders-app/samconfig.toml) names the stack, `shop`, which makes `shop-api`, `shop-receipts` and `shop-nightly`, and the parameters: the buckets' names, yours to choose, as a bucket's name is unique across FF, and the page's origin with them. From the app's folder:
 
 ```bash
 cd examples/orders-app
-ff deploy . --name orders-api --handler index.http            # npm installs pg and the clients in a copy of the folder; the package goes up
-ff deploy . --name orders-receipts --handler index.receipts   # "package: …, which the account had"
-ff deploy . --name orders-nightly --handler index.nightly
+ff doctor .                                                   # nothing that works on FF alone, the template read as CloudFormation reads it
+ff deploy template.yaml                                       # the stack shop: its buckets, its queue, then its functions; npm installs pg and the clients in a copy of the folder
 ```
 
-**Its database, its bucket and its queue.** `ff db create` makes the database and sets its connection string as the API's and the night's `DATABASE_URL`, rolling each out; the queue holds the new orders, and the bucket the receipts, each named in a variable: the API sends to the queue and reads the receipts back, the receipts' function writes them, the night removes them. Each function has a key of its own to the account's buckets and queues, with the region and the front doors' addresses, in its environment, so `new S3Client({})` and `new SQSClient({})` need nothing more, as on AWS Lambda with a role:
+The deploy prints what it made and the template's outputs, `OrdersApi`, the API's address, and `OrdersPage`, the page's; the package goes up once, for the three. Each function has a key of its own to the account's buckets and queues, with the region and the front doors' addresses, in its environment, so `new S3Client({})` and `new SQSClient({})` need nothing more, as on AWS Lambda with a role. A change to the template is deployed the same way, and changes what changed ("SAM templates", below).
+
+**Its database, its cache and its mail,** made apart, as no resource of SAM's makes them. `ff db create` makes the database and sets its connection string as the API's and the night's `DATABASE_URL`, a secret, rolling each out; `ff caches create` makes the cache and sets its address as their `REDIS_URL`: the API keeps the latest orders there a minute, a new order clears them, and the night clears them when it removes some; without it, the list is read from the database each time. Secrets stay out of the template, and its next deploy leaves them be. The receipts go from an address the account proved, or one at a domain it proved, and, in the sandbox, only to what it proved: a domain's records, or an address's link, which FF e-mails it (in development, to Mailpit at http://localhost:58025 when `FF_SMTP_URL` names it, else into the backend's log). Then the template's `ReceiptsFrom`, each parameter not given keeping the stack's last value:
 
 ```bash
-ff db create orders --secret-for orders-api --secret-for orders-nightly
-ff buckets create shop-receipts                               # a name of yours: bucket names are unique across FF
-ff queues create new-orders
-ff env set orders-api RECEIPTS_QUEUE=new-orders RECEIPTS_BUCKET=shop-receipts
-ff env set orders-receipts RECEIPTS_BUCKET=shop-receipts
-ff env set orders-nightly RECEIPTS_BUCKET=shop-receipts
-ff event-sources add new-orders orders-receipts --report-batch-item-failures
-```
-
-**Its cache and its mail.** `ff caches create` makes the cache and sets its address as the API's and the night's `REDIS_URL`: the API keeps the latest orders there a minute, a new order clears them, and the night clears them when it removes some; without it, the list is read from the database each time. The receipts go from an address the account proved, or one at a domain it proved, and, in the sandbox, only to what it proved: a domain's records, or an address's link, which FF e-mails it (in development, to Mailpit at http://localhost:58025 when `FF_SMTP_URL` names it, else into the backend's log):
-
-```bash
-ff caches create orders-cache --secret-for orders-api --secret-for orders-nightly
+ff db create shop --secret-for shop-api --secret-for shop-nightly
+ff caches create shop-cache --secret-for shop-api --secret-for shop-nightly
 ff email add orders@example.tn                                # the sender; follow the link FF e-mails it
 ff email add me@example.tn                                    # a recipient, for the sandbox: the same
-ff env set orders-receipts RECEIPTS_FROM=orders@example.tn
+ff deploy template.yaml --parameter-overrides ReceiptsFrom=orders@example.tn   # shop-receipts's RECEIPTS_FROM
 ```
 
-**The web address.**
+**The web address,** the output `OrdersApi`:
 
 ```bash
-ff url enable orders-api --auth none                          # its address: http://<id>.fn.localhost:3001/
-ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2, "email": "me@example.tn"}'
+ff invoke shop-api --http POST /orders --data '{"item": "harissa", "quantity": 2, "email": "me@example.tn"}'
 # HTTP 201, then {"id":1,"item":"harissa","quantity":2,"email":"me@example.tn","created_at":"…","receipt":"queued"}
 curl -si http://<id>.fn.localhost:3001/orders | grep -i x-cache   # x-cache: miss, then hit for a minute
-ff invoke orders-api --http GET /orders/1/receipt             # a moment later: Order 1, 2 × harissa, and its time
-ff history orders-receipts                                    # the call that wrote it, its source sqs
+ff invoke shop-api --http GET /orders/1/receipt               # a moment later: Order 1, 2 × harissa, and its time
+ff history shop-receipts                                      # the call that wrote it, its source sqs
 ff email messages                                             # the receipt, sent to me@example.tn
 ```
 
 Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the string the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after; it connects to the cache the same way, over TLS, and a cache it can't reach is logged and passed by, the database answering. `GET /orders` lists the latest without the addresses orders gave, since the page shows them to anyone. The order is written first, then put in the queue, found by its name (`GetQueueUrl`) as on AWS: the answer doesn't wait for the receipt. A message that can't be sent leaves the order, with `"receipt": null` in the answer and a line in the log; without `RECEIPTS_QUEUE`, the handler writes the receipt itself, as the app did before it had a queue.
 
-**The receipts, in the background.** `orders-receipts` reads the queue as Lambda's event source mapping for SQS reads one: FF calls `index.receipts` with SQS's event as soon as an order is sent, and it writes each order's receipt, `receipts/<id>.txt`, to the bucket. With `--report-batch-item-failures`, a receipt it couldn't write names its message in `batchItemFailures`: that message alone comes back, once the queue's visibility timeout ends, and the others are deleted. Then it e-mails the receipt from `RECEIPTS_FROM` to the order's address, with `new SESv2Client({})`; a receipt SES refuses is logged, and its order and receipt kept, since a refusal doesn't change on a retry. A message received twice writes the same receipt again, the same file, and e-mails it again. To keep the orders whose receipt never can be written, give the queue a dead-letter queue (`ff queues create new-orders-dlq`, then `ff queues set new-orders --dead-letter-queue new-orders-dlq`), and an alarm on its `ApproximateNumberOfMessagesVisible`. With one of the account's keys, the AWS CLI reads a receipt as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
+**The receipts, in the background.** `shop-receipts` reads the queue as Lambda's event source mapping for SQS reads one: FF calls `index.receipts` with SQS's event as soon as an order is sent, and it writes each order's receipt, `receipts/<id>.txt`, to the bucket. With `--report-batch-item-failures`, a receipt it couldn't write names its message in `batchItemFailures`: that message alone comes back, once the queue's visibility timeout ends, and the others are deleted. Then it e-mails the receipt from `RECEIPTS_FROM` to the order's address, with `new SESv2Client({})`; a receipt SES refuses is logged, and its order and receipt kept, since a refusal doesn't change on a retry. A message received twice writes the same receipt again, the same file, and e-mails it again. To keep the orders whose receipt never can be written, give the queue a dead-letter queue in the template (a second `AWS::SQS::Queue`, and the first one's `RedrivePolicy` naming its `Arn`), and an alarm on its `ApproximateNumberOfMessagesVisible`. With one of the account's keys, the AWS CLI reads a receipt as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
 
-**Its page, a site.** `site/` is a page of plain HTML and JavaScript: it lists the latest orders and sends new ones to the API, whose address it reads from `config.json`, written beside it at the deploy. Its bucket is a site, and the function URL lets the site's origin in (CORS):
+**Its page, a site.** `site/` is a page of plain HTML and JavaScript: it lists the latest orders and sends new ones to the API, whose address it reads from `config.json`, written beside it at the deploy. Its bucket is the template's site, whose files `ff sites deploy` puts there, as SAM uploads none; the function URL lets the site's origin in, the template's `SiteOrigin`:
 
 ```bash
-ff buckets create shop-site                                   # a name of yours, as the receipts' bucket's
-printf '{"api": "%s"}\n' "$(ff url show orders-api --output json | jq -r .url.functionUrl)" > site/config.json
-ff sites deploy shop-site site                                # http://shop-site.site.localhost:3004
-ff url enable orders-api --auth none --cors-origin http://shop-site.site.localhost:3004 \
-  --cors-method GET --cors-method POST --cors-header content-type
+printf '{"api": "%s"}\n' "$(ff url show shop-api --output json | jq -r .url.functionUrl)" > site/config.json
+ff sites deploy shop-site site                                # http://shop-site.site.localhost:3004, the output OrdersPage
 ```
 
 Open http://shop-site.site.localhost:3004 in a browser: an order made there is in the list at once, the cache cleared by it.
@@ -856,23 +853,22 @@ Open http://shop-site.site.localhost:3004 in a browser: an order made there is i
 **The nightly report, called without waiting.**
 
 ```bash
-ff schedule set orders-nightly "cron(0 2 * * ? *)"            # every night at 02:00 UTC; it says the next runs
-ff invoke orders-nightly --async --data @events/scheduled.json  # a night's run, now, as the schedule calls it: its request ID at once
-ff history orders-nightly                                     # the run, "asynchronously, attempt 1"
-ff logs orders-nightly                                        # report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}
+ff schedule list shop-nightly                                 # the template's EveryNight, cron(0 2 * * ? *), its next run
+ff invoke shop-nightly --async --data @events/scheduled.json  # a night's run, now, as the schedule calls it: its request ID at once
+ff history shop-nightly                                       # the run, "asynchronously, attempt 1"
+ff logs shop-nightly                                          # report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}
 ```
 
-The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself, without waiting, as `--async` does: a run that fails is retried a minute, then two minutes later, as Lambda retries it, and `ff async-config orders-nightly --on-failure <a queue's ARN>` keeps the record of one that fails for good. `ff schedule list orders-nightly` says how the last run went. `hack/cli-e2e.sh` runs this walkthrough end to end.
+The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself, without waiting, as `--async` does: a run that fails is retried a minute, then two minutes later, as Lambda retries it, and an `EventInvokeConfig` in the template, its `DestinationConfig`'s `OnFailure` a queue, keeps the record of one that fails for good. `ff schedule list shop-nightly` says how the last run went. `hack/cli-e2e.sh` runs this walkthrough end to end.
 
-**Its way to AWS,** before you delete it: `ff export ../orders-to-aws` writes what moving it needs, as [Moving to AWS](#moving-to-aws-ff-export) says: its three functions, `orders-receipts`'s role writing the receipts to `shop-receipts` and sending from `orders@example.tn` alone, as its keys did, and the API's sending to `new-orders`, which it can't read; the queue, the buckets, and the runbook that moves the database, the files, the cache and the mail first. Afterwards:
+**Its way to AWS,** before you delete it: `ff export ../orders-to-aws` writes what moving it needs, as [Moving to AWS](#moving-to-aws-ff-export) says: its three functions, `shop-receipts`'s role writing the receipts to `shop-receipts` and sending from `orders@example.tn` alone, as its keys did, and the API's sending to `shop-new-orders`, which it can't read; the queue, the buckets, and the runbook that moves the database, the files, the cache and the mail first. Afterwards:
 
 ```bash
-ff delete orders-nightly --yes && ff delete orders-receipts --yes && ff delete orders-api --yes
-ff queues delete new-orders --yes                             # the queue, and its mapping with it
-ff db delete orders --yes                                     # the database, with its data
-ff caches delete orders-cache --yes                           # the cache, with its keys
-ff buckets delete shop-receipts --force --yes                 # the bucket, with its receipts
+ff buckets delete shop-receipts --force --yes                 # the bucket, with its receipts: a stack deletes empty buckets alone, as CloudFormation
 ff buckets delete shop-site --force --yes                     # the page's bucket, its site with it
+ff delete-stack --yes                                         # the stack samconfig.toml names: its functions, with their URL, schedule and mapping, and its queue
+ff db delete shop --yes                                       # the database, with its data
+ff caches delete shop-cache --yes                             # the cache, with its keys
 ff email delete orders@example.tn --yes && ff email delete me@example.tn --yes
 ```
 
@@ -882,11 +878,197 @@ ff email delete orders@example.tn --yes && ff email delete me@example.tn --yes
 DATABASE_URL=$(hack/k8s/app-database.sh up)                 # postgres://app:…@198.18.0.10:5432/app
 docker compose exec -T postgres psql -U postgres -d serverless_platform \
   -c "UPDATE accounts SET internet_egress = true WHERE id = '$(curl -s "$FF/me" | jq -r '.accounts[0].id')'"
-printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
+printf '%s\n' "$DATABASE_URL" | ff secrets set shop-api DATABASE_URL
 hack/k8s/app-database.sh down                               # afterwards: the database, with its data
 ```
 
-**In production** the database, the cache, the queue, the buckets and the mail are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on; the receipts go from a domain of yours, proved by its records, once FF's operator lets the account out of the sandbox. The same folder runs on AWS Lambda with an RDS database, an ElastiCache cache, an SQS queue, S3 buckets and SES, its page on S3 behind CloudFront: `ff package` writes its zip, the function's role gives the clients their credentials, and the export kit has the queue and its mapping ([`data/sqs.md`](../cli/templates/export/data/sqs.md)), the page ([`data/s3-website.md`](../cli/templates/export/data/s3-website.md)), the cache ([`data/elasticache.md`](../cli/templates/export/data/elasticache.md)) and the mail ([`data/ses.md`](../cli/templates/export/data/ses.md)).
+**In production** the database, the cache, the queue, the buckets and the mail are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on; the receipts go from a domain of yours, proved by its records, once FF's operator lets the account out of the sandbox. The same folder runs on AWS Lambda with an RDS database, an ElastiCache cache, an SQS queue, S3 buckets and SES, its page on S3 behind CloudFront: its `template.yaml` passes `sam validate --lint` as it is, and `sam deploy` takes the one `ff export` writes from the stack, which adds the secrets, `DATABASE_URL` and `REDIS_URL`, as parameters CloudFormation doesn't show back, each function's role giving the clients their credentials; and the export kit has the queue and its mapping ([`data/sqs.md`](../cli/templates/export/data/sqs.md)), the page ([`data/s3-website.md`](../cli/templates/export/data/s3-website.md)), the cache ([`data/elasticache.md`](../cli/templates/export/data/elasticache.md)) and the mail ([`data/ses.md`](../cli/templates/export/data/ses.md)).
+
+### The way out
+
+Leaving FF for AWS changes settings, not code. FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's and its mail SES's, and AWS's own tools reach each one with only the endpoint changed. This section is the map; the sections after it give each part in full. In French: [Fonctions, comme AWS Lambda](fr/fonctions.md) and [Partir vers AWS](fr/partir-vers-aws.md).
+
+**AWS's tools against FF.** Each tool takes FF's endpoints as configuration, outside the code, and the move to AWS removes them:
+
+| Tool | FF's endpoints | On AWS |
+|---|---|---|
+| AWS CLI v2, AWS's SDK for JavaScript v3, boto3 | The seven variables `ff keys create` prints: the key, `AWS_REGION`, and `AWS_ENDPOINT_URL_LAMBDA`, `_S3`, `_SQS` and `_SESV2`. Or a profile of `~/.aws/config` with a `services` section (below) | The variables unset, or a profile without `services` |
+| The AWS CLI, one command | `--endpoint-url <endpoint>` | The option dropped |
+| An SDK's client made in code | `endpoint` (JavaScript) or `endpoint_url` (boto3) in its options, which puts FF in the code: prefer the variables | The option removed |
+| A function's own code, running on FF | Nothing to do: FF gives each function the four endpoints' variables, with a key of its own | Nothing to do: the function's role gives the SDK its credentials, and the SDK finds AWS's endpoints |
+| OpenTofu and Terraform, with AWS's provider | The provider block's `endpoints` and five `skip_*` settings ("Terraform", below) | Those lines removed, and an AWS region |
+| A SAM template | `ff deploy template.yaml`, which reads SAM's subset itself, as FF has no CloudFormation ("SAM templates", below) | `sam deploy` |
+| AWS's SDK for JavaScript v2, which AWS no longer supports | It reads no variable or profile for an endpoint: `endpoint` in each client | The option removed |
+
+**A profile with a `services` section,** as AWS's CLI and SDKs read it, keeps FF's endpoints in one place. On AWS, the same profile without its `services` line, or AWS's own profile:
+
+```ini
+# ~/.aws/config; the key goes in ~/.aws/credentials, under [ff]
+[profile ff]
+region   = tn-tunis-1
+services = ff-endpoints
+
+[services ff-endpoints]
+lambda =
+  endpoint_url = http://localhost:3006
+s3 =
+  endpoint_url = http://s3.localhost:3002
+sqs =
+  endpoint_url = http://localhost:3003
+sesv2 =
+  endpoint_url = http://localhost:3005
+```
+
+Then `AWS_PROFILE=ff aws lambda list-functions`, or `--profile ff`. In production the endpoints are `https://lambda.<domain>` and the others, as `GET /me` gives them with the account (`aws`), and as the console's Account page lists them. The versions checked are pinned: the AWS CLI 2.34.32, the SDK for JavaScript 3.1156.0 and boto3 1.43.118; L4 checks a profile like this one against Lambda's endpoint.
+
+**Versions and aliases** are Lambda's ("Versions, as Lambda's", above): a version published is frozen, an alias names one and can give a second one a share of its calls, and a function's URL, schedules, queues and buckets' events can each go through an alias. A release moved by steps, with the AWS CLI:
+
+```bash
+aws lambda publish-version --function-name hello                     # version 2, the code as it is
+aws lambda update-alias --function-name hello --name live --function-version 1 \
+  --routing-config '{"AdditionalVersionWeights": {"2": 0.1}}'         # a tenth of live's calls to version 2
+aws lambda update-alias --function-name hello --name live --function-version 2 \
+  --routing-config '{"AdditionalVersionWeights": {}}'                 # then all of them
+```
+
+**Terraform, SAM, the export.** Three ways to describe the same functions, queues and buckets, each of which AWS takes too:
+
+1. **Terraform:** `ff init <name> --template terraform` writes a project that OpenTofu and Terraform apply on FF with AWS's provider, and on AWS once its provider block is changed ("Terraform", below).
+2. **SAM:** `ff deploy template.yaml` takes FF's subset of SAM: functions, their events, queues, buckets, and their outputs; `ff doctor template.yaml` names what is outside it ("SAM templates", below, and [the page of its own](sam-templates.md)).
+3. **The export:** `ff export <folder>` writes the account as both, a SAM template and a Terraform project, with each function's code, its role, a runbook and the estimate; the template deploys back on FF too ("Moving to AWS: ff export", below).
+
+**The estimate:** `ff usage --aws`, the console's Usage page and the export's `cost-estimate.md` price the account's last three months at AWS's prices, beside FF's own total, with a line for each part of AWS's bill that FF doesn't charge for: start-up time, databases, caches, data sent out, logs, CloudFront and a NAT gateway ("At AWS's prices, an estimate", below).
+
+**`ff doctor`** reads what would break on AWS, before the move:
+
+- `ff doctor <folder>`: the function's code, such as an FF API key, FF's hosts and variables, and files written outside `/tmp`;
+- `ff doctor template.yaml`: the template, what CloudFormation can't read, what is past Lambda's limits, and what `ff deploy` doesn't take;
+- `ff doctor` in a Terraform project: its provider block's lines for FF;
+- `ff doctor --deployed`: the account, what in it still points at FF, such as a URL that takes FF's keys or a domain on a site.
+
+Errors stop a move. Warnings are for you to judge, and with `--strict` they fail too ("Check the code first", below).
+
+**The differences, said plainly.** What FF does otherwise, by design:
+
+1. **FF's regions, endpoints and account IDs are its own:** `tn-tunis-1`, FF's endpoints, and account numbers of FF's, in each ARN. They are configuration, never code: code that reads its region from `AWS_REGION`, as Lambda sets it too, moves unchanged; an ARN written out in the code, FF's region and account in it, has to change.
+2. **No IAM.** A function's role is kept, without effect, and so are Lambda's permissions. FF's access keys decide who reaches what, each naming its functions, buckets and queues, as a policy names them. The export writes each function's role from what its keys used on FF.
+3. **An account out of credit** is refused. FF's API answers `402 InsufficientCreditException`. Lambda's endpoint answers `429 TooManyRequestsException`, saying that the credit ran out. AWS has no such refusal: it bills.
+4. **Not offered:** SnapStart, a VPC, X-Ray (`TracingConfig` takes `PassThrough` alone), code signing, layers, container images, file systems and KMS keys. Lambda's endpoint refuses each one, saying why, unless it is sent at its default, as AWS's tools send it. There is no CloudFormation: `ff deploy` reads SAM's subset itself. There is no Lambda@Edge either.
+5. **47 of Lambda's operations aren't offered yet.** Each answers `UnknownOperationException`, naming it, and what FF offers instead where it does ("The 47 others refused, for later", below).
+6. **A bucket's name is unique across FF,** as on S3, and FF refuses dots in it. The export makes each bucket's name a parameter, as the name may be taken on AWS.
+7. **A secret is FF's own:** Lambda has variables alone. The export makes each secret a parameter CloudFormation doesn't show back (`NoEcho`), listed in `secrets.template.env` for you to fill, as FF never shows a secret's value; or keep it in AWS's Secrets Manager.
+8. **Tracked, decided one by one:** AWS's additions of 2025 and 2026, Lambda Managed Instances, tenant isolation, durable functions, Lambda MicroVMs and Lambda Web Functions. None is offered: the operations Lambda's model has for them, its capacity providers' and its durable executions', answer as not offered yet (5), and `CreateFunction` refuses a field it doesn't take, such as tenant isolation's `TenancyConfig`, rather than ignore it.
+
+### Functions through Lambda's API
+
+AWS's CLI, its SDKs and Terraform's provider make, change and invoke functions on FF as on AWS Lambda, with only the endpoint changed ([ADR 0014](adr/0014-lambda-api.md)). The backend answers Lambda's API, its JSON at its dated paths, on a port of its own, `FF_LAMBDA_PORT` (3006), at `FF_LAMBDA_BASE` (`http://localhost:3006`; in production `https://lambda.<domain>`). Each request is signed with Signature Version 4 for `lambda` by one of the account's access keys that names functions ("An access key", under "Files in buckets", above): at `read` it lists and reads them, at `invoke` it calls them too, at `write` it makes, changes and deletes them, each change counted against the plan's changes a minute with FF's API's (`TooManyRequestsException` past them, with `Retry-After`). Another account's function answers as one that doesn't exist. A function's pods get `AWS_ENDPOINT_URL_LAMBDA` with a key of their own, which invokes the account's functions and does nothing else.
+
+```bash
+eval "$(ff keys create --name deployer --function '*' --function-access write | grep '^export ')"   # AWS_ENDPOINT_URL_LAMBDA among the seven
+aws lambda create-function --function-name hello --runtime nodejs24.x --handler index.handler \
+  --role arn:aws:iam::123456789012:role/hello --zip-file fileb://hello.zip    # State Pending; the role kept, without effect
+aws lambda wait function-active-v2 --function-name hello
+aws lambda update-function-code --function-name hello --zip-file fileb://hello.zip   # LastUpdateStatus InProgress, then Successful
+aws lambda list-functions
+aws lambda invoke --function-name hello --cli-binary-format raw-in-base64-out --payload '{"name": "Ada"}' \
+  --log-type Tail --query LogResult --output text out.json | base64 -d    # the call's log, its START to its REPORT; its answer in out.json
+```
+
+`Invoke` answers as Lambda's. A call waited for (`RequestResponse`, the default) answers 200 with the function's answer as it returned it, `ExecutedVersion` naming what ran, `$LATEST` or a version, an alias's included; one that threw, timed out or failed to load answers 200 too, `FunctionError: Unhandled`, Lambda's error document as its payload, `{"errorType": …, "errorMessage": …}`, the stack trace in the function's log. `--log-type Tail` gives back the call's last 4 KB of log; `--client-context`, base64 of a JSON object, reaches the handler as `context.clientContext` in Node.js and `context.client_context` in Python. `Event` keeps the call in the function's queue, as FF's API's `"invocationType": "Event"`, and answers 202; `DryRun` checks it and answers 204. Refused as Lambda refuses: a payload past 6 MB, or an `Event`'s past 1 MB, `RequestEntityTooLargeException`; `$LATEST` while the function isn't `Active`, `ResourceConflictException` naming its state, a version running as it was published; past the plan's invocations per second, which count Lambda's calls with the API's and the URLs', `TooManyRequestsException` with `Reason: CallerRateLimitExceeded` and `Retry-After`, and with no instance free, `Reason: ReservedFunctionConcurrentInvocationLimitExceeded`; once the account's credit ran out, 429 too, saying so. The function's history keeps each call, as one through FF's API.
+
+**41 operations,** those AWS's tools call, as [the spike](../hack/spikes/lambda/README.md) recorded them, each answering now: functions, `CreateFunction`, `GetFunction`, `GetFunctionConfiguration`, `ListFunctions`, `UpdateFunctionCode`, `UpdateFunctionConfiguration`, `DeleteFunction` and `GetFunctionCodeSigningConfig`, which answers that there is none, FF signing no code; `Invoke`; versions and aliases, `PublishVersion`, `ListVersionsByFunction`, `CreateAlias`, `GetAlias`, `UpdateAlias`, with `RoutingConfig` sharing an alias's calls with another version, `DeleteAlias` and `ListAliases`, as FF's own ("Versions, as Lambda's" and "Aliases, as Lambda's", above); function URLs, `CreateFunctionUrlConfig`, `GetFunctionUrlConfig`, `UpdateFunctionUrlConfig` and `DeleteFunctionUrlConfig`, `$LATEST`'s or an alias's by `--qualifier`, and `ListFunctionUrlConfigs`, as FF's own ("A web address for a function", above), Lambda's `Cors` under its names, a second URL, a version's and an alias the function hasn't refused in Lambda's words; event source mappings, `CreateEventSourceMapping`, `GetEventSourceMapping`, `UpdateEventSourceMapping`, `DeleteEventSourceMapping` and `ListEventSourceMappings`, for a queue of the account, the function as it is, a version or an alias reading it, as FF's own ("A function reading a queue", above), what only streams and brokers take, `FilterCriteria` among the rest, refused saying why unless sent empty, as the tools send their defaults, and a second mapping of a queue refused in Lambda's words; the settings of a function's asynchronous calls, `PutFunctionEventInvokeConfig`, `UpdateFunctionEventInvokeConfig`, `GetFunctionEventInvokeConfig`, `DeleteFunctionEventInvokeConfig` and `ListFunctionEventInvokeConfigs`, as FF's own ("Background work", above): FF keeps one for the function, which its versions and aliases follow too, so a version's or an alias's is refused, saying so; a function's dead-letter queue, `DeadLetterConfig` in `CreateFunction` and `UpdateFunctionConfiguration`, a queue of the account ("Background work", above); tags, `TagResource`, `UntagResource` and `ListTags`; and `GetAccountSettings`, the plan's limits and what the account uses; reserved concurrency, `PutFunctionConcurrency`, `GetFunctionConcurrency` and `DeleteFunctionConcurrency`, over the function's `maxInstances` ("Scaling", above); and permissions, `AddPermission`, `RemovePermission` and `GetPolicy`, a function's own policy, a version's or an alias's by `--qualifier`.
+
+**Permissions are kept, without effect.** A statement added is kept as Lambda writes it and given back by `GetPolicy`, so that Terraform's modules and SAM's templates apply unchanged, but it opens nothing and closes nothing, as a function's role: FF's keys, and a URL's `AuthType`, decide who calls a function, and the account's own buckets, schedules and queues call it as they are told. A statement for `*` lets no one else call it; a key that may only read is refused `Invoke` with or without one. FF's API description says so too.
+
+```bash
+aws lambda add-permission --function-name hello --statement-id s3 --action lambda:InvokeFunction \
+  --principal s3.amazonaws.com --source-arn arn:aws:s3:::photos    # kept as sent, without effect
+aws lambda get-policy --function-name hello --query Policy --output text    # Lambda's policy document, the statement in it
+aws lambda remove-permission --function-name hello --statement-id s3
+```
+
+**The 47 others refused, for later.** Each of Lambda's other operations, as its model has them, answers `400 UnknownOperationException`, naming it and saying FF doesn't offer it yet, and what FF offers instead where it does; every client shows it at once and none tries again:
+
+```bash
+aws lambda list-layers
+# An error occurred (UnknownOperationException) when calling the ListLayers operation: FF doesn't offer ListLayers of Lambda's API yet. A function's zip carries its libraries.
+```
+
+- layers: `ListLayers`, `ListLayerVersions`, `PublishLayerVersion`, `GetLayerVersion`, `GetLayerVersionByArn`, `DeleteLayerVersion`, `AddLayerVersionPermission`, `GetLayerVersionPolicy` and `RemoveLayerVersionPermission`, a function's zip carrying its libraries ("Functions with dependencies", above);
+- provisioned concurrency: `PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `DeleteProvisionedConcurrencyConfig` and `ListProvisionedConcurrencyConfigs`, a function's `minInstances` keeping instances warm ("Scaling", above);
+- invoking otherwise: `InvokeWithResponseStream`, and `InvokeAsync`, which AWS deprecated for `Invoke` with `InvocationType` `Event`;
+- code signing's own operations: `CreateCodeSigningConfig`, `GetCodeSigningConfig`, `UpdateCodeSigningConfig`, `DeleteCodeSigningConfig`, `ListCodeSigningConfigs`, `ListFunctionsByCodeSigningConfig`, `PutFunctionCodeSigningConfig` and `DeleteFunctionCodeSigningConfig`;
+- runtime management, `GetRuntimeManagementConfig` and `PutRuntimeManagementConfig`, and recursion's detection, `GetFunctionRecursionConfig` and `PutFunctionRecursionConfig`;
+- AWS's additions of 2025 and 2026: capacity providers, `CreateCapacityProvider`, `GetCapacityProvider`, `UpdateCapacityProvider`, `DeleteCapacityProvider`, `ListCapacityProviders` and `ListFunctionVersionsByCapacityProvider`, and a function's scaling on them, `GetFunctionScalingConfig` and `PutFunctionScalingConfig`; durable executions, `ListDurableExecutionsByFunction`, `GetDurableExecution`, `GetDurableExecutionHistory`, `GetDurableExecutionState`, `CheckpointDurableExecution`, `StopDurableExecution`, `SendDurableExecutionCallbackSuccess`, `SendDurableExecutionCallbackFailure` and `SendDurableExecutionCallbackHeartbeat`; resource-based policies, `PutResourcePolicy`, `GetResourcePolicy` and `DeleteResourcePolicy`.
+
+A request that is none of Lambda's operations answers the same, with its method and its path. Each refusal comes once the request's key is known to be good, so that an unsigned request learns nothing. The list follows Lambda's model as botocore 1.43.118 has it ([`BE/src/lambda/lambda-api-model`](../BE/src/lambda/lambda-api-model/operations.json)); the backend's tests check that each of its operations reaches its own name, and that this section names each one.
+
+**In the console,** a function's page has its AWS CLI commands to copy: the region and Lambda's endpoint to export, beside one of the account's access keys, then the function read, called with its log, given new code and published as a version, by its name. The Account page lists FF's region and its four endpoints, Lambda's beside S3's, SQS's and SES's, and the variables to export, as `GET /me` gives them with each account (`aws`).
+
+### Terraform
+
+`ff init <name> --template terraform --runtime nodejs|python` writes an app's Terraform project that OpenTofu and Terraform's CLI apply on FF with AWS's own provider and, with only its provider block changed, on AWS. Its four modules, in `modules/`, each used once by `main.tf`: a function with a URL anyone may call on its alias `live`, which each change of its code publishes and moves, and its asynchronous calls' settings; a queue with its dead-letter queue and a function reading it; a bucket whose new files run a function, with S3's permission; a site, a bucket with its website configuration, its files from `site/`. Its code is in `src/`, its README says the rest. `ff init` reads FF's region and endpoints, and the account, from `GET /me`, asks the API nothing more, and prints the command of the key the provider takes:
+
+```bash
+ff init shop --template terraform --runtime nodejs
+cd shop
+eval "$(ff keys create --name shop-terraform --function shop-api --function shop-jobs --function shop-uploads --function-access write \
+  --bucket shop-uploads --bucket shop-site --queue shop-jobs --queue shop-jobs-dead-letters | grep '^export ')"
+tofu init && tofu apply                          # or terraform's: 22 resources
+tofu plan                                        # No changes.
+curl "$(tofu output -raw api_url)"               # the API, on its alias live
+aws s3 cp ./photo.jpg s3://shop-uploads/in/photo.jpg   # runs shop-uploads with S3's event
+aws s3 rm s3://shop-uploads --recursive && tofu destroy   # a bucket that holds files isn't deleted, as on S3
+```
+
+**A key reaches what it names,** as an IAM policy does: this one the project's three functions at `write`, its two buckets and its two queues, named before they are made. A function, bucket or queue added to `main.tf` needs a key that names it too.
+
+**The provider block,** in `providers.tf`, as `ff init` writes it here:
+
+```hcl
+provider "aws" {
+  region = "tn-tunis-1"
+
+  # FF: from here...
+  skip_credentials_validation = true   # no STS to check the key with
+  skip_requesting_account_id  = true   # nor to ask the account's ID of
+  skip_metadata_api_check     = true   # no instance metadata service
+  skip_region_validation      = true   # FF's region isn't in AWS's list
+  s3_use_path_style           = true   # FF's S3 at the endpoint's path, http://s3.localhost:3002/<bucket>
+  endpoints {
+    lambda = "http://localhost:3006"
+    s3     = "http://s3.localhost:3002"
+    sqs    = "http://localhost:3003"
+    sesv2  = "http://localhost:3005"
+  }
+  # ...to here.
+}
+```
+
+The provider resolves names with Go's own resolver, which finds `localhost` but, on a machine without one that knows its subdomains, not `s3.localhost` (`no such host`): there, `s3 = "http://127.0.0.1:3002"`, which FF's S3 takes path-style. In production the endpoints are `https://lambda.<domain>` and the others, as `GET /me` gives them.
+
+**Kept without effect,** so that the modules apply unchanged on both: each function's role, an ARN of the account's, as FF has no IAM and a function's own key stands for it; Lambda's permissions, the two the provider adds for a URL anyone may call and the one that lets S3 call a function ("Permissions are kept, without effect", above); a site's bucket policy and public access block, as on FF a website configuration alone makes a bucket public. **What the provider waits for:** a new queue about 25 seconds, as it reads it until it has its attributes six times; and the plan's changes a minute, 60 on beta, Lambda's own and the API's together: over them, Lambda's endpoint answers `TooManyRequestsException` with `Retry-After`, which the provider retries until each change goes through. **A bucket's ARN** the provider builds from its region's partition, of which FF's region has none (`arn::s3:::photos`, which a permission's `source_arn` refuses): the modules write it in AWS's, `arn:aws:s3:::photos`, as a project's other ARNs are.
+
+**Moving to AWS:** in `providers.tf`, an AWS region, the lines between the two "FF" comments removed, and `function_role` set to `null`, so that each module makes its function's role; then `apply` with an AWS account's key. `ff doctor` in the project's folder names what is left of FF's: the `endpoints` block an error (`provider-endpoints`), each of the five settings a warning (`provider-setting`), Terraform's `.terraform/` left out, the functions' code read as for any move (below). `hack/e2e-aws-tools.sh` applies the project, calls each part, plans it again, destroys it and readies it for AWS, with OpenTofu and with Terraform's CLI ("Run the tests", in [Everyday tasks](#5-everyday-tasks)).
+
+### SAM templates
+
+`ff deploy template.yaml` makes a SAM template's functions, queues and buckets on FF as `sam deploy` makes them on AWS, in a stack FF keeps: each logical ID with its type and the FF resource it made, so that the next deploy changes what the template changed and deletes what it no longer has. `ff init <name> --template sam --runtime nodejs|python` writes one to start from, `sam init`'s hello world as FF takes it: `template.yaml`, its function in `hello-world/` (`hello_world/` in Python) with a URL anyone may call where `sam init`'s has an API Gateway REST API, which FF hasn't, its event a URL's request, and `samconfig.toml`, which names the stack, for `sam deploy` too. [SAM templates on FF](sam-templates.md) lists FF's subset of SAM, and what of `sam init`'s hello world changes.
+
+```bash
+ff init shop --template sam --runtime nodejs
+cd shop
+ff deploy template.yaml                       # the stack samconfig.toml names, shop: the function and its URL, the outputs printed
+curl <HelloWorldApi>                          # the function's URL, the output HelloWorldApi: {"message":"hello world"}
+ff deploy template.yaml --yes                 # after a change: what changed changes; what the template no longer has is deleted
+ff delete-stack shop --yes                    # the stack, with what it made, as sam delete
+```
+
+**What it takes** is FF's subset of SAM ([the page of its own](sam-templates.md), [ADR 0016](adr/0016-sam-templates.md)), and `ff doctor template.yaml` says what is outside it: `Globals`; `Parameters`, from `--parameter-overrides`, else `samconfig.toml`, a parameter not given keeping the stack's last value, else its Default, as `sam deploy` gives them; `!Ref`, `!GetAtt`, `!Sub`, `!Join` and the pseudo parameters, FF's region and account; and, so far, `AWS::Serverless::Function`: its `CodeUri`, a folder built as `ff deploy <folder>` builds one, or a .zip deployed as it is; `Handler`, `Runtime`, `MemorySize`, `Timeout`, `Description`, `Environment`, `Tags`; `ReservedConcurrentExecutions`, the most instances it runs, and `ProvisionedConcurrencyConfig`, those kept running; `FunctionUrlConfig`; `AutoPublishAlias`, a version published at each deploy and the alias moved to it, the URL then the alias's; `EventInvokeConfig`; `DeadLetterQueue`, a queue of the account; and its events: `Schedule` and `ScheduleV2`, one of the function's schedules; `SQS`, the function reading a queue, the template's or the account's; `HttpApi`, the routes of one function, which go to its URL; `S3`, its bucket's notification. `AWS::SQS::Queue`: a standard queue with its attributes, its dead-letter queue and its tags, `!Ref` of it in a function's variables the URL functions reach inside the cluster, and in `Outputs` the public one. `AWS::S3::Bucket`: a bucket with its tags, its site (`WebsiteConfiguration`, which `ff sites deploy` then fills) and its notifications to the account's functions and queues, `!GetAtt` of its `Arn`, `DomainName` and, in `Outputs`, its site's `WebsiteURL`. `Policies` are read and left for AWS, `AWS::Lambda::Permission`, `AWS::SQS::QueuePolicy` and `AWS::S3::BucketPolicy` kept without effect, and the `Outputs` printed once FF knows what they name, a function's URL and its version among them. `sam build`'s `.aws-sam/build/template.yaml` is taken too: its folders, built already, are deployed as they are, and `samconfig.toml` is the project's, two folders up.
+
+**A function's name** is its `FunctionName`, else the one the stack's last deploy gave it, else one made CloudFormation's way, the stack's name, the logical ID and 12 random letters and digits, within Lambda's 64 characters. A function of that name in no stack, or in another, is refused: `ff deploy` doesn't take it over.
+
+**Every problem first,** in one refusal that changes nothing: the template's, each at its line; its parameters'; a value that can't be known before the deploy, such as a function's URL in a variable; a variable with the name of one of the function's secrets, which stay with `ff secrets`, out of the template; a handler the code hasn't; a schedule's expression FF's parser wouldn't take; a queue or a function the account hasn't and the template doesn't make; two notifications of a bucket that could both take one event; a queue or a bucket of the template's name that the account has outside the stack. When the template no longer has what the stack's last deploy made, `ff deploy` then asks before deleting it, and a script says `--yes`. The template's buckets are made or changed first, with their sites, then its queues, each dead-letter queue before the queues that use it; then each function is created or updated with what changed, as `ff deploy` does one, then its instances, its alias, its URL, its asynchronous calls' settings, its schedules and the queues it reads; then each bucket's notifications; what the template no longer has is deleted last, the buckets after the functions and the queues after them, as CloudFormation cleans up, a bucket with files stopping the deploy there, saying how to empty it. The stack is saved as the deploy goes: one stopped halfway leaves what it made in the stack, and the next updates it. `ff get` names a function's stack, and the console says it on the function's page, since a change made elsewhere the next deploy undoes. `--output json` gives each bucket's, queue's and function's action and changes, each site's address, each function's version and URL, what was deleted, and the outputs.
 
 ### Moving to AWS: ff export
 
@@ -900,11 +1082,11 @@ ff export ./to-aws --with-values                              # the functions' v
 
 | In the folder | What it holds |
 |---|---|
-| `template.yaml` | An AWS SAM template: each function with its role, its URL, its schedules, the queues it reads and its settings for calls that don't wait; the queues; the buckets, with their events, each one's name a parameter, S3's names being everyone's |
+| `template.yaml` | An AWS SAM template: each function with its role, its URL, its schedules, the queues it reads and its settings for calls that don't wait; the queues; the buckets, with their events, each one's name a parameter, S3's names being everyone's. A function's variable that holds a bucket's name takes that parameter, and one that holds a queue's name the queue's `QueueName`, so that a name changed on the way reaches the code |
 | `template-before-copy.yaml` | The same without the buckets' events, for the first deploy, so that copying their files calls nothing |
 | `terraform/` | The same for OpenTofu or Terraform with AWS's provider, and `terraform.tfvars.example`, its values to fill; use it or the template, not both |
 | `code/` | Each function's zip as Lambda runs it, inline TypeScript as the JavaScript FF ran |
-| `secrets.template.env` | The values the template takes and the export doesn't write, a line each: the functions' variables, unless `--with-values`, and their secrets, which FF never shows back |
+| `secrets.template.env` | The values the template takes and the export doesn't write, a line each: the functions' variables, unless `--with-values`, but those that hold a bucket's or a queue's name, and their secrets, which FF never shows back |
 | `data/` | How each kind of resource the account has moves, a page each, the account's names at its top: the functions (`lambda.md`, with your domains in front of a function URL), the databases, the caches, the mail, the queues, the sites, and `s3-sync.sh` for the buckets' files |
 | `MIGRATION.md` | The account's runbook, in the order that works: the data, then the queues, then the functions, each still served by FF until its callers move; and what the template changes on the way or leaves to you |
 | `cost-estimate.md` | The account's last three months at AWS's prices, an estimate, a column a month beside FF's own total, with what each line of what AWS bills that FF doesn't assumes; with a key that can't read the usage, why there is none |
@@ -913,9 +1095,11 @@ ff export ./to-aws --with-values                              # the functions' v
 
 **Versions and aliases:** the export has each function's code as it is, `$LATEST`'s. Its alias naming `$LATEST`, the first by name if it has several, becomes the template's `AutoPublishAlias` and Terraform's `aws_lambda_alias`, which each deploy points at a new version of the code; the function's URL, schedules, queues read and settings for calls that don't wait then go through it, as SAM attaches them to it. A function kept warm without one gets `live`, which holds its provisioned concurrency. `MIGRATION.md` says the rest, each with the AWS CLI's command that makes it on AWS: another alias naming `$LATEST`; an alias naming a version, whose code the export hasn't; an alias's own URL, with its domains, whose callers the cutover moves with the function's; and a schedule, a queue reader, a bucket's notification or a destination that names a version or an alias the files don't publish, which the files have call the function, or the alias they publish. `ff doctor --deployed` names an alias's URL that takes FF's keys, and its domains, as it names the function's.
 
-**Check the code first:** `ff doctor <folder>` reads a function's code, its libraries' folders and `.env` files left out, and names each line that works on FF and not on AWS Lambda, as `file:line: level: message [check]`. An error stops a move: an FF API key in the code (`ffk_…`), a secret to revoke, and a folder over Lambda's 250 MB unzipped. A warning is yours to judge: a variable FF's runtime sets (`FUNCTION_NAME`, which Lambda calls `AWS_LAMBDA_FUNCTION_NAME`) or one starting with `FF_`; FF's hosts, your profile's domain and the cluster's `.svc.cluster.local`; `event.body` read as an object, as FF's original event gave the payload ([ADR 0007](adr/0007-function-events.md)); a file written outside `/tmp`, which is all Lambda lets a function write; and a TypeScript handler without its JavaScript, which `ff package --compile` makes. A `template.yaml` beside the code is read as CloudFormation reads it: what CloudFormation can't read is an error at its line, and so is a function's memory or timeout beyond Lambda's (128 to 10,240 MB, 900 s); a runtime Lambda has deprecated, Node.js 20 or Python 3.10 and older in November 2026, is a warning, and an error once Lambda creates no function on it; a TypeScript handler is a warning there too, unless its `Metadata: BuildMethod: esbuild` has `sam build` compile it. It reads lines, not what the code means, so a finding is a line to look at. It exits 1 on an error, and with `--strict` on a warning too, for a CI job; `--output json` lists the findings.
+**Check the code first:** `ff doctor <folder>` reads a function's code, its libraries' folders and `.env` files left out, and names each line that works on FF and not on AWS Lambda, as `file:line: level: message [check]`. An error stops a move: an FF API key in the code (`ffk_…`), a secret to revoke, and a folder over Lambda's 250 MB unzipped. A warning is yours to judge: a variable FF's runtime sets (`FUNCTION_NAME`, which Lambda calls `AWS_LAMBDA_FUNCTION_NAME`) or one starting with `FF_`; FF's hosts, your profile's domain and the cluster's `.svc.cluster.local`; `event.body` read as an object, as FF's original event gave the payload ([ADR 0007](adr/0007-function-events.md)); a file written outside `/tmp`, which is all Lambda lets a function write; and a TypeScript handler without its JavaScript, which `ff package --compile` makes. A `template.yaml` beside the code is read as CloudFormation reads it: what CloudFormation can't read is an error at its line, and so is a function's memory or timeout beyond Lambda's (128 to 10,240 MB, 900 s); a runtime Lambda has deprecated, Node.js 20 or Python 3.10 and older in November 2026, is a warning, and an error once Lambda creates no function on it; a TypeScript handler is a warning there too, unless its `Metadata: BuildMethod: esbuild` has `sam build` compile it. What `ff deploy` wouldn't take of it is named as well, by `ff`'s own reading of the template: each piece outside FF's subset of SAM is a warning, since AWS takes it (`sam init`'s `Api` event, `Conditions`, layers, DynamoDB tables, IAM's resources, a runtime FF hasn't), and a name that names nothing an error, as CloudFormation would refuse it; a parameter's value is the one `sam deploy` would use, from `--parameter-overrides` or else `samconfig.toml`, and one CloudFormation would refuse is an error. A Terraform project's `.tf` files are read for their AWS provider block: an `endpoints` block is an error, and each setting FF needs (the four skips, `s3_use_path_style`) a warning ("Terraform", above), `.terraform/` left out. It reads lines, not what the code means, so a finding is a line to look at. It exits 1 on an error, and with `--strict` on a warning too, for a CI job; `--output json` lists the findings.
 
 **What still points at FF:** `ff doctor --deployed` reads the account as `ff export` does and names, a line each, what a move has to change that the code doesn't show: a function that gets FF's original event, or whose name is outside Lambda's rule; one kept warm, which AWS bills as provisioned concurrency; a URL that takes FF's API keys, where AWS asks for a request signed with AWS's keys; a domain on a URL or a site, which moves behind CloudFront; a function whose key reached FF's S3, SQS or SES, from its key's daily uses; and, for an owner, the account's storage keys, with when each was used last. Each is a warning: with `--strict`, it fails until nothing points at FF any more, the last step of a move.
+
+**Back on FF, in another account:** the template deploys on FF too, as `sam deploy` takes it: `ff deploy template.yaml --stack-name <stack> --parameter-overrides <name>=<value> …` in the folder makes the same functions, with their code, variables and URLs, the same queues and the same buckets, which the `ff` suite checks through FF's API. Give each bucket's parameter a name of your own, as a bucket's name is its own across FF, and the values of `secrets.template.env`: a secret comes back a variable, as Lambda has no other: to keep it a secret on FF, take it out of the template and give it with `ff secrets set`. The schedules stay off until `ScheduleState=ENABLED`, and an alias that names a version stays out, as `MIGRATION.md` says.
 
 **Check it before you deploy:** `sam validate --lint --region <your region>` in the folder; with Terraform, `tofu init && tofu validate` in `terraform/`. Then `MIGRATION.md`, step by step: the schedules stay off at AWS (`ScheduleState`, or `schedule_state` in `terraform.tfvars`) until FF's are disabled, so that none runs on both, and FF serves each caller until it moves. In French: [Partir vers AWS](fr/partir-vers-aws.md).
 
@@ -1200,6 +1384,8 @@ docker compose exec -T postgres psql -U postgres -d serverless_platform -c "
 
 **Lost calls.** When the backend stops during a call (it crashed, was killed, or restarted), the call's answer is lost, and its invocation would stay `RUNNING`. At startup and every minute, the backend marks such calls `LOST`, with a usage record that bills nothing, once the longest a call can take has passed: two timeouts (a wait for a free instance, then the run), the cold-start limit (`K8S_READY_TIMEOUT_SECONDS`, 90 s), and 30 s more. For a function with a 5 s timeout, that is 2 min 10 s. The history then says `Lost: the backend restarted during the call, so its answer is unknown. It isn't billed.` A function changed since the call started gets the longest timeout there is (900 s), as its timeout then is no longer known. An asynchronous call's lost attempt isn't the end of it: nobody waits for its answer, so its event comes back once its lease ends, and the lost attempt counts as one that failed ("Call a function without waiting", above).
 
+**Stopped changes.** When the backend stops during a change of a function (an update, a create or a delete), the change would stay `InProgress`, and the function would refuse its next change until the change's bound had passed: twice `FF_READY_TIMEOUT_SECONDS` and a minute, 4 minutes by default. At startup and every minute, the backend ends such changes once past that bound. It rolls the function's version before the change out again, the one its record still describes, and marks the change `Failed`, with the reason `The backend stopped during this change, which was undone: the version before it is still live. Send the change again.` (`LastUpdateStatusReason` on Lambda's API). A function being created ends `ERROR`, scaled to zero, and an update deploys it again; a function in `ERROR` stays so. Each end is in the audit log, by FF.
+
 **Capacity samples.** Five seconds into every minute, the backend lists FF's Deployments in one Kubernetes call and writes a row to `capacity_samples` for each Deployment with a ready instance, a function's `$LATEST` and each of its versions apart (`version`, 0 for `$LATEST`): how many, its memory, a version's as published, and the `minInstances` it keeps warm, `$LATEST`'s alone (D6 and D8 of the client-readiness plan). A warm instance holds its memory whether or not it runs a call, and these samples show how much. Like usage records, samples are never changed or deleted, and the table has a partition per month. The capacity report weighs, per account and day, the GB-s held for ready instances against the GB-s the usage records bill:
 
 ```bash
@@ -1447,6 +1633,7 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 (cd runtimes/nodejs && npm test)                         # Node.js runtime protocol
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
 (cd cli && cargo test --locked)                          # the ff command: unit tests, then its binary against a scripted API, seconds
+hack/test-sam-fixtures.sh                                # every SAM template kept as a fixture, which sam validate --lint takes (hack/install-tools.sh sam), about 20 s
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 6 min
 hack/k8s/test-logging-filter.sh                          # the log collector's configuration and filter, in its image, seconds
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions
@@ -1454,6 +1641,7 @@ hack/e2e.sh                                              # the whole stack throu
 hack/e2e.sh --only queues                                # one of its sections, after what it needs; --list names them, --from runs on from one, in each of the three
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 7 min
 hack/cli-e2e.sh                                          # the ff command on the stack, and in Docker, about 15 min
+hack/e2e-aws-tools.sh                                    # ff init's Terraform project applied by OpenTofu and Terraform's CLI, about 11 min
 hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
 hack/k8s/test-platform-manifests.sh                      # deploy/k8s/platform checked without deploying it, about 1 min
 hack/e2e-platform.sh                                     # FF deployed from deploy/k8s on a cluster of its own, through its edge, about 15 min
@@ -1464,14 +1652,15 @@ hack/backup-drill.sh                                     # the restore drill: bo
 
 ```bash
 hack/ci.sh static            # linters, types, builds, the docs, how-it-works.html's script, the shell scripts, the workflow, gitleaks, about 5 min
-hack/ci.sh unit              # every unit suite: backend, console, admin app, both runtimes, alert rules, log filter, about 2 min
+hack/ci.sh unit              # every unit suite: backend, console, admin app, both runtimes, the SAM fixtures, alert rules, log filter, about 2 min
 hack/ci.sh db                # L2 and the migrations' drift check, on a PostgreSQL 15.19 of its own, about 2 min
 hack/ci.sh security          # npm audit, and each image scanned by Trivy with its SBOM in hack/.ci/sbom, about 3 min
-hack/ci.sh cluster           # the five below in a row, on the dev cluster, as a laptop runs them: about 45 min
+hack/ci.sh cluster           # the six below in a row, on the dev cluster, as a laptop runs them: about 55 min
 hack/ci.sh l3                # L3: the Kubernetes driver on the cluster, about 5 min
 hack/ci.sh l4                # L4: the stack through the API, about 14 min
 hack/ci.sh l5                # L5: every route as another account, about 6 min
 hack/ci.sh cli               # the ff command on the stack and in Docker, about 13 min
+hack/ci.sh aws-tools         # AWS's tools on the stack: ff init's Terraform project applied, planned again, destroyed, by OpenTofu then Terraform's CLI, about 11 min
 hack/ci.sh images            # the platform's images, run as the cluster runs them, and its manifests without deploying them, about 8 min
 hack/ci.sh advisories        # the last security run's SBOMs and the lockfiles, checked again with the day's advisories: nightly on the CI server, under 1 min
 hack/ci.sh tools             # the latest release of each AWS tool the tests pin, and Rust's stable, tried as the pinned ones run: nightly on the CI server
@@ -1484,7 +1673,15 @@ hack/ci.sh suggest           # runs nothing: what the working tree's changes nee
 
 `security` fails on a high or critical vulnerability that has a fix. One that can't be fixed yet, or whose fix is less than two weeks old, is accepted for a while, with why and until when, and on that date it is reported again: in an image, in `.trivyignore.yaml`, for the one binary it is in; in what a Node.js package ships, in `.npmauditignore`, for that directory and package (`hack/lib/npm-audit.py` reads npm audit's report against it, and `hack/test-npm-audit.sh` tests it). A gitleaks finding that isn't a secret goes in `.gitleaksignore`, by its fingerprint.
 
-**On GitHub,** a push to `master` and a pull request run every stage but `platform`: the cluster's `l3`, `l4`, `l5` and `cli` at once, each on a runner of its own, so that a push is answered in about 25 minutes, a failure in any of them known within that stage's own time; and `images` in the `security` job, after the scans, on the images they built, which Docker's build cache keeps. Each job installs only what its stages use (`deps`), and keeps npm's downloads and, where it builds the `ff` command, Cargo's and its build between runs (`.github/actions/setup`, each job's setup). A push or a pull request that changes only documents (`docs/` and `*.md` files, but the `ff` command's templates, which it embeds) runs `static` alone, which checks them and every commit's secrets, about 4 minutes in all: a first job, `changes`, compares the commits (`hack/lib/changes.sh`, which `hack/test-changes.sh` tests). The nightly run (02:17 UTC) runs `platform`; `advisories`, which checks the branch's last SBOMs and the lockfiles again with the day's advisories (`hack/lib/last-sboms.sh` fetches them, `hack/test-last-sboms.sh` tests it); and `tools`, which tries the latest release of each tool the tests pin: the AWS CLI, the SDK for JavaScript, boto3, OpenTofu, Terraform and its AWS provider, and the SAM CLI through the Lambda spike's flows, whose requests and steps are compared with the pinned versions' recordings (`hack/spikes/lambda/compare.py`, which `hack/test-tools-compare.sh` tests), and Rust's stable release through the `ff` command's lints and tests. The other jobs ran on the commit when it was pushed, but an image or a package unchanged since can have an advisory published the next day, and a tool a new release. A run started by hand names its jobs: `gh workflow run ci.yml --ref <branch> -f jobs=platform` runs that one alone, `-f jobs=static,unit` those two, `-f jobs=l4,cli` two of the cluster's stages, `cluster` its four, `security` or `images` the job that runs both, `all` every one, and `nightly` what the schedule runs, with its issue. **A red nightly run is seen:** it opens one issue, "The nightly run is red", with the run's page and the lines of the failed jobs' logs that say what failed, or comments on the one already open; the next green nightly closes it (`hack/lib/nightly-issue.sh`, which `hack/test-nightly-issue.sh` tests in `static` against a stand-in `gh`).
+**On GitHub,** a push to `master` and a pull request run every stage but `platform`: the cluster's `l3`, `l4`, `l5`, `cli` and `aws-tools` at once, each on a runner of its own, so that a push is answered in about 25 minutes, a failure in any of them known within that stage's own time; and `images` in the `security` job, after the scans, on the images they built, which Docker's build cache keeps. Each job installs only what its stages use (`deps`), and keeps npm's downloads and, where it builds the `ff` command, Cargo's and its build between runs (`.github/actions/setup`, each job's setup). A push or a pull request that changes only documents (`docs/` and `*.md` files, but the `ff` command's templates, which it embeds) runs `static` alone, which checks them and every commit's secrets, about 4 minutes in all: a first job, `changes`, compares the commits (`hack/lib/changes.sh`, which `hack/test-changes.sh` tests). The nightly run (02:17 UTC) runs `platform`; `advisories`, which checks the branch's last SBOMs and the lockfiles again with the day's advisories (`hack/lib/last-sboms.sh` fetches them, `hack/test-last-sboms.sh` tests it); and `tools`, which tries the latest release of each tool the tests pin: the AWS CLI, the SDK for JavaScript, boto3, OpenTofu, Terraform and its AWS provider, and the SAM CLI through the Lambda spike's flows, whose requests and steps are compared with the pinned versions' recordings (`hack/spikes/lambda/compare.py`, which `hack/test-tools-compare.sh` tests), and Rust's stable release through the `ff` command's lints and tests. The other jobs ran on the commit when it was pushed, but an image or a package unchanged since can have an advisory published the next day, and a tool a new release. A run started by hand names its jobs: `gh workflow run ci.yml --ref <branch> -f jobs=platform` runs that one alone, `-f jobs=static,unit` those two, `-f jobs=l4,cli` two of the cluster's stages, `cluster` its five, `security` or `images` the job that runs both, `all` every one, and `nightly` what the schedule runs, with its issue. **A red nightly run is seen:** it opens one issue, "The nightly run is red", with the run's page and the lines of the failed jobs' logs that say what failed, or comments on the one already open; the next green nightly closes it (`hack/lib/nightly-issue.sh`, which `hack/test-nightly-issue.sh` tests in `static` against a stand-in `gh`).
+
+**Once a month, on AWS itself** (`.github/workflows/aws.yml`, the 1st at 04:41 UTC, or by hand once it is on `master`): `hack/e2e-aws.sh` deploys the small app's `template.yaml` with `sam deploy`, as it is, then checks there what FF reads and leaves to AWS: the page synced to its bucket and served by the bucket's policy, the function URL's CORS for the page's origin, and an order put in the queue, its receipt written by the queue's reader through its mapping and its role and read back at the URL by the API's role. Then it deletes the stack, its buckets emptied first. The page's and the CORS's checks are the ff suite's own (`hack/lib/orders-app.sh`). No database or cache is made, so the orders' own paths are left to the ff suite. Every other run checks the way out offline (`sam validate --lint`, cfn-lint and `tofu validate`). The job is skipped until the repository has an AWS account's role, as the decision log's 63 waits for that account. To turn it on:
+
+1. In the account, add GitHub's OIDC provider (`token.actions.githubusercontent.com`, audience `sts.amazonaws.com`), and a role it may assume only for this repository's `master`: the trust policy's `token.actions.githubusercontent.com:sub` is `repo:<owner>/<repository>:ref:refs/heads/master`.
+2. Give the role what one run makes and deletes, each limited to names that start with `ff-monthly-`: CloudFormation's stacks, with SAM's own `aws-sam-cli-managed-default` stack; Lambda's functions, their URLs, permissions and mappings; IAM's roles for the functions, with `iam:PassRole`; S3's buckets and objects, with SAM's bucket `aws-sam-cli-managed-default-*`; SQS's queues; EventBridge's rules; CloudWatch Logs' groups `/aws/lambda/ff-monthly-*`, which Lambda makes and the run deletes. The account's own S3 Block Public Access must let a bucket's policy make its site public.
+3. In the repository's settings, set the variable `FF_AWS_ROLE_ARN` to the role's ARN, and `FF_AWS_REGION` if not `eu-west-3`. No secret is kept: each run exchanges GitHub's OIDC token for an hour's credentials.
+
+A run stays within AWS's free tier: three functions called a few times, a queue, two buckets and a rule, for minutes. SAM's bucket for the code, which the first run makes, keeps a few megabytes.
 
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
 

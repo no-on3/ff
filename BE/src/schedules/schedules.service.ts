@@ -1,7 +1,8 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
+import { isUniqueViolation } from '../common/unique-violation';
 import { wrappedIn } from '../functions/aliases.service';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
@@ -10,9 +11,6 @@ import { PlansService } from '../plans/plans.service';
 import { CreateScheduleDto, ScheduleView, UpdateScheduleDto } from './dto/schedule.dto';
 import { InvalidScheduleExpressionError, ScheduleExpression, nextRun, nextRuns, parseScheduleExpression } from './schedule-expression';
 import { Schedule } from './schedule.entity';
-
-/** PostgreSQL's unique_violation: another of the function's schedules has the name. */
-const UNIQUE_VIOLATION = '23505';
 
 /** How many next runs a preview shows. */
 export const PREVIEW_RUNS = 5;
@@ -194,7 +192,7 @@ export class SchedulesService {
     try {
       return await this.schedules.save(schedule);
     } catch (error) {
-      if (error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION) {
+      if (isUniqueViolation(error)) {
         throw new ConflictException(`The function has a schedule named "${schedule.name}" already: names are unique within a function`);
       }
       throw error;

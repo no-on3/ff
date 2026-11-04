@@ -238,6 +238,7 @@ describe('the event source poller, which reads the queues functions are mapped t
 
   it.each([
     ['the function is not ACTIVE', () => functions.findOne.mockResolvedValue({ ...active, status: FunctionStatus.ERROR })],
+    ["the function's reserved concurrency is 0", () => functions.findOne.mockResolvedValue({ ...active, callsStopped: true })],
     ['the function is gone', () => functions.findOne.mockRejectedValue(new NotFoundException())],
     ['the account is not active', () => accounts.findOne.mockResolvedValue({ id: ACCOUNT, status: AccountStatus.SUSPENDED, storageDisabledAt: null })],
     ["FF turned the account's databases, buckets and queues off", () => accounts.findOne.mockResolvedValue({ id: ACCOUNT, status: AccountStatus.ACTIVE, storageDisabledAt: new Date() })],

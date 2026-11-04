@@ -10,6 +10,7 @@ import { Function } from '../functions/entities/function.entity';
 import { FunctionEnvironment } from '../functions/entities/function-environment.entity';
 import { FunctionAlias } from '../functions/entities/function-alias.entity';
 import { FunctionVersion } from '../functions/entities/function-version.entity';
+import { FunctionPolicyStatement } from '../functions/entities/function-policy-statement.entity';
 import { FunctionUrl } from '../functions/entities/function-url.entity';
 import { FunctionEventInvokeConfig } from '../functions/entities/function-event-invoke-config.entity';
 import { EventSourceMapping } from '../event-sources/event-source-mapping.entity';
@@ -59,9 +60,11 @@ import { QueueMessage } from '../queues/queue-message.entity';
 import { QueueRequestCount } from '../queues/queue-request-count.entity';
 import { QueueSample } from '../queues/queue-sample.entity';
 import { AsyncEventCount } from '../queues/async-event-count.entity';
+import { ResourceTag } from '../tags/resource-tag.entity';
+import { Stack, StackResource } from '../stacks/stack.entity';
 
 /**
  * Every entity, listed explicitly rather than found by a file glob: a glob over
  * the build output also matches the compiled `.d.ts` files. Add new entities here.
  */
-export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionVersion, FunctionAlias, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, KeyUse, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping, QueueRequestCount, QueueSample, AsyncEventCount, Cache, CacheSample, EmailIdentity, EmailSuppression, EmailMessage, EmailSending, EmailSend];
+export const ENTITIES = [Plan, Account, User, Membership, Invitation, ApiKey, AuditEntry, Function, FunctionEnvironment, FunctionVersion, FunctionAlias, FunctionPolicyStatement, ResourceTag, FunctionUrl, CustomDomain, Schedule, Package, FunctionInvocation, FunctionMetrics, RateLimitedInvocations, UsageRecord, CapacitySample, PlatformSetting, Currency, PriceBook, LedgerAccount, LedgerTransaction, LedgerEntry, UsageHourly, UsageCharge, RatingRun, LowBalanceNotice, Payment, TaxRate, Invoice, InvoiceLine, InvoiceCounter, InvoiceNotice, NotificationDelivery, WebhookSecret, Alarm, Database, DatabaseSample, ResourceUsageHourly, Bucket, StorageKey, StorageRequestCount, KeyUse, BucketSample, Queue, QueueMessage, FunctionEventInvokeConfig, EventSourceMapping, QueueRequestCount, QueueSample, AsyncEventCount, Cache, CacheSample, EmailIdentity, EmailSuppression, EmailMessage, EmailSending, EmailSend, Stack, StackResource];

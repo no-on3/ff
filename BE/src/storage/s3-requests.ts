@@ -1,5 +1,6 @@
 import { IncomingHttpHeaders } from 'node:http';
 import { decodeEscapes } from '../common/signature-v4';
+import { UNSET_SETTINGS } from './bucket-defaults';
 
 /** A request's bucket and key: by its host (virtual-hosted) or its path's first segment (path-style). */
 export interface S3Address {
@@ -55,10 +56,29 @@ const GET_OBJECT = new Set([
 const op = (name: string, klass: RequestClass, writes = false): S3Operation => ({ name, class: klass, writes });
 const NOT_IMPLEMENTED = op('NotImplemented', 'tier2');
 
+/** A bucket's settings FF keeps, by S3's query parameter for each: the operations that read it, set it whole, and remove it, where S3 has one. */
+const KEPT_SETTINGS: Record<string, { get: string; put: string; delete?: string }> = {
+  notification: { get: 'GetBucketNotificationConfiguration', put: 'PutBucketNotificationConfiguration' },
+  website: { get: 'GetBucketWebsite', put: 'PutBucketWebsite', delete: 'DeleteBucketWebsite' },
+  tagging: { get: 'GetBucketTagging', put: 'PutBucketTagging', delete: 'DeleteBucketTagging' },
+  policy: { get: 'GetBucketPolicy', put: 'PutBucketPolicy', delete: 'DeleteBucketPolicy' },
+  publicAccessBlock: { get: 'GetPublicAccessBlock', put: 'PutPublicAccessBlock', delete: 'DeletePublicAccessBlock' },
+};
+
+/** The operation on a setting FF keeps that a request with its one parameter is: a read, a change, or a removal, free as S3's are. */
+function keptSetting(method: string, parameter: string): S3Operation | undefined {
+  const setting = KEPT_SETTINGS[parameter];
+  if (!setting) return undefined;
+  if (method === 'GET') return op(setting.get, 'tier2');
+  if (method === 'PUT') return op(setting.put, 'tier1', true);
+  if (method === 'DELETE' && setting.delete) return op(setting.delete, 'free', true);
+  return undefined;
+}
+
 /**
  * The operation a request is, from its method, its address and its query, as
- * S3 tells them apart; anything else, a bucket's policy or an object's tags
- * among them, is NotImplemented. Its parameters must all be the operation's.
+ * S3 tells them apart; anything else, a bucket's CORS set or an object's
+ * tags among them, is NotImplemented. Its parameters must all be the operation's.
  */
 export function operationOf(method: string, address: S3Address, query: URLSearchParams, headers: IncomingHttpHeaders): S3Operation {
   const names = [...new Set(query.keys())].filter((name) => !ALWAYS.test(name));
@@ -70,15 +90,18 @@ export function operationOf(method: string, address: S3Address, query: URLSearch
   if (!address.bucket) return method === 'GET' && names.length === 0 ? op('ListBuckets', 'tier1') : NOT_IMPLEMENTED;
   if (!address.rawKey) {
     if (method === 'GET' && has('location') && only('location')) return op('GetBucketLocation', 'tier2');
-    if (method === 'GET' && has('notification') && only('notification')) return op('GetBucketNotificationConfiguration', 'tier2');
-    if (method === 'PUT' && has('notification') && only('notification')) return op('PutBucketNotificationConfiguration', 'tier1', true);
-    if (method === 'GET' && has('website') && only('website')) return op('GetBucketWebsite', 'tier2');
-    if (method === 'PUT' && has('website') && only('website')) return op('PutBucketWebsite', 'tier1', true);
-    if (method === 'DELETE' && has('website') && only('website')) return op('DeleteBucketWebsite', 'free', true);
+    const kept = names.length === 1 ? keptSetting(method, names[0]) : undefined;
+    if (kept) return kept;
+    if (method === 'GET' && names.length === 1) {
+      const unset = Object.entries(UNSET_SETTINGS).find(([, setting]) => setting.parameter === names[0]);
+      if (unset) return op(unset[0], 'tier2');
+    }
     if (method === 'GET' && has('uploads') && only(UPLOADS_LISTING)) return op('ListMultipartUploads', 'tier1');
     if (method === 'GET' && only(LISTING)) return op(query.get('list-type') === '2' ? 'ListObjectsV2' : 'ListObjects', 'tier1');
     if (method === 'HEAD' && names.length === 0) return op('HeadBucket', 'tier2');
     if (method === 'POST' && has('delete') && only('delete')) return op('DeleteObjects', 'free', true);
+    if (method === 'PUT' && names.length === 0) return op('CreateBucket', 'tier1', true);
+    if (method === 'DELETE' && names.length === 0) return op('DeleteBucket', 'free', true);
     return NOT_IMPLEMENTED;
   }
   switch (method) {

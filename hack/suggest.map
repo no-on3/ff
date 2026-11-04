@@ -1,19 +1,20 @@
 # Which stages and sections a change needs, for hack/ci.sh suggest (hack/lib/suggest.sh). Each line is a path pattern,
 # as bash's case reads it, so that * takes slashes too, then what a change there needs: stages of hack/ci.sh, or a
-# suite's sections as <suite>:<id>,<id>... (l4, l5 and cli: hack/e2e.sh, hack/e2e-tenancy.sh and hack/cli-e2e.sh,
-# with --only, which runs what they need too). A path's line is the first it matches, so the narrower come first;
-# hack/test-suggest.sh checks that every file the repository tracks matches one, and that a stage or a section named
-# here exists.
+# suite's sections as <suite>:<id>,<id>... (l4, l5, cli and aws-tools: hack/e2e.sh, hack/e2e-tenancy.sh,
+# hack/cli-e2e.sh and hack/e2e-aws-tools.sh, with --only, which runs what they need too). A path's line is the first
+# it matches, so the narrower come first; hack/test-suggest.sh checks that every file the repository tracks matches
+# one, and that a stage or a section named here exists.
 
 # The documents, which static checks: the ff command's templates are code, as it builds them in.
+cli/templates/terraform/*               static unit aws-tools
 cli/templates/*                         static unit cli
 docs/*                                  static
 *.md                                    static
 
 # The backend, a module at a time where its suites' sections are its own; L5 tries every route, so it runs whole.
-BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted
-BE/src/event-sources/*                  static unit db l4:mappings l5 cli:event_sources
-BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted
+BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted aws-tools
+BE/src/event-sources/*                  static unit db l4:mappings l5 cli:event_sources aws-tools
+BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted aws-tools
 BE/src/object-store/*                   static unit db l4:buckets,buckets_room,notifications,sites l5 cli:buckets,sites
 BE/src/databases/*                      static unit db l4:databases,databases_sampled l5 cli:databases,databases_used
 BE/src/caches/*                         static unit db l4:caches,caches_sampled l5 cli:small_app
@@ -21,7 +22,7 @@ BE/src/email/*                          static unit db l4:mail,mail_sent l5 cli:
 BE/src/mail/*                           static unit db l4:mail_sent l5
 BE/src/schedules/*                      static unit db l4:schedules,schedules_ran l5 cli:schedules,schedules_ran
 BE/src/alarms/*                         static unit db l4:alarms,sites_counted,caches_sampled l5
-BE/src/function-urls/*                  static unit db l4:url,url_domain l5 cli:url
+BE/src/function-urls/*                  static unit db l4:url,url_domain l5 cli:url aws-tools
 BE/src/packages/*                       static unit db l4:package,from_package,lost_images l5 cli:packages,init
 BE/src/plans/*                          static unit db l4:plans l5
 BE/src/billing/*                        static unit db l4:usage,priced,rating,balance l5
@@ -34,19 +35,20 @@ BE/src/audit/*                          static unit db l5
 BE/src/accounts/*                       static unit db l5
 BE/src/api-keys/*                       static unit db l5
 BE/src/retention/*                      static unit db l5
-BE/src/orchestrator/*                   static unit db l3 l4 l5 cli images
-BE/src/*                                static unit db l3 l4 l5 cli
-BE/*                                    static unit db security l3 l4 l5 cli images
+BE/src/orchestrator/*                   static unit db l3 l4 l5 cli aws-tools images
+BE/src/*                                static unit db l3 l4 l5 cli aws-tools
+BE/*                                    static unit db security l3 l4 l5 cli aws-tools images
 
 # The console and the admin app: their builds and tests, their images.
 FE/*                                    static unit security images
 admin/*                                 static unit security images
 
 # The runtimes run every function: every suite that calls one.
-runtimes/python/*                       static unit security l3 l4 cli images
-runtimes/*                              static unit security l3 l4 l5 cli images
+runtimes/python/*                       static unit security l3 l4 cli aws-tools images
+runtimes/*                              static unit security l3 l4 l5 cli aws-tools images
 
-# The ff command.
+# The ff command; its Terraform project is AWS's tools' too.
+cli/src/commands/init.rs                static unit cli:init aws-tools
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.
@@ -68,28 +70,33 @@ examples/*                              static cli
 hack/e2e.sh                             static l4
 hack/e2e-tenancy.sh                     static l5
 hack/cli-e2e.sh                         static cli
+hack/e2e-aws-tools.sh                   static aws-tools
+hack/lib/provider_log.py                static aws-tools
 hack/e2e-platform.sh                    static platform
 hack/test-images.sh                     static images
+hack/test-sam-fixtures.sh               static unit
 hack/test-evidence.sh                   static l3
 hack/k8s/test-it.sh                     static l3
 hack/lib/s3-clients/*                   static l4:buckets
 hack/lib/sqs-clients/*                  static l4:queues
 hack/lib/mail-receiver.mjs              static l4:mail_sent
+hack/lib/orders-app.sh                  static cli:small_app
 hack/lib/dkim-verify.mjs                static l4:mail_sent
-hack/lib/e2e-stack.sh                   static l4 l5 cli
-hack/lib/backend-build.sh               static l4 l5 cli
-hack/lib/sections.sh                    static l4 l5 cli
-hack/lib/checks.sh                      static l4 l5 cli
-hack/lib/evidence.sh                    static l3 l4 l5 cli
+hack/lib/e2e-stack.sh                   static l4 l5 cli aws-tools
+hack/lib/backend-build.sh               static l4 l5 cli aws-tools
+hack/lib/sections.sh                    static l4 l5 cli aws-tools
+hack/lib/checks.sh                      static l4 l5 cli aws-tools
+hack/lib/evidence.sh                    static l3 l4 l5 cli aws-tools
 hack/lib/latest-tools.sh                static tools
-hack/install-tools.sh                   static unit tools
-hack/k8s/*                              static l3 l4 l5 cli images
+hack/install-tools.sh                   static unit tools aws-tools
+hack/k8s/*                              static l3 l4 l5 cli aws-tools images
+hack/spikes/lambda/sam/*                static unit
 hack/spikes/*                           static
 hack/*                                  static
 
 # The rest: the CI server's workflow, the compose project the suites start, the scanners' accepted findings.
 .github/*                               static
-docker-compose.yml                      static db l4 l5 cli
+docker-compose.yml                      static db l4 l5 cli aws-tools
 .trivyignore.yaml                       security
 .npmauditignore                         static security
 .gitleaksignore                         static

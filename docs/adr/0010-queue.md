@@ -89,7 +89,7 @@ The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, 
 ### As built (Q-04, part 2): the endpoint reached
 
 - **From outside,** through the edge at `sqs.<domain>`, which sends the host to the backend's port 3003 as it came, the signatures covering it; `deploy.sh` checks that the edge's host is `FF_SQS_BASE`'s.
-- **From functions,** as buckets are (ADR 0009): with the function's own key, its pods get `AWS_ENDPOINT_URL_SQS`, the endpoint inside the cluster (`FF_SQS_FUNCTION_ENDPOINT`, the Service `ff-storage`'s fixed address on 3003), which their NetworkPolicy opens; a function's variables can't set it.
+- **From functions,** as buckets are (ADR 0009): with the function's own key, its pods get `AWS_ENDPOINT_URL_SQS`, the endpoint inside the cluster (`FF_SQS_FUNCTION_ENDPOINT`, the Service `ff-storage`'s fixed address on 3003), which their NetworkPolicy opens; a function's variables can't set it. `GET /me` names it with the other endpoints, `sqsFunctionEndpoint` (SQS's own where it isn't set), so that `ff deploy` writes a template's `!Ref` of a queue in a function's variables as a URL under it.
 - **A queue's URL under the endpoint its caller reached.** AWS's SDK for JavaScript sends each request that names a queue's URL to that URL's host, unless its client was given an endpoint in its code or `useQueueUrlAsEndpoint: false`: an endpoint from `AWS_ENDPOINT_URL_SQS` doesn't count (its `queueUrlMiddleware`, read in `@aws-sdk/client-sqs` 3.1146.0). boto3 1.43 and the AWS CLI send every request to their endpoint, botocore having no such rule. So the endpoint answers a queue's URL under functions' endpoint to a request made to its host, and under `FF_SQS_BASE` to any other, and reads any URL by its path: a function that finds its queue by name keeps its requests inside the cluster, with every SDK.
 - **A URL from outside, in a function:** works with boto3 and the AWS CLI; with the SDK for JavaScript, only with `useQueueUrlAsEndpoint: false`, as functions don't reach the edge. Measured in L4: its default client's send failed with `ECONNREFUSED`, the URL's host being the function's own `localhost`, and the same send with `useQueueUrlAsEndpoint: false` went in. The other way, every function reaching FF's public endpoints through the edge whatever its account's internet access, would make such URLs work as they are; it is a choice of the platform's, left open.
 
@@ -142,12 +142,22 @@ The SQS endpoint (Q-04) speaks the JSON 1.0 protocol, answers both error names, 
 - **The console reads the same metrics:** a queue's page asks for its last 12 hours an hour a point and shows those with any activity, beside the queue's alarms; a function's "Calls that don't wait" asks for its last day's and says them in a line. Neither keeps metrics of its own.
 - **`ff queues metrics`** prints a queue's a row per period, as `ff metrics` prints a function's, whose totals now end with the calls that didn't wait. An API without those series reads as none, so a newer `ff` works against an older FF.
 
+### As built (X-11, part 1, 2026-11-03): a queue's tags
+
+Terraform's provider puts its `default_tags` on each queue it makes, in `CreateQueue`'s `tags`, and reads them back with `ListQueueTags` at every plan: refused, as they were, a queue's apply failed.
+
+- **Kept beside a function's and a bucket's,** in `resource_tags` (ADR 0014): a third column, `queue_id`, beside `function_id` and `bucket_id`, one of the three set (the migration `QueueTags`), the rows gone with their queue.
+- **As SQS's:** `TagQueue` puts tags, a key there taking its new value; `UntagQueue` removes them by key, a key the queue hasn't no error; `ListQueueTags` gives them, without `Tags` when there are none, and a read-only key may call it, as IAM's read access level has it. `CreateQueue`'s `tags` are checked and kept in the transaction that makes the queue, a refusal making none; a queue there already keeps its own, as SQS's. Each is a request of the queue, billed as SQS bills one.
+- **AWS's rules,** a function's: 50 a queue, AWS's characters, no key starting `aws:`, each refused `InvalidParameterValue`; `Tags` that aren't strings by their keys too, and none given `MissingParameter`.
+- **The audit log names the key** and its address, from the SQS endpoint, for each `queue.tag` and `queue.untag`, and `queue.create` names the tags it was made with.
+- **Measured** with the AWS CLI (`tag-queue`, `list-queue-tags`), the SDK for JavaScript (`CreateQueue`'s tags, `TagQueue`, `UntagQueue`, a key AWS keeps refused) and boto3 in L4, and in L5 a key of one account that neither reads nor changes another's.
+
 ## Consequences
 
 - One more append-and-delete table in FF's database, its size bounded by the plans' limits on messages (the decision log, 28); the operator's database alerts and backups cover it, its point-in-time recovery possibly redelivering what was handled in the last minutes.
 - Queue throughput is FF's database's: about 2,500 messages a second claimed and deleted here, far past a beta's needs; past that, a queue of its own in pgmq or NATS JetStream.
 - The history's rows gain a request ID apart from their own ID, the same for every attempt of an event.
-- What the build leaves for later, each said in its part above: a bucket's events sent at most once, where S3 promises at least once; every backend reading every mapping, so that a queue's batches may be as many again with each backend, until a lease per mapping makes one read it; the last minutes' request counts of a backend that dies, its requests then not billed; standard queues only, FIFO ones later; destinations and notifications to functions and queues only, SNS topics and EventBridge later; and SQS's permissions, tags and message move tasks, which answer `UnsupportedOperation`.
+- What the build leaves for later, each said in its part above: a bucket's events sent at most once, where S3 promises at least once; every backend reading every mapping, so that a queue's batches may be as many again with each backend, until a lease per mapping makes one read it; the last minutes' request counts of a backend that dies, its requests then not billed; standard queues only, FIFO ones later; destinations and notifications to functions and queues only, SNS topics and EventBridge later; and SQS's permissions and message move tasks, which answer `UnsupportedOperation`; a queue's tags are kept since step 5, as above.
 
 ## Alternatives considered
 

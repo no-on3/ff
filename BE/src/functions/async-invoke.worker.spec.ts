@@ -5,6 +5,7 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError, OrchestratorError } from '../orchestrator/orchestrator.errors';
 import { plan } from '../plans/test-fixtures';
 import { ClaimedEvent } from '../queues/queue-store';
+import { messageSize } from '../queues/sqs-messages';
 import { LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES } from './async-invoke';
 import { AsyncInvokeWorker } from './async-invoke.worker';
 import { InvocationSource } from './entities/function-invocation.entity';
@@ -24,8 +25,9 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     claimEvents: jest.Mock;
     retryEvent: jest.Mock;
     deleteEvent: jest.Mock;
-    deleteEventAndSend: jest.Mock;
     deleteEventAnd: jest.Mock;
+    sendEvent: jest.Mock;
+    kept: jest.Mock;
     accountBytes: jest.Mock;
   };
   let configs: { settingsFor: jest.Mock; arnOf: (f: { accountId: string; name: string }) => string; destinationFunction: jest.Mock; destinationQueue: jest.Mock };
@@ -80,19 +82,20 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       asyncCounts as never,
     );
   /** The record the worker handed its destination, as the destination's event. */
-  const handed = () => JSON.parse(queues.deleteEventAndSend.mock.calls[0][3] as string) as Record<string, unknown>;
+  const handed = () => JSON.parse(queues.sendEvent.mock.calls[0][2] as string) as Record<string, unknown>;
 
   beforeEach(() => {
     queues = {
       claimEvents: jest.fn(async () => []),
       retryEvent: jest.fn(async () => true),
       deleteEvent: jest.fn(async () => true),
-      deleteEventAndSend: jest.fn(async () => true),
       // The event deleted, then the writes of the transaction, here with its manager's stand-in.
       deleteEventAnd: jest.fn(async (_event: unknown, then: (manager: unknown) => Promise<void>) => {
         await then('the transaction');
         return true;
       }),
+      sendEvent: jest.fn(async () => undefined),
+      kept: jest.fn(),
       accountBytes: jest.fn(async () => 0),
     };
     configs = {
@@ -289,7 +292,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
 
     await tick(event({ attributes: { qualifier: 'live' } }));
 
-    expect([functions.call.mock.calls.length, queues.deleteEvent.mock.calls.length, queues.deleteEventAndSend.mock.calls.length]).toEqual([0, 1, 0]);
+    expect([functions.call.mock.calls.length, queues.deleteEvent.mock.calls.length, queues.deleteEventAnd.mock.calls.length, queues.sendEvent.mock.calls.length]).toEqual([0, 1, 0, 0]);
     expect(warnings).toHaveBeenCalledWith('Asynchronous call req-1 of function fn-1 was dropped: the version or the alias it named is gone');
     expect(asyncCounts.count).toHaveBeenCalledWith({ functionId: 'fn-1', accountId: ACCOUNT, dropped: 1 });
   });
@@ -381,8 +384,8 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await tick(event());
 
     expect(configs.destinationFunction).toHaveBeenCalledWith(ACCOUNT, `${RECORDS_ARN}:live`);
-    expect(queues.deleteEventAndSend.mock.calls[0][1]).toBe(records);
-    expect(queues.deleteEventAndSend.mock.calls[0][5]).toEqual({ qualifier: 'live' });
+    expect(queues.sendEvent.mock.calls[0][0]).toBe(records);
+    expect(queues.sendEvent.mock.calls[0][4]).toEqual({ manager: 'the transaction', attributes: { qualifier: 'live' } });
   });
 
   it("hands a call that succeeded to its onSuccess destination, Lambda's record of it, in the transaction that deletes the event", async () => {
@@ -391,8 +394,18 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
 
     await tick(event({ receiveCount: 2, attributes: { failures: 1, throttles: 0, settled: 1 } }));
 
-    const [[ended, target, requestId, , expiresAt, attributes]] = queues.deleteEventAndSend.mock.calls;
-    expect([ended.id, target, requestId, attributes, queues.deleteEvent.mock.calls.length]).toEqual(['7', records, expect.stringMatching(/^[0-9a-f-]{36}$/), undefined, 0]);
+    const [[ended]] = queues.deleteEventAnd.mock.calls;
+    const [[target, requestId, , expiresAt, { manager, attributes }]] = queues.sendEvent.mock.calls;
+    expect([ended.id, target, requestId, manager, attributes, queues.deleteEvent.mock.calls.length]).toEqual([
+      '7',
+      records,
+      expect.stringMatching(/^[0-9a-f-]{36}$/),
+      'the transaction',
+      undefined,
+      0,
+    ]);
+    // Counted as the destination's AsyncEventsReceived once the transaction committed.
+    expect(queues.kept).toHaveBeenCalledWith(records);
     expect((expiresAt as Date).getTime() - NOW.getTime()).toBeGreaterThanOrEqual(7 * 3600 * 1000 - 1000);
     expect(configs.destinationFunction).toHaveBeenCalledWith(ACCOUNT, RECORDS_ARN);
     expect(handed()).toEqual({
@@ -440,7 +453,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await tick(event({ id: '8', requestId: 'req-2', sentAt: later(-6 * 3600 - 1) }));
 
     expect(functions.call).not.toHaveBeenCalled();
-    const [first, second] = queues.deleteEventAndSend.mock.calls.map(([, , , body]) => JSON.parse(body as string) as Record<string, unknown>);
+    const [first, second] = queues.sendEvent.mock.calls.map(([, , body]) => JSON.parse(body as string) as Record<string, unknown>);
     expect(first).toMatchObject({ requestContext: { condition: 'EventAgeExceeded' }, responseContext: { statusCode: 429 }, responsePayload: lastResponse.payload });
     expect([second.requestContext, 'responseContext' in second]).toEqual([expect.objectContaining({ requestId: 'req-2', condition: 'EventAgeExceeded' }), false]);
   });
@@ -454,7 +467,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await tick(event());
     await tick(event({ id: '8', requestId: 'req-2' }));
 
-    expect([queues.deleteEventAndSend.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 2]);
+    expect([queues.deleteEventAnd.mock.calls.length, queues.sendEvent.mock.calls.length, queues.kept.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 0, 0, 2]);
     expect(warnings).toHaveBeenCalledWith(`The record of asynchronous call req-1 of function fn-1 was not delivered: its destination ${RECORDS_ARN} is no function of the account, or no version or alias of it, any more`);
     expect(warnings).toHaveBeenCalledWith(expect.stringMatching(/^The record of asynchronous call req-2 of function fn-1 was not delivered: its record is \d+ bytes, over an asynchronous call's 1048576$/));
     // As Lambda's DestinationDeliveryFailures: each record its destination didn't take.
@@ -506,7 +519,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     await tick(event({ receiveCount: 3, attributes: { failures: 2, throttles: 0, settled: 2 } }));
 
     expect(configs.destinationQueue).toHaveBeenCalledWith(ACCOUNT, QUEUE_ARN);
-    expect([queues.deleteEventAnd.mock.calls[0][0].id, queues.deleteEvent.mock.calls.length, queues.deleteEventAndSend.mock.calls.length]).toEqual(['7', 0, 0]);
+    expect([queues.deleteEventAnd.mock.calls[0][0].id, queues.deleteEvent.mock.calls.length, queues.sendEvent.mock.calls.length]).toEqual(['7', 0, 0]);
     const [[queue, [message], at, manager]] = customerQueues.send.mock.calls;
     expect([queue, manager, (at as Date).getTime() >= NOW.getTime()]).toEqual([failedOrders, 'the transaction', true]);
     expect(message).toEqual({
@@ -554,5 +567,66 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
 
     expect([customerQueues.send.mock.calls.length, queues.deleteEvent.mock.calls.length, configs.destinationQueue.mock.calls.length]).toEqual([0, 1, 0]);
     expect(warnings).toHaveBeenCalledWith("The record of asynchronous call req-1 of function fn-1 was not delivered: FF turned the account's databases, buckets and queues off");
+  });
+
+  describe("a function's dead-letter queue", () => {
+    const DEAD_LETTERS_ARN = `arn:aws:sqs:tn-tunis-1:${ACCOUNT}:dead-orders`;
+    const deadOrders = { ...failedOrders, id: 'queue-2', name: 'dead-orders' };
+    const tooOld = (values: Partial<ClaimedEvent> = {}) => event({ sentAt: later(-6 * 3600 - 1), ...values });
+
+    beforeEach(() => functions.findOne.mockResolvedValue({ ...fn, deadLetterTargetArn: DEAD_LETTERS_ARN }));
+
+    it("takes a call whose retries are used up, its event as it was sent with Lambda's attributes beside it, in the transaction that deletes it and hands its record on", async () => {
+      configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: QUEUE_ARN });
+      configs.destinationQueue.mockImplementation(async (_account: string, arn: string) => (arn === QUEUE_ARN ? failedOrders : deadOrders));
+      functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'no stock for order 42'), invocation: {} });
+
+      await tick(event({ receiveCount: 3, attributes: { failures: 2, throttles: 0, settled: 2 } }));
+
+      expect([queues.deleteEventAnd.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([1, 0]);
+      const sent = customerQueues.send.mock.calls.map(([queue, [message], , manager]) => ({ queue: (queue as { name: string }).name, manager, message: message as Record<string, unknown> }));
+      expect(sent.map(({ queue, manager }) => [queue, manager])).toEqual([
+        ['failed-orders', 'the transaction'],
+        ['dead-orders', 'the transaction'],
+      ]);
+      const messageAttributes = {
+        RequestID: { DataType: 'String', StringValue: 'req-1' },
+        ErrorCode: { DataType: 'Number', StringValue: '200' },
+        ErrorMessage: { DataType: 'String', StringValue: 'no stock for order 42' },
+      };
+      expect(sent[1].message).toEqual({
+        messageId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+        body: '{"order":42}',
+        meta: { messageAttributes, senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders` },
+        sizeBytes: messageSize('{"order":42}', messageAttributes),
+        delaySeconds: 0,
+      });
+      // Each a request Lambda makes to SQS.
+      expect(counts.count.mock.calls.map(([use]) => (use as { queueName: string }).queueName)).toEqual(['failed-orders', 'dead-orders']);
+    });
+
+    it('takes a call too old, its request ID alone beside it when no attempt answered; never a call that succeeded', async () => {
+      configs.destinationQueue.mockResolvedValue(deadOrders);
+
+      await tick(tooOld());
+      await tick(event({ id: '8', requestId: 'req-2' }));
+
+      expect(customerQueues.send.mock.calls.map(([, [message]]) => (message as { meta: unknown }).meta)).toEqual([
+        { messageAttributes: { RequestID: { DataType: 'String', StringValue: 'req-1' } }, senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders` },
+      ]);
+      expect([queues.deleteEventAnd.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([1, 1]);
+    });
+
+    it("deletes the event all the same when its queue is gone or the event over the queue's largest message, saying so, as no destination's failure", async () => {
+      configs.destinationQueue.mockResolvedValueOnce(undefined).mockResolvedValueOnce({ ...deadOrders, maximumMessageSize: 1024 });
+
+      await tick(tooOld());
+      await tick(tooOld({ id: '8', requestId: 'req-2', body: JSON.stringify({ order: 'x'.repeat(2000) }) }));
+
+      expect([customerQueues.send.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 2]);
+      expect(warnings).toHaveBeenCalledWith(`Asynchronous call req-1 of function fn-1 was not sent to its dead-letter queue: ${DEAD_LETTERS_ARN} is no queue of the account any more`);
+      expect(warnings).toHaveBeenCalledWith(expect.stringMatching(/^Asynchronous call req-2 of function fn-1 was not sent to its dead-letter queue: its event is \d+ bytes, over the queue's maximum message size of 1024$/));
+      expect(asyncCounts.count.mock.calls.filter(([use]) => (use as { destinationFailures?: number }).destinationFailures)).toEqual([]);
+    });
   });
 });

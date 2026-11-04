@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
@@ -51,10 +51,12 @@ export function sameRelease(version: Release, versionEnvironment: EnvironmentDoc
 
 /**
  * Why a function can't be published as it is, as Lambda refuses it: its code
- * not working, or not what the caller read. Undefined when it can.
+ * not working, a change of it `changing`, under way, or not what the caller
+ * read. Undefined when it can.
  */
-export function publishRefusal(function_: Pick<Function, 'status' | 'codeSha256' | 'revisionId'>, sent: PublishVersionDto): Error | undefined {
+export function publishRefusal(function_: Pick<Function, 'status' | 'codeSha256' | 'revisionId'>, sent: PublishVersionDto, changing = false): Error | undefined {
   if (function_.status === FunctionStatus.CREATING) return new ConflictException('The function is still being deployed: publish it once it is ACTIVE');
+  if (changing) return new ConflictException('The function is being changed: publish it once that change is live, or rolled back');
   if (function_.status !== FunctionStatus.ACTIVE) {
     return new ConflictException(`The function is ${function_.status}: it has no working code to publish. Fix it with PUT /functions/{id} first`);
   }
@@ -99,63 +101,71 @@ export class FunctionVersionsService {
    * last one when nothing but the description changed since it.
    */
   async publish(accountId: string, id: string, sent: PublishVersionDto): Promise<FunctionVersionView> {
-    const { published, made } = await this.versions.manager.transaction(async (manager) => {
-      const function_ = await lockedFunction(manager, accountId, id);
-      const refusal = publishRefusal(function_, sent);
-      if (refusal) throw refusal;
-      const environment = await this.environments.load(id, manager);
-      const last = await manager
-        .createQueryBuilder(FunctionVersion, 'v')
-        .addSelect('v.environment')
-        .where('v.functionId = :id', { id })
-        .orderBy('v.version', 'DESC')
-        .getOne();
-      if (last && sameRelease(last, this.environments.openVersion(id, last.version, last.environment), function_, environment)) {
-        return { published: this.view(function_, last), made: false };
-      }
-      const version = (function_.lastVersion ?? 0) + 1;
-      // Not through the record, whose save would change its updatedAt: a publish changes nothing of the function's own.
-      await manager.query('UPDATE "functions" SET "last_version" = $2 WHERE "id" = $1', [id, version]);
-      const saved = await manager.save(
-        manager.create(FunctionVersion, {
-          functionId: id,
-          version,
-          accountId,
-          description: sent.description ?? '',
-          runtime: function_.runtime,
-          handler: function_.handler,
-          packageType: function_.packageType,
-          code: function_.packageType === PackageType.INLINE ? function_.code : '',
-          codeSha256: function_.codeSha256,
-          codeSize: function_.codeSize,
-          packageSha256: await this.packageOf(function_),
-          memory: function_.memory,
-          timeout: function_.timeout,
-          eventFormat: function_.eventFormat,
-          awsEndpoints: function_.awsEndpoints,
-          environment: this.environments.sealVersion(id, version, environment),
-        }),
-      );
-      await this.audit.record(
-        {
-          accountId,
-          action: 'function.publish',
-          resource: `function:${id}`,
-          details: { version, codeSha256: saved.codeSha256, ...(saved.description ? { description: saved.description } : {}) },
-        },
-        manager,
-      );
-      return { published: this.view(function_, saved), made: true };
-    });
+    const { published, made } = await this.versions.manager.transaction((manager) => this.publishIn(manager, accountId, id, sent));
     if (made) await this.labelLatest(accountId, id);
     return published;
+  }
+
+  /**
+   * A publish in the caller's transaction, which Lambda's CreateFunction ends
+   * with: its version, and whether it is a new one, whose caller labels
+   * $LATEST's pods once the transaction commits. The version's description is
+   * the function's unless one is sent, as Lambda's.
+   */
+  async publishIn(manager: EntityManager, accountId: string, id: string, sent: PublishVersionDto): Promise<{ published: FunctionVersionView; made: boolean }> {
+    const function_ = await lockedFunction(manager, accountId, id);
+    const refusal = publishRefusal(function_, sent, this.functions.isChanging(function_));
+    if (refusal) throw refusal;
+    const environment = await this.environments.load(id, manager);
+    const last = await manager
+      .createQueryBuilder(FunctionVersion, 'v')
+      .addSelect('v.environment')
+      .where('v.functionId = :id', { id })
+      .orderBy('v.version', 'DESC')
+      .getOne();
+    if (last && sameRelease(last, this.environments.openVersion(id, last.version, last.environment), function_, environment)) {
+      return { published: this.view(function_, last), made: false };
+    }
+    const version = (function_.lastVersion ?? 0) + 1;
+    // Not through the record, whose save would change its updatedAt: a publish changes nothing of the function's own.
+    await manager.query('UPDATE "functions" SET "last_version" = $2 WHERE "id" = $1', [id, version]);
+    const saved = await manager.save(
+      manager.create(FunctionVersion, {
+        functionId: id,
+        version,
+        accountId,
+        description: sent.description ?? function_.description,
+        runtime: function_.runtime,
+        handler: function_.handler,
+        packageType: function_.packageType,
+        code: function_.packageType === PackageType.INLINE ? function_.code : '',
+        codeSha256: function_.codeSha256,
+        codeSize: function_.codeSize,
+        packageSha256: await this.packageOf(function_),
+        memory: function_.memory,
+        timeout: function_.timeout,
+        eventFormat: function_.eventFormat,
+        awsEndpoints: function_.awsEndpoints,
+        environment: this.environments.sealVersion(id, version, environment),
+      }),
+    );
+    await this.audit.record(
+      {
+        accountId,
+        action: 'function.publish',
+        resource: `function:${id}`,
+        details: { version, codeSha256: saved.codeSha256, ...(saved.description ? { description: saved.description } : {}) },
+      },
+      manager,
+    );
+    return { published: this.view(function_, saved), made: true };
   }
 
   /**
    * Starts moving $LATEST's pods onto a label of their own, so that a version's first call seldom waits for that
    * rollout. A failure is only logged: that call moves them then, waiting for it.
    */
-  private async labelLatest(accountId: string, id: string): Promise<void> {
+  async labelLatest(accountId: string, id: string): Promise<void> {
     try {
       await this.orchestrator.labelLatest({ id, accountId });
     } catch (error) {

@@ -8,13 +8,13 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
-use super::account::{Account, BucketRecord, Destination, FunctionRecord, Notification};
+use super::account::{Account, BucketRecord, Destination, FunctionRecord, Named, Notification};
 use super::aliases;
 use super::hcl::{Block, Hcl, file, literal};
 use super::names::{ResourceNames, lambda_names};
 use super::roles::{self, Target};
-use super::template::{DEFAULT_MAX_INSTANCES, Parameter, lambda_runtime};
-use crate::api::types::name_in_arn;
+use super::template::{Parameter, lambda_runtime};
+use crate::api::types::{DEFAULT_MAX_INSTANCES, name_in_arn};
 
 /// The AWS provider the files take, and OpenTofu's or Terraform's version.
 const PROVIDER: &str = "~> 6.0";
@@ -146,7 +146,7 @@ struct Builder<'a> {
     functions: HashMap<&'a str, Names>,
     queues: HashMap<&'a str, String>,
     buckets: HashMap<&'a str, String>,
-    /// The variable of each bucket's name on S3: the files', and the sites' a role uses.
+    /// The variable of each bucket's name on S3: the files', and the sites' a role or a function's variable uses.
     bucket_variables: HashMap<&'a str, String>,
     /// The mail identities the account proved, which SES sends as.
     proved: Vec<&'a str>,
@@ -192,7 +192,11 @@ impl<'a> Builder<'a> {
         let bucket_variables = account
             .buckets
             .iter()
-            .filter(|bucket| buckets.contains_key(bucket.name.as_str()) || used(&bucket.name))
+            .filter(|bucket| {
+                buckets.contains_key(bucket.name.as_str())
+                    || used(&bucket.name)
+                    || account.a_variable_names(&bucket.name)
+            })
             .map(|bucket| (bucket.name.as_str(), names.give("variable", &format!("{} bucket name", bucket.name))))
             .collect();
         Builder {
@@ -236,6 +240,19 @@ impl<'a> Builder<'a> {
             .attribute("principal", principal)
             .attribute("source_arn", source);
         (name, block)
+    }
+
+    /// A variable that holds the name of one of the account's buckets or queues: the bucket's variable, since S3's
+    /// names are global, or the queue's name.
+    fn named(&self, value: &Value) -> Option<Hcl> {
+        match self.account.named_by(value)? {
+            Named::Bucket(bucket) => {
+                self.bucket_variables.get(bucket).map(|variable| Hcl::reference(format!("var.{variable}")))
+            }
+            Named::Queue(queue) => {
+                self.queues.get(queue).map(|name| Hcl::reference(format!("aws_sqs_queue.{name}.name")))
+            }
+        }
     }
 
     fn queue_arn(&self, queue: &str) -> Hcl {
@@ -378,7 +395,9 @@ impl<'a> Builder<'a> {
         }
         let mut variables = Vec::new();
         for (key, value) in function.environment.iter().flatten() {
-            let value = if self.with_values {
+            let value = if let Some(reference) = self.named(value) {
+                reference
+            } else if self.with_values {
                 Hcl::from(value.as_str().map_or_else(|| value.to_string(), str::to_owned))
             } else {
                 Hcl::reference(format!("var.{}", self.value(&function.name, key, false)))
@@ -752,7 +771,7 @@ impl<'a> Builder<'a> {
             let Some(name) = self.bucket_variables.get(bucket.name.as_str()) else { continue };
             let description = if bucket.website.is_some() {
                 format!(
-                    "The site {}'s bucket on S3, for the roles that use it: the output Bucket of data/s3-website.md's stack, FF's name until it is made",
+                    "The site {}'s bucket on S3, for the functions that use it: the output Bucket of data/s3-website.md's stack, FF's name until it is made",
                     bucket.name
                 )
             } else {
@@ -835,5 +854,26 @@ mod tests {
         account.functions.clear();
         let paths: Vec<String> = terraform(&account, false, "").files.into_iter().map(|(path, _)| path).collect();
         assert_eq!(paths, ["terraform/main.tf", "terraform/variables.tf"]);
+    }
+
+    #[test]
+    fn a_variable_holding_a_buckets_or_a_queues_name_follows_it_with_values_or_without() {
+        let mut account = shop();
+        let receipts = account.functions.iter_mut().find(|record| record.function.name == "send-receipts").unwrap();
+        let environment = receipts.function.environment.get_or_insert_default();
+        environment.insert("PHOTOS".into(), Value::from("photos"));
+        environment.insert("ORDERS".into(), Value::from("orders"));
+
+        for with_values in [false, true] {
+            let terraform = terraform(&account, with_values, "");
+            let functions =
+                &terraform.files.iter().find(|(path, _)| path == "terraform/functions.tf").expect("functions.tf").1;
+            for line in
+                ["      ORDERS       = aws_sqs_queue.orders.name\n", "      PHOTOS       = var.photos_bucket_name\n"]
+            {
+                assert!(functions.contains(line), "{line} in {functions}");
+            }
+            assert!(!terraform.to_fill.iter().any(|parameter| ["PHOTOS", "ORDERS"].contains(&parameter.name.as_str())));
+        }
     }
 }

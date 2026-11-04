@@ -170,6 +170,8 @@ async function run(handler: Handler, message: InvokeMessage): Promise<WorkerMess
     // A string, as in AWS Lambda's Node.js runtime.
     memoryLimitInMB: String(config.memoryLimitMb),
     awsRequestId: message.requestId,
+    // What the caller said of itself, as Lambda passes a synchronous call's ClientContext on: undefined without one.
+    clientContext: message.clientContext,
     getRemainingTimeInMillis: () => Math.max(0, message.deadlineMs - Date.now()),
     // No callbackWaitsForEmptyEventLoop: it went with callback handlers, as on Lambda's Node.js 24.
   };

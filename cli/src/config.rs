@@ -29,7 +29,46 @@ pub fn is_account_id(text: &str) -> bool {
 /// AWS Lambda's rule for a function's name, which the API follows: 1 to 64 letters, digits,
 /// hyphens or underscores.
 pub fn is_function_name(text: &str) -> bool {
-    (1..=64).contains(&text.len())
+    is_word(text, 64)
+}
+
+/// SQS's rule for a standard queue's name, as the API's: 1 to 80 letters, digits, hyphens and underscores.
+pub fn is_queue_name(text: &str) -> bool {
+    is_word(text, 80)
+}
+
+/// AWS's prefixes and suffixes that no bucket of AWS's may have, and so no bucket of FF's.
+const RESERVED_PREFIXES: [&str; 3] = ["xn--", "sthree-", "amzn-s3-demo-"];
+const RESERVED_SUFFIXES: [&str; 4] = ["-s3alias", "--ol-s3", "--x-s3", "--table-s3"];
+
+/// AWS's rule for a bucket's name, as the API's, without dots: 3 to 63 lower-case letters, digits
+/// and hyphens, a letter or a digit first and last, none of the names AWS keeps.
+pub fn is_bucket_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let edge = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    (3..=63).contains(&bytes.len())
+        && bytes.first().is_some_and(edge)
+        && bytes.last().is_some_and(edge)
+        && bytes.iter().all(|byte| edge(byte) || *byte == b'-')
+        && !RESERVED_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+        && !RESERVED_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+}
+
+/// S3's event types a bucket of FF's sends, as the API takes them.
+pub const EVENT_TYPES: [&str; 8] = [
+    "s3:ObjectCreated:*",
+    "s3:ObjectCreated:Put",
+    "s3:ObjectCreated:Post",
+    "s3:ObjectCreated:Copy",
+    "s3:ObjectCreated:CompleteMultipartUpload",
+    "s3:ObjectRemoved:*",
+    "s3:ObjectRemoved:Delete",
+    "s3:ObjectRemoved:DeleteMarkerCreated",
+];
+
+/// 1 to `most` letters, digits, hyphens or underscores, as AWS names functions and queues.
+fn is_word(text: &str, most: usize) -> bool {
+    (1..=most).contains(&text.len())
         && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 

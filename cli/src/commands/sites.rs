@@ -212,11 +212,41 @@ fn configuration(current: Option<&Website>, options: &DeployOptions, files: &BTr
         (None, None) => files.contains_key("404.html").then(|| "404.html".to_owned()),
     };
     let single_page_app = options.single_page_app.or(current.map(|site| site.single_page_app)).unwrap_or(false);
+    body(&index, error.as_deref(), single_page_app)
+}
+
+/// A site's configuration as the API takes it.
+fn body(index: &str, error: Option<&str>, single_page_app: bool) -> Value {
     let mut body = json!({ "indexDocument": { "suffix": index }, "singlePageApp": single_page_app });
     if let Some(error) = error {
         body["errorDocument"] = json!({ "key": error });
     }
     body
+}
+
+/// The bucket's site as a template says it, its index document and its error document, none for no site: put when it
+/// differs, the single-page app's setting kept, which a template can't say; removed when the template has none. The
+/// site's address, and whether the deploy changed it.
+pub(super) fn ensure(
+    client: &Client,
+    bucket: &str,
+    wanted: Option<(&str, Option<&str>)>,
+) -> Result<(Option<String>, bool), Error> {
+    let current = website_of(client, bucket)?;
+    let Some((index, error)) = wanted else {
+        if current.is_some() {
+            client.done(&Call::delete(format!("/buckets/{bucket}/website")))?;
+        }
+        return Ok((None, current.is_some()));
+    };
+    let wanted = body(index, error, current.as_ref().is_some_and(|site| site.single_page_app));
+    match current {
+        Some(site) if unchanged(&site, &wanted) => Ok((Some(site.url), false)),
+        _ => {
+            let site: Website = client.json(&Call::put(format!("/buckets/{bucket}/website"), wanted))?;
+            Ok((Some(site.url), true))
+        }
+    }
 }
 
 /// Whether a configuration says what the bucket's says already.

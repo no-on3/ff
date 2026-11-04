@@ -5,7 +5,9 @@ code (worker.py):
 
   GET  /healthz   liveness: the main process is responsive
   GET  /readyz    readiness: user code is loaded (503 with the error if not)
-  POST /invoke    run the handler once; invocations are serialized, as on Lambda
+  POST /invoke    run the handler once; invocations are serialized, as on Lambda.
+                  X-FF-Log-Type: Tail asks for the call's last 4 KB of log, answered
+                  in X-FF-Log-Result; X-FF-Client-Context carries Lambda's ClientContext.
 
 A timeout, out-of-memory, or crash kills the worker and starts a fresh one, so
 even CPU-bound infinite loops are stopped and probes keep answering. If that
@@ -13,6 +15,7 @@ fresh worker can't load code that loaded before, the process exits, so that
 Kubernetes restarts the container. Environment variables are never logged.
 """
 import _thread
+import base64
 import json
 import math
 import os
@@ -26,10 +29,12 @@ import threading
 import time
 import traceback
 import uuid
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
 from ff_runtime import protocol
+from ff_runtime.output import LogTail, Output, WorkerStreams
 from ff_runtime.protocol import (
     FUNCTION_VERSION,
     HANDLER,
@@ -79,12 +84,28 @@ def memory_used_mb(worker):
     return max(1, round((own + (protocol.proc_status_kb("VmHWM", worker.pid) or 0)) / 1024))
 
 
+@dataclass
+class Call:
+    """One call of POST /invoke, as its request asked for it."""
+
+    request_id: str
+    event: object
+    client_context: dict | None = None  # Lambda's ClientContext, the JSON object the caller sent; None when it sent none
+    tail: LogTail | None = None  # the call's log, kept while it runs when the caller asked for its tail
+
+
 # A call refused before it ran, as the header says, so that the caller may send it to another instance: the backend does.
 NOT_RUN = (503, json.dumps({"errorType": "ServiceUnavailableException", "errorMessage": "Runtime is shutting down"}),
            {"x-ff-not-run": "shutting-down"})
 # How long the backend keeps a connection to a function unused before it closes it (kubernetes.orchestrator.ts): a
 # runtime that stops waits as long for its callers to close their connections.
 CALLER_IDLE_CLOSE_MS = 5000
+# How long END waits for the call's output once its result has come, or once the worker is gone: it comes within a
+# millisecond unless work the handler left running blocks the worker. Under the 2 s the backend allows past a call's
+# queue wait and timeout (kubernetes.orchestrator.ts), as the Node.js runtime's.
+OUTPUT_WAIT_S = 1.0
+# This process's stdout and stderr: the worker's output, and the runtime's own lines (output.py).
+OUTPUT = Output()
 
 
 class Supervisor:
@@ -100,22 +121,28 @@ class Supervisor:
         self.pending = 0  # admitted invocations whose response is not written yet
         self.process = None
         self.sock = None
+        self.streams = None  # the worker's stdout and stderr, which this process forwards
         self.start_worker()
 
     def start_worker(self):
         try:
             ours, theirs = socket.socketpair()
+            streams = WorkerStreams(OUTPUT, start_thread)
+            stdout, stderr = streams.give_worker()
             process = subprocess.Popen(
                 [sys.executable, "-P", "-m", "ff_runtime.worker", str(theirs.fileno()), str(os.getpid())],
                 pass_fds=[theirs.fileno()],
                 stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
             )
-        except (OSError, MemoryError) as error:
+            streams.worker_started()
+        except (OSError, MemoryError, RuntimeError) as error:
             fatal(f"cannot start the worker process: {error!r}")
         theirs.close()
         with self.lock:
             self.state, self.init_error = "starting", None
-            self.process, self.sock = process, ours
+            self.process, self.sock, self.streams = process, ours, streams
         try:
             start_thread(self._await_init, process, ours)
         except (RuntimeError, MemoryError) as error:
@@ -216,7 +243,7 @@ class Supervisor:
         with self.lock:
             self.lock.wait_for(lambda: self.pending == 0, timeout_s)
 
-    def invoke(self, request_id, event):
+    def invoke(self, call):
         """Runs one admitted invocation. Returns (status, body, headers)."""
         with self.lock:
             # A call still waiting its turn when the runtime stops is refused, never run (see main()).
@@ -233,18 +260,20 @@ class Supervisor:
                 if self.state != "ready":
                     error = self.init_error or {"errorType": "Runtime.Unavailable", "errorMessage": "Runtime is not ready"}
                     return 500, json.dumps(error), {"x-ff-function-error": "Unhandled"}
-                process, sock = self.process, self.sock
-            return self._run(process, sock, request_id, event)
+                process, sock, streams = self.process, self.sock, self.streams
+            return self._run(process, sock, streams, call)
         finally:
             with self.lock:
                 self.running = False
                 self.lock.notify_all()
 
-    def _run(self, process, sock, request_id, event):
-        print(f"START RequestId: {request_id} Version: {FUNCTION_VERSION}", flush=True)
+    def _run(self, process, sock, streams, call):
+        request_id = call.request_id
+        OUTPUT.keep_tail(call.tail)
+        OUTPUT.line(f"START RequestId: {request_id} Version: {FUNCTION_VERSION}")
         started = time.perf_counter()
         try:
-            protocol.send(sock, "invoke", request_id, event, time.time() * 1000 + TIMEOUT_MS)
+            protocol.send(sock, "invoke", request_id, call.event, time.time() * 1000 + TIMEOUT_MS, call.client_context)
             message = protocol.recv(sock) if protocol.wait_readable(sock, TIMEOUT_MS / 1000) else ["timeout"]
         except (EOFError, OSError):
             message = ["exited"]
@@ -259,6 +288,8 @@ class Supervisor:
         }
 
         status, body, replace = 200, message[-1], False
+        if message[0] in ("result", "error"):
+            streams.wait_for_call(request_id, OUTPUT_WAIT_S)  # the worker marked the end of the call's output
         if message[0] == "error":
             status, error_type, error_message = 500, message[1], message[2]
             replace = error_type == "Runtime.OutOfMemory"  # the worker exits after reporting it
@@ -268,12 +299,14 @@ class Supervisor:
         elif message[0] == "timeout":
             status, error_type = 504, "Sandbox.Timedout"
             error_message = f"Task timed out after {TIMEOUT_MS / 1000:.2f} seconds"
-            log(level="error", msg="task timed out; restarting worker", requestId=request_id, timeoutMs=TIMEOUT_MS)
             self.stop_worker(process, sock)
+            streams.wait_for_end(OUTPUT_WAIT_S)  # what the call wrote before it was stopped comes first
+            log(level="error", msg="task timed out; restarting worker", requestId=request_id, timeoutMs=TIMEOUT_MS)
             replace = True
         elif message[0] == "exited":
             # The socket closes while the interpreter is still exiting: wait for its exit status.
             status, (error_type, error_message) = 500, crash_error(self.stop_worker(process, sock, grace_s=2))
+            streams.wait_for_end(OUTPUT_WAIT_S)
             log(level="error", msg="function worker crashed; restarting", errorType=error_type,
                 errorMessage=error_message, requestId=request_id)
             replace = True
@@ -284,13 +317,15 @@ class Supervisor:
             self.stop_worker(process, sock, grace_s=2)
             self.start_worker()
 
-        print(f"END RequestId: {request_id}", flush=True)
-        print(
+        OUTPUT.line(f"END RequestId: {request_id}")
+        OUTPUT.line(
             f"REPORT RequestId: {request_id}\tDuration: {duration_ms:.2f} ms\t"
             f"Billed Duration: {math.ceil(duration_ms)} ms\tMemory Size: {MEMORY_MB} MB\t"
-            f"Max Memory Used: {memory_mb} MB",
-            flush=True,
+            f"Max Memory Used: {memory_mb} MB"
         )
+        OUTPUT.keep_tail(None)  # its log ends with its REPORT: what comes after is no call's, or the next one's
+        if call.tail:
+            headers["x-ff-log-result"] = call.tail.base64()
         return status, body, headers
 
 
@@ -300,6 +335,23 @@ SHUTTING_DOWN = threading.Event()
 
 def reject_constant(name):
     raise ValueError(f"{name} is not valid JSON")
+
+
+CLIENT_CONTEXT_REFUSED = (400, json.dumps({
+    "errorType": "InvalidRequestContentException",
+    "errorMessage": "Client context must be a valid Base64-encoded JSON object.",
+}))
+
+
+def client_context_of(header):
+    """Lambda's ClientContext from X-FF-Client-Context: the base64 of a JSON object, as the caller sent it to Lambda's
+    Invoke, its padding optional as Lambda's; None without the header. ValueError when it isn't one."""
+    if header is None:
+        return None
+    value = json.loads(base64.b64decode(header + "=" * (-len(header) % 4)), parse_constant=reject_constant)
+    if not isinstance(value, dict):
+        raise ValueError("the client context is not a JSON object")
+    return value
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -361,14 +413,22 @@ class Handler(BaseHTTPRequestHandler):
                 "errorMessage": f"Request must be smaller than {MAX_PAYLOAD_BYTES} bytes",
             })
             return
+        try:
+            client_context = client_context_of(self.headers.get("x-ff-client-context"))
+        except ValueError:
+            self.send_json(*CLIENT_CONTEXT_REFUSED)
+            return
         refusal = SUPERVISOR.admit()
         if refusal:
             self.send_json(*refusal)
             return
         try:
-            event = body if protocol.EVENT_FORMAT == "lambda" else self.wrapped(body, url)
-            request_id = self.headers.get("x-ff-request-id") or str(uuid.uuid4())
-            self.send_json(*SUPERVISOR.invoke(request_id, event))
+            self.send_json(*SUPERVISOR.invoke(Call(
+                request_id=self.headers.get("x-ff-request-id") or str(uuid.uuid4()),
+                event=body if protocol.EVENT_FORMAT == "lambda" else self.wrapped(body, url),
+                client_context=client_context,
+                tail=LogTail() if self.headers.get("x-ff-log-type") == "Tail" else None,
+            )))
         finally:
             SUPERVISOR.release()
 
@@ -498,6 +558,7 @@ def listen(port):
 
 def main():
     global SUPERVISOR
+    protocol.write_lines_with(OUTPUT.line)
     if protocol.EVENT_FORMAT not in protocol.EVENT_FORMATS:
         # A function given the wrong event would fail at every call, or worse, misread it: refuse to start instead.
         log(level="error", msg="unknown FF_EVENT_FORMAT", expected=list(protocol.EVENT_FORMATS))

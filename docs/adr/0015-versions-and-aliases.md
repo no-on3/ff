@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [step-5 plan](../step-5-plan.md)'s D9, and its choices (its §9, 7), confirmed on 2026-10-31 (the [decision log](../decisions.md)'s 51 to 64); how a version runs on the cluster measured by X-01's spike the same day |
 | **Date** | 2026-10-31 |
-| **Implementation** | Step-5 plan: decision D9; tasks X-05 (versions and aliases in the backend) and X-06 (in the console, `ff` and the admin app), with X-09 and X-10 for Lambda's operations of them. As built: X-05's scaler, idle sweep and capacity samples, and the qualifier wherever a function is named (below), decision 2 changed |
+| **Implementation** | Step-5 plan: decision D9; tasks X-05 (versions and aliases in the backend) and X-06 (in the console, `ff` and the admin app), with X-09 and X-10 for Lambda's operations of them. As built: X-05's scaler, idle sweep and capacity samples, and the qualifier wherever a function is named (below), decision 2 changed; X-06's Versions tab, `ff publish`, `ff versions` and `ff alias`, the alarms and metrics by version and alias, and the admin app's; Lambda's operations of them as [ADR 0014](0014-lambda-api.md)'s "As built: versions and aliases" says; X-14 documented it: the guide's "Versions, as Lambda's", "Aliases, as Lambda's" and "The way out", `how-it-works.html`'s scenario of an alias's share moving, and the page in French, [Fonctions, comme AWS Lambda](../fr/fonctions.md) |
 | **Related** | [ADR 0003](0003-code-delivery.md) (one code image per package, which a version names by digest); [ADR 0014](0014-lambda-api.md) (Lambda's API); [ADR 0016](0016-sam-templates.md) (SAM's `AutoPublishAlias`); the spike, [`hack/spikes/versions`](../../hack/spikes/versions/README.md) |
 
 ## Context

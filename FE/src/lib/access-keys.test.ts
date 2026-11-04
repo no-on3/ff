@@ -1,6 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import type { CreatedStorageKey } from '../services/api';
-import { NEW_KEY, awsVariables, draftProblem, draftReach, exportLines, keyNameProblem, keyReach, requestOf, storageChoices, tryCommand, withFunctions } from './access-keys';
+import { AWS_ENDPOINTS } from '../test-fixtures';
+import {
+  ENDPOINT_LABELS,
+  NEW_KEY,
+  awsVariables,
+  draftProblem,
+  draftReach,
+  endpointVariables,
+  exportLines,
+  keyNameProblem,
+  keyReach,
+  requestOf,
+  shellExports,
+  storageChoices,
+  tryCommand,
+  withFunctions,
+} from './access-keys';
 
 describe('an access key', () => {
   const key: CreatedStorageKey = {
@@ -53,6 +69,18 @@ describe('an access key', () => {
     expect(exportLines(key)).toBe(
       'export AWS_ACCESS_KEY_ID=AKFF7Q2MLKX4RTZB3W5N\nexport AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nexport AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.cloud\nexport AWS_ENDPOINT_URL_SQS=https://sqs.ffunc.cloud\nexport AWS_ENDPOINT_URL_SESV2=https://email.ffunc.cloud\nexport AWS_ENDPOINT_URL_LAMBDA=https://lambda.ffunc.cloud',
     );
+  });
+
+  it("says where FF is with the account's region and endpoints, Lambda's beside S3's, SQS's and SES's, each in words", () => {
+    const variables = endpointVariables(AWS_ENDPOINTS);
+    expect(variables.map(([name, value]) => `${ENDPOINT_LABELS[name]}: ${name}=${value}`)).toEqual([
+      'Region: AWS_REGION=tn-tunis-1',
+      'S3, for buckets: AWS_ENDPOINT_URL_S3=https://s3.ffunc.cloud',
+      'SQS, for queues: AWS_ENDPOINT_URL_SQS=https://sqs.ffunc.cloud',
+      'SES, for mail: AWS_ENDPOINT_URL_SESV2=https://email.ffunc.cloud',
+      "Lambda's API, for functions: AWS_ENDPOINT_URL_LAMBDA=https://lambda.ffunc.cloud",
+    ]);
+    expect(shellExports(variables.slice(0, 2))).toBe('export AWS_REGION=tn-tunis-1\nexport AWS_ENDPOINT_URL_S3=https://s3.ffunc.cloud');
   });
 
   it('is tried with a command for what it reaches, none for a key to functions alone', () => {

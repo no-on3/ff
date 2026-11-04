@@ -1,0 +1,35 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  {{name}}
+
+  Sample SAM Template for {{name}}: sam init's hello world as FF takes it, which ff deploy puts on FF and sam deploy on AWS
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+
+Resources:
+  HelloWorldFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      CodeUri: {{code_uri}}
+      Handler: {{handler}}
+      Runtime: {{runtime}}
+      Architectures:
+        - x86_64
+      # Where sam init's hello world has an Api event, which makes an API Gateway REST API that FF hasn't: a function
+      # URL, which FF and Lambda give alike, and which sends Lambda's URL event, as events/event.json holds one.
+      FunctionUrlConfig:
+        AuthType: NONE
+
+Outputs:
+  # sam init's HelloWorldApi names its REST API; here it is the function's URL. Its output of the IAM role SAM makes
+  # for the function is left out: FF has no IAM, and the function's own key stands for its role.
+  HelloWorldApi:
+    Description: "Function URL for Hello World function"
+    Value: !GetAtt HelloWorldFunctionUrl.FunctionUrl
+  HelloWorldFunction:
+    Description: "Hello World Lambda Function ARN"
+    Value: !GetAtt HelloWorldFunction.Arn

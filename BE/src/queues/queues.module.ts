@@ -7,6 +7,8 @@ import { BillingModule } from '../billing/billing.module';
 import { PlansModule } from '../plans/plans.module';
 import { Function } from '../functions/entities/function.entity';
 import { StorageModule } from '../storage/storage.module';
+import { TagsModule } from '../tags/tags.module';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { AsyncEventCount } from './async-event-count.entity';
 import { AsyncEventCounts } from './async-event-counts.service';
 import { BucketEventDelivery } from './bucket-event-delivery';
@@ -34,7 +36,7 @@ import { SqsOperations } from './sqs-operations';
  */
 @Module({
   // Buckets' events go to the account's functions and queues: a function by its row.
-  imports: [TypeOrmModule.forFeature([Queue, QueueMessage, QueueRequestCount, AsyncEventCount, Function]), StorageModule, PlansModule, BillingModule, AuditModule],
+  imports: [TypeOrmModule.forFeature([Queue, QueueMessage, QueueRequestCount, AsyncEventCount, Function]), StorageModule, PlansModule, BillingModule, AuditModule, TagsModule],
   controllers: [QueuesController],
   providers: [
     QueueStore,
@@ -45,10 +47,10 @@ import { SqsOperations } from './sqs-operations';
     AsyncEventCounts,
     {
       provide: SqsOperations,
-      inject: [CustomerQueues, QueueStore, QueueEvents, AuditService, QueueRequestCounts, ConfigService],
-      useFactory: (queues: CustomerQueues, store: QueueStore, events: QueueEvents, audit: AuditService, counts: QueueRequestCounts, config: ConfigService) => {
+      inject: [CustomerQueues, QueueStore, QueueEvents, AuditService, QueueRequestCounts, ResourceTagsService, ConfigService],
+      useFactory: (queues: CustomerQueues, store: QueueStore, events: QueueEvents, audit: AuditService, counts: QueueRequestCounts, tags: ResourceTagsService, config: ConfigService) => {
         const sqs = config.getOrThrow<{ base: string; region: string }>('sqs');
-        return new SqsOperations(queues, store, events, audit, counts, sqs.base, sqs.region);
+        return new SqsOperations(queues, store, events, audit, counts, tags, sqs.base, sqs.region);
       },
     },
     SqsFrontDoor,

@@ -3,6 +3,7 @@ against one fixture on a free port. No Docker needed.
 
 Run from runtimes/python:  python3 -m unittest discover -s tests -v
 """
+import base64
 import json
 import os
 import signal
@@ -621,6 +622,196 @@ class AcceptLoop(unittest.TestCase):
             return repr(error)
         finally:
             connection.close()
+
+
+def outside_their_call(output, request_ids):
+    """The lines of each call, which start with its ID, found outside its START and END."""
+    lines = output.splitlines()
+    outside = []
+    for request_id in request_ids:
+        start = lines.index(f"START RequestId: {request_id} Version: $LATEST")
+        end = lines.index(f"END RequestId: {request_id}")
+        outside += [line for at, line in enumerate(lines) if line.startswith(f"{request_id}:") and not start < at < end]
+    return outside
+
+
+class CallOutput(RuntimeTest):
+    """The log store tags each line with the call between its pod's START and REPORT lines (ADR 0005), so a line that
+    came after END would go untagged. The worker's output reaches the container's through the main process, which
+    prints END once the worker has marked the end of the call's output on both streams."""
+
+    def test_writes_every_line_of_a_call_before_its_end_on_stdout_and_stderr_and_never_the_end_of_call_markers(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="5000")
+        rt.ready()
+
+        # Calls that write mostly to stdout, and calls that write only to stderr: END waits for both streams.
+        calls = [(f"req-order-{i}", {"lines": 0, "errors": 20, "open": False} if i % 2 else {"lines": 20, "errors": 1})
+                 for i in range(1, 21)]
+        for request_id, body in calls:
+            self.assertEqual(rt.invoke(body, {"x-ff-request-id": request_id}).status, 200)
+
+        output = rt.logs()
+        self.assertNotIn("ff-end-of-call", output, "an end-of-call marker reached the output")
+        self.assertEqual(outside_their_call(output, [request_id for request_id, _ in calls]), [], output)
+
+    def test_starts_its_own_lines_on_a_line_of_their_own_when_the_call_left_one_open_and_adds_no_empty_line_otherwise(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="5000")
+        rt.ready()
+
+        rt.invoke({"lines": 1, "errors": 0}, {"x-ff-request-id": "req-open"})
+        rt.invoke({"lines": 1, "errors": 0, "open": False}, {"x-ff-request-id": "req-closed"})
+
+        output = rt.logs()
+        self.assertRegex(output, r"\nreq-open: line 1\nreq-open: left open\nEND RequestId: req-open\nREPORT RequestId: req-open\t")
+        self.assertRegex(output, r"\nSTART RequestId: req-closed Version: \$LATEST\nreq-closed: line 1\nEND RequestId: req-closed\nREPORT ")
+
+    def test_writes_what_a_call_wrote_before_its_timeout_ahead_of_the_timeout_and_its_end(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="500")
+        rt.ready()
+
+        res = rt.invoke({"lines": 3, "errors": 1, "open": False, "hangMs": 3000}, {"x-ff-request-id": "req-late"})
+
+        self.assertFunctionError(res, 504, "Sandbox.Timedout")
+        lines = rt.logs().splitlines()
+        timed_out = next(at for at, line in enumerate(lines) if '"msg": "task timed out; restarting worker"' in line)
+        written = [at for at, line in enumerate(lines) if line.startswith("req-late:")]
+        self.assertEqual(len(written), 4, lines)  # three lines on stdout, one on stderr
+        self.assertLess(max(written), timed_out)
+        self.assertLess(timed_out, lines.index("END RequestId: req-late"))
+
+
+class WhatLambdasCallerAsksFor(RuntimeTest):
+    """A caller of Lambda's Invoke may ask for the call's last 4 KB of log, which the log store has only seconds later,
+    and may say who it is, in a client context the handler reads."""
+
+    @staticmethod
+    def tail_of(res):
+        return base64.b64decode(res.headers.get("x-ff-log-result", "")).decode(errors="replace")
+
+    def test_gives_back_the_call_s_log_from_its_start_to_its_report_both_streams_when_asked_and_nothing_when_not(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="5000")
+        rt.ready()
+
+        asked = rt.invoke({"lines": 2, "errors": 1}, {"x-ff-request-id": "req-tail", "x-ff-log-type": "Tail"})
+        not_asked = rt.invoke({"lines": 1}, {"x-ff-request-id": "req-none"})
+
+        self.assertEqual(asked.status, 200)
+        lines = self.tail_of(asked).split("\n")
+        self.assertEqual(lines[0], "START RequestId: req-tail Version: $LATEST")
+        # Each stream's lines come whole, in either stream's order, through pipes of their own; the line left open last.
+        self.assertEqual(sorted(lines[1:4]), ["req-tail: error 1", "req-tail: line 1", "req-tail: line 2"])
+        self.assertEqual(lines[4:6], ["req-tail: left open", "END RequestId: req-tail"])
+        self.assertRegex(lines[6], r"^REPORT RequestId: req-tail\tDuration: [\d.]+ ms\t.*\tMax Memory Used: \d+ MB$")
+        self.assertEqual(lines[7:], [""])
+        self.assertNotIn("x-ff-log-result", not_asked.headers)
+
+    def test_keeps_a_long_call_s_last_4_kb_its_report_last(self):
+        rt = self.start("output", FUNCTION_TIMEOUT="5000")
+        rt.ready()
+
+        res = rt.invoke({"lines": 400, "errors": 0, "open": False}, {"x-ff-request-id": "req-long", "x-ff-log-type": "Tail"})
+
+        tail = base64.b64decode(res.headers["x-ff-log-result"])
+        self.assertEqual(len(tail), 4096)
+        self.assertNotIn(b"START RequestId", tail)
+        self.assertRegex(tail.decode(), r"req-long: line 400\nEND RequestId: req-long\nREPORT RequestId: req-long\t[^\n]+\n$")
+
+    def test_gives_back_the_log_of_a_call_that_raised_with_its_error_and_of_one_that_timed_out_with_the_timeout(self):
+        raises = self.start("throws")
+        times_out = self.start("timeout", FUNCTION_TIMEOUT="300")
+        raises.ready()
+        times_out.ready()
+
+        raised = raises.invoke({}, {"x-ff-request-id": "req-raised", "x-ff-log-type": "Tail"})
+        late = times_out.invoke({}, {"x-ff-request-id": "req-late", "x-ff-log-type": "Tail"})
+
+        self.assertFunctionError(raised, 500, "TypeError")
+        self.assertRegex(self.tail_of(raised),
+                         r'"msg": "function error", "requestId": "req-raised", "errorType": "TypeError"[^\n]*\nEND RequestId: req-raised\n')
+        self.assertFunctionError(late, 504, "Sandbox.Timedout")
+        self.assertRegex(self.tail_of(late), r'(?s)"msg": "task timed out; restarting worker", "requestId": "req-late".*\nEND RequestId: req-late\n')
+
+    def test_hands_the_caller_s_client_context_to_the_handler_as_lambda_s_objects_and_refuses_one_that_is_no_json_object(self):
+        rt = self.start("client-context")
+        rt.ready()
+        said = {"client": {"installation_id": "i-1", "app_title": "shop"}, "custom": {"cart": "7"}, "env": {"locale": "ar-TN"}}
+
+        def header(text):
+            return {"x-ff-client-context": base64.b64encode(text.encode()).decode()}
+
+        given = rt.invoke({}, header(json.dumps(said)))
+        without_client = rt.invoke({}, header(json.dumps({"custom": {"cart": "8"}})))
+        none = rt.invoke({})
+        refusals = [rt.invoke({}, header(text)) for text in ("not json", "[1]", "null", "NaN")]
+        unpadded = rt.invoke({}, {"x-ff-client-context": "e30"})  # "{}", its padding left out, as Lambda takes it
+
+        self.assertEqual(given.json, {
+            "custom": {"cart": "7"},
+            "env": {"locale": "ar-TN"},
+            "client": {"installation_id": "i-1", "app_title": "shop", "app_version_name": None, "app_version_code": None,
+                       "app_package_name": None},
+            "slots": False,
+        })
+        self.assertEqual(without_client.json, {"custom": {"cart": "8"}, "env": None, "client": None, "slots": False})
+        self.assertIsNone(none.json)
+        self.assertEqual(unpadded.json, {"custom": None, "env": None, "client": None, "slots": False})
+        message = "Client context must be a valid Base64-encoded JSON object."
+        for res in refusals:
+            self.assertEqual((res.status, res.json["errorType"], res.json["errorMessage"]), (400, "InvalidRequestContentException", message))
+
+
+class OutputMerging(unittest.TestCase):
+    """The worker's two streams and the runtime's lines, merged line by line as the container's log reads them, and
+    as the log of a call a caller of Lambda's Invoke asks for keeps them, its last 4 KB."""
+
+    def setUp(self):
+        from ff_runtime.output import LogTail, Output
+        self.written = []  # (fd, data) as written, in order: one log reading both streams
+        self.output = Output(write=lambda fd, data: self.written.append((fd, bytes(data))) or len(data))
+        self.tail = LogTail()
+        self.output.keep_tail(self.tail)
+
+    def log(self):
+        return b"".join(data for _, data in self.written).decode()
+
+    def tail_text(self):
+        return base64.b64decode(self.tail.base64()).decode()
+
+    def test_keeps_a_line_written_in_parts_whole_the_other_stream_s_lines_after_it(self):
+        # Unbuffered, the worker's print writes its text, then its newline, and the pipe may give them apart.
+        self.output.line("START")
+        self.output.forward("stdout", b"line 3")
+        self.output.forward("stderr", b"an error\n")
+        self.output.forward("stdout", b"\nthree, ")
+        self.output.forward("stdout", b"four\n")
+        self.output.line("END")
+
+        self.assertEqual(self.log(), "START\nan error\nline 3\nthree, four\nEND\n")
+        self.assertEqual(self.tail_text(), self.log())
+        self.assertEqual([fd for fd, _ in self.written], [1, 2, 1, 1, 1])
+
+    def test_ends_the_lines_the_streams_left_open_before_the_runtime_s_own_and_at_the_stream_s_end(self):
+        self.output.forward("stdout", b"open on stdout")
+        self.output.forward("stderr", b"open on stderr")
+        self.output.line("END")
+        self.output.forward("stderr", b"the worker's last words")
+        self.output.end_stream("stderr")
+        self.output.line("REPORT")
+
+        self.assertEqual(self.log(), "open on stdout\nopen on stderr\nEND\nthe worker's last words\nREPORT\n")
+        self.assertEqual(self.tail_text(), self.log())
+
+    def test_writes_a_line_left_open_past_its_bound_as_it_is_and_gives_back_the_last_4_kb(self):
+        from ff_runtime.output import HELD_LINE_BYTES, LOG_TAIL_BYTES
+        self.output.forward("stdout", b"x" * (3 * LOG_TAIL_BYTES))
+        self.assertEqual(self.written, [])  # held, within its bound
+        self.output.forward("stdout", b"x" * HELD_LINE_BYTES)
+        self.assertEqual(len(self.log()), 3 * LOG_TAIL_BYTES + HELD_LINE_BYTES)  # past it, written as it is
+        self.output.line("END")
+        kept = base64.b64decode(self.tail.base64())
+
+        self.assertEqual(len(kept), LOG_TAIL_BYTES)
+        self.assertEqual(kept, b"x" * (LOG_TAIL_BYTES - len(b"\nEND\n")) + b"\nEND\n")
 
 
 class Secrets(RuntimeTest):

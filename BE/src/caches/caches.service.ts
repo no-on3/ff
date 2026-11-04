@@ -2,10 +2,11 @@ import { BadRequestException, ConflictException, Inject, Injectable, Logger, Not
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isIP } from 'node:net';
-import { In, Not, QueryFailedError, Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
+import { isUniqueViolation } from '../common/unique-violation';
 import { CacheSettings } from '../config/configuration';
 import { ORCHESTRATOR, Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
@@ -13,9 +14,6 @@ import { CACHE_SERVER, CacheServer, CacheSpec, CacheUse } from './cache-server';
 import { newPassword, newServerName, passwordSha256 } from './cache-names';
 import { Cache, CacheStatus } from './cache.entity';
 import { CacheView, CacheWithPassword, CreateCacheDto } from './dto/cache.dto';
-
-/** PostgreSQL's unique_violation: the account has a cache of that name, or another took the port first. */
-const UNIQUE_VIOLATION = '23505';
 
 export const NO_CACHE_SERVER = "This FF has no server for customers' caches (FF_CACHE_HOST)";
 
@@ -105,7 +103,7 @@ export class CachesService {
         );
       });
     } catch (error) {
-      if (error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION) {
+      if (isUniqueViolation(error)) {
         throw new ConflictException(`The account has a cache named "${dto.name}" already`);
       }
       throw error;

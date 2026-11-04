@@ -1,0 +1,54 @@
+# The way out tried on AWS itself, once a month: hack/e2e-aws.sh deploys the small app's template with sam deploy,
+# checks there what FF leaves to AWS, and deletes the stack. Every other run checks the way out offline. Skipped
+# until the repository has an AWS account's role: its variable FF_AWS_ROLE_ARN names a role that GitHub's OIDC token
+# is exchanged for, an hour's credentials, so that no AWS key is kept here; FF_AWS_REGION, eu-west-3 unless set. The
+# role's trust and permissions are in the getting-started guide's pipeline section. A workflow of its own, as a
+# monthly schedule in ci.yml would start the nightly's jobs too; GitHub starts a schedule or a dispatch of a workflow
+# once it is on the default branch.
+name: aws
+
+on:
+  schedule:
+    - cron: '41 4 1 * *' # the 1st of each month, after the nightly
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aws
+  cancel-in-progress: false # a run deletes what it made before it ends
+
+jobs:
+  aws:
+    if: ${{ vars.FF_AWS_ROLE_ARN != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # GitHub's OIDC token, which AWS's STS takes for the role's credentials
+    env:
+      AWS_REGION: ${{ vars.FF_AWS_REGION || 'eu-west-3' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          lockfiles: examples/orders-app/package-lock.json
+          aws-tools: sam # the unit job's cache of the SAM CLI
+      - run: hack/install-tools.sh sam
+      - name: The role's credentials, for an hour
+        env:
+          ROLE: ${{ vars.FF_AWS_ROLE_ARN }}
+        run: |
+          token="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)"
+          aws sts assume-role-with-web-identity --role-arn "$ROLE" --role-session-name "ff-monthly-$GITHUB_RUN_ID" \
+            --web-identity-token "$token" --duration-seconds 3600 --query Credentials --output json >"$RUNNER_TEMP/role.json"
+          for field in AccessKeyId SecretAccessKey SessionToken; do echo "::add-mask::$(jq -r ".$field" "$RUNNER_TEMP/role.json")"; done
+          {
+            echo "AWS_ACCESS_KEY_ID=$(jq -r .AccessKeyId "$RUNNER_TEMP/role.json")"
+            echo "AWS_SECRET_ACCESS_KEY=$(jq -r .SecretAccessKey "$RUNNER_TEMP/role.json")"
+            echo "AWS_SESSION_TOKEN=$(jq -r .SessionToken "$RUNNER_TEMP/role.json")"
+          } >>"$GITHUB_ENV"
+          rm "$RUNNER_TEMP/role.json"
+      - run: hack/e2e-aws.sh

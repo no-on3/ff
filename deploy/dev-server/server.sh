@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # FF on its development server (README.md), as root, from the checkout install.sh copied to /data/ff/src: k3s and
 # gVisor; PostgreSQL, S3, mail, and customers' database, cache and mail servers beside the cluster, in Docker Compose;
-# FF's passwords and keys, made once, in /data/ff/secrets; the images built here and given to k3s; deploy/k8s applied
-# and the platform deployed by its deploy.sh; the first operator; FF's route in the server's own proxy (/data/proxy);
-# then every hostname checked through that proxy. A step already done does nothing, so that an update is the same
-# run. No password is ever printed, or put on a command line.
+# FF's passwords and keys, made once, in /data/ff/secrets; the images built here and given to k3s, and ff for the
+# smoke test; deploy/k8s applied and the platform deployed by its deploy.sh; the first operator; FF's route in the
+# server's own proxy (/data/proxy); then every hostname checked through that proxy. A step already done does nothing,
+# so that an update is the same run. No password is ever printed, or put on a command line.
 #   FF_VERSION=<the images' tag> FF_ADMIN_ALLOW=<address>/32 /data/ff/src/deploy/dev-server/server.sh
 set -euo pipefail
 home=/data/ff
@@ -428,3 +428,11 @@ check "customers' mail's SES endpoint: SES's refusal of an unsigned request" "40
 check "Lambda's endpoint: Lambda's refusal of an unsigned request" "403 MissingAuthenticationTokenException" \
   "$(at "lambda.$domain" /2015-03-31/functions/) $(header x-amzn-errortype)"
 echo "server.sh: $passed checks passed; FF $version is up at https://console.$domain"
+
+step "ff, built here as one static binary, which the smoke test deploys a template with"
+# Last, as FF's install needs none of it. In Rust's image (hack/build-cli.sh --container), on half the server's
+# processors, as other projects share them; Cargo's downloads and build kept in cli/target, which install.sh's copy
+# leaves alone, so that an update builds what changed.
+FF_BUILD_COMMIT="$version" CARGO_BUILD_JOBS="$(($(nproc) / 2))" "$src/hack/build-cli.sh" --container >"$work/ff-build.log" 2>&1 ||
+  { tail -n 20 "$work/ff-build.log" >&2; fail "ff's build failed"; }
+echo "  $("$src/cli/target/dist/ff-linux-x86_64" version | head -1)"

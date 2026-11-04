@@ -107,6 +107,16 @@ await check('ok', "GetQueueAttributes: SQS's attributes, the queue's own values 
   const { Attributes } = await queues.send(new sqs.GetQueueAttributesCommand({ QueueUrl: url, AttributeNames: ['All'] }));
   return expect([Attributes.VisibilityTimeout, Attributes.MessageRetentionPeriod, Attributes.ApproximateNumberOfMessagesDelayed], ['5', '345600', '1']);
 });
+await check('ok', "a queue's tags: CreateQueue's and TagQueue's, read by ListQueueTags, removed by UntagQueue; a key AWS keeps refused, InvalidParameterValue", async () => {
+  const tagged = (await queues.send(new sqs.CreateQueueCommand({ QueueName: 'e2e-sdk-tagged', tags: { team: 'shop' } }))).QueueUrl;
+  await queues.send(new sqs.TagQueueCommand({ QueueUrl: tagged, Tags: { stage: 'dev' } }));
+  const both = (await queues.send(new sqs.ListQueueTagsCommand({ QueueUrl: tagged }))).Tags;
+  await refusedAs(() => queues.send(new sqs.TagQueueCommand({ QueueUrl: tagged, Tags: { 'aws:team': 'x' } })), 'InvalidParameterValue', 'InvalidParameterValue');
+  await queues.send(new sqs.UntagQueueCommand({ QueueUrl: tagged, TagKeys: ['team', 'stage'] }));
+  const none = (await queues.send(new sqs.ListQueueTagsCommand({ QueueUrl: tagged }))).Tags;
+  await queues.send(new sqs.DeleteQueueCommand({ QueueUrl: tagged }));
+  return expect([both, none ?? 'none'], [{ stage: 'dev', team: 'shop' }, 'none']);
+});
 await check('ok', 'a queue that is not there: QueueDoesNotExist, by both its names', () => refusedAs(() => queues.send(new sqs.GetQueueUrlCommand({ QueueName: 'nowhere' })), 'QueueDoesNotExist', 'AWS.SimpleQueueService.NonExistentQueue'));
 await check('ok', "another account's queue, by its URL: one that doesn't exist", () =>
   refusedAs(() => queues.send(new sqs.SendMessageCommand({ QueueUrl: OTHER_URL, MessageBody: 'not mine' })), 'QueueDoesNotExist', 'AWS.SimpleQueueService.NonExistentQueue'));

@@ -7,6 +7,7 @@ import {
   FUNCTION_NAME_PATTERN,
   INVOCATION_STATUS_INFO,
   eventFormatText,
+  stackText,
   FUNCTION_NAME_RULE,
   MAX_FUNCTION_NAME_LENGTH,
   TRUNCATED_NOTE,
@@ -32,6 +33,7 @@ import { FunctionUrlTab } from './FunctionUrl';
 import { FunctionSchedules } from './FunctionSchedules';
 import { FunctionVersions } from './FunctionVersions';
 import { FunctionAsyncSettings } from './FunctionAsyncSettings';
+import { FunctionAwsCli } from './FunctionAwsCli';
 import { FunctionEventSources } from './FunctionEventSources';
 import { FunctionLogs } from './FunctionLogs';
 import FunctionAlarms from './FunctionAlarms';
@@ -250,6 +252,12 @@ const FunctionDetail: React.FC = () => {
             </Callout>
           )}
 
+          {stackText(func) && (
+            <Callout tone="info" title={`In the stack ${func.stack}`}>
+              {stackText(func)}
+            </Callout>
+          )}
+
           {func.status === 'ERROR' && func.error && (
             <Callout tone="danger" role="alert" title="This function can't run:">
               <pre className="font-mono text-xs break-all whitespace-pre-wrap">{func.error}</pre>
@@ -379,6 +387,8 @@ const FunctionDetail: React.FC = () => {
               <FunctionAlarms functionId={func.id} mayChange={mayChange} />
             </div>
           </div>
+
+          <FunctionAwsCli func={func} />
         </div>
       )}
 

@@ -204,19 +204,20 @@ run('the log pipeline on the dev cluster (L3)', () => {
     const nonce = word('n');
     const nodeCall = `it-log-node-${randomUUID()}`;
     const pythonCall = `it-log-python-${randomUUID()}`;
-    await orchestrator.invoke(printerA, { nonce, lines: 2, stderr: true }, nodeCall);
-    await orchestrator.invoke(python, { nonce }, pythonCall);
+    await orchestrator.invoke(printerA, { nonce, lines: 2, stderr: true }, { requestId: nodeCall });
+    await orchestrator.invoke(python, { nonce }, { requestId: pythonCall });
     const called = Date.now();
 
-    // Node.js: START, two lines, one on stderr, END, REPORT. Python: START, its print, END, REPORT.
+    // Node.js: START, two lines, one on stderr, END, REPORT. Python: START, its print, END, REPORT. In the store's
+    // order, as the backend reads them: its _time drops a fraction's trailing zeros, which a comparison of the
+    // strings would put after a later time's longer fraction.
     const lines = await until<StoredLine[]>("the two calls' 10 lines", 30_000, async () => {
-      const got = await query(`{namespace="${nsA}"} request_id:in("${nodeCall}", "${pythonCall}") _time:10m`);
+      const got = await query(`{namespace="${nsA}"} request_id:in("${nodeCall}", "${pythonCall}") _time:10m | sort by (_time, _msg)`);
       return got.length === 10 ? { done: got } : { last: got.map((l) => l._msg) };
     });
     const delayMs = Date.now() - called;
 
-    const of = (call: string) =>
-      lines.filter((l) => l.request_id === call).sort((a, b) => a._time.localeCompare(b._time) || a._msg.localeCompare(b._msg));
+    const of = (call: string) => lines.filter((l) => l.request_id === call);
     const node = of(nodeCall);
     expect(node[0]._msg).toBe(`START RequestId: ${nodeCall} Version: $LATEST`);
     expect(node.at(-1)?._msg).toMatch(new RegExp(`^REPORT RequestId: ${nodeCall}\\tDuration: `));
@@ -239,8 +240,8 @@ run('the log pipeline on the dev cluster (L3)', () => {
   it("reads pages of a function's lines as the logs API does (P-43): a call's, a phrase's, and back with the cursor", async () => {
     const nonce = word('page');
     const first = `it-log-page-1-${randomUUID()}`;
-    await orchestrator.invoke(printerA, { nonce, lines: 5 }, first);
-    await orchestrator.invoke(printerA, { nonce: word('other'), lines: 1 }, `it-log-page-2-${randomUUID()}`);
+    await orchestrator.invoke(printerA, { nonce, lines: 5 }, { requestId: first });
+    await orchestrator.invoke(printerA, { nonce: word('other'), lines: 1 }, { requestId: `it-log-page-2-${randomUUID()}` });
     const window = () => ({ start: new Date(Date.now() - 600_000), end: new Date(Date.now() + 1000), limit: 1000 });
 
     // The first call: START, its 5 lines, END and REPORT, oldest first.
@@ -289,8 +290,8 @@ run('the log pipeline on the dev cluster (L3)', () => {
       }
     })();
 
-    await orchestrator.invoke(printerA, { nonce: word('other'), lines: 1 }, `it-log-tail-other-${randomUUID()}`);
-    await orchestrator.invoke(printerA, { nonce, lines: 2 }, call);
+    await orchestrator.invoke(printerA, { nonce: word('other'), lines: 1 }, { requestId: `it-log-tail-other-${randomUUID()}` });
+    await orchestrator.invoke(printerA, { nonce, lines: 2 }, { requestId: call });
     const called = Date.now();
     await Promise.race([reading, new Promise((resolve) => setTimeout(resolve, 30_000))]);
     const delayMs = Date.now() - called;
@@ -311,8 +312,8 @@ run('the log pipeline on the dev cluster (L3)', () => {
     const nonce = word('flood');
     const floodCall = `it-log-flood-${randomUUID()}`;
     const quietCalls = Array.from({ length: 5 }, () => `it-log-quiet-${randomUUID()}`);
-    const flood = orchestrator.invoke(printerA, { nonce, lines: 30_000 }, floodCall);
-    for (const call of quietCalls) await orchestrator.invoke(printerB, { nonce: word('quiet'), lines: 5 }, call);
+    const flood = orchestrator.invoke(printerA, { nonce, lines: 30_000 }, { requestId: floodCall });
+    for (const call of quietCalls) await orchestrator.invoke(printerB, { nonce: word('quiet'), lines: 5 }, { requestId: call });
     await flood;
 
     // Each of the call's 30,003 lines (with START, END and REPORT) is either stored or counted in a notice.
@@ -342,7 +343,7 @@ run('the log pipeline on the dev cluster (L3)', () => {
 
   it('cuts a line past 16,384 bytes at the start of a character', async () => {
     const call = `it-log-long-${randomUUID()}`;
-    await orchestrator.invoke(printerA, { text: '€'.repeat(40_000) }, call); // 120,000 bytes, written in parts
+    await orchestrator.invoke(printerA, { text: '€'.repeat(40_000) }, { requestId: call }); // 120,000 bytes, written in parts
 
     const [line] = await until<StoredLine[]>('the long line', 30_000, async () => {
       const got = await query(`{namespace="${nsA}"} request_id:="${call}" "truncated" _time:10m`);
@@ -393,8 +394,8 @@ run('the log pipeline on the dev cluster (L3)', () => {
 
   it("deletes an account's namespace and every line of it, as closing the account does, and leaves another account's (P-45)", async () => {
     const nonce = word('closing');
-    await orchestrator.invoke(printerA, { nonce, lines: 3 }, `it-log-close-a-${randomUUID()}`);
-    await orchestrator.invoke(printerB, { nonce, lines: 3 }, `it-log-close-b-${randomUUID()}`);
+    await orchestrator.invoke(printerA, { nonce, lines: 3 }, { requestId: `it-log-close-a-${randomUUID()}` });
+    await orchestrator.invoke(printerB, { nonce, lines: 3 }, { requestId: `it-log-close-b-${randomUUID()}` });
     await until<boolean>("both accounts' new lines stored", 30_000, async () => {
       const [a, b] = await Promise.all([count(`{namespace="${nsA}"} "${nonce}"`), count(`{namespace="${nsB}"} "${nonce}"`)]);
       return a === 3 && b === 3 ? { done: true } : { last: { a, b } };

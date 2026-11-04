@@ -12,6 +12,7 @@ import urllib.request
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 endpoint = os.environ["ENDPOINT"]
 bucket = os.environ["BUCKET"]
@@ -36,6 +37,70 @@ def same(actual, wanted):
     if actual != wanted:
         raise AssertionError(f"got {actual!r}, not {wanted!r}")
     return actual
+
+
+def refused_as(code, run):
+    """Fails unless the call is refused with S3's error of that code."""
+    try:
+        run()
+    except ClientError as error:
+        return same(error.response["Error"]["Code"], code)
+    raise AssertionError(f"accepted, not refused {code}")
+
+
+def bucket_life():
+    name = f"{bucket}-boto3"
+    s3.create_bucket(Bucket=name, CreateBucketConfiguration={"LocationConstraint": "tn-tunis-1"})
+    s3.put_object(Bucket=name, Key="kept.txt", Body=b"kept")
+    full = refused_as("BucketNotEmpty", lambda: s3.delete_bucket(Bucket=name))
+    s3.delete_object(Bucket=name, Key="kept.txt")
+    s3.delete_bucket(Bucket=name)
+    return f"{full} {refused_as('404', lambda: s3.head_bucket(Bucket=name))}"
+
+
+def bucket_refusals():
+    elsewhere = refused_as("IllegalLocationConstraintException", lambda: s3.create_bucket(Bucket=f"{bucket}-boto3", CreateBucketConfiguration={"LocationConstraint": "eu-west-1"}))
+    reserved = refused_as("InvalidBucketName", lambda: s3.create_bucket(Bucket="xn--boto3", CreateBucketConfiguration={"LocationConstraint": "tn-tunis-1"}))
+    return f"{elsewhere} {reserved}"
+
+
+def bucket_tags():
+    name = f"{bucket}-boto3-tags"
+    s3.create_bucket(Bucket=name, CreateBucketConfiguration={"LocationConstraint": "tn-tunis-1"})
+    s3.put_bucket_tagging(Bucket=name, Tagging={"TagSet": [{"Key": "team", "Value": "web"}, {"Key": "stage", "Value": "dev"}]})
+    s3.put_bucket_tagging(Bucket=name, Tagging={"TagSet": [{"Key": "team", "Value": "shop"}]})
+    kept = s3.get_bucket_tagging(Bucket=name)["TagSet"]
+    s3.delete_bucket_tagging(Bucket=name)
+    none = refused_as("NoSuchTagSet", lambda: s3.get_bucket_tagging(Bucket=name))
+    s3.delete_bucket(Bucket=name)
+    return f"{same(kept, [{'Key': 'team', 'Value': 'shop'}]) and 'replaced'} {none}"
+
+
+def site_access():
+    policy = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": f"arn:aws:s3:::{bucket}/*"}]})
+    s3.put_public_access_block(Bucket=bucket, PublicAccessBlockConfiguration={"BlockPublicAcls": False, "IgnorePublicAcls": False, "BlockPublicPolicy": False, "RestrictPublicBuckets": True})
+    s3.put_bucket_policy(Bucket=bucket, Policy=policy)
+    same(s3.get_bucket_policy(Bucket=bucket)["Policy"], policy)
+    same(s3.get_public_access_block(Bucket=bucket)["PublicAccessBlockConfiguration"]["RestrictPublicBuckets"], True)
+    s3.delete_bucket_policy(Bucket=bucket)
+    s3.delete_public_access_block(Bucket=bucket)
+    return f"{refused_as('NoSuchBucketPolicy', lambda: s3.get_bucket_policy(Bucket=bucket))} {refused_as('NoSuchPublicAccessBlockConfiguration', lambda: s3.get_public_access_block(Bucket=bucket))}"
+
+
+def unset_settings():
+    missing = [refused_as(code, lambda read=read: read(Bucket=bucket)) for code, read in [
+        ("NoSuchCORSConfiguration", s3.get_bucket_cors),
+        ("NoSuchLifecycleConfiguration", s3.get_bucket_lifecycle_configuration),
+        ("ReplicationConfigurationNotFoundError", s3.get_bucket_replication),
+        ("ServerSideEncryptionConfigurationNotFoundError", s3.get_bucket_encryption),
+        ("ObjectLockConfigurationNotFoundError", s3.get_object_lock_configuration),
+    ]]
+    same(s3.get_bucket_versioning(Bucket=bucket).get("Status"), None)
+    same(s3.get_bucket_accelerate_configuration(Bucket=bucket).get("Status"), None)
+    same(s3.get_bucket_logging(Bucket=bucket).get("LoggingEnabled"), None)
+    same(s3.get_bucket_request_payment(Bucket=bucket)["Payer"], "BucketOwner")
+    same([grant["Permission"] for grant in s3.get_bucket_acl(Bucket=bucket)["Grants"]], ["FULL_CONTROL"])
+    return f"{len(missing)} none, the rest a new bucket's"
 
 
 def fetch(url, method="GET", data=None):
@@ -77,3 +142,8 @@ check("refused", "a presigned URL past its expiry: AccessDenied", expired)
 check("refused", "a wrong secret: SignatureDoesNotMatch", lambda: boto3.session.Session(aws_access_key_id=os.environ["KEY"], aws_secret_access_key=os.environ["SECRET"] + "x", region_name="tn-tunis-1").client("s3", endpoint_url=endpoint).head_object(Bucket=bucket, Key="boto/hello.txt"))
 check("refused", "another account's bucket: AccessDenied", lambda: s3.get_object(Bucket=other, Key="anything.txt"))
 check("ok", "copies, then deletes a batch", lambda: (s3.copy_object(Bucket=bucket, Key="boto/copy.txt", CopySource={"Bucket": bucket, "Key": "boto/hello.txt"}), same(len(s3.delete_objects(Bucket=bucket, Delete={"Objects": [{"Key": "boto/copy.txt"}, {"Key": "boto/presigned.txt"}]})["Deleted"]), 2))[1])
+check("ok", "create_bucket in FF's region; delete_bucket refused while it holds a file, BucketNotEmpty, then deleted", bucket_life)
+check("ok", "create_bucket in another region, IllegalLocationConstraintException; a name AWS keeps, InvalidBucketName", bucket_refusals)
+check("ok", "a bucket's tags put, the second set replacing the first, read, then deleted: NoSuchTagSet", bucket_tags)
+check("ok", "a bucket's settings FF's buckets don't have, read as S3 answers a bucket without them", unset_settings)
+check("ok", "a bucket's policy and public access block kept and read back, then removed: none, in S3's errors", site_access)

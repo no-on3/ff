@@ -4,9 +4,13 @@ between the two processes. Runtime protocol v3.
 Messages are JSON arrays sent over a socket pair, each prefixed by its length
 as a 4-byte big-endian integer:
 
-  main -> worker: ["invoke", request_id, event, deadline_ms]
+  main -> worker: ["invoke", request_id, event, deadline_ms, client_context]
   worker -> main: ["ready"] | ["init_error", type, message]
                   | ["result", json_text] | ["error", type, message]
+
+The worker's stdout and stderr are pipes that main.py reads and forwards
+(output.py): before each "result" or "error", the worker ends the call's output
+on both with END_OF_CALL, the call's request ID, and a newline.
 """
 import json
 import os
@@ -16,6 +20,8 @@ from datetime import datetime, timezone
 
 # AWS Lambda's synchronous request and response limit.
 MAX_PAYLOAD_BYTES = 6 * 1024 * 1024
+# What the worker writes on its stdout and its stderr once a call's output is all written (output.py).
+END_OF_CALL = b"\0ff-end-of-call:"
 
 
 def env_int(name, default):
@@ -46,9 +52,23 @@ EVENT_FORMATS = ("lambda", "wrapped")
 EVENT_FORMAT = os.environ.get("FF_EVENT_FORMAT", "lambda")
 
 
+def _print_line(text):
+    print(text, flush=True)
+
+
+# How a line of the runtime's own is written: printed, in the worker; through the Output, in main.py.
+_write_line = _print_line
+
+
+def write_lines_with(write_line):
+    """Has log() write its lines with write_line: main.py's Output, which it shares with the worker's output."""
+    global _write_line
+    _write_line = write_line
+
+
 def log(**fields):
     """Writes one JSON log line. Never pass environment values."""
-    print(json.dumps({"time": datetime.now(timezone.utc).isoformat(), **fields}), flush=True)
+    _write_line(json.dumps({"time": datetime.now(timezone.utc).isoformat(), **fields}))
 
 
 def proc_status_kb(field, pid="self"):

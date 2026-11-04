@@ -13,6 +13,8 @@ import { EncryptionService } from '../encryption/encryption.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { Bucket } from './bucket.entity';
 import { BucketsService } from './buckets.service';
+import { ResourceTag } from '../tags/resource-tag.entity';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
 import { StorageKeysService } from './storage-keys.service';
@@ -32,7 +34,7 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
   let storeBuckets: StoreBuckets;
   let directory: StorageDirectory;
   let audit: AuditService;
-  const service = (limits = {}, buckets = storeBuckets) => new BucketsService(db.dataSource.getRepository(Bucket), buckets, onePlan(plan(limits)), audit, config);
+  const service = (limits = {}, buckets = storeBuckets) => new BucketsService(db.dataSource.getRepository(Bucket), buckets, onePlan(plan(limits)), audit, config, new ResourceTagsService(db.dataSource.getRepository(ResourceTag), audit));
   const keys = (limits = {}) => new StorageKeysService(db.dataSource.getRepository(StorageKey), directory, audit, onePlan(plan(limits)), config);
   const rowOf = (name: string) => db.dataSource.getRepository(Bucket).findOneBy({ name });
   const actions = async (accountId: string) =>
@@ -92,10 +94,29 @@ run("buckets and access keys, in FF's database and the store (L2)", () => {
       await db.dataSource.query(`INSERT INTO bucket_samples (bucket_id, hour, account_id, name, size_bytes, objects) VALUES ($1, $2, $3, $4, $5, 3)`, [row!.id, hour, ACCOUNT, name, size]);
     }
     const measured = { ...view, sizeBytes: 7_634_423, objects: 3, measuredAt: new Date('2026-10-23T09:00:00Z') };
-    expect([await service().list(ACCOUNT), await service().get(ACCOUNT, name)]).toEqual([[measured], measured]);
+    expect([await service().list(ACCOUNT), await service().get(ACCOUNT, name)]).toEqual([[measured], { ...measured, tags: {} }]);
     expect(await service().list(OTHER)).toEqual([]);
     await expect(service().get(OTHER, name)).rejects.toThrow(NotFoundException);
     expect(await actions(ACCOUNT)).toContain(`bucket.create bucket:${name}`);
+  });
+
+  it("takes a bucket's tags through the API: made with them, replaced whole, {} removing them, in its own answer alone, each change in the audit log", async () => {
+    const name = unique('labelled');
+
+    expect((await service().create(ACCOUNT, { name, tags: { team: 'photos', stage: 'dev' } })).tags).toBeUndefined();
+    expect((await service().get(ACCOUNT, name)).tags).toEqual({ stage: 'dev', team: 'photos' });
+    expect((await service().update(ACCOUNT, name, { tags: { stage: 'prod' } })).tags).toEqual({ stage: 'prod' });
+    expect((await service().update(ACCOUNT, name, {})).tags).toEqual({ stage: 'prod' });
+    expect((await service().update(ACCOUNT, name, { tags: {} })).tags).toEqual({});
+    expect((await service().list(ACCOUNT)).filter((bucket) => bucket.name === name).map((bucket) => bucket.tags)).toEqual([undefined]);
+    await expect(service().update(OTHER, name, { tags: { team: 'theirs' } })).rejects.toThrow(new NotFoundException(`The account has no bucket named "${name}"`));
+
+    const entries = await db.dataSource.getRepository(AuditEntry).find({ where: { accountId: ACCOUNT, resource: `bucket:${name}` }, order: { at: 'ASC' } });
+    expect(entries.map((entry) => [entry.action, entry.details])).toEqual([
+      ['bucket.create', { name, store: (await rowOf(name))?.storeName, tags: { team: 'photos', stage: 'dev' } }],
+      ['bucket.tag', { tags: { stage: 'prod' }, replaced: true }],
+      ['bucket.untag', { keys: ['stage'] }],
+    ]);
   });
 
   it('counts the plan under a lock: of two at once past it, one is refused', async () => {

@@ -224,6 +224,8 @@ export class EventSourcePoller implements OnModuleInit, OnModuleDestroy {
     if (!target) return waits(`the function has no ${qualifierText(mapping.qualifier)}`);
     // A version reads whatever $LATEST's state, as a call that waits runs it.
     if (!target.version && fn.status !== FunctionStatus.ACTIVE) return waits('the function is not ACTIVE');
+    // Read, its batches would be throttled and come back, each receive counted toward the queue's dead-letter queue.
+    if (fn.callsStopped) return waits("the function's reserved concurrency is 0");
     const account = await this.accounts.findOne({ where: { id: mapping.accountId }, select: { id: true, status: true, storageDisabledAt: true } });
     if (!account || account.status !== AccountStatus.ACTIVE) return waits('the account is not active');
     if (account.storageDisabledAt) return waits("FF turned the account's databases, buckets and queues off");

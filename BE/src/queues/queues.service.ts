@@ -4,6 +4,7 @@ import { Principal } from '../auth/principal';
 import { CreditService } from '../billing/credit.service';
 import { PlansService } from '../plans/plans.service';
 import { StorageDirectory } from '../storage/storage-directory.service';
+import { ResourceTagsService, taggedQueue } from '../tags/resource-tags.service';
 import { CustomerQueues } from './customer-queues';
 import { CreateQueueDto, QueueAttributesDto, QueueView, ReceiveMessagesDto, ReceivedMessageView, SendMessageDto, SentMessageView, UpdateQueueDto } from './dto/queue.dto';
 import { Queue } from './queue.entity';
@@ -51,6 +52,7 @@ export class QueuesService {
     private readonly plans: PlansService,
     private readonly credit: CreditService,
     private readonly directory: StorageDirectory,
+    private readonly tags: ResourceTagsService,
     config: ConfigService,
   ) {
     const sqs = config.getOrThrow<{ base: string; region: string }>('sqs');
@@ -65,24 +67,30 @@ export class QueuesService {
     return queues.map((queue) => this.view(queue, counts.get(queue.id)));
   }
 
+  /** A queue with its messages counted and its tags. */
   async get(accountId: string, name: string): Promise<QueueView> {
     const queue = await this.find(accountId, name);
-    return this.view(queue, await this.queues.counts(queue, new Date()));
+    return { ...this.view(queue, await this.queues.counts(queue, new Date())), tags: await this.tags.of(taggedQueue(queue)) };
   }
 
   /** As SQS's CreateQueue, but for a name the account has already: 409, whatever its attributes; none made while FF has the account's queues off, as buckets. */
   async create(principal: Principal, dto: CreateQueueDto): Promise<QueueView> {
     await this.open(principal.accountId);
     if (await this.queues.find(principal.accountId, dto.name)) throw new ConflictException(`The account has a queue named "${dto.name}" already`);
-    const { name, ...attributes } = dto;
-    await this.run('CreateQueue', { QueueName: name, Attributes: sqsAttributes(attributes) }, principal, name, HttpStatus.BAD_REQUEST);
+    const { name, tags, ...attributes } = dto;
+    await this.run('CreateQueue', { QueueName: name, Attributes: sqsAttributes(attributes), ...(tags ? { tags } : {}) }, principal, name, HttpStatus.BAD_REQUEST);
     return this.get(principal.accountId, name);
   }
 
-  /** As SQS's SetQueueAttributes: what is given changes, the rest stays. */
+  /** As SQS's SetQueueAttributes: what is given changes, the rest stays; tags given replace the queue's. */
   async update(principal: Principal, name: string, dto: UpdateQueueDto): Promise<QueueView> {
     const queue = await this.find(principal.accountId, name);
-    await this.run('SetQueueAttributes', { QueueUrl: this.urlOf(queue), Attributes: sqsAttributes(dto) }, principal, name);
+    const { tags, ...rest } = dto;
+    const attributes = sqsAttributes(rest);
+    if (tags === undefined || Object.keys(attributes).length > 0) {
+      await this.run('SetQueueAttributes', { QueueUrl: this.urlOf(queue), Attributes: attributes }, principal, name);
+    }
+    if (tags !== undefined) await this.tags.replace(principal.accountId, taggedQueue(queue), tags);
     return this.get(principal.accountId, name);
   }
 

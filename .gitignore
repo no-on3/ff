@@ -177,6 +177,7 @@ hack/.sam/
 hack/.e2e/
 hack/.e2e-tenancy/
 hack/.cli-e2e/
+hack/.aws-tools/
 hack/.code-delivery-spike/
 # hack/spikes/queue: pgmq's release, the SDKs, the dumps (step 3's spike)
 hack/.spike-queue/
@@ -200,3 +201,5 @@ hack/.cache/
 hack/.ci/
 # The small app's page's API address, written at its deploy.
 examples/orders-app/site/config.json
+# Python's compiled files, wherever a script ran.
+__pycache__/

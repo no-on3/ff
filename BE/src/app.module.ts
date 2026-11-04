@@ -32,6 +32,7 @@ import { PlansService } from './plans/plans.service';
 import { RateLimitGuard, rateLimitOptions } from './plans/rate-limits';
 import { RetentionModule } from './retention/retention.module';
 import { SchedulesModule } from './schedules/schedules.module';
+import { StacksModule } from './stacks/stacks.module';
 import { StorageModule } from './storage/storage.module';
 
 @Module({
@@ -72,6 +73,7 @@ import { StorageModule } from './storage/storage.module';
     PlansModule,
     RetentionModule,
     SchedulesModule,
+    StacksModule,
     StorageModule,
   ],
   controllers: [HealthController],

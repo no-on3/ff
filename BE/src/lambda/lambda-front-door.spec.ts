@@ -8,7 +8,7 @@
  * Terraform sent the spike's endpoint (hack/spikes/lambda/recordings),
  * replayed as they were signed.
  */
-import { Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { SignatureV4 } from '@smithy/signature-v4';
@@ -16,43 +16,33 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { IncomingHttpHeaders, OutgoingHttpHeaders, request as httpRequest } from 'node:http';
 import { join } from 'node:path';
 import { AccountStatus } from '../accounts/entities/account.entity';
+import { currentRequest } from '../common/request-context';
 import { Sha256 } from '../common/test-fixtures';
+import { EncryptionService } from '../encryption/encryption.service';
+import { DEVELOPMENT_KEY } from '../encryption/key-ring';
 import { Function } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { onePlan, plan } from '../plans/test-fixtures';
 import { ActiveKey, EXPIRED, StorageDirectory } from '../storage/storage-directory.service';
+import { CODE_LINK_MS, LambdaCodeLinks } from './lambda-code-links';
 import { LambdaFrontDoor } from './lambda-front-door';
 import { LambdaCall, LambdaCaller, LambdaHandler, LambdaOperations, operationOf } from './lambda-operations';
+import { ACCOUNT, REGION, accessKey } from './test-fixtures';
 
-const ACCOUNT = '000000000001';
-const REGION = 'tn-tunis-1';
 const ARN = `arn:aws:lambda:${REGION}:${ACCOUNT}:function`;
 
-const key = (id: string, more: Partial<ActiveKey>): ActiveKey => ({
-  id,
-  accountId: ACCOUNT,
-  name: null,
-  functionId: null,
-  buckets: null,
-  queues: null,
-  functions: null,
-  functionAccess: null,
-  readOnly: false,
-  secret: `${id.toLowerCase()}-secret`,
-  ...more,
-});
-const WRITER = key('AKFFWRITERAAAAAAAAAA', { name: 'deploy', functions: ['*'], functionAccess: 'write' });
-const READER = key('AKFFREADERAAAAAAAAAA', { name: 'reader', functions: ['orders'], functionAccess: 'read' });
-const INVOKER = key('AKFFINVOKERAAAAAAAAA', { functions: ['orders'], functionAccess: 'invoke' });
+const WRITER = accessKey('AKFFWRITERAAAAAAAAAA', { name: 'deploy', functions: ['*'], functionAccess: 'write' });
+const READER = accessKey('AKFFREADERAAAAAAAAAA', { name: 'reader', functions: ['orders'], functionAccess: 'read' });
+const INVOKER = accessKey('AKFFINVOKERAAAAAAAAA', { functions: ['orders'], functionAccess: 'invoke' });
 /** A key to the account's buckets, queues and mail, as every key made before keys reached functions. */
-const STORAGE = key('AKFFSTORAGEAAAAAAAAA', {});
-const FUNCTION_KEY = key('AKFFFUNCTIONAAAAAAAA', { functionId: 'f-billing' });
-const OTHERS = key('AKFFOTHERSAAAAAAAAAA', { accountId: '000000000002', name: 'deploy', functions: ['*'], functionAccess: 'write' });
+const STORAGE = accessKey('AKFFSTORAGEAAAAAAAAA');
+const FUNCTION_KEY = accessKey('AKFFFUNCTIONAAAAAAAA', { functionId: 'f-billing' });
+const OTHERS = accessKey('AKFFOTHERSAAAAAAAAAA', { accountId: '000000000002', name: 'deploy', functions: ['*'], functionAccess: 'write' });
 /** A function's key past its end, which the directory says so of. */
 const PAST = 'AKFFPASTAAAAAAAAAAAA';
 
 /** The spike's own key, made up, which its recordings are signed with, in the account its ARNs name. */
-const SPIKE = key('AKFFSPIKELAMBDA23456', { accountId: '123456789012', functions: ['*'], functionAccess: 'write', secret: 'the-spike-s-own-secret-not-a-real-one' });
+const SPIKE = accessKey('AKFFSPIKELAMBDA23456', { accountId: '123456789012', functions: ['*'], functionAccess: 'write', secret: 'the-spike-s-own-secret-not-a-real-one' });
 
 const fn = (accountId: string, name: string): Function => Object.assign(new Function(), { id: `f-${name}`, accountId, name });
 
@@ -89,7 +79,14 @@ describe("Lambda's endpoint (L1)", () => {
     findAll: jest.fn(async (accountId: string, name: string) =>
       (accountId === ACCOUNT && ['orders', 'billing'].includes(name)) || accountId === SPIKE.accountId ? [fn(accountId, name)] : [],
     ),
+    // The code a link names: orders' and its version 3's; any other function is gone.
+    code: jest.fn(async (accountId: string, id: string, { version }: { version?: number } = {}) => {
+      if (accountId !== ACCOUNT || id !== 'f-orders' || (version !== undefined && version !== 3)) throw new NotFoundException('gone');
+      return { name: 'orders', zip: Buffer.from(version === undefined ? 'PK latest' : 'PK version 3') };
+    }),
   } as unknown as FunctionsService;
+  const config = new ConfigService({ lambda: { region: REGION, base: 'http://lambda.ff.test' }, encryption: { keys: [DEVELOPMENT_KEY] } });
+  const links = new LambdaCodeLinks(new EncryptionService(config), config);
   const operations = { handler: (name: string) => built.get(name) } as unknown as LambdaOperations;
   const throttler = {
     increment: async (counter: string) => {
@@ -106,7 +103,7 @@ describe("Lambda's endpoint (L1)", () => {
   const build = (...names: string[]) => names.forEach((name) => built.set(name, recording));
 
   beforeAll(async () => {
-    frontDoor = new LambdaFrontDoor(new ConfigService({ lambda: { region: REGION } }), directory, functions, operations, onePlan(plan({ writesPerMinute: 3 })), throttler);
+    frontDoor = new LambdaFrontDoor(config, directory, functions, operations, links, onePlan(plan({ writesPerMinute: 3 })), throttler);
     port = (await frontDoor.listen(0, '127.0.0.1')).port;
   });
 
@@ -156,20 +153,82 @@ describe("Lambda's endpoint (L1)", () => {
 
   const refusal = (answer: Answer) => [answer.status, answer.headers['x-amzn-errortype'], answer.body.message];
 
+  describe("a link to a function's code, as GetFunction gives it", () => {
+    /** Asks for a link, unsigned, as anyone with it may: its status, its type, its body as text. */
+    async function open(link: string): Promise<[number, string | null, string]> {
+      const answer = await fetch(`http://127.0.0.1:${port}${new URL(link).pathname}`);
+      return [answer.status, answer.headers.get('content-type'), await answer.text()];
+    }
+    const s3Error = (code: string, message: string) => `<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>${code}</Code><Message>${message}</Message></Error>`;
+
+    it("answers the zip, unsigned, at the endpoint's /code/{token}: $LATEST's, or a version's", async () => {
+      const latest = links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders' });
+
+      expect(latest).toMatch(/^http:\/\/lambda\.ff\.test\/code\/[A-Za-z0-9_-]+$/);
+      expect(await open(latest)).toEqual([200, 'application/zip', 'PK latest']);
+      expect(await open(links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders', version: 3 }))).toEqual([200, 'application/zip', 'PK version 3']);
+    });
+
+    it('refuses one past its 10 minutes, and one FF never made or that was changed, as S3 refuses a link', async () => {
+      const old = links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders' }, new Date(Date.now() - CODE_LINK_MS - 1000));
+      const good = links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders' });
+      const token = new URL(good).pathname.slice('/code/'.length);
+      const changed = `${good.slice(0, -token.length)}${token.slice(0, 40)}${token[40] === 'A' ? 'B' : 'A'}${token.slice(41)}`;
+
+      expect(await open(old)).toEqual([403, 'application/xml', s3Error('AccessDenied', 'Request has expired')]);
+      expect(await open(changed)).toEqual([403, 'application/xml', s3Error('AccessDenied', "The link isn't one that GetFunction gave.")]);
+      expect(await open('http://lambda.ff.test/code/bm90LW9uZS1vZi1mZnM')).toEqual([403, 'application/xml', s3Error('AccessDenied', "The link isn't one that GetFunction gave.")]);
+    });
+
+    it("refuses one to an account no longer active, and answers 404 for a function or a version gone since", async () => {
+      accounts.set(ACCOUNT, { ...(accounts.get(ACCOUNT) as NonNullable<AccountRow>), status: AccountStatus.SUSPENDED });
+      expect(await open(links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders' }))).toEqual([403, 'application/xml', s3Error('AccessDenied', 'The account is suspended: its code answers no link.')]);
+      accounts.set(ACCOUNT, { ...(accounts.get(ACCOUNT) as NonNullable<AccountRow>), status: AccountStatus.ACTIVE });
+
+      const gone = s3Error('NoSuchKey', 'The function, or its version, is gone since the link was given.');
+      expect(await open(links.linkFor({ accountId: ACCOUNT, functionId: 'f-billing' }))).toEqual([404, 'application/xml', gone]);
+      expect(await open(links.linkFor({ accountId: ACCOUNT, functionId: 'f-orders', version: 2 }))).toEqual([404, 'application/xml', gone]);
+    });
+  });
+
   describe('answers', () => {
     it("an operation it offers but hasn't built yet, in Lambda's shape: 400 UnknownOperationException, its request ID, its type in the header", async () => {
-      const answer = await send('GET', '/2015-03-31/functions/orders/configuration');
+      const answer = await send('GET', '/2015-03-31/functions/orders/aliases');
 
-      expect(refusal(answer)).toEqual([400, 'UnknownOperationException', "FF doesn't offer GetFunctionConfiguration of Lambda's API yet."]);
+      expect(refusal(answer)).toEqual([400, 'UnknownOperationException', "FF doesn't offer ListAliases of Lambda's API yet."]);
       expect(answer.body.Type).toBe('User');
       expect(answer.headers['x-amzn-requestid']).toMatch(/^[0-9a-f-]{36}$/);
       expect(answer.headers['content-type']).toBe('application/json');
     });
 
-    it("an operation it doesn't offer, by its method and its path, once the key is known to be good", async () => {
-      expect(refusal(await send('GET', '/2018-10-31/layers'))).toEqual([400, 'UnknownOperationException', "FF doesn't offer this operation of Lambda's API yet: GET /2018-10-31/layers."]);
+    it("one of Lambda's other operations, by its name, once the key is known to be good, and what FF offers instead where it does", async () => {
+      expect(refusal(await send('GET', '/2018-10-31/layers'))).toEqual([
+        400,
+        'UnknownOperationException',
+        "FF doesn't offer ListLayers of Lambda's API yet. A function's zip carries its libraries.",
+      ]);
+      expect(refusal(await send('PUT', '/2024-08-31/functions/orders/recursion-config', { body: '{"RecursiveLoop": "Allow"}' }))).toEqual([
+        400,
+        'UnknownOperationException',
+        "FF doesn't offer PutFunctionRecursionConfig of Lambda's API yet.",
+      ]);
+      expect(refusal(await send('PUT', '/2019-09-30/functions/orders/provisioned-concurrency?Qualifier=live', { body: '{"ProvisionedConcurrentExecutions": 2}' }))[2]).toBe(
+        "FF doesn't offer PutProvisionedConcurrencyConfig of Lambda's API yet. FF keeps a function's instances warm with its minInstances, in FF's API (PUT /functions/{id}/scaling-config).",
+      );
       // Unsigned, it is a request without a signature first: an unsigned request learns nothing.
       expect(refusal(await raw('GET', '/2018-10-31/layers', {}))[1]).toBe('MissingAuthenticationTokenException');
+    });
+
+    it('one of two at a path, by its query, as Lambda tells them', async () => {
+      const arn = encodeURIComponent(`arn:aws:lambda:${REGION}:${ACCOUNT}:layer:shared:1`);
+
+      expect(refusal(await send('GET', `/2018-10-31/layers?find=LayerVersion&Arn=${arn}`))[2]).toMatch(/^FF doesn't offer GetLayerVersionByArn of Lambda's API yet\./);
+      expect(refusal(await send('GET', '/2019-09-30/functions/orders/provisioned-concurrency?List=ALL'))[2]).toMatch(/^FF doesn't offer ListProvisionedConcurrencyConfigs /);
+      expect(refusal(await send('GET', '/2019-09-30/functions/orders/provisioned-concurrency?Qualifier=live'))[2]).toMatch(/^FF doesn't offer GetProvisionedConcurrencyConfig /);
+    });
+
+    it("a request that is none of Lambda's operations, by its method and its path", async () => {
+      expect(refusal(await send('GET', '/2018-10-31/layerz'))).toEqual([400, 'UnknownOperationException', "FF doesn't offer this operation of Lambda's API yet: GET /2018-10-31/layerz."]);
     });
 
     it('an operation it has, given the function as named: by its name, its ARN or its partial ARN, its qualifier from the name or the query', async () => {
@@ -217,10 +276,31 @@ describe("Lambda's endpoint (L1)", () => {
       expect(logged).toHaveBeenCalledWith(expect.stringContaining('the database went away'), expect.any(String));
       logged.mockRestore();
     });
+
+    it("a refusal of FF's services as FF's API answers it, under Lambda's name for its status, and logs none", async () => {
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      const throwing = (error: Error) => built.set('GetFunction', async () => Promise.reject(error));
+
+      throwing(new BadRequestException(['Send code or codeSha256, not both', 'memory must be a number']));
+      expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([400, 'InvalidParameterValueException', 'Send code or codeSha256, not both; memory must be a number']);
+      throwing(new ConflictException('A function named orders exists'));
+      expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([409, 'ResourceConflictException', 'A function named orders exists']);
+      throwing(new NotFoundException('Function f-orders not found'));
+      expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([404, 'ResourceNotFoundException', 'Function f-orders not found']);
+      // A refusal that names its error as Lambda's model does keeps that name.
+      throwing(new BadRequestException({ statusCode: 400, error: 'CodeStorageExceededException', message: 'The Beta plan keeps 75 MB of code an account' }));
+      expect(refusal(await send('GET', '/2015-03-31/functions/orders'))).toEqual([400, 'CodeStorageExceededException', 'The Beta plan keeps 75 MB of code an account']);
+      throwing(new ServiceUnavailableException("The code registry can't be reached: nothing changed, try again in a moment"));
+      const answer = await send('GET', '/2015-03-31/functions/orders');
+      expect(refusal(answer)).toEqual([503, 'ServiceException', "The code registry can't be reached: nothing changed, try again in a moment"]);
+      expect(answer.body.Type).toBe('Service');
+      expect(logged).not.toHaveBeenCalled();
+      logged.mockRestore();
+    });
   });
 
   describe("a key's level with the function", () => {
-    beforeEach(() => build('GetFunction', 'Invoke', 'DeleteFunction', 'CreateFunction', 'ListFunctions', 'TagResource', 'ListEventSourceMappings', 'GetEventSourceMapping'));
+    beforeEach(() => build('GetFunction', 'Invoke', 'DeleteFunction', 'CreateFunction', 'ListFunctions', 'TagResource', 'ListEventSourceMappings', 'GetEventSourceMapping', 'CreateEventSourceMapping'));
     const status = async (method: string, target: string, as: ActiveKey, body = '') => {
       const answer = await send(method, target, { as, body });
       return answer.status === 200 ? 200 : `${answer.status} ${String(answer.body.message)}`;
@@ -265,10 +345,13 @@ describe("Lambda's endpoint (L1)", () => {
       expect(await status('POST', '/2015-03-31/functions', WRITER, '{}')).toBe('400 FunctionName is required.');
       expect(await status('GET', '/2015-03-31/event-source-mappings/?FunctionName=billing', READER)).toBe("403 The access key reader (AKFFREADERAAAAAAAAAA) doesn't reach the function billing.");
       expect(await status('GET', '/2015-03-31/event-source-mappings/', READER)).toBe(200);
+      expect(await status('POST', '/2015-03-31/event-source-mappings/', WRITER, JSON.stringify({ FunctionName: 'orders:live' }))).toBe(200);
+      expect(await status('POST', '/2015-03-31/event-source-mappings/', WRITER, JSON.stringify({ FunctionName: 'nothing' }))).toBe(`404 Function not found: ${ARN}:nothing`);
       expect(await status('POST', `/2017-03-31/tags/${encodeURIComponent(`${ARN}:orders`)}`, WRITER, '{"Tags":{}}')).toBe(200);
       expect(await status('POST', '/2017-03-31/tags/orders', WRITER, '{"Tags":{}}')).toBe("400 The resource must be a function's ARN, arn:aws:lambda:<region>:<account>:function:<name>, not orders.");
-      // A creation names a function that doesn't exist yet: only the operations that name one by its path find it.
-      expect(calls.map(({ caller }) => caller.function_?.id ?? null)).toEqual([null, null, 'f-orders']);
+      // A function's creation names one that doesn't exist yet, and a list's query names one to filter by: the others find theirs.
+      expect(calls.map(({ caller }) => caller.function_?.id ?? null)).toEqual([null, null, 'f-orders', 'f-orders']);
+      expect(calls[2].caller.named).toEqual({ name: 'orders', qualifier: 'live' });
     });
 
     it('lets a mapping\'s operations ask what the key may do with the function its record names', async () => {
@@ -296,12 +379,20 @@ describe("Lambda's endpoint (L1)", () => {
       expect(touched).toEqual([WRITER.id]);
     });
 
+    it("runs its operation as FF's API runs a request: what FF's services record of it names the key, its address and the request's ID", async () => {
+      built.set('DeleteFunction', async () => ({ status: 200, document: currentRequest() }));
+
+      const answer = await send('DELETE', '/2015-03-31/functions/orders');
+
+      expect(answer.body).toEqual({ requestId: answer.headers['x-amzn-requestid'], actor: { id: `access_key:${WRITER.id}`, label: `access key ${WRITER.id}` }, ip: '127.0.0.1' });
+    });
+
     it("is refused without a signature, with a key FF doesn't know, one past its end, another secret, a path escaped once, or a session token: in Lambda's words", async () => {
       const target = '/2015-03-31/functions/orders%3Alive';
 
       expect(refusal(await raw('GET', target, {}))).toEqual([403, 'MissingAuthenticationTokenException', 'Missing Authentication Token']);
-      expect(refusal(await send('GET', target, { as: key('AKFFUNKNOWNAAAAAAAAA', {}) }))).toEqual([403, 'UnrecognizedClientException', 'The security token included in the request is invalid.']);
-      expect(refusal(await send('GET', target, { as: key(PAST, {}) }))).toEqual([403, 'ExpiredTokenException', 'The security token included in the request is expired']);
+      expect(refusal(await send('GET', target, { as: accessKey('AKFFUNKNOWNAAAAAAAAA') }))).toEqual([403, 'UnrecognizedClientException', 'The security token included in the request is invalid.']);
+      expect(refusal(await send('GET', target, { as: accessKey(PAST) }))).toEqual([403, 'ExpiredTokenException', 'The security token included in the request is expired']);
       expect(refusal(await send('GET', target, { secret: 'another' }))[1]).toBe('InvalidSignatureException');
       expect(refusal(await send('GET', target, { escapePath: false }))[1]).toBe('InvalidSignatureException');
       expect(refusal(await send('GET', target, { sessionToken: 'a-token' }))).toEqual([403, 'UnrecognizedClientException', 'The security token included in the request is invalid.']);
@@ -327,7 +418,7 @@ describe("Lambda's endpoint (L1)", () => {
       expect(counted).toEqual([`writes:account:${ACCOUNT}`, `writes:account:${ACCOUNT}`]);
     });
 
-    it("is refused past its operation's limit before it is read, in Lambda's words: 50 MB of code in base64, 6 MB for any other", async () => {
+    it("is refused past its operation's limit before it is read, in Lambda's words: 50 MB of code in base64, 6 MB for any other, Invoke's payload too", async () => {
       expect(refusal(await raw('POST', '/2015-03-31/functions', { 'content-length': '69905068' }))).toEqual([
         413,
         'RequestEntityTooLargeException',
@@ -335,6 +426,17 @@ describe("Lambda's endpoint (L1)", () => {
       ]);
       expect(refusal(await raw('PUT', '/2015-03-31/functions/orders/configuration', { 'content-length': String(6 * 1024 * 1024 + 1) }))[2]).toBe(
         'Request must be smaller than 6291456 bytes for the UpdateFunctionConfiguration operation',
+      );
+      // Invoke's refusal names the operation as Lambda's does, InvokeFunction.
+      expect(refusal(await raw('POST', '/2015-03-31/functions/orders/invocations', { 'content-length': String(6 * 1024 * 1024 + 1) }))[2]).toBe(
+        'Request must be smaller than 6291456 bytes for the InvokeFunction operation',
+      );
+      // One of Lambda's other operations, at Lambda's limit for it, so that a layer's zip is refused by its name.
+      expect(refusal(await raw('POST', '/2018-10-31/layers/shared/versions', { 'content-length': '69905068' }))[2]).toBe(
+        'Request must be smaller than 69905067 bytes for the PublishLayerVersion operation',
+      );
+      expect(refusal(await raw('POST', '/2018-10-31/layerz', { 'content-length': String(6 * 1024 * 1024 + 1) }))[2]).toBe(
+        'Request must be smaller than 6291456 bytes for the requested operation',
       );
     });
 
@@ -398,7 +500,15 @@ describe("the requests AWS's tools sent Lambda's API, replayed as they were sign
     } as unknown as StorageDirectory;
     const functions = { findAll: async (accountId: string, name: string) => [fn(accountId, name)] } as unknown as FunctionsService;
     const throttler = { increment: async () => ({ totalHits: 1, timeToExpire: 60, isBlocked: false, timeToBlockExpire: 0 }) } as unknown as ThrottlerStorage;
-    frontDoor = new LambdaFrontDoor(new ConfigService({ lambda: { region: REGION } }), directory, functions, { handler: () => answered } as unknown as LambdaOperations, onePlan(), throttler);
+    frontDoor = new LambdaFrontDoor(
+      new ConfigService({ lambda: { region: REGION } }),
+      directory,
+      functions,
+      { handler: () => answered } as unknown as LambdaOperations,
+      {} as LambdaCodeLinks,
+      onePlan(),
+      throttler,
+    );
     port = (await frontDoor.listen(0, '127.0.0.1')).port;
     // The clock alone is the recording's, so that each signature's time is within its 15 minutes.
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout', 'queueMicrotask', 'hrtime', 'performance'] });

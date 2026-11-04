@@ -49,9 +49,11 @@ describe("Lambda's PublishVersion's refusals (L1)", () => {
     expect(publishRefusal(ACTIVE, { codeSha256: ACTIVE.codeSha256, revisionId: ACTIVE.revisionId, description: 'v' })).toBeUndefined();
   });
 
-  it("refuses one being deployed or without working code with 409, another code's SHA-256 with 400, another revision with 412", () => {
+  it("refuses one being deployed or changed or without working code with 409, another code's SHA-256 with 400, another revision with 412", () => {
     const refusal = (fields: Partial<typeof ACTIVE>, sent = {}) => publishRefusal({ ...ACTIVE, ...fields }, sent);
     expect(refusal({ status: FunctionStatus.CREATING })).toBeInstanceOf(ConflictException);
+    // Its update's rollout, as Lambda's PublishVersion waits for the last update to end.
+    expect(publishRefusal(ACTIVE, {}, true)).toEqual(new ConflictException('The function is being changed: publish it once that change is live, or rolled back'));
     expect(refusal({ status: FunctionStatus.ERROR })?.message).toBe('The function is ERROR: it has no working code to publish. Fix it with PUT /functions/{id} first');
     expect(refusal({}, { codeSha256: 'other' })).toEqual(
       new BadRequestException(`codeSha256 other isn't the function's code's, ${ACTIVE.codeSha256}: publish with the function's, or none`),

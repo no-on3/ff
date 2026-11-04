@@ -46,6 +46,9 @@ pipeline:
       match: '*'
       script: /fluent-bit/etc/ff/ff.lua
       call: ff
+      # Each line's time as its seconds and nanoseconds apart: ff.lua counts it in the second the store files
+      # it in, which a number would round a second's last nanoseconds out of.
+      time_as_table: on
 
   outputs:
     # The stream fields are the account's namespace and the function: every query names both (P-43).

@@ -7,15 +7,14 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 
 use super::super::queues::Queue;
-use super::account::{Account, AsyncConfig, BucketRecord, Destination, FunctionRecord, Notification};
+use super::account::{Account, AsyncConfig, BucketRecord, Destination, FunctionRecord, Named, Notification};
 use super::aliases;
 use super::names::{LogicalIds, lambda_names, renamed};
 use super::roles::{self, Role, Target};
 use super::yaml::Yaml;
-use crate::api::types::name_in_arn;
+use crate::api::types::{DEFAULT_MAX_INSTANCES, name_in_arn};
+use crate::cli::Runtime;
 
-/// The instances a function runs at most unless its owner says otherwise: no cap to carry to AWS.
-pub const DEFAULT_MAX_INSTANCES: u32 = 3;
 /// The parameter that turns the schedules on at AWS, off until the move, so that none runs twice.
 pub const SCHEDULES_STATE: &str = "ScheduleState";
 /// What a move does with a function that gets FF's original event, after its name.
@@ -53,11 +52,10 @@ pub struct Template {
 
 /// FF's runtimes as Lambda names them: FF runs Node.js 24 and Python 3.13.
 pub fn lambda_runtime(runtime: &str) -> &str {
-    match runtime {
-        "nodejs" => "nodejs24.x",
-        "python" => "python3.13",
-        other => other,
-    }
+    [Runtime::Nodejs, Runtime::Python]
+        .into_iter()
+        .find(|ours| ours.as_str() == runtime)
+        .map_or(runtime, |ours| ours.lambda())
 }
 
 /// The template of what the export read; `with_values` writes the functions' variables' values,
@@ -137,6 +135,7 @@ impl<'a> Builder<'a> {
             .filter(|bucket| {
                 buckets.contains_key(bucket.name.as_str())
                     || roles.values().any(|role| role.buckets().contains(&bucket.name.as_str()))
+                    || account.a_variable_names(&bucket.name)
             })
             .map(|bucket| (bucket.name.as_str(), ids.give(&bucket.name, "BucketName")))
             .collect();
@@ -209,7 +208,7 @@ impl<'a> Builder<'a> {
             let Some(parameter) = self.bucket_names.get(bucket.name.as_str()) else { continue };
             let description = if bucket.website.is_some() {
                 format!(
-                    "The site {}'s bucket on S3, for the roles that use it: the output Bucket of data/s3-website.md's stack, FF's name until it is made",
+                    "The site {}'s bucket on S3, for the functions that use it: the output Bucket of data/s3-website.md's stack, FF's name until it is made",
                     bucket.name
                 )
             } else {
@@ -305,7 +304,9 @@ impl<'a> Builder<'a> {
         let mut variables = Vec::new();
         let environment = function.environment.iter().flatten();
         for (name, value) in environment {
-            if self.with_values {
+            if let Some(reference) = self.named(&function.name, name, value) {
+                variables.push((name.clone(), reference));
+            } else if self.with_values {
                 variables
                     .push((name.clone(), Yaml::from(value.as_str().map_or_else(|| value.to_string(), str::to_owned))));
             } else {
@@ -462,6 +463,21 @@ impl<'a> Builder<'a> {
     }
 
     /// A bucket's name on S3: its parameter's when the template has one, FF's otherwise.
+    /// A variable that holds the name of one of the account's buckets or queues: the template's name for it, the
+    /// bucket's parameter, said in the notes, since S3's names are global, or the queue's QueueName.
+    fn named(&mut self, function: &str, variable: &str, value: &Value) -> Option<Yaml> {
+        match self.account.named_by(value)? {
+            Named::Bucket(bucket) => {
+                let parameter = self.bucket_names.get(bucket)?.clone();
+                self.notes.push(format!(
+                    "**{function}**'s variable `{variable}` is the bucket `{bucket}`'s name: the template gives it `{parameter}`, the bucket's name on S3."
+                ));
+                Some(Yaml::reference(&parameter))
+            }
+            Named::Queue(queue) => self.queues.get(queue).map(|id| Yaml::attribute(id, "QueueName")),
+        }
+    }
+
     fn bucket_name(&self, bucket: &str) -> Yaml {
         self.bucket_names.get(bucket).map_or_else(|| Yaml::from(bucket), |parameter| Yaml::reference(parameter))
     }
@@ -897,5 +913,29 @@ mod tests {
         let mut quiet = shop();
         quiet.buckets.retain(|bucket| bucket.website.is_some());
         assert!(super::template(&quiet, false, HEADER).before_copy.is_none(), "no bucket with events, one template");
+    }
+
+    #[test]
+    fn a_variable_holding_a_buckets_or_a_queues_name_follows_it_with_values_or_without() {
+        let mut account = shop();
+        let receipts = account.functions.iter_mut().find(|record| record.function.name == "send-receipts").unwrap();
+        let environment = receipts.function.environment.get_or_insert_default();
+        environment.insert("PHOTOS".into(), Value::from("photos"));
+        environment.insert("ORDERS".into(), Value::from("orders"));
+
+        for with_values in [false, true] {
+            let template = template(&account, with_values, HEADER);
+            for line in
+                ["          PHOTOS: !Ref PhotosBucketName\n", "          ORDERS: !GetAtt OrdersQueue.QueueName\n"]
+            {
+                assert!(template.text.contains(line), "{line}");
+            }
+            assert!(
+                !template.parameters.iter().any(|parameter| ["PHOTOS", "ORDERS"].contains(&parameter.name.as_str()))
+            );
+            assert!(template.notes.contains(
+                &"**send-receipts**'s variable `PHOTOS` is the bucket `photos`'s name: the template gives it `PhotosBucketName`, the bucket's name on S3.".to_owned()
+            ));
+        }
     }
 }

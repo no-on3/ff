@@ -67,8 +67,8 @@ run('usage records (L2, P-20)', () => {
     let called!: (requestId: string) => void;
     const id = new Promise<string>((resolve) => (called = resolve));
     let answer!: (result: InvokeResult) => void;
-    invoke.mockImplementationOnce((_fn, _payload, requestId) => {
-      called(requestId as string);
+    invoke.mockImplementationOnce((_fn, _payload, options) => {
+      called(options?.requestId as string);
       return new Promise((resolve) => (answer = resolve));
     });
     const done = functions.invoke(ACCOUNT, fn.id, {});
@@ -141,7 +141,7 @@ run('usage records (L2, P-20)', () => {
     const invocation = await functions.invoke(ACCOUNT, fn.id, { a: 1 });
 
     // $LATEST's pods are there: a cold start makes nothing, given a fresh key only when its key is due.
-    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ id: fn.id }), { a: 1 }, invocation.id, expect.any(globalThis.Function));
+    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ id: fn.id }), { a: 1 }, { requestId: invocation.id, start: expect.any(globalThis.Function) });
     const saved = (await invocationOf(invocation.id)) as FunctionInvocation;
     expect(saved).toMatchObject({ status: InvocationStatus.COMPLETED, duration: 12.34, memoryUsed: 50 });
     expect(await recordsOf(invocation.id)).toEqual([
@@ -273,8 +273,8 @@ run('usage records (L2, P-20)', () => {
   it("writes neither when the record can't be written, so the call is reaped as LOST later", async () => {
     const fn = await newFunction();
     let id = '';
-    invoke.mockImplementationOnce(async (_fn, _payload, requestId) => {
-      id = requestId as string;
+    invoke.mockImplementationOnce(async (_fn, _payload, options) => {
+      id = options?.requestId as string;
       return { output: 1, durationMs: 2 };
     });
     await query(`
@@ -297,8 +297,8 @@ run('usage records (L2, P-20)', () => {
   it('keeps no record of a final state that failed to commit: they are one transaction', async () => {
     const fn = await newFunction();
     let id = '';
-    invoke.mockImplementationOnce(async (_fn, _payload, requestId) => {
-      id = requestId as string;
+    invoke.mockImplementationOnce(async (_fn, _payload, options) => {
+      id = options?.requestId as string;
       return { output: 1, durationMs: 2 };
     });
     // Checked at commit, after the record was written.

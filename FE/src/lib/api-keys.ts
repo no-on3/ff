@@ -20,6 +20,8 @@ export const SCOPE_INFO: Record<Scope, string> = {
   'caches:write': 'Create and delete caches, and give them new passwords',
   'email:read': "List and read the domains and addresses mail goes from, the account's quotas and its suppression list",
   'email:write': 'Add, prove and delete domains and addresses, change the suppression list, and send mail',
+  'stacks:read': 'List and read stacks, what `ff deploy` made of a SAM template',
+  'stacks:write': "Put and forget stacks; making and deleting their resources needs those resources' scopes",
 };
 
 export type KeyState = 'active' | 'revoked' | 'expired';

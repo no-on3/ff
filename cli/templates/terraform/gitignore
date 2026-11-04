@@ -1,0 +1,5 @@
+# Terraform's and OpenTofu's own: the providers, the state (which holds the stack's every setting), the zips built.
+.terraform/
+*.tfstate
+*.tfstate.*
+.build/

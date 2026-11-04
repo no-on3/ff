@@ -112,25 +112,6 @@ export class QueueStore {
   }
 
   /**
-   * Ends a claimed event and hands its record to another function as an
-   * asynchronous call, with what its queue keeps beside it, in one
-   * transaction: the record is kept exactly when the event goes. False, and
-   * nothing sent, when another claim has the event since.
-   */
-  async deleteEventAndSend(
-    event: Pick<ClaimedEvent, 'id' | 'receiveCount'>,
-    target: { id: string; accountId: string },
-    requestId: string,
-    body: string,
-    expiresAt: Date,
-    attributes?: Record<string, unknown>,
-  ): Promise<boolean> {
-    const sent = await this.deleteEventAnd(event, (manager) => this.sendEvent(target, requestId, body, expiresAt, { manager, attributes }));
-    if (sent) this.kept(target);
-    return sent;
-  }
-
-  /**
    * Claims up to `limit` asynchronous calls due, of any function, the longest
    * waiting first: each counted as received and hidden for its lease, the
    * longest its attempt can take (a wait for an instance and the call, each

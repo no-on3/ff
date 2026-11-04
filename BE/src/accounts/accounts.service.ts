@@ -6,6 +6,7 @@ import { DataSource, QueryFailedError, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { ACCOUNT_ID, Principal, Role } from '../auth/principal';
 import { Identity } from '../auth/token-verifier';
+import { awsEndpoints } from '../common/aws-endpoints';
 import { MailService } from '../mail/mail.service';
 import { DEFAULT_PLAN } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
@@ -139,6 +140,7 @@ export class AccountsService {
       storageDisabledAt,
       storageDisabledReason,
       bucketStorageNotice: bucketStorageNotice ?? null,
+      aws: awsEndpoints(this.config),
     };
   }
 

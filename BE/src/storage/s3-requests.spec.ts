@@ -28,6 +28,55 @@ describe('the operation a request is', () => {
     return `${operation.name} ${operation.class}${operation.writes ? ' writes' : ''}`;
   };
 
+  it('a bucket made, as S3 bills a PUT, and deleted for free, as a DELETE; with a parameter, another operation', () => {
+    expect(of('PUT', bucket)).toBe('CreateBucket tier1 writes');
+    expect(of('PUT', bucket, 'x-id=CreateBucket')).toBe('CreateBucket tier1 writes');
+    expect(of('DELETE', bucket)).toBe('DeleteBucket free writes');
+    expect(of('PUT', bucket, 'cors')).toBe('NotImplemented tier2');
+  });
+
+  it("the bucket's tags: read as a GET, replaced as a PUT, removed for free, as a DELETE", () => {
+    expect(of('GET', bucket, 'tagging')).toBe('GetBucketTagging tier2');
+    expect(of('PUT', bucket, 'tagging')).toBe('PutBucketTagging tier1 writes');
+    expect(of('DELETE', bucket, 'tagging')).toBe('DeleteBucketTagging free writes');
+    expect(of('GET', bucket, 'tagging&policy')).toBe('NotImplemented tier2');
+  });
+
+  it("the bucket's policy and public access block, kept as the tags are: read as a GET, set as a PUT, removed for free; with the object's key, NotImplemented", () => {
+    for (const [parameter, name] of [
+      ['policy', 'BucketPolicy'],
+      ['publicAccessBlock', 'PublicAccessBlock'],
+    ]) {
+      expect(of('GET', bucket, `${parameter}&x-id=Get${name}`)).toBe(`Get${name} tier2`);
+      expect(of('PUT', bucket, parameter)).toBe(`Put${name} tier1 writes`);
+      expect(of('DELETE', bucket, parameter)).toBe(`Delete${name} free writes`);
+      expect(of('POST', bucket, parameter)).toBe('NotImplemented tier2');
+      expect(of('PUT', object, parameter)).toBe('NotImplemented tier2');
+    }
+    expect(of('DELETE', bucket, 'notification')).toBe('NotImplemented tier2');
+  });
+
+  it("the bucket's settings FF's buckets don't have, each read as a GET, which S3 answers for a bucket without it; set, NotImplemented", () => {
+    const reads = {
+      acl: 'GetBucketAcl',
+      cors: 'GetBucketCors',
+      versioning: 'GetBucketVersioning',
+      accelerate: 'GetBucketAccelerateConfiguration',
+      requestPayment: 'GetBucketRequestPayment',
+      logging: 'GetBucketLogging',
+      lifecycle: 'GetBucketLifecycleConfiguration',
+      replication: 'GetBucketReplication',
+      encryption: 'GetBucketEncryption',
+      'object-lock': 'GetObjectLockConfiguration',
+      ownershipControls: 'GetBucketOwnershipControls',
+    };
+    for (const [parameter, name] of Object.entries(reads)) {
+      expect(of('GET', bucket, `${parameter}&x-id=${name}`)).toBe(`${name} tier2`);
+      expect(of('PUT', bucket, parameter)).toBe('NotImplemented tier2');
+    }
+    expect(of('GET', object, 'acl')).toBe('NotImplemented tier2');
+  });
+
   it("the bucket's: listings, its location, the bucket itself, a batch of deletes", () => {
     expect(of('GET', { ...bucket, bucket: '' })).toBe('ListBuckets tier1');
     expect(of('GET', bucket, 'list-type=2&prefix=2026%2F&delimiter=%2F&max-keys=100&x-id=ListObjectsV2')).toBe('ListObjectsV2 tier1');
@@ -67,12 +116,10 @@ describe('the operation a request is', () => {
     expect(of('GET', object, `${presigned}&x-amz-checksum-mode=ENABLED&x-id=GetObject`)).toBe('GetObject tier2');
   });
 
-  it("anything else answers NotImplemented: a bucket's policy or creation, an object's tags, versions", () => {
+  it("anything else answers NotImplemented: a bucket's CORS set, its policy's status, an object's tags, versions", () => {
     for (const [method, address, query] of [
-      ['GET', bucket, 'policy'],
-      ['PUT', bucket, 'policy'],
-      ['PUT', bucket, ''],
-      ['DELETE', bucket, ''],
+      ['GET', bucket, 'policyStatus'],
+      ['PUT', bucket, 'cors'],
       ['GET', bucket, 'versions'],
       ['GET', bucket, 'list-type=2&acl'],
       ['GET', object, 'tagging'],

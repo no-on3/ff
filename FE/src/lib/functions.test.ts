@@ -16,6 +16,7 @@ import {
   keptCallText,
   codeText,
   formatBytes,
+  stackText,
 } from './functions';
 
 const stored: Function = {
@@ -197,6 +198,17 @@ describe('eventFormatText', () => {
   it("says what a function's handler gets", () => {
     expect(eventFormatText({ eventFormat: 'lambda' })).toBe("AWS Lambda's event: the input itself");
     expect(eventFormatText({ eventFormat: 'wrapped' })).toMatch(/^FF's original event: the input in event.body/);
+  });
+});
+
+describe('stackText', () => {
+  it("says that a template's deploy keeps a function of a stack, and nothing of another", () => {
+    expect(stackText({ stack: 'shop' })).toBe(
+      "A SAM template's deploy keeps it, in the stack shop: its next `ff deploy` makes it the template's again, a change made here undone, " +
+        'and `ff delete-stack shop` deletes it with the stack.',
+    );
+    expect(stackText({ stack: null })).toBeUndefined();
+    expect(stackText({})).toBeUndefined();
   });
 });
 

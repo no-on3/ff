@@ -1,3 +1,11 @@
+import { HttpException, NotFoundException } from '@nestjs/common';
+import { functionArn } from '../functions/arns';
+import { ChangeUnderWayException } from '../functions/change-under-way';
+import { FunctionStatus } from '../functions/entities/function.entity';
+import { functionAccessOf, keyLabel } from '../storage/key-reach';
+import { ActiveKey } from '../storage/storage-directory.service';
+import { FunctionAccess } from '../storage/storage-key.entity';
+
 /**
  * An error as AWS Lambda answers it, in its REST JSON protocol (ADR 0014): an
  * HTTP status, the error's name in the `x-amzn-ErrorType` header, which AWS's
@@ -33,7 +41,9 @@ export const invalidSignature = (
 ) => new LambdaError(403, 'InvalidSignatureException', message);
 export const accessDenied = (message: string) => new LambdaError(403, 'AccessDeniedException', message);
 export const resourceNotFound = (message: string) => new LambdaError(404, 'ResourceNotFoundException', message);
+export const resourceConflict = (message: string) => new LambdaError(409, 'ResourceConflictException', message);
 export const invalidParameterValue = (message: string) => new LambdaError(400, 'InvalidParameterValueException', message);
+export const preconditionFailed = (message: string) => new LambdaError(412, 'PreconditionFailedException', message);
 export const invalidRequestContent = (message: string) => new LambdaError(400, 'InvalidRequestContentException', message);
 export const requestEntityTooLarge = (limit: number, operation: string) =>
   new LambdaError(413, 'RequestEntityTooLargeException', `Request must be smaller than ${limit} bytes for the ${operation} operation`);
@@ -42,4 +52,75 @@ export const tooManyRequests = (message: string, retryAfterSeconds: number) =>
   new LambdaError(429, 'TooManyRequestsException', message, { Reason: 'CallerRateLimitExceeded' }, { 'retry-after': String(retryAfterSeconds) });
 /** An operation FF doesn't offer: 400, which no client tries again. */
 export const unknownOperation = (message: string) => new LambdaError(400, 'UnknownOperationException', message);
+/** One of Lambda's operations FF doesn't offer yet, named, and what FF offers instead, where it does. */
+export const notOffered = (operation: string, instead?: string) =>
+  unknownOperation(`FF doesn't offer ${operation} of Lambda's API yet.${instead ? ` ${instead}` : ''}`);
+/** What a level lets a key do with a function, as a refusal says it. */
+const DOES: Record<FunctionAccess, string> = { read: 'read', invoke: 'invoke', write: 'change' };
+
+/** The key may not make the operation: with that function, at that level, or with the account's functions at all. */
+export function keyCannot(key: ActiveKey, operation: { name: string; access: FunctionAccess }, name?: string): LambdaError {
+  const label = keyLabel(key);
+  if (key.functionId !== null) {
+    return accessDenied(`A function's own key invokes its account's functions and does nothing else with them: ${operation.name} needs an access key that may ${DOES[operation.access]} them.`);
+  }
+  if (name === undefined) return accessDenied(`The access key ${label} reaches no function: ${operation.name} needs a key that does.`);
+  const access = functionAccessOf(key, name);
+  if (!access) return accessDenied(`The access key ${label} doesn't reach the function ${name}.`);
+  return accessDenied(`The access key ${label} may ${DOES[access]} the function ${name}, not ${DOES[operation.access]} it.`);
+}
+
+/** What `lookup` finds; FF's NotFoundException, its API's, the refusal `missing` makes in Lambda's words instead. */
+export async function notFoundAs<T>(lookup: Promise<T>, missing: () => LambdaError): Promise<T> {
+  try {
+    return await lookup;
+  } catch (error) {
+    if (error instanceof NotFoundException) throw missing();
+    throw error;
+  }
+}
+
 export const serviceException = () => new LambdaError(500, 'ServiceException', 'The AWS Lambda service encountered an internal error.');
+
+/** Lambda's name for each refusal of FF's API that its services give: the same status, the same message. */
+const NAMES: Record<number, string> = {
+  400: 'InvalidParameterValueException',
+  403: 'AccessDeniedException',
+  404: 'ResourceNotFoundException',
+  409: 'ResourceConflictException',
+  412: 'PreconditionFailedException',
+  413: 'RequestEntityTooLargeException',
+  429: 'TooManyRequestsException',
+};
+
+/**
+ * A change refused while another runs, in Lambda's own words, which the tools
+ * wait on: a function being created is Pending, else an update is in
+ * progress, the function named by its ARN in `region`.
+ */
+function changeUnderWay({ function_ }: ChangeUnderWayException, region: string): LambdaError {
+  return resourceConflict(
+    function_.status === FunctionStatus.CREATING
+      ? 'The operation cannot be performed at this time. The function is currently in the following state: Pending'
+      : `The operation cannot be performed at this time. An update is in progress for resource: ${functionArn(region, function_.accountId, function_.name)}`,
+  );
+}
+
+/**
+ * A refusal of FF's services, which FF's API answers, as Lambda's: its status
+ * and its message, under the name Lambda gives that status, or the one of
+ * Lambda's that the refusal names (CodeStorageExceededException); a change
+ * refused while another runs in Lambda's words, its function in `region`; a
+ * failure of the platform's, 500 or 503, Lambda's ServiceException, which the
+ * SDKs try again.
+ */
+export function lambdaErrorOf(error: HttpException, region: string): LambdaError {
+  if (error instanceof ChangeUnderWayException) return changeUnderWay(error, region);
+  const status = error.getStatus();
+  const answer = error.getResponse();
+  const { message: said, error: named } = typeof answer === 'string' ? { message: answer, error: undefined } : (answer as { message?: unknown; error?: unknown });
+  const message = Array.isArray(said) ? said.join('; ') : typeof said === 'string' ? said : error.message;
+  if (status >= 500) return new LambdaError(status, 'ServiceException', message);
+  const lambdas = typeof named === 'string' && /^[A-Z][A-Za-z]+Exception$/.test(named) ? named : undefined;
+  return new LambdaError(status, lambdas ?? NAMES[status] ?? 'InvalidRequestContentException', message);
+}

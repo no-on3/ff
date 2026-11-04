@@ -10,19 +10,22 @@
 #             in the history (gitleaks): what a push that changes only documents runs
 #   unit      the unit tests: the backend's (L1), the console's, the admin app's, both runtimes', the cache
 #             and mail servers' agents', the small app's handlers, the ff command's and its binary's (L1, L2),
-#             the alert rules' and the log collector's filter (these two in their own images)
+#             every SAM template kept as a fixture, which the SAM CLI's sam validate --lint takes, the alert rules'
+#             and the log collector's filter (these two in their own images)
 #   db        the backend's database tests (L2) and the migrations' drift check, on a PostgreSQL of its own,
 #             with servers of customers' databases and caches, and a store for buckets
 #   security  the dependencies' advisories (npm audit, but those .npmauditignore accepts until a date), and every
 #             image built, scanned (Trivy, but what .trivyignore.yaml accepts) and listed as an SBOM (CycloneDX),
 #             into hack/.ci/sbom
-#   cluster   l3, l4, l5, cli and images below, one after the other, as a laptop runs them; GitHub runs l3 to cli
-#             each on a runner of its own, at once, and images after security, in its job, on the images it built.
+#   cluster   l3, l4, l5, cli, aws-tools and images below, one after the other, as a laptop runs them; GitHub runs l3
+#             to aws-tools each on a runner of its own, at once, and images after security, in its job, on its images.
 #             Each makes or reuses the k3d dev cluster (hack/k8s/cluster-up.sh):
 #     l3      the Kubernetes driver (L3)
 #     l4      the stack through the API (L4)
 #     l5      every route as another account (L5)
 #     cli     the ff command on the stack and in Docker, its export checked by the SAM CLI and OpenTofu
+#     aws-tools  AWS's tools on the stack: the project ff init --template terraform writes, applied by OpenTofu and by
+#             Terraform's CLI, each pinned, planned again with nothing to change, destroyed; a throttled change retried
 #     images  the platform's images, run as the cluster runs them, and its manifests, without deploying them
 #   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last push's) and the lockfiles,
 #             checked again with the day's advisories, for an image or a package unchanged since its push: nightly
@@ -98,14 +101,14 @@ free_ports() {
   return 1
 }
 
-# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, and the AWS tools the
-# ff suite checks an export with. A stage that runs the backend here needs its packages; the images build in Docker
+# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, the SAM CLI the unit
+# tests lint the SAM fixtures with, and the AWS tools the ff suite checks an export with. A stage that runs the backend here needs its packages; the images build in Docker
 # with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
-  [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust" [db]=BE [security]=''
-  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [images]=BE [platform]='' [advisories]='' [tools]=''
+  [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust sam" [db]=BE [security]=''
+  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [aws-tools]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
 )
-stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[images]}"
+stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[aws-tools]} ${stage_uses[images]}"
 stage_uses[all]="${stage_uses[static]} ${stage_uses[unit]} ${stage_uses[db]} ${stage_uses[security]} ${stage_uses[cluster]}"
 
 stage_deps() {
@@ -116,7 +119,10 @@ stage_deps() {
     case "$uses" in *" $dir "*) prepare "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund ;; esac
   done
   case "$uses" in *" rust "*) prepare "Rust for the ff command" hack/install-tools.sh rust ;; esac
-  case "$uses" in *" aws "*) prepare "the SAM CLI, OpenTofu and AWS's provider, pinned and checked" hack/install-tools.sh tofu aws-provider sam ;; esac
+  case "$uses" in
+    *" aws "*) prepare "the SAM CLI, OpenTofu and AWS's provider, pinned and checked" hack/install-tools.sh tofu aws-provider sam ;;
+    *" sam "*) prepare "the SAM CLI, pinned and checked" hack/install-tools.sh sam ;;
+  esac
 }
 
 # The page's one script, which a syntax error stops entirely (and with it every scenario).
@@ -200,6 +206,7 @@ stage_unit() {
   step "the mail server's agent: unit tests" node --test deploy/mail/agent.test.mjs
   step "the small app: its handlers, their clients stubbed" node --test examples/orders-app/test/handlers.test.js
   step "ff: unit tests, and its binary's against a scripted API (L1, L2)" in_dir cli cargo test --locked
+  step "the SAM fixtures, which sam validate --lint takes, cfn-lint inside it" hack/test-sam-fixtures.sh
   step "alert rules and dashboards" hack/k8s/test-monitoring-rules.sh
   step "log collector: configuration and filter" hack/k8s/test-logging-filter.sh
 }
@@ -387,13 +394,15 @@ stage_l3() {
 stage_l4() { cluster_ready; step "L4: the stack through the API" hack/e2e.sh; }
 stage_l5() { cluster_ready; step "L5: every route as another account" hack/e2e-tenancy.sh; }
 stage_cli() { cluster_ready; step "the ff command on the stack and in Docker" hack/cli-e2e.sh; }
+# The suite installs the tools it pins, OpenTofu, Terraform's CLI and both providers, kept between runs on GitHub.
+stage_aws_tools() { cluster_ready; step "AWS's tools on the stack: Terraform's CLIs applying ff init's project" hack/e2e-aws-tools.sh; }
 # After security in a run, the images are built already: Docker's build cache has every layer of them.
 stage_images() {
   cluster_ready
   step "the platform's images, run as the cluster runs them" hack/test-images.sh
   step "the platform's manifests, without deploying them" hack/k8s/test-platform-manifests.sh
 }
-stage_cluster() { stage_l3; stage_l4; stage_l5; stage_cli; stage_images; }
+stage_cluster() { stage_l3; stage_l4; stage_l5; stage_cli; stage_aws_tools; stage_images; }
 
 stage_platform() {
   prepare "kubectl and k3d, pinned and checked" hack/install-tools.sh
@@ -405,9 +414,9 @@ stage_platform() {
 ci_stages="$*"
 for stage in "$@"; do
   case "$stage" in
-    deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | images | advisories | tools | platform) "stage_$stage" ;;
+    deps | static | unit | db | security | cluster | l3 | l4 | l5 | cli | aws-tools | images | advisories | tools | platform) "stage_${stage//-/_}" ;;
     all) stage_static; stage_unit; stage_db; stage_security; stage_cluster ;;
-    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, images), advisories, tools, platform or all; suggest, alone" >&2; exit 2 ;;
+    *) echo "unknown stage $stage: deps, static, unit, db, security, cluster (or l3, l4, l5, cli, aws-tools, images), advisories, tools, platform or all; suggest, alone" >&2; exit 2 ;;
   esac
 done
 ci_done

@@ -2,11 +2,12 @@ import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nest
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes } from 'node:crypto';
-import { In, LessThan, QueryFailedError, Repository } from 'typeorm';
+import { In, LessThan, Repository } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { describeError } from '../common/describe-error';
 import { Actor } from '../common/request-context';
+import { isUniqueViolation } from '../common/unique-violation';
 import type { EmailSettings } from '../config/configuration';
 import { EncryptionService } from '../encryption/encryption.service';
 import { DnsUnavailableError } from '../function-urls/domain-check';
@@ -19,8 +20,6 @@ import { MailRecord, MailResolver, checkMailDomain, mailDomainRecords, newDkimKe
 /** Injection token for the DNS questions a domain's check asks. */
 export const MAIL_RESOLVER = Symbol('MAIL_RESOLVER');
 
-/** PostgreSQL's unique_violation: the account has the identity already. */
-const UNIQUE_VIOLATION = '23505';
 const MINUTE_MS = 60_000;
 /** How long a domain's records are looked for before it is FAILED, as SES gives them: 72 hours. */
 const PROOF_HOURS = 72;
@@ -154,7 +153,7 @@ export class EmailIdentitiesService implements OnModuleInit, OnModuleDestroy {
         return made;
       });
     } catch (error) {
-      if (error instanceof QueryFailedError && (error.driverError as { code?: string })?.code === UNIQUE_VIOLATION) {
+      if (isUniqueViolation(error)) {
         throw new IdentityRefusal('exists', `The account has the identity ${parsed.identity} already`);
       }
       throw error;

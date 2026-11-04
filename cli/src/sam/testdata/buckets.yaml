@@ -1,0 +1,89 @@
+# A template's buckets as ff deploy makes them: a site, and a bucket telling a queue and a function of its files, its
+# configurations of one queue and one filter one on FF; and what its function and its outputs see of them. The
+# function names the site, not the bucket that calls it, which CloudFormation would refuse as a circle.
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Site:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: shop-site
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: 404.html
+  SitePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Site
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub '${Site.Arn}/*'
+  Photos:
+    Type: AWS::S3::Bucket
+    DependsOn: RemovedPolicy
+    Properties:
+      Tags:
+        - Key: team
+          Value: shop
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectRemoved:Delete
+            Queue: !GetAtt Removed.Arn
+          - Event: s3:ObjectRemoved:DeleteMarkerCreated
+            Queue: !GetAtt Removed.Arn
+          - Event: s3:ObjectCreated:*
+            Queue: !GetAtt Removed.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: suffix
+                    Value: .tmp
+  Removed:
+    Type: AWS::SQS::Queue
+  RemovedPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref Removed]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt Removed.Arn
+  Resizer:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: orders
+      Handler: index.handler
+      Runtime: nodejs24.x
+      AutoPublishAlias: live
+      Environment:
+        Variables:
+          SITE: !Ref Site
+          SITE_DOMAIN: !GetAtt Site.DomainName
+      Events:
+        Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref Photos
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+                  - Name: suffix
+                    Value: .jpg
+Outputs:
+  SiteUrl:
+    Description: Where the site answers
+    Value: !GetAtt Site.WebsiteURL
+  PhotosArn:
+    Value: !GetAtt Photos.Arn
+  PhotosDomain:
+    Value: !GetAtt Photos.RegionalDomainName

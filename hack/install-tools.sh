@@ -4,16 +4,16 @@
 # (cli/rust-toolchain.toml's) through rustup, the PATH's, or one installed into
 # hack/.rust/ (git-ignored), rustup-init's checksum verified too; hack/ci.sh uses
 # it from there. On request, the AWS tools the tests of AWS's way in and out drive:
-# OpenTofu and Terraform's CLI into hack/bin, Terraform's AWS provider, for both,
-# into hack/.terraform/mirror (a directory the CLIs install providers from, in
-# place of a registry), and the SAM CLI into hack/.sam, cfn-lint inside it. Each
+# OpenTofu and Terraform's CLI into hack/bin, Terraform's AWS and archive providers,
+# for both, into hack/.terraform/mirror (a directory the CLIs install providers from,
+# in place of a registry), and the SAM CLI into hack/.sam, cfn-lint inside it. Each
 # pinned to a release at least two weeks old when chosen. Idempotent: tools
 # already at the pinned version are left alone, and so is a Rust at least as
 # recent where there is no rustup to pin it with. Nothing is installed system-wide.
 # FF_TOOLS_BIN and FF_SAM_DIR put the binaries and the SAM CLI elsewhere, as the nightly's newest tools go into a
 # directory of their own, so that the pinned ones the other stages use stay as they are.
 #   hack/install-tools.sh [kubectl] [k3d] [rust]     (all three without an argument)
-#   hack/install-tools.sh tofu terraform aws-provider sam, or aws for the four
+#   hack/install-tools.sh tofu terraform aws-provider archive-provider sam, or aws for the five
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,6 +24,8 @@ RUST_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$rep
 TOFU_VERSION="${TOFU_VERSION:-1.13.1}"
 TERRAFORM_VERSION="${TERRAFORM_VERSION:-1.16.6}"
 AWS_PROVIDER_VERSION="${AWS_PROVIDER_VERSION:-6.69.1}"
+# The archive provider, which zips a function's folder in the project `ff init --template terraform` writes.
+ARCHIVE_PROVIDER_VERSION="${ARCHIVE_PROVIDER_VERSION:-2.8.1}"
 SAM_VERSION="${SAM_VERSION:-1.169.0}"
 # The SAM CLI publishes its installers' checksums in its release's notes alone: copied from there, for the version
 # pinned. Another version needs SAM_SHA256, from its own release's notes.
@@ -172,39 +174,51 @@ install_terraform() {
   echo "installed Terraform $TERRAFORM_VERSION (sha256 verified)"
 }
 
-# Terraform's AWS provider, its release's zip as published, in a directory both CLIs install providers from in place of
-# a registry (their filesystem mirror's packed layout), under each one's name for it: hashicorp/aws on Terraform's
-# registry and on OpenTofu's. hack/.terraform/cli.tfrc tells both to take it from there (TF_CLI_CONFIG_FILE), and to
-# unpack it once, into a cache every working directory links to.
-install_aws_provider() {
-  local mirror="$repo_root/hack/.terraform/mirror" asset="terraform-provider-aws_${AWS_PROVIDER_VERSION}_${os}_${arch}.zip" expected
-  local zip="$mirror/registry.terraform.io/hashicorp/aws/$asset"
-  aws_provider_config "$mirror"
+# A HashiCorp provider, its release's zip as published, in a directory both CLIs install providers from in place of a
+# registry (their filesystem mirror's packed layout), under each one's name for it: hashicorp/<name> on Terraform's
+# registry and on OpenTofu's. hack/.terraform/cli.tfrc tells both to take the providers it holds from there
+# (TF_CLI_CONFIG_FILE), and to unpack each once, into a cache every working directory links to.
+mirror="$repo_root/hack/.terraform/mirror"
+install_provider() { # <name> <version> <its name in messages>
+  local name=$1 version=$2 label=$3 expected
+  local asset="terraform-provider-${name}_${version}_${os}_${arch}.zip"
+  local zip="$mirror/registry.terraform.io/hashicorp/$name/$asset"
   if [ -f "$zip" ]; then
-    echo "Terraform's AWS provider $AWS_PROVIDER_VERSION already installed"
-    return
+    echo "Terraform's $label provider $version already installed"
+  else
+    local base="https://releases.hashicorp.com/terraform-provider-$name/$version"
+    curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+    expected="$(published_sha256 "$base/terraform-provider-${name}_${version}_SHA256SUMS" "$asset")"
+    verify "$tmp/$asset" "$expected"
+    mkdir -p "$(dirname "$zip")" "$mirror/registry.opentofu.org/hashicorp/$name"
+    install -m 0644 "$tmp/$asset" "$zip"
+    ln -f "$zip" "$mirror/registry.opentofu.org/hashicorp/$name/$asset"
+    echo "installed Terraform's $label provider $version in hack/.terraform/mirror (sha256 verified)"
   fi
-  local base="https://releases.hashicorp.com/terraform-provider-aws/$AWS_PROVIDER_VERSION"
-  curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
-  expected="$(published_sha256 "$base/terraform-provider-aws_${AWS_PROVIDER_VERSION}_SHA256SUMS" "$asset")"
-  verify "$tmp/$asset" "$expected"
-  mkdir -p "$(dirname "$zip")" "$mirror/registry.opentofu.org/hashicorp/aws"
-  install -m 0644 "$tmp/$asset" "$zip"
-  ln -f "$zip" "$mirror/registry.opentofu.org/hashicorp/aws/$asset"
-  echo "installed Terraform's AWS provider $AWS_PROVIDER_VERSION in hack/.terraform/mirror (sha256 verified)"
+  providers_config
 }
-aws_provider_config() { # <mirror>: the CLIs' configuration, for this checkout's paths
+install_aws_provider() { install_provider aws "$AWS_PROVIDER_VERSION" AWS; }
+install_archive_provider() { install_provider archive "$ARCHIVE_PROVIDER_VERSION" archive; }
+# The CLIs' configuration, for this checkout's paths: each provider the mirror holds from there, so that a version it
+# lacks fails rather than comes from a registry unchecked, and any other provider from its registry.
+providers_config() {
+  local dir names=()
+  for dir in "$mirror"/registry.terraform.io/hashicorp/*/; do names+=("$(basename "$dir")"); done
+  local name addresses=()
+  for name in "${names[@]}"; do addresses+=("\"registry.terraform.io/hashicorp/$name\"" "\"registry.opentofu.org/hashicorp/$name\""); done
+  local list
+  list="$(printf '%s, ' "${addresses[@]}")"
   mkdir -p "$repo_root/hack/.terraform/plugin-cache"
   cat >"$repo_root/hack/.terraform/cli.tfrc" <<EOF
-# Written by hack/install-tools.sh: hashicorp/aws from the mirror it fills, any other provider from its registry.
+# Written by hack/install-tools.sh: $(printf 'hashicorp/%s ' "${names[@]}")from the mirror it fills, any other provider from its registry.
 plugin_cache_dir = "$repo_root/hack/.terraform/plugin-cache"
 provider_installation {
   filesystem_mirror {
-    path    = "$1"
-    include = ["registry.terraform.io/hashicorp/aws", "registry.opentofu.org/hashicorp/aws"]
+    path    = "$mirror"
+    include = [${list%, }]
   }
   direct {
-    exclude = ["registry.terraform.io/hashicorp/aws", "registry.opentofu.org/hashicorp/aws"]
+    exclude = [${list%, }]
   }
 }
 EOF
@@ -241,7 +255,8 @@ for tool in "$@"; do
   case "$tool" in
     kubectl | k3d | rust | tofu | terraform | sam) "install_$tool" ;;
     aws-provider) install_aws_provider ;;
-    aws) install_tofu; install_terraform; install_aws_provider; install_sam ;;
-    *) echo "unknown tool $tool: kubectl, k3d, rust, tofu, terraform, aws-provider, sam, or aws for the last four" >&2; exit 2 ;;
+    archive-provider) install_archive_provider ;;
+    aws) install_tofu; install_terraform; install_aws_provider; install_archive_provider; install_sam ;;
+    *) echo "unknown tool $tool: kubectl, k3d, rust, tofu, terraform, aws-provider, archive-provider, sam, or aws for the last five" >&2; exit 2 ;;
   esac
 done

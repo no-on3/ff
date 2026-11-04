@@ -221,9 +221,33 @@ pub fn read(client: &Client, account: &MeAccount, only: &[String]) -> Result<Acc
     Ok(read)
 }
 
+/// What a function's variable holds the name of: one of the account's buckets, else one of its queues.
+pub enum Named<'a> {
+    Bucket(&'a str),
+    Queue(&'a str),
+}
+
 impl Account {
     pub fn queue_named(&self, name: &str) -> Option<&Queue> {
         self.queues.iter().find(|queue| queue.name == name)
+    }
+
+    /// The bucket or the queue a variable's value is the name of, which the export writes by reference, so that a
+    /// name changed on the way reaches the functions: a bucket's above all, S3's names being global.
+    pub fn named_by(&self, value: &serde_json::Value) -> Option<Named<'_>> {
+        let text = value.as_str()?;
+        match self.buckets.iter().find(|bucket| bucket.name == text) {
+            Some(bucket) => Some(Named::Bucket(&bucket.name)),
+            None => self.queue_named(text).map(|queue| Named::Queue(&queue.name)),
+        }
+    }
+
+    /// Whether one of the functions' variables holds the bucket's name.
+    pub fn a_variable_names(&self, bucket: &str) -> bool {
+        self.functions
+            .iter()
+            .flat_map(|record| record.function.environment.iter().flatten())
+            .any(|(_, value)| value.as_str() == Some(bucket))
     }
 
     /// Each queue's visibility timeout where a function reading it has a longer timeout, which AWS

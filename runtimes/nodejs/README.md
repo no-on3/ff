@@ -45,9 +45,9 @@ Loading the code must fit in the start-up limit, 10 s (or the function's timeout
 |---|---|
 | `GET /healthz` | `200 {"status":"ok"}` while the main thread is alive (liveness probe) |
 | `GET /readyz` | `200 {"status":"ready"}` once user code is loaded. Otherwise `503 {"status":"starting"}`, or `503 {"status":"failed","error":{errorType,errorMessage}}` (readiness probe) |
-| `POST /invoke` | Body = JSON payload (empty means `{}`). Optional header `X-FF-Request-Id`. Returns `200` with the handler's return value as JSON (`null` for `undefined`). |
+| `POST /invoke` | Body = JSON payload (empty means `{}`). Optional headers: `X-FF-Request-Id`; `X-FF-Log-Type: Tail`, for the call's log (see [Logs](#logs)); `X-FF-Client-Context`, Lambda's `ClientContext`, the base64 of a JSON object, which the handler gets as `context.clientContext`. Returns `200` with the handler's return value as JSON (`null` for `undefined`). |
 
-**Response headers:** `X-FF-Request-Id`, `X-FF-Duration-Ms`, `X-FF-Max-Memory-Used-Mb`, and `X-FF-Function-Error: Unhandled` on function errors.
+**Response headers:** `X-FF-Request-Id`, `X-FF-Duration-Ms`, `X-FF-Max-Memory-Used-Mb`, `X-FF-Log-Result` when the call's log was asked for, and `X-FF-Function-Error: Unhandled` on function errors.
 
 **Error responses** (body `{"errorType","errorMessage"}`):
 
@@ -60,7 +60,7 @@ Loading the code must fit in the start-up limit, 10 s (or the function's timeout
 | 500 | `Runtime.MarshalError` | The return value has no JSON form: a function, a symbol, a `BigInt`, or a cycle. `Unable to marshal response: …`, as the Python runtime says |
 | 500 | `Function.ResponseSizeTooLarge` | Return value above 6 MB |
 | 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Runtime.CallbackHandlerDeprecated`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
-| 400 | `InvalidRequestContentException` | Body is not JSON |
+| 400 | `InvalidRequestContentException` | Body is not JSON; or `X-FF-Client-Context` is not the base64 of a JSON object: `Client context must be a valid Base64-encoded JSON object.`, as Lambda says |
 | 413 | `RequestEntityTooLargeException` | Body above 6 MB |
 | 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting, or one waited longer than `FF_MAX_QUEUE_WAIT_MS` for its turn: `Rate exceeded: no instance was free within X.XX seconds` |
 | 503 | `ServiceUnavailableException` | The runtime is stopping, and refused the call before it ran: `Runtime is shutting down`, with `X-FF-Not-Run: shutting-down`, so that the caller may send it to another instance, as the backend does (see [Stopping](#stopping)) |
@@ -74,9 +74,10 @@ export async function handler(event, context) { … }
 // event:   the payload of POST /invoke itself, any JSON value, as on AWS Lambda; or, with
 //          FF_EVENT_FORMAT=wrapped, { body, headers, method, query, path } with body = the payload
 // context: { functionName, functionVersion, memoryLimitInMB (string), awsRequestId,
-//            getRemainingTimeInMillis() }
+//            clientContext, getRemainingTimeInMillis() }
 ```
 
+- **`context.clientContext` is what the caller said of itself,** as Lambda passes it on for a synchronous `Invoke`: the JSON object it sent, its `custom`, `env` and `client`, or `undefined` without one.
 - **The event is the payload,** as on Lambda: `POST /invoke` with `{"name": "Tunis"}` calls the handler with `event.name === 'Tunis'`. FF's backend builds every event a function gets: an invoke's input, a function URL's HTTP event, a schedule's ([ADR 0007](../../docs/adr/0007-function-events.md)). A function made before protocol 3 keeps FF's original wrapper, which the runtime builds from its own request when `FF_EVENT_FORMAT=wrapped`.
 
 - `getRemainingTimeInMillis()` counts down from the start of *this* invocation, not from process start.
@@ -168,7 +169,9 @@ The stack trace points at the lines of the TypeScript source (source maps are on
 - **A line left open,** by `process.stdout.write` without a newline, is ended before the runtime's next line, so that `START`, `END`, `REPORT` and the JSON lines always start a line.
 - **A worker that dies after its handler returned,** because work left running filled the heap or exited, doesn't fail that call: it keeps its answer, and the crash is logged after its `REPORT`, without a request ID. The next call gets a fresh worker.
 
-The Python runtime needs none of this: its worker is a process that writes to the same stdout and stderr, unbuffered (`PYTHONUNBUFFERED`), before it sends its result.
+The Python runtime's main process forwards its worker's output the same way, end-of-call markers and all, so that it has each call's output too.
+
+**A call's log, given back.** With `X-FF-Log-Type: Tail`, the answer carries `X-FF-Log-Result`: the base64 of the call's last 4 KB of log, from its `START` to its `REPORT`, which the backend gives back as Lambda's `X-Amz-Log-Result` for `Invoke` with `LogType` `Tail`; the log store has a line only seconds after it is written. The runtime keeps what it writes while the call runs, its own lines and the worker's on both streams, merged line by line: a line one stream left open waits for its end, so that the other's lines don't split it, and the runtime's next line ends it.
 
 ## What changed in v3
 
@@ -180,6 +183,8 @@ Protocol v3 (2026-10-21, step-1 plan U-03, [ADR 0007](../../docs/adr/0007-functi
 | The startup line | `"protocol": 2` | `"protocol": 3`, with `"eventFormat"` |
 
 The backend tells each function's pods which format they get. Every function made before v3 is `wrapped`, and gets from v3 the same event as from v2.
+
+Two optional headers came later in v3 (2026-11-03), for Lambda's `Invoke`: `X-FF-Log-Type: Tail`, answered with `X-FF-Log-Result`, and `X-FF-Client-Context`. A runtime built before them ignores both, and gives back no log.
 
 ## What changed in v2
 

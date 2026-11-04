@@ -2,11 +2,14 @@
 //! SDKs and CLI reach them at FF's S3 endpoint with one of the account's access keys, which
 //! `ff keys` makes (`ff buckets keys` another name for it).
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::Context;
 use crate::api::{Call, Client};
+use crate::config::is_bucket_name;
 use crate::error::Error;
 use crate::table::{table, time};
 
@@ -27,6 +30,9 @@ pub(super) struct Bucket {
     /// The hour of that measure.
     #[serde(default)]
     measured_at: Option<String>,
+    /// Its tags, in a bucket's own answer alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tags: Option<BTreeMap<String, String>>,
     created_at: String,
 }
 
@@ -41,23 +47,6 @@ fn held(bucket: &Bucket) -> String {
         ),
         _ => "not measured yet: within the hour".to_owned(),
     }
-}
-
-/// AWS's prefixes and suffixes that no bucket of AWS's may have, and so no bucket of FF's.
-const RESERVED_PREFIXES: [&str; 3] = ["xn--", "sthree-", "amzn-s3-demo-"];
-const RESERVED_SUFFIXES: [&str; 4] = ["-s3alias", "--ol-s3", "--x-s3", "--table-s3"];
-
-/// AWS's rule for a bucket's name, as the API's, without dots: 3 to 63 lower-case letters, digits
-/// and hyphens, a letter or a digit first and last, none of the names AWS keeps.
-pub fn is_bucket_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    let edge = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
-    (3..=63).contains(&bytes.len())
-        && bytes.first().is_some_and(edge)
-        && bytes.last().is_some_and(edge)
-        && bytes.iter().all(|byte| edge(byte) || *byte == b'-')
-        && !RESERVED_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
-        && !RESERVED_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
 
 pub fn checked_name(name: &str) -> Result<&str, Error> {
@@ -120,8 +109,12 @@ pub fn get(name: &str, context: &Context) -> Result<(), Error> {
     let client = Client::new(&context.settings()?)?;
     let bucket: Bucket = client.json(&Call::get(format!("/buckets/{name}")))?;
     context.out.result(&bucket, || {
+        let tags = match bucket.tags.as_ref().filter(|tags| !tags.is_empty()) {
+            Some(tags) => format!("tags      {}\n", crate::table::tags(tags)),
+            None => String::new(),
+        };
         format!(
-            "{}\nstatus    {}\nheld      {}\n{}\ncreated   {} UTC",
+            "{}\nstatus    {}\nheld      {}\n{tags}{}\ncreated   {} UTC",
             bucket.name,
             bucket.status,
             held(&bucket),

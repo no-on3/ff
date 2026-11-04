@@ -9,7 +9,9 @@ import { BillingModule } from '../billing/billing.module';
 import { EncryptionModule } from '../encryption/encryption.module';
 import { UsageModule } from '../usage/usage.module';
 import { PackagesModule } from '../packages/packages.module';
+import { StacksModule } from '../stacks/stacks.module';
 import { StorageModule } from '../storage/storage.module';
+import { TagsModule } from '../tags/tags.module';
 import { QueuesModule } from '../queues/queues.module';
 import { Account } from '../accounts/entities/account.entity';
 import { AsyncInvocationsService } from './async-invocations.service';
@@ -19,6 +21,7 @@ import { EventInvokeConfigController } from './event-invoke-config.controller';
 import { EventInvokeConfigService } from './event-invoke-config.service';
 import { FunctionEnvironment } from './entities/function-environment.entity';
 import { FunctionAlias } from './entities/function-alias.entity';
+import { FunctionPolicyStatement } from './entities/function-policy-statement.entity';
 import { FunctionVersion } from './entities/function-version.entity';
 import { Schedule } from '../schedules/schedule.entity';
 import { FunctionInvocation } from './entities/function-invocation.entity';
@@ -31,10 +34,12 @@ import { FunctionAliasesService } from './aliases.service';
 import { FunctionVersionsController } from './versions.controller';
 import { FunctionVersionsService } from './versions.service';
 import { FunctionKeyRenewal } from './key-renewal.service';
+import { FunctionPoliciesService } from './policies.service';
+import { StoppedChanges } from './stopped-changes.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Function, FunctionInvocation, FunctionEnvironment, FunctionEventInvokeConfig, FunctionVersion, FunctionAlias, Account, Schedule]),
+    TypeOrmModule.forFeature([Function, FunctionInvocation, FunctionEnvironment, FunctionEventInvokeConfig, FunctionVersion, FunctionAlias, FunctionPolicyStatement, Account, Schedule]),
     ObjectStoreModule,
     OrchestratorModule,
     MetricsModule,
@@ -49,9 +54,13 @@ import { FunctionKeyRenewal } from './key-renewal.service';
     StorageModule,
     // Its asynchronous calls wait in a queue of its own.
     QueuesModule,
+    // Its answers say which stack it is in, and its tags.
+    StacksModule,
+    TagsModule,
   ],
   controllers: [FunctionsController, EventInvokeConfigController, FunctionVersionsController, FunctionAliasesController],
-  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionKeyRenewal],
-  exports: [FunctionsService],
+  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionPoliciesService, FunctionKeyRenewal, StoppedChanges],
+  // Lambda's endpoint reads versions and aliases, queues calls and sets their settings, as FF's API does, and keeps its permissions.
+  exports: [FunctionsService, FunctionVersionsService, FunctionAliasesService, FunctionPoliciesService, AsyncInvocationsService, EventInvokeConfigService],
 })
 export class FunctionsModule {}

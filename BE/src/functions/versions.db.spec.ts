@@ -12,7 +12,7 @@
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
-import { BadRequestException, ConflictException, InternalServerErrorException, NotFoundException, PreconditionFailedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, InternalServerErrorException, Logger, NotFoundException, PreconditionFailedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'node:crypto';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
@@ -31,7 +31,7 @@ import { FunctionAliasesService } from './aliases.service';
 import { FunctionAlias } from './entities/function-alias.entity';
 import { FunctionUrl, UrlAuthType } from './entities/function-url.entity';
 import { FunctionVersion } from './entities/function-version.entity';
-import { EventFormat, Function, Runtime } from './entities/function.entity';
+import { EventFormat, Function, Runtime, UpdateStatus } from './entities/function.entity';
 import { EnvironmentStore } from './environment.store';
 import { FunctionsService } from './functions.service';
 import { noFunctionKeys, noPackages } from './test-fixtures';
@@ -269,6 +269,94 @@ run("functions' versions and aliases (L2)", () => {
     expect(await numbers(fn.id)).toEqual([]);
     expect(callsFor(orchestrator.removeVersion, fn.id)).toEqual([[{ id: fn.id, accountId: ACCOUNT, version: 1 }], [{ id: fn.id, accountId: ACCOUNT, version: 1 }]]);
     expect((await deletions())[0].n).toBe(1);
+  });
+
+  describe("a create as Lambda's CreateFunction makes it, answered before its rollout", () => {
+    const role = `arn:aws:iam::${ACCOUNT}:role/orders`;
+
+    it('saves the function CREATING with its description and role, refuses its changes meanwhile, then makes it ACTIVE with version 1 in one transaction', async () => {
+      const started = await functions.startCreate(ACCOUNT, body('created'), { description: 'Takes orders', role });
+      const { id } = started.function_;
+
+      expect(await query('SELECT status, description, role FROM functions WHERE id = $1', [id])).toEqual([{ status: 'CREATING', description: 'Takes orders', role }]);
+      await expect(functions.update(ACCOUNT, id, { memory: 256 })).rejects.toThrow('The function created is being created: change or delete it once it is ACTIVE, or ERROR');
+      await expect(functions.remove(ACCOUNT, id)).rejects.toBeInstanceOf(ConflictException);
+
+      const view = await started.rollOut((manager) => versions.publishIn(manager, ACCOUNT, id, {}));
+
+      expect(view).toMatchObject({ id, status: 'ACTIVE', description: 'Takes orders', role, environment: { TABLE: 'orders' } });
+      // The package the pods run is the backend's to know: the answer doesn't give it.
+      expect(view.packageSha256).toBeUndefined();
+      // A version's description is its function's, unless its publish says another, as Lambda's.
+      expect(await versions.list(ACCOUNT, id)).toMatchObject([{ version: '1', description: 'Takes orders' }]);
+      expect(await functions.findOne(ACCOUNT, id)).toMatchObject({ description: 'Takes orders', role });
+    });
+
+    it('keeps the function from ACTIVE when what goes with it fails: the transaction undone, the function ERROR, no version', async () => {
+      const started = await functions.startCreate(ACCOUNT, body('unpublished'));
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      await expect(
+        started.rollOut(async () => {
+          throw new Error('the publish failed');
+        }),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+
+      // Its create ended, Failed, so that a change may take the function.
+      expect(await query('SELECT status, update_status, update_started_at FROM functions WHERE id = $1', [started.function_.id])).toEqual([
+        { status: 'ERROR', update_status: 'Failed', update_started_at: null },
+      ]);
+      expect(await query('SELECT count(*)::int AS n FROM function_versions WHERE function_id = $1', [started.function_.id])).toEqual([{ n: 0 }]);
+      expect(logged).toHaveBeenCalledWith(expect.stringContaining('the publish failed'), expect.any(String));
+      logged.mockRestore();
+    });
+
+    it('leaves a function deleted during its rollout deleted, its outcome refused', async () => {
+      const started = await functions.startCreate(ACCOUNT, body('gone'));
+      await query('DELETE FROM functions WHERE id = $1', [started.function_.id]);
+
+      await expect(started.rollOut()).rejects.toBeInstanceOf(ConflictException);
+      expect(await query('SELECT count(*)::int AS n FROM functions WHERE id = $1', [started.function_.id])).toEqual([{ n: 0 }]);
+    });
+  });
+
+  describe("an update as Lambda's UpdateFunctionCode makes it, answered before its rollout", () => {
+    it("is waited for as Lambda's PublishVersion waits: refused while it rolls out, then published in the transaction that ends it", async () => {
+      const fn = await functions.create(ACCOUNT, body('changing'));
+      const started = await functions.startUpdate(ACCOUNT, fn.id, { memory: 256 });
+
+      await expect(versions.publish(ACCOUNT, fn.id, {})).rejects.toThrow(new ConflictException('The function is being changed: publish it once that change is live, or rolled back'));
+      await expect(functions.update(ACCOUNT, fn.id, { timeout: 10 })).rejects.toThrow('The function changing is being changed: change or delete it once that change is live, or rolled back');
+      let published: unknown;
+      const view = await started.rollOut(async (manager) => {
+        published = (await versions.publishIn(manager, ACCOUNT, fn.id, {})).published;
+      });
+
+      expect(view).toMatchObject({ memory: 256, updateStatus: UpdateStatus.SUCCESSFUL, updateStartedAt: null });
+      expect(published).toMatchObject({ version: '1', memory: 256 });
+      expect(await numbers(fn.id)).toEqual(['1']);
+    });
+
+    it('rolls back when what goes with it fails: the transaction undone, no version, the function as it was, its update Failed', async () => {
+      const fn = await functions.create(ACCOUNT, body('rolled-back'));
+      const started = await functions.startUpdate(ACCOUNT, fn.id, { memory: 256 });
+      const logged = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      const warned = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+      await expect(
+        started.rollOut(async () => {
+          throw new Error('the publish failed');
+        }),
+      ).rejects.toBeInstanceOf(InternalServerErrorException);
+
+      expect(await query('SELECT status, memory, update_status, update_reason, update_started_at FROM functions WHERE id = $1', [fn.id])).toEqual([
+        { status: 'ACTIVE', memory: 128, update_status: 'Failed', update_reason: expect.stringMatching(/The update was rolled back: the previous version is still live\.$/), update_started_at: null },
+      ]);
+      expect(await numbers(fn.id)).toEqual([]);
+      logged.mockRestore();
+      warned.mockRestore();
+      await expect(functions.update(ACCOUNT, fn.id, { memory: 256 })).resolves.toMatchObject({ memory: 256, updateStatus: UpdateStatus.SUCCESSFUL });
+    });
   });
 
   describe('aliases', () => {

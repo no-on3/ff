@@ -48,6 +48,7 @@ describe("QueuesService: customers' queues in FF's API, as SQS's operations (L1)
       onePlan(),
       credit as never,
       { account: async () => account } as never,
+      { of: async () => ({}) } as never,
       new ConfigService({ sqs: { base: BASE, region: 'tn-tunis-1' } }),
     );
   });

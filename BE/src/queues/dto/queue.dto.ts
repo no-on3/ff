@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsObject, IsOptional, IsString, Length, Matches, Max, MaxLength, Min, ValidateNested } from 'class-validator';
+import { IsInt, IsObject, IsOptional, IsString, Length, Matches, Max, MaxLength, Min, ValidateIf, ValidateNested } from 'class-validator';
+import { IsTags, TAG_LIMITS } from '../../tags/tag-rules';
 
 /** SQS's redrive policy: after maxReceiveCount receives, a message goes to the dead-letter queue its ARN names. */
 export class RedrivePolicyDto {
@@ -60,8 +61,23 @@ export class QueueAttributesDto {
   redrivePolicy?: RedrivePolicyDto | null;
 }
 
+/** A queue's attributes and its tags, which a make and a change take. */
+class QueueAttributesAndTagsDto extends QueueAttributesDto {
+  @ApiPropertyOptional({
+    description:
+      `Its tags, as SQS's: ${TAG_LIMITS.perResource} at most, a key of ${TAG_LIMITS.keyLength} characters, a value of ${TAG_LIMITS.valueLength}. ` +
+      "A new queue's, as CreateQueue's; on a change, those sent replace them all, {} removing them, as a template's deploy gives them",
+    type: 'object',
+    additionalProperties: { type: 'string' },
+    example: { team: 'orders' },
+  })
+  @ValidateIf((_dto, value) => value !== undefined)
+  @IsTags()
+  tags?: Record<string, string>;
+}
+
 /** POST /queues. */
-export class CreateQueueDto extends QueueAttributesDto {
+export class CreateQueueDto extends QueueAttributesAndTagsDto {
   @ApiProperty({ example: 'orders', description: "The queue's name, SQS's rule: 1 to 80 letters, digits, hyphens or underscores, the account's own" })
   @IsString()
   @Length(1, 80)
@@ -70,7 +86,7 @@ export class CreateQueueDto extends QueueAttributesDto {
 }
 
 /** PATCH /queues/:name: the attributes given change, the others stay, as SQS's SetQueueAttributes. */
-export class UpdateQueueDto extends QueueAttributesDto {}
+export class UpdateQueueDto extends QueueAttributesAndTagsDto {}
 
 /** A queue's messages, as SQS counts them, roughly. */
 export class QueueMessagesView {
@@ -112,6 +128,9 @@ export class QueueView {
 
   @ApiProperty({ type: RedrivePolicyDto, nullable: true })
   redrivePolicy: RedrivePolicyDto | null;
+
+  @ApiPropertyOptional({ type: 'object', additionalProperties: { type: 'string' }, example: { team: 'orders' }, description: "Its tags, in a queue's own answer, as SQS's ListQueueTags gives them; not in the list" })
+  tags?: Record<string, string>;
 
   @ApiProperty({ type: QueueMessagesView })
   messages: QueueMessagesView;

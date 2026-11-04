@@ -1,0 +1,448 @@
+{
+ "source": "botocore 1.43.118, botocore/data/lambda/2015-03-31/service-2.json: each operation's name, method and URI as Lambda's model has them",
+ "license": "Apache-2.0, as botocore's",
+ "apiVersion": "2015-03-31",
+ "operations": [
+  {
+   "name": "InvokeAsync",
+   "method": "POST",
+   "uri": "/2014-11-13/functions/{FunctionName}/invoke-async",
+   "deprecated": true
+  },
+  {
+   "name": "ListEventSourceMappings",
+   "method": "GET",
+   "uri": "/2015-03-31/event-source-mappings"
+  },
+  {
+   "name": "CreateEventSourceMapping",
+   "method": "POST",
+   "uri": "/2015-03-31/event-source-mappings"
+  },
+  {
+   "name": "DeleteEventSourceMapping",
+   "method": "DELETE",
+   "uri": "/2015-03-31/event-source-mappings/{UUID}"
+  },
+  {
+   "name": "GetEventSourceMapping",
+   "method": "GET",
+   "uri": "/2015-03-31/event-source-mappings/{UUID}"
+  },
+  {
+   "name": "UpdateEventSourceMapping",
+   "method": "PUT",
+   "uri": "/2015-03-31/event-source-mappings/{UUID}"
+  },
+  {
+   "name": "ListFunctions",
+   "method": "GET",
+   "uri": "/2015-03-31/functions"
+  },
+  {
+   "name": "CreateFunction",
+   "method": "POST",
+   "uri": "/2015-03-31/functions"
+  },
+  {
+   "name": "DeleteFunction",
+   "method": "DELETE",
+   "uri": "/2015-03-31/functions/{FunctionName}"
+  },
+  {
+   "name": "GetFunction",
+   "method": "GET",
+   "uri": "/2015-03-31/functions/{FunctionName}"
+  },
+  {
+   "name": "ListAliases",
+   "method": "GET",
+   "uri": "/2015-03-31/functions/{FunctionName}/aliases"
+  },
+  {
+   "name": "CreateAlias",
+   "method": "POST",
+   "uri": "/2015-03-31/functions/{FunctionName}/aliases"
+  },
+  {
+   "name": "DeleteAlias",
+   "method": "DELETE",
+   "uri": "/2015-03-31/functions/{FunctionName}/aliases/{Name}"
+  },
+  {
+   "name": "GetAlias",
+   "method": "GET",
+   "uri": "/2015-03-31/functions/{FunctionName}/aliases/{Name}"
+  },
+  {
+   "name": "UpdateAlias",
+   "method": "PUT",
+   "uri": "/2015-03-31/functions/{FunctionName}/aliases/{Name}"
+  },
+  {
+   "name": "UpdateFunctionCode",
+   "method": "PUT",
+   "uri": "/2015-03-31/functions/{FunctionName}/code"
+  },
+  {
+   "name": "GetFunctionConfiguration",
+   "method": "GET",
+   "uri": "/2015-03-31/functions/{FunctionName}/configuration"
+  },
+  {
+   "name": "UpdateFunctionConfiguration",
+   "method": "PUT",
+   "uri": "/2015-03-31/functions/{FunctionName}/configuration"
+  },
+  {
+   "name": "Invoke",
+   "method": "POST",
+   "uri": "/2015-03-31/functions/{FunctionName}/invocations"
+  },
+  {
+   "name": "GetPolicy",
+   "method": "GET",
+   "uri": "/2015-03-31/functions/{FunctionName}/policy"
+  },
+  {
+   "name": "AddPermission",
+   "method": "POST",
+   "uri": "/2015-03-31/functions/{FunctionName}/policy"
+  },
+  {
+   "name": "RemovePermission",
+   "method": "DELETE",
+   "uri": "/2015-03-31/functions/{FunctionName}/policy/{StatementId}"
+  },
+  {
+   "name": "ListVersionsByFunction",
+   "method": "GET",
+   "uri": "/2015-03-31/functions/{FunctionName}/versions"
+  },
+  {
+   "name": "PublishVersion",
+   "method": "POST",
+   "uri": "/2015-03-31/functions/{FunctionName}/versions"
+  },
+  {
+   "name": "GetAccountSettings",
+   "method": "GET",
+   "uri": "/2016-08-19/account-settings"
+  },
+  {
+   "name": "UntagResource",
+   "method": "DELETE",
+   "uri": "/2017-03-31/tags/{Resource}"
+  },
+  {
+   "name": "ListTags",
+   "method": "GET",
+   "uri": "/2017-03-31/tags/{Resource}"
+  },
+  {
+   "name": "TagResource",
+   "method": "POST",
+   "uri": "/2017-03-31/tags/{Resource}"
+  },
+  {
+   "name": "DeleteFunctionConcurrency",
+   "method": "DELETE",
+   "uri": "/2017-10-31/functions/{FunctionName}/concurrency"
+  },
+  {
+   "name": "PutFunctionConcurrency",
+   "method": "PUT",
+   "uri": "/2017-10-31/functions/{FunctionName}/concurrency"
+  },
+  {
+   "name": "ListLayers",
+   "method": "GET",
+   "uri": "/2018-10-31/layers"
+  },
+  {
+   "name": "ListLayerVersions",
+   "method": "GET",
+   "uri": "/2018-10-31/layers/{LayerName}/versions"
+  },
+  {
+   "name": "PublishLayerVersion",
+   "method": "POST",
+   "uri": "/2018-10-31/layers/{LayerName}/versions"
+  },
+  {
+   "name": "DeleteLayerVersion",
+   "method": "DELETE",
+   "uri": "/2018-10-31/layers/{LayerName}/versions/{VersionNumber}"
+  },
+  {
+   "name": "GetLayerVersion",
+   "method": "GET",
+   "uri": "/2018-10-31/layers/{LayerName}/versions/{VersionNumber}"
+  },
+  {
+   "name": "GetLayerVersionPolicy",
+   "method": "GET",
+   "uri": "/2018-10-31/layers/{LayerName}/versions/{VersionNumber}/policy"
+  },
+  {
+   "name": "AddLayerVersionPermission",
+   "method": "POST",
+   "uri": "/2018-10-31/layers/{LayerName}/versions/{VersionNumber}/policy"
+  },
+  {
+   "name": "RemoveLayerVersionPermission",
+   "method": "DELETE",
+   "uri": "/2018-10-31/layers/{LayerName}/versions/{VersionNumber}/policy/{StatementId}"
+  },
+  {
+   "name": "GetLayerVersionByArn",
+   "method": "GET",
+   "uri": "/2018-10-31/layers?find=LayerVersion"
+  },
+  {
+   "name": "DeleteFunctionEventInvokeConfig",
+   "method": "DELETE",
+   "uri": "/2019-09-25/functions/{FunctionName}/event-invoke-config"
+  },
+  {
+   "name": "GetFunctionEventInvokeConfig",
+   "method": "GET",
+   "uri": "/2019-09-25/functions/{FunctionName}/event-invoke-config"
+  },
+  {
+   "name": "UpdateFunctionEventInvokeConfig",
+   "method": "POST",
+   "uri": "/2019-09-25/functions/{FunctionName}/event-invoke-config"
+  },
+  {
+   "name": "PutFunctionEventInvokeConfig",
+   "method": "PUT",
+   "uri": "/2019-09-25/functions/{FunctionName}/event-invoke-config"
+  },
+  {
+   "name": "ListFunctionEventInvokeConfigs",
+   "method": "GET",
+   "uri": "/2019-09-25/functions/{FunctionName}/event-invoke-config/list"
+  },
+  {
+   "name": "GetFunctionConcurrency",
+   "method": "GET",
+   "uri": "/2019-09-30/functions/{FunctionName}/concurrency"
+  },
+  {
+   "name": "DeleteProvisionedConcurrencyConfig",
+   "method": "DELETE",
+   "uri": "/2019-09-30/functions/{FunctionName}/provisioned-concurrency"
+  },
+  {
+   "name": "GetProvisionedConcurrencyConfig",
+   "method": "GET",
+   "uri": "/2019-09-30/functions/{FunctionName}/provisioned-concurrency"
+  },
+  {
+   "name": "PutProvisionedConcurrencyConfig",
+   "method": "PUT",
+   "uri": "/2019-09-30/functions/{FunctionName}/provisioned-concurrency"
+  },
+  {
+   "name": "ListProvisionedConcurrencyConfigs",
+   "method": "GET",
+   "uri": "/2019-09-30/functions/{FunctionName}/provisioned-concurrency?List=ALL"
+  },
+  {
+   "name": "ListCodeSigningConfigs",
+   "method": "GET",
+   "uri": "/2020-04-22/code-signing-configs"
+  },
+  {
+   "name": "CreateCodeSigningConfig",
+   "method": "POST",
+   "uri": "/2020-04-22/code-signing-configs"
+  },
+  {
+   "name": "DeleteCodeSigningConfig",
+   "method": "DELETE",
+   "uri": "/2020-04-22/code-signing-configs/{CodeSigningConfigArn}"
+  },
+  {
+   "name": "GetCodeSigningConfig",
+   "method": "GET",
+   "uri": "/2020-04-22/code-signing-configs/{CodeSigningConfigArn}"
+  },
+  {
+   "name": "UpdateCodeSigningConfig",
+   "method": "PUT",
+   "uri": "/2020-04-22/code-signing-configs/{CodeSigningConfigArn}"
+  },
+  {
+   "name": "ListFunctionsByCodeSigningConfig",
+   "method": "GET",
+   "uri": "/2020-04-22/code-signing-configs/{CodeSigningConfigArn}/functions"
+  },
+  {
+   "name": "DeleteFunctionCodeSigningConfig",
+   "method": "DELETE",
+   "uri": "/2020-06-30/functions/{FunctionName}/code-signing-config"
+  },
+  {
+   "name": "GetFunctionCodeSigningConfig",
+   "method": "GET",
+   "uri": "/2020-06-30/functions/{FunctionName}/code-signing-config"
+  },
+  {
+   "name": "PutFunctionCodeSigningConfig",
+   "method": "PUT",
+   "uri": "/2020-06-30/functions/{FunctionName}/code-signing-config"
+  },
+  {
+   "name": "GetRuntimeManagementConfig",
+   "method": "GET",
+   "uri": "/2021-07-20/functions/{FunctionName}/runtime-management-config"
+  },
+  {
+   "name": "PutRuntimeManagementConfig",
+   "method": "PUT",
+   "uri": "/2021-07-20/functions/{FunctionName}/runtime-management-config"
+  },
+  {
+   "name": "DeleteFunctionUrlConfig",
+   "method": "DELETE",
+   "uri": "/2021-10-31/functions/{FunctionName}/url"
+  },
+  {
+   "name": "GetFunctionUrlConfig",
+   "method": "GET",
+   "uri": "/2021-10-31/functions/{FunctionName}/url"
+  },
+  {
+   "name": "CreateFunctionUrlConfig",
+   "method": "POST",
+   "uri": "/2021-10-31/functions/{FunctionName}/url"
+  },
+  {
+   "name": "UpdateFunctionUrlConfig",
+   "method": "PUT",
+   "uri": "/2021-10-31/functions/{FunctionName}/url"
+  },
+  {
+   "name": "ListFunctionUrlConfigs",
+   "method": "GET",
+   "uri": "/2021-10-31/functions/{FunctionName}/urls"
+  },
+  {
+   "name": "InvokeWithResponseStream",
+   "method": "POST",
+   "uri": "/2021-11-15/functions/{FunctionName}/response-streaming-invocations"
+  },
+  {
+   "name": "GetFunctionRecursionConfig",
+   "method": "GET",
+   "uri": "/2024-08-31/functions/{FunctionName}/recursion-config"
+  },
+  {
+   "name": "PutFunctionRecursionConfig",
+   "method": "PUT",
+   "uri": "/2024-08-31/functions/{FunctionName}/recursion-config"
+  },
+  {
+   "name": "ListCapacityProviders",
+   "method": "GET",
+   "uri": "/2025-11-30/capacity-providers"
+  },
+  {
+   "name": "CreateCapacityProvider",
+   "method": "POST",
+   "uri": "/2025-11-30/capacity-providers"
+  },
+  {
+   "name": "DeleteCapacityProvider",
+   "method": "DELETE",
+   "uri": "/2025-11-30/capacity-providers/{CapacityProviderName}"
+  },
+  {
+   "name": "GetCapacityProvider",
+   "method": "GET",
+   "uri": "/2025-11-30/capacity-providers/{CapacityProviderName}"
+  },
+  {
+   "name": "UpdateCapacityProvider",
+   "method": "PUT",
+   "uri": "/2025-11-30/capacity-providers/{CapacityProviderName}"
+  },
+  {
+   "name": "ListFunctionVersionsByCapacityProvider",
+   "method": "GET",
+   "uri": "/2025-11-30/capacity-providers/{CapacityProviderName}/function-versions"
+  },
+  {
+   "name": "GetFunctionScalingConfig",
+   "method": "GET",
+   "uri": "/2025-11-30/functions/{FunctionName}/function-scaling-config"
+  },
+  {
+   "name": "PutFunctionScalingConfig",
+   "method": "PUT",
+   "uri": "/2025-11-30/functions/{FunctionName}/function-scaling-config"
+  },
+  {
+   "name": "SendDurableExecutionCallbackFailure",
+   "method": "POST",
+   "uri": "/2025-12-01/durable-execution-callbacks/{CallbackId}/fail"
+  },
+  {
+   "name": "SendDurableExecutionCallbackHeartbeat",
+   "method": "POST",
+   "uri": "/2025-12-01/durable-execution-callbacks/{CallbackId}/heartbeat"
+  },
+  {
+   "name": "SendDurableExecutionCallbackSuccess",
+   "method": "POST",
+   "uri": "/2025-12-01/durable-execution-callbacks/{CallbackId}/succeed"
+  },
+  {
+   "name": "GetDurableExecution",
+   "method": "GET",
+   "uri": "/2025-12-01/durable-executions/{DurableExecutionArn}"
+  },
+  {
+   "name": "CheckpointDurableExecution",
+   "method": "POST",
+   "uri": "/2025-12-01/durable-executions/{DurableExecutionArn}/checkpoint"
+  },
+  {
+   "name": "GetDurableExecutionHistory",
+   "method": "GET",
+   "uri": "/2025-12-01/durable-executions/{DurableExecutionArn}/history"
+  },
+  {
+   "name": "GetDurableExecutionState",
+   "method": "GET",
+   "uri": "/2025-12-01/durable-executions/{DurableExecutionArn}/state"
+  },
+  {
+   "name": "StopDurableExecution",
+   "method": "POST",
+   "uri": "/2025-12-01/durable-executions/{DurableExecutionArn}/stop"
+  },
+  {
+   "name": "ListDurableExecutionsByFunction",
+   "method": "GET",
+   "uri": "/2025-12-01/functions/{FunctionName}/durable-executions"
+  },
+  {
+   "name": "DeleteResourcePolicy",
+   "method": "DELETE",
+   "uri": "/2026-07-09/resource-policy/{ResourceArn}"
+  },
+  {
+   "name": "GetResourcePolicy",
+   "method": "GET",
+   "uri": "/2026-07-09/resource-policy/{ResourceArn}"
+  },
+  {
+   "name": "PutResourcePolicy",
+   "method": "PUT",
+   "uri": "/2026-07-09/resource-policy/{ResourceArn}"
+  }
+ ]
+}

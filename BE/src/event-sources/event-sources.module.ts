@@ -16,5 +16,6 @@ import { EventSourcesService } from './event-sources.service';
   imports: [TypeOrmModule.forFeature([EventSourceMapping, Account]), FunctionsModule, QueuesModule, PlansModule, AuditModule, BillingModule],
   controllers: [EventSourcesController],
   providers: [EventSourcesService, EventSourcePoller],
+  exports: [EventSourcesService],
 })
 export class EventSourcesModule {}

@@ -34,7 +34,13 @@
 #   - Buckets and queues, through the S3 front door and the SQS endpoint: each
 #     account's key reaches its own account's alone; another's bucket is
 #     AccessDenied, another's queue one that doesn't exist, by its URL or its
-#     name, and its messages stay.
+#     name, and its messages and tags stay; a key deletes no other account's bucket
+#     through S3, nor takes its name, nor reads or changes its tags, its policy
+#     or its public access block.
+#   - Stacks (ADR 0016): each account's own, their names each account's;
+#     another account gets 404 on every route, and a stack names only its own
+#     account's functions, queues and buckets, which a function's answer says;
+#     a key needs stacks:read and stacks:write.
 #   - Members (P-16): user 2 is invited into account 1 and joins on the next call
 #     (L4), reads as a viewer, writes as a developer, then is removed; the last
 #     owner can't leave. Member routes never reach another account's members.
@@ -258,6 +264,16 @@ site_of() { "$1" GET "/buckets/$2/website" | jq -r '.indexDocument.suffix'; }
 # site_domains_of <as_…> <bucket>: the domains of the bucket's site, as its own account reads them.
 site_domains_of() { "$1" GET "/buckets/$2/website/domains" | jq -r '[.[].domain] | join(",")'; }
 
+# stack_body <function> <queue> <bucket>: a stack as `ff deploy` puts one, which makes the three.
+stack_body() {
+  jq -cn --arg sha "$(printf 'l5' | sha256sum | cut -d' ' -f1)" --arg fn "$1" --arg queue "$2" --arg bucket "$3" \
+    '{templateSha256: $sha, parameters: {Stage: "l5"}, resources: [{logicalId: "Orders", type: "AWS::Serverless::Function", physicalId: $fn},
+      {logicalId: "Queue", type: "AWS::SQS::Queue", physicalId: $queue}, {logicalId: "Photos", type: "AWS::S3::Bucket", physicalId: $bucket}]}'
+}
+
+# stack_of <as_…> <stack>: the stack's name, its resources counted, and its Stage, as its own account reads it.
+stack_of() { "$1" GET "/stacks/$2" | jq -r '"\(.name) \(.resources | length) \(.parameters.Stage)"'; }
+
 # kept_by <as_…> <queue>: the queue's name and its messages that can be received, as its own account reads them.
 kept_by() { "$1" GET "/queues/$2" | jq -r '"\(.name) \(.messages.available)"'; }
 
@@ -362,7 +378,7 @@ s3_with() {
   shift 3
   AWS_ACCESS_KEY_ID="$id" AWS_SECRET_ACCESS_KEY="$secret" AWS_DEFAULT_REGION=tn-tunis-1 AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
     "${aws_cli[@]}" --endpoint-url "http://127.0.0.1:$port" "$@" >/dev/null 2>"$work/s3.err" && echo accepted ||
-    echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|NoSuchBucket)\)' "$work/s3.err" | head -1 | tr -d '()')"
+    echo "refused $(grep -oE '\((SignatureDoesNotMatch|AccessDenied|InvalidAccessKeyId|AccountProblem|NoSuchBucket|BucketAlreadyExists)\)' "$work/s3.err" | head -1 | tr -d '()')"
 }
 
 as_user_1() { with_token "$token_1" "$@"; }
@@ -514,6 +530,9 @@ as_a PUT /buckets/l5-photos-a/website '{"indexDocument": {"suffix": "index.html"
 check "  ... and is a site" "200 index.html" "$(status) $(jq -r '.indexDocument.suffix' "$work/body")"
 as_a POST /buckets/l5-photos-a/website/domains '{"domain": "l5.example.tn"}' >/dev/null
 check "  ... with a domain of A's own, pending" "201 pending" "$(status) $(jq -r .status "$work/body")"
+as_a PUT /stacks/l5-shop "$(stack_body l5-a l5-orders-a l5-photos-a)" >/dev/null
+check "A puts a stack of its function, its queue and its bucket, as ff deploy does" "200 l5-shop 3 l5" "$(status) $(stack_of as_a l5-shop)"
+check "  ... which its function's answer names" "l5-shop" "$(as_a GET "/functions/$id" | jq -r .stack)"
 key_a="$(as_a POST /storage-keys '{}')"
 check "  ... and an access key to it, its secret in the answer" "201 true" "$(status) $(jq -r '.secretAccessKey | test("^[A-Za-z0-9+/]{40}$")' <<<"$key_a")"
 key_a_id="$(jq -r .id <<<"$key_a")"
@@ -701,10 +720,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_b POST /buckets '{"name": "l5-photos-b"}' >/dev/null
       check "  ... and makes one of its own, which A's list doesn't show" "201 0" "$(status) $(as_a GET /buckets | jq 'map(select(.name == "l5-photos-b")) | length')"
       ;;
-    "GET /buckets/{name}" | "DELETE /buckets/{name}")
-      as_b "$method" /buckets/l5-photos-a >/dev/null
+    "GET /buckets/{name}" | "PATCH /buckets/{name}" | "DELETE /buckets/{name}")
+      as_b "$method" /buckets/l5-photos-a "$([ "$method" = PATCH ] && echo '{"tags": {"owner": "b"}}' || true)" >/dev/null
       check "$route: B gets 404 for A's bucket" '404 The account has no bucket named "l5-photos-a"' "$(status) $(message)"
-      check "  ... which A still has" "l5-photos-a 200" "$(as_a GET /buckets/l5-photos-a | jq -r .name) $(status)"
+      check "  ... which A still has, untagged" "l5-photos-a 0 200" "$(as_a GET /buckets/l5-photos-a | jq -r '"\(.name) \(.tags | length)"') $(status)"
       ;;
     "GET /buckets/{name}/notifications" | "PUT /buckets/{name}/notifications")
       as_b "$method" /buckets/l5-photos-a/notifications "$([ "$method" = PUT ] && echo '{}' || true)" >/dev/null
@@ -809,6 +828,25 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... which A's list doesn't show" 0 "$(as_a GET /caches | jq --argjson port "$(jq -r .port <<<"$cache_b")" 'map(select(.port == $port)) | length')"
       as_b DELETE /caches/l5-sessions >/dev/null
       check "  ... and which B deletes, A's own untouched" "204 a" "$(status) $(cache_cli "$cache_url_a" GET l5)"
+      ;;
+    "GET /stacks")
+      listed="$(as_b GET /stacks | jq 'map(select(.name == "l5-shop")) | length')"
+      check "$route: B's list doesn't show A's stack" "200 0" "$(status) $listed"
+      ;;
+    "GET /stacks/{name}" | "DELETE /stacks/{name}")
+      as_b "$method" /stacks/l5-shop >/dev/null
+      check "$route: B gets 404 for A's stack" '404 The account has no stack named "l5-shop"' "$(status) $(message)"
+      check "  ... which A still has, as it put it" "l5-shop 3 l5 200" "$(stack_of as_a l5-shop) $(status)"
+      ;;
+    "PUT /stacks/{name}")
+      as_b PUT /stacks/l5-shop "$(stack_body l5-a l5-orders-a l5-photos-a)" >/dev/null
+      check "$route: B can't name A's function, queue or bucket in a stack" \
+        '400 Orders: the account has no function named "l5-a"; Queue: the account has no queue named "l5-orders-a"; Photos: the account has no bucket named "l5-photos-a"' \
+        "$(status) $(messages)"
+      as_b PUT /stacks/l5-shop "$(jq -c '.resources = []' <<<"$(stack_body x x x)")" >/dev/null
+      check "  ... and puts one of its own, of the name A's has: names are each account's, A's as it put it" "200 l5-shop 3 l5" "$(status) $(stack_of as_a l5-shop)"
+      as_b DELETE /stacks/l5-shop >/dev/null
+      check "  ... which B forgets, A's own untouched" "204 l5-shop 3 l5 l5-shop" "$(status) $(stack_of as_a l5-shop) $(as_a GET "/functions/$id" | jq -r .stack)"
       ;;
     "GET /email/identities")
       listed="$(as_b GET /email/identities | jq 'map(select(.dkimSelector == "'"$selector_a"'")) | length')"
@@ -968,6 +1006,11 @@ check "  ... nor A's queue" \
 as_b PUT "/functions/$own/event-invoke-config" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-records" '{destinationConfig: {onFailure: {destination: $arn}}}')" >/dev/null
 check "  ... which, under its own account's ARN, is no queue of B's" \
   '400 destinationConfig.onFailure.destination: the account has no queue named "l5-records"' "$(status) $(message)"
+as_b PUT "/functions/$own" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-records" '{deadLetterTargetArn: $arn}')" >/dev/null
+check "  ... nor as its function's dead-letter queue, a SAM template's DeadLetterQueue" \
+  "400 deadLetterTargetArn must be a queue of this account, in tn-tunis-1: arn:aws:sqs:tn-tunis-1:$account_b:l5-records" "$(status) $(message)"
+as_b PUT "/functions/$own" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_b:l5-records" '{deadLetterTargetArn: $arn}')" >/dev/null
+check "  ... under its own account's ARN either" '400 deadLetterTargetArn: the account has no queue named "l5-records"' "$(status) $(message)"
 sql "DELETE FROM queues WHERE account_id = '$account_a' AND name = 'l5-records'"
 as_b POST "/functions/$own/event-sources" "$(jq -cn --arg arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a" '{eventSourceArn: $arn}')" >/dev/null
 check "B can't have its own function read A's queue" \
@@ -1013,6 +1056,34 @@ check "B's key can neither read, set nor remove A's bucket's site, which A still
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-website --bucket l5-photos-a --website-configuration '{"IndexDocument": {"Suffix": "stolen.html"}}') \
 $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-website --bucket l5-photos-a) \
 $(site_of as_a l5-photos-a)"
+check "B's key can neither read, set nor remove A's bucket's tags, which A's key put and A still has" \
+  "accepted refused AccessDenied refused AccessDenied refused AccessDenied team=a" \
+  "$(s3_with "$key_a_id" "$key_a_secret" "$storage_port" s3api put-bucket-tagging --bucket l5-photos-a --tagging 'TagSet=[{Key=team,Value=a}]') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-tagging --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-tagging --bucket l5-photos-a --tagging 'TagSet=[{Key=team,Value=b}]') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-tagging --bucket l5-photos-a) \
+$(sql_value "SELECT string_agg(t.key || '=' || t.value, ',') FROM resource_tags t JOIN buckets b ON b.id = t.bucket_id WHERE b.name = 'l5-photos-a'")"
+check "  ... nor reads its settings, its ACL and versioning among them" "refused AccessDenied refused AccessDenied" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-acl --bucket l5-photos-a) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-versioning --bucket l5-photos-a)"
+check "  ... nor reads, sets or removes its policy and public access block, which A's key put and A still has" \
+  "accepted accepted refused AccessDenied refused AccessDenied refused AccessDenied refused AccessDenied refused AccessDenied refused AccessDenied true true" \
+  "$(s3_with "$key_a_id" "$key_a_secret" "$storage_port" s3api put-public-access-block --bucket l5-photos-a --public-access-block-configuration BlockPublicAcls=true) \
+$(s3_with "$key_a_id" "$key_a_secret" "$storage_port" s3api put-bucket-policy --bucket l5-photos-a --policy '{"Version": "2012-10-17", "Statement": []}') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-bucket-policy --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-bucket-policy --bucket l5-photos-a --policy '{"Statement": []}') \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-bucket-policy --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api get-public-access-block --bucket l5-photos-a) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api put-public-access-block --bucket l5-photos-a --public-access-block-configuration BlockPublicAcls=false) \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3api delete-public-access-block --bucket l5-photos-a) \
+$(sql_value "SELECT (policy IS NOT NULL AND public_access_block->>'blockPublicAcls' = 'true')::text FROM buckets WHERE name = 'l5-photos-a'") \
+$(sql_value "SELECT (count(*) = 2)::text FROM audit_log WHERE resource = 'bucket:l5-photos-a' AND action IN ('bucket.policy', 'bucket.public_access_block')")"
+check "B's key can neither delete A's bucket through S3, AccessDenied, nor take its name, BucketAlreadyExists: it stays A's" \
+  "refused AccessDenied refused BucketAlreadyExists $account_a" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 rb s3://l5-photos-a) $(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 mb s3://l5-photos-a) \
+$(sql_value "SELECT account_id FROM buckets WHERE name = 'l5-photos-a'")"
+check "  ... and makes a bucket of B's own through S3, then deletes it" "accepted $account_b accepted 0" \
+  "$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 mb s3://l5-made-b) $(sql_value "SELECT account_id FROM buckets WHERE name = 'l5-made-b'") \
+$(s3_with "$key_b_id" "$key_b_secret" "$storage_port" s3 rb s3://l5-made-b) $(sql_value "SELECT count(*) FROM buckets WHERE name = 'l5-made-b'")"
 as_b DELETE /buckets/l5-photos-b >/dev/null
 check "B deletes its own bucket" 204 "$(status)"
 }
@@ -1040,6 +1111,11 @@ check "  ... nor by its name, naming its owner" "refused AWS.SimpleQueueService.
   "$(sqs_with "$key_b_id" "$key_b_secret" get-queue-url --queue-name l5-orders --queue-owner-aws-account-id "$account_a" --query QueueUrl)"
 check "  ... nor purged, nor deleted: A's message is there still" "refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue A's own" \
   "$(sqs_with "$key_b_id" "$key_b_secret" purge-queue --queue-url "$queue_a") $(sqs_with "$key_b_id" "$key_b_secret" delete-queue --queue-url "$queue_a") $(sqs_with "$key_a_id" "$key_a_secret" receive-message --queue-url "$queue_a" --query 'Messages[].Body')"
+sqs_with "$key_a_id" "$key_a_secret" tag-queue --queue-url "$queue_a" --tags team=a >/dev/null
+check "  ... nor its tags read, put or removed: A's tag is there still" \
+  "refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue refused AWS.SimpleQueueService.NonExistentQueue a" \
+  "$(sqs_with "$key_b_id" "$key_b_secret" list-queue-tags --queue-url "$queue_a") $(sqs_with "$key_b_id" "$key_b_secret" tag-queue --queue-url "$queue_a" --tags team=b) \
+$(sqs_with "$key_b_id" "$key_b_secret" untag-queue --queue-url "$queue_a" --tag-keys team) $(sqs_with "$key_a_id" "$key_a_secret" list-queue-tags --queue-url "$queue_a" --query Tags.team)"
 # Each lists its own: this queue, and the one its account made through FF's API above.
 listed_by() { sqs_with "$1" "$2" list-queues --query QueueUrls | tr '\t' ' '; }
 check "ListQueues lists each key's own account's queues alone" \
@@ -1102,9 +1178,94 @@ check "B's key doesn't find A's function, by its name or by its ARN: each accoun
 check "  ... nor its alias, nor deletes it, nor invokes it" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
   "$(lambda_with "${lambda_b[@]}" get-alias --function-name l5-a --name live) $(lambda_with "${lambda_b[@]}" delete-function --function-name "$arn_a") \
 $(lambda_with "${lambda_b[@]}" invoke --function-name l5-a /dev/null)"
-# A's own key finds it: what answers then is the operation, which FF doesn't offer yet.
-check "A's key finds it, by its name and by its ARN" "refused UnknownOperationException refused UnknownOperationException" \
-  "$(lambda_with "${lambda_a[@]}" get-function --function-name l5-a) $(lambda_with "${lambda_a[@]}" get-function --function-name "$arn_a")"
+check "  ... nor publishes a version of it, nor makes, changes or deletes an alias of it, nor lists either" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
+  "$(lambda_with "${lambda_b[@]}" publish-version --function-name "$arn_a") $(lambda_with "${lambda_b[@]}" create-alias --function-name l5-a --name b --function-version 1) \
+$(lambda_with "${lambda_b[@]}" update-alias --function-name "$arn_a" --name live --function-version 1) $(lambda_with "${lambda_b[@]}" delete-alias --function-name l5-a --name live) \
+$(lambda_with "${lambda_b[@]}" list-versions-by-function --function-name "$arn_a") $(lambda_with "${lambda_b[@]}" list-aliases --function-name l5-a)"
+# A's URLs as A's key lists them, before B's attempts and after.
+urls_of_a() { lambda_with "${lambda_a[@]}" list-function-url-configs --function-name l5-a --query 'FunctionUrlConfigs[].[FunctionArn, AuthType]'; }
+urls_before_b="$(urls_of_a)"
+check "  ... nor gives it a URL, nor reads, changes, lists or deletes its URLs, \$LATEST's or its alias's: A's as they were" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException true" \
+  "$(lambda_with "${lambda_b[@]}" create-function-url-config --function-name l5-a --auth-type NONE) \
+$(lambda_with "${lambda_b[@]}" get-function-url-config --function-name "$arn_a" --qualifier live) \
+$(lambda_with "${lambda_b[@]}" update-function-url-config --function-name l5-a:live --auth-type NONE) \
+$(lambda_with "${lambda_b[@]}" list-function-url-configs --function-name "$arn_a") $(lambda_with "${lambda_b[@]}" delete-function-url-config --function-name l5-a) \
+$([ "$(urls_of_a)" = "$urls_before_b" ] && echo true || echo false)"
+# A's mapping, made through FF's API, as A's key reads it before B's attempts and after.
+mapping_of_a() { lambda_with "${lambda_a[@]}" get-event-source-mapping --uuid "$mapping_a" --query '[State, BatchSize, FunctionArn]'; }
+mapping_before_b="$(mapping_of_a)"
+check "  ... nor reads, changes or deletes its queue's mapping, nor lists it by A's function or A's queue, nor maps A's function: A's as it was, disabled" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException 0 0 refused ResourceNotFoundException true Disabled" \
+  "$(lambda_with "${lambda_b[@]}" get-event-source-mapping --uuid "$mapping_a") \
+$(lambda_with "${lambda_b[@]}" update-event-source-mapping --uuid "$mapping_a" --enabled) \
+$(lambda_with "${lambda_b[@]}" delete-event-source-mapping --uuid "$mapping_a") \
+$(lambda_with "${lambda_b[@]}" list-event-source-mappings --function-name "$arn_a" --query 'length(EventSourceMappings)') \
+$(lambda_with "${lambda_b[@]}" list-event-source-mappings --event-source-arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a" --query 'length(EventSourceMappings)') \
+$(lambda_with "${lambda_b[@]}" create-event-source-mapping --function-name "$arn_a" --event-source-arn "arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a") \
+$([ "$(mapping_of_a)" = "$mapping_before_b" ] && echo true || echo false) $(mapping_of_a | awk '{print $1}')"
+lambda_with "${lambda_a[@]}" put-function-event-invoke-config --function-name l5-a --maximum-retry-attempts 1 >/dev/null
+check "  ... nor puts, changes, reads, lists or deletes the settings of its asynchronous calls: A's as they were" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException 1" \
+  "$(lambda_with "${lambda_b[@]}" put-function-event-invoke-config --function-name "$arn_a" --maximum-retry-attempts 0) \
+$(lambda_with "${lambda_b[@]}" update-function-event-invoke-config --function-name l5-a --maximum-retry-attempts 0) \
+$(lambda_with "${lambda_b[@]}" get-function-event-invoke-config --function-name l5-a) \
+$(lambda_with "${lambda_b[@]}" list-function-event-invoke-configs --function-name "$arn_a") \
+$(lambda_with "${lambda_b[@]}" delete-function-event-invoke-config --function-name l5-a) \
+$(lambda_with "${lambda_a[@]}" get-function-event-invoke-config --function-name l5-a --query MaximumRetryAttempts)"
+lambda_with "${lambda_a[@]}" delete-function-event-invoke-config --function-name l5-a >/dev/null
+lambda_with "${lambda_a[@]}" put-function-concurrency --function-name l5-a --reserved-concurrent-executions 2 >/dev/null
+check "  ... nor reserves, reads or deletes its concurrency, nor stops its calls with 0: A's as it was" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException 2" \
+  "$(lambda_with "${lambda_b[@]}" put-function-concurrency --function-name "$arn_a" --reserved-concurrent-executions 0) \
+$(lambda_with "${lambda_b[@]}" get-function-concurrency --function-name l5-a) \
+$(lambda_with "${lambda_b[@]}" delete-function-concurrency --function-name l5-a) \
+$(lambda_with "${lambda_a[@]}" get-function-concurrency --function-name l5-a --query ReservedConcurrentExecutions)"
+lambda_with "${lambda_a[@]}" delete-function-concurrency --function-name l5-a >/dev/null
+lambda_with "${lambda_a[@]}" add-permission --function-name l5-a --statement-id l5-a --action lambda:InvokeFunction --principal '*' >/dev/null
+check "  ... nor adds to its policy, reads it or removes from it, by its ARN or its name: A's as it was" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException l5-a" \
+  "$(lambda_with "${lambda_b[@]}" add-permission --function-name "$arn_a" --statement-id l5-b --action lambda:InvokeFunction --principal '*') \
+$(lambda_with "${lambda_b[@]}" get-policy --function-name l5-a) \
+$(lambda_with "${lambda_b[@]}" remove-permission --function-name "$arn_a" --statement-id l5-a) \
+$(lambda_with "${lambda_a[@]}" get-policy --function-name l5-a --query Policy | jq -r '[.Statement[].Sid] | join(",")')"
+lambda_with "${lambda_a[@]}" remove-permission --function-name l5-a --statement-id l5-a >/dev/null
+check "  ... nor reads its tags, nor tags it, nor untags it, by its ARN" "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException" \
+  "$(lambda_with "${lambda_b[@]}" list-tags --resource "$arn_a") $(lambda_with "${lambda_b[@]}" tag-resource --resource "$arn_a" --tags owner=b) \
+$(lambda_with "${lambda_b[@]}" untag-resource --resource "$arn_a" --tag-keys owner)"
+# Neither is read: the name's account is checked first, and A's bucket is one B's key can't know of.
+made_by_b=(--runtime nodejs24.x --role "arn:aws:iam::$account_b:role/l5" --handler index.handler)
+check "  ... nor creates a function in A's account by an ARN of A's, nor with code from A's bucket, nothing made in either" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException 0 0" \
+  "$(lambda_with "${lambda_b[@]}" create-function --function-name "arn:aws:lambda:tn-tunis-1:$account_a:function:l5-b-made" "${made_by_b[@]}" --code S3Bucket=l5-b-code,S3Key=code.zip) \
+$(lambda_with "${lambda_b[@]}" create-function --function-name l5-b-made "${made_by_b[@]}" --code S3Bucket=l5-photos-a,S3Key=code.zip) \
+$(as_a GET '/functions?name=l5-b-made' | jq length) $(as_b GET '/functions?name=l5-b-made' | jq length)"
+# Both refused before the code is read: the ARN's account first, then the queue in B's own account.
+check "  ... nor gives a function of B's A's queue as its dead-letter queue, by A's ARN or under B's, which is no queue of B's: nothing made" \
+  "refused InvalidParameterValueException refused InvalidParameterValueException The account has no queue named l5-orders-a 0" \
+  "$(lambda_with "${lambda_b[@]}" create-function --function-name l5-b-made "${made_by_b[@]}" --code S3Bucket=l5-b-code,S3Key=code.zip \
+    --dead-letter-config "TargetArn=arn:aws:sqs:tn-tunis-1:$account_a:l5-orders-a") \
+$(lambda_with "${lambda_b[@]}" create-function --function-name l5-b-made "${made_by_b[@]}" --code S3Bucket=l5-b-code,S3Key=code.zip \
+    --dead-letter-config "TargetArn=arn:aws:sqs:tn-tunis-1:$account_b:l5-orders-a") \
+$(grep -oE 'The account has no queue named [a-z0-9-]+' "$work/lambda.err") $(as_b GET '/functions?name=l5-b-made' | jq length)"
+# A's function as A's key reads it before B's attempts: its revision, its timeout, its code.
+seen_by_a() { lambda_with "${lambda_a[@]}" get-function-configuration --function-name l5-a --query '[RevisionId, Timeout, CodeSha256]'; }
+before_b="$(seen_by_a)"
+check "  ... nor changes its configuration or its code, by its name or its ARN, with code of B's or A's: A's function as it was" \
+  "refused ResourceNotFoundException refused ResourceNotFoundException refused ResourceNotFoundException true" \
+  "$(lambda_with "${lambda_b[@]}" update-function-configuration --function-name "$arn_a" --timeout 9) \
+$(lambda_with "${lambda_b[@]}" update-function-code --function-name l5-a --s3-bucket l5-b-code --s3-key code.zip) \
+$(lambda_with "${lambda_b[@]}" update-function-code --function-name "$arn_a" --s3-bucket l5-photos-a --s3-key code.zip) \
+$([ "$(seen_by_a)" = "$before_b" ] && echo true || echo false)"
+check "A's key finds it, by its name and by its ARN" "$arn_a $arn_a" \
+  "$(lambda_with "${lambda_a[@]}" get-function --function-name l5-a --query Configuration.FunctionArn) $(lambda_with "${lambda_a[@]}" get-function --function-name "$arn_a" --query Configuration.FunctionArn)"
+check "  ... and invokes it, a DryRun, which runs nothing" 204 \
+  "$(lambda_with "${lambda_a[@]}" invoke --function-name "$arn_a" --invocation-type DryRun --query StatusCode /dev/null)"
+# listed <key ID> <secret>: the functions the key's ListFunctions gives, by name, one a line.
+listed() { lambda_with "$@" list-functions --query 'Functions[].FunctionName' | tr '\t' '\n'; }
+check "  ... and lists it, where B's key lists none of A's functions" "true false" \
+  "$(listed "${lambda_a[@]}" | grep -x l5-a >/dev/null && echo true || echo false) $(listed "${lambda_b[@]}" | grep -x l5-a >/dev/null && echo true || echo false)"
 check "  ... and a key that reaches no function, such as the one each account's buckets are reached with, none" "refused AccessDeniedException refused AccessDeniedException" \
   "$(lambda_with "$key_a_id" "$key_a_secret" list-functions) $(lambda_with "$key_b_id" "$key_b_secret" get-function --function-name l5-a)"
 as_a DELETE "/storage-keys/${lambda_a[0]}" >/dev/null
@@ -1242,6 +1403,8 @@ as_user_1 PUT /buckets/l5-photos-1/website '{"indexDocument": {"suffix": "index.
 check "  ... and is a single-page app's site" "200 true" "$(status) $(jq -r .singlePageApp "$work/body")"
 as_user_1 POST /buckets/l5-photos-1/website/domains '{"domain": "l5-one.example.tn"}' >/dev/null
 check "  ... with a domain of its own, pending" "201 pending" "$(status) $(jq -r .status "$work/body")"
+as_user_1 PUT /stacks/l5-shop "$(stack_body l5-one l5-orders-1 l5-photos-1)" >/dev/null
+check "  ... and a stack of its function, its queue and its bucket" "200 l5-shop 3 l5" "$(status) $(stack_of as_user_1 l5-shop)"
 key_1_s3="$(as_user_1 POST /storage-keys '{}')"
 check "  ... and an access key to it" 201 "$(status)"
 key_1_s3_id="$(jq -r .id <<<"$key_1_s3")"
@@ -1398,10 +1561,10 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       as_user_2 POST /buckets '{"name": "l5-photos-2"}' >/dev/null
       check "  ... and makes one of its own, which account 1's list doesn't show" "201 0" "$(status) $(as_user_1 GET /buckets | jq 'map(select(.name == "l5-photos-2")) | length')"
       ;;
-    "GET /buckets/{name}" | "DELETE /buckets/{name}")
-      as_user_2 "$method" /buckets/l5-photos-1 >/dev/null
+    "GET /buckets/{name}" | "PATCH /buckets/{name}" | "DELETE /buckets/{name}")
+      as_user_2 "$method" /buckets/l5-photos-1 "$([ "$method" = PATCH ] && echo '{"tags": {"owner": "2"}}' || true)" >/dev/null
       check "$route: account 2 gets 404 for account 1's bucket" '404 The account has no bucket named "l5-photos-1"' "$(status) $(message)"
-      check "  ... which account 1 still has" "l5-photos-1 200" "$(as_user_1 GET /buckets/l5-photos-1 | jq -r .name) $(status)"
+      check "  ... which account 1 still has, untagged" "l5-photos-1 0 200" "$(as_user_1 GET /buckets/l5-photos-1 | jq -r '"\(.name) \(.tags | length)"') $(status)"
       ;;
     "GET /buckets/{name}/notifications" | "PUT /buckets/{name}/notifications")
       as_user_2 "$method" /buckets/l5-photos-1/notifications "$([ "$method" = PUT ] && echo '{}' || true)" >/dev/null
@@ -1507,6 +1670,22 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       check "  ... which account 1's list doesn't show" 0 "$(as_user_1 GET /caches | jq --argjson port "$(jq -r .port <<<"$cache_2")" 'map(select(.port == $port)) | length')"
       as_user_2 DELETE /caches/l5-one >/dev/null
       check "  ... and which account 2 deletes, account 1's own untouched" "204 one" "$(status) $(cache_cli "$cache_conn_1" GET l5)"
+      ;;
+    "GET /stacks")
+      listed="$(as_user_2 GET /stacks | jq 'map(select(.name == "l5-shop")) | length')"
+      check "$route: account 2's list doesn't show account 1's stack" "200 0" "$(status) $listed"
+      ;;
+    "GET /stacks/{name}" | "DELETE /stacks/{name}")
+      as_user_2 "$method" /stacks/l5-shop >/dev/null
+      check "$route: account 2 gets 404 for account 1's stack" '404 The account has no stack named "l5-shop"' "$(status) $(message)"
+      check "  ... which account 1 still has, as it put it" "l5-shop 3 l5 200" "$(stack_of as_user_1 l5-shop) $(status)"
+      ;;
+    "PUT /stacks/{name}")
+      as_user_2 PUT /stacks/l5-shop "$(stack_body l5-one l5-orders-1 l5-photos-1)" >/dev/null
+      check "$route: account 2 can't name account 1's function, queue or bucket in a stack" \
+        '400 Orders: the account has no function named "l5-one"; Queue: the account has no queue named "l5-orders-1"; Photos: the account has no bucket named "l5-photos-1"' \
+        "$(status) $(messages)"
+      check "  ... account 1's stack as it put it" "l5-shop 3 l5" "$(stack_of as_user_1 l5-shop)"
       ;;
     "GET /email/identities")
       listed="$(as_user_2 GET /email/identities | jq 'map(select(.dkimSelector == "'"$selector_1"'")) | length')"
@@ -1711,6 +1890,10 @@ with_token "$key_1" GET /queues >/dev/null
 check "a key without queues:read can't list the account's queues" "403 This API key lacks the scope queues:read" "$(status) $(message)"
 with_token "$key_1" POST /queues/l5-orders-1/messages '{"body": "by key"}' >/dev/null
 check "nor send to one without queues:write" "403 This API key lacks the scope queues:write" "$(status) $(message)"
+with_token "$key_1" GET /stacks >/dev/null
+check "a key without stacks:read can't list the account's stacks" "403 This API key lacks the scope stacks:read" "$(status) $(message)"
+with_token "$key_1" DELETE /stacks/l5-shop >/dev/null
+check "nor forget one without stacks:write, the stack kept" "403 This API key lacks the scope stacks:write l5-shop 3 l5" "$(status) $(message) $(stack_of as_user_1 l5-shop)"
 with_token "$key_usage" PUT /billing/alerts '{"lowBalancePercents": [10]}' >/dev/null
 check "but can't change them: that takes an owner's token" "403 API keys can't call this route: it takes a user's token" "$(status) $(message)"
 me_key="$(with_token "$key_1" GET /me)"
@@ -1827,7 +2010,7 @@ section_audit() {
 section "the audit log (P-17)"
 log_1="$(as_user_1 GET '/audit-log?limit=100')"
 check "account 1's log has each change, oldest to newest, FF's approval included (P-71)" \
-  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create email.identity.create email.suppression.put bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add storage_key.create api_key.create storage_key.create storage_key.delete function_url.create storage_key.create storage_key.delete api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
+  "account.create account.approve function.create api_key.create member.invite billing.pro_forma alarm.create package.upload database.create cache.create email.identity.create email.suppression.put bucket.create queue.create event_source.create queue.create bucket.notifications bucket.website custom_domain.add stack.put storage_key.create api_key.create storage_key.create storage_key.delete function_url.create storage_key.create storage_key.delete api_key.revoke function_url.delete member.invite member.join member.role member.remove" \
   "$(jq -r '[.entries[].action] | reverse | join(" ")' <<<"$log_1")"
 check "each names who did it: user 1, or user 2 who joined" "$user_1 $user_2" \
   "$(jq -r '[(.entries[] | select(.action == "member.role")), (.entries[] | select(.action == "member.join"))] | map(.actorLabel) | join(" ")' <<<"$log_1")"

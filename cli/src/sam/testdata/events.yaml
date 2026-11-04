@@ -1,0 +1,58 @@
+# A function's events as ff deploy makes them: its schedules, the queues it reads, and an HttpApi's routes at its URL.
+Transform: AWS::Serverless-2016-10-31
+Parameters:
+  Jobs:
+    Type: String
+    Default: jobs
+Globals:
+  Function:
+    CodeUri: orders
+    Runtime: nodejs24.x
+Resources:
+  Orders:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: orders
+      Handler: index.handler
+      AutoPublishAlias: live
+      Events:
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+            Input: '{"report": "daily"}'
+            Description: The night's report
+        Hourly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: ' rate(1 hour) '
+            ScheduleExpressionTimezone: UTC
+            Name: orders-hourly
+            State: DISABLED
+        Jobs:
+          Type: SQS
+          Properties:
+            Queue: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${Jobs}
+            BatchSize: 100
+            MaximumBatchingWindowInSeconds: 5
+            FunctionResponseTypes: [ReportBatchItemFailures]
+            ScalingConfig:
+              MaximumConcurrency: '2'
+            Enabled: false
+  Api:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: orders-api
+      Handler: api.handler
+      Events:
+        List:
+          Type: HttpApi
+          Properties:
+            Path: /orders
+            Method: get
+        Take:
+          Type: HttpApi
+        Failed:
+          Type: SQS
+          Properties:
+            Queue: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:failed

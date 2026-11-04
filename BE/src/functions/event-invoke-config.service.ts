@@ -117,7 +117,7 @@ export class EventInvokeConfigService {
   private async destination(fn: Function, which: 'onSuccess' | 'onFailure', given: string | undefined): Promise<string | null> {
     if (given === undefined) return null;
     const field = `destinationConfig.${which}.destination`;
-    if (given.startsWith('arn:aws:sqs:')) return this.queueDestination(fn, field, given);
+    if (given.startsWith('arn:aws:sqs:')) return this.checkedQueue(fn.accountId, field, given);
     // By its name, a version or an alias of it after a colon: the account's function of that name.
     const arn = QUALIFIED_NAME.test(given) ? this.arnOf({ accountId: fn.accountId, name: given }) : given;
     const named = parseFunctionArn(arn);
@@ -142,14 +142,14 @@ export class EventInvokeConfigService {
     return qualifiedFunctionArn(this.region, fn.accountId, named.name, named.qualifier);
   }
 
-  /** A queue's ARN as a destination: the account's, in FF's region, there now. */
-  private async queueDestination(fn: Function, field: string, arn: string): Promise<string> {
+  /** A queue's ARN as a destination, or a function's dead-letter queue: the account's, in FF's region, there now. */
+  async checkedQueue(accountId: string, field: string, arn: string): Promise<string> {
     const named = parseQueueArn(arn);
-    if (!named) throw new BadRequestException(`${field} is no queue's ARN, which SQS writes ${queueArn(this.region, fn.accountId, '<name>')}`);
-    if (named.region !== this.region || named.accountId !== fn.accountId) {
-      throw new BadRequestException(`${field} must be a queue of this account, in ${this.region}: ${queueArn(this.region, fn.accountId, named.name)}`);
+    if (!named) throw new BadRequestException(`${field} is no queue's ARN, which SQS writes ${queueArn(this.region, accountId, '<name>')}`);
+    if (named.region !== this.region || named.accountId !== accountId) {
+      throw new BadRequestException(`${field} must be a queue of this account, in ${this.region}: ${queueArn(this.region, accountId, named.name)}`);
     }
-    if (!(await this.destinationQueue(fn.accountId, arn))) throw new BadRequestException(`${field}: the account has no queue named "${named.name}"`);
+    if (!(await this.destinationQueue(accountId, arn))) throw new BadRequestException(`${field}: the account has no queue named "${named.name}"`);
     return arn;
   }
 

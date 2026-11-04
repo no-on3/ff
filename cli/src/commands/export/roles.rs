@@ -126,6 +126,30 @@ fn s3_action(operation: &str) -> Option<(&'static str, Scope)> {
         "GetBucketWebsite" => ("s3:GetBucketWebsite", Scope::Bucket),
         "PutBucketWebsite" => ("s3:PutBucketWebsite", Scope::Bucket),
         "DeleteBucketWebsite" => ("s3:DeleteBucketWebsite", Scope::Bucket),
+        "CreateBucket" => ("s3:CreateBucket", Scope::Bucket),
+        "DeleteBucket" => ("s3:DeleteBucket", Scope::Bucket),
+        "GetBucketTagging" => ("s3:GetBucketTagging", Scope::Bucket),
+        // S3 allows the removal of a bucket's tags by the action that puts them: it has no other.
+        "PutBucketTagging" | "DeleteBucketTagging" => ("s3:PutBucketTagging", Scope::Bucket),
+        // A bucket's policy and public access block, kept for AWS, where a site's bucket needs both; S3 removes the block
+        // by the action that puts it.
+        "GetBucketPolicy" => ("s3:GetBucketPolicy", Scope::Bucket),
+        "PutBucketPolicy" => ("s3:PutBucketPolicy", Scope::Bucket),
+        "DeleteBucketPolicy" => ("s3:DeleteBucketPolicy", Scope::Bucket),
+        "GetPublicAccessBlock" => ("s3:GetBucketPublicAccessBlock", Scope::Bucket),
+        "PutPublicAccessBlock" | "DeletePublicAccessBlock" => ("s3:PutBucketPublicAccessBlock", Scope::Bucket),
+        // A bucket's settings FF's buckets don't have, which tools read all the same.
+        "GetBucketAcl" => ("s3:GetBucketAcl", Scope::Bucket),
+        "GetBucketCors" => ("s3:GetBucketCORS", Scope::Bucket),
+        "GetBucketVersioning" => ("s3:GetBucketVersioning", Scope::Bucket),
+        "GetBucketAccelerateConfiguration" => ("s3:GetAccelerateConfiguration", Scope::Bucket),
+        "GetBucketRequestPayment" => ("s3:GetBucketRequestPayment", Scope::Bucket),
+        "GetBucketLogging" => ("s3:GetBucketLogging", Scope::Bucket),
+        "GetBucketLifecycleConfiguration" => ("s3:GetLifecycleConfiguration", Scope::Bucket),
+        "GetBucketReplication" => ("s3:GetReplicationConfiguration", Scope::Bucket),
+        "GetBucketEncryption" => ("s3:GetEncryptionConfiguration", Scope::Bucket),
+        "GetObjectLockConfiguration" => ("s3:GetBucketObjectLockConfiguration", Scope::Bucket),
+        "GetBucketOwnershipControls" => ("s3:GetBucketOwnershipControls", Scope::Bucket),
         "ListBuckets" => ("s3:ListAllMyBuckets", Scope::Account),
         _ => return None,
     })
@@ -419,6 +443,90 @@ mod tests {
                 statement(Target::Queue("orders".to_owned()), &["sqs:SendMessage"]),
             ]
         );
+    }
+
+    #[test]
+    fn a_bucket_made_tagged_and_deleted_through_s3_is_allowed_on_the_bucket_itself() {
+        let role = role(
+            &uses(&[
+                ("s3", "uploads", "CreateBucket"),
+                ("s3", "uploads", "PutBucketTagging"),
+                ("s3", "uploads", "GetBucketTagging"),
+                ("s3", "uploads", "DeleteBucketTagging"),
+                ("s3", "uploads", "DeleteBucket"),
+            ]),
+            &[],
+        );
+
+        assert_eq!(
+            role.statements,
+            [statement(
+                Target::Bucket("uploads".to_owned()),
+                &["s3:CreateBucket", "s3:DeleteBucket", "s3:GetBucketTagging", "s3:PutBucketTagging"]
+            )]
+        );
+        assert!(role.templates.is_empty() && role.unknown.is_empty());
+    }
+
+    #[test]
+    fn a_site_s_policy_and_public_access_block_are_allowed_by_s3_s_own_actions_the_block_s_removal_by_its_put() {
+        let role = role(
+            &uses(&[
+                ("s3", "site", "PutBucketPolicy"),
+                ("s3", "site", "GetBucketPolicy"),
+                ("s3", "site", "DeleteBucketPolicy"),
+                ("s3", "site", "PutPublicAccessBlock"),
+                ("s3", "site", "GetPublicAccessBlock"),
+                ("s3", "site", "DeletePublicAccessBlock"),
+            ]),
+            &[],
+        );
+
+        assert_eq!(
+            role.statements,
+            [statement(
+                Target::Bucket("site".to_owned()),
+                &[
+                    "s3:DeleteBucketPolicy",
+                    "s3:GetBucketPolicy",
+                    "s3:GetBucketPublicAccessBlock",
+                    "s3:PutBucketPolicy",
+                    "s3:PutBucketPublicAccessBlock"
+                ]
+            )]
+        );
+        assert!(role.templates.is_empty() && role.unknown.is_empty());
+    }
+
+    #[test]
+    fn a_bucket_s_settings_read_as_terraform_reads_them_are_allowed_by_s3_s_own_actions() {
+        let role = role(
+            &uses(&[
+                ("s3", "site", "GetBucketCors"),
+                ("s3", "site", "GetBucketAccelerateConfiguration"),
+                ("s3", "site", "GetBucketLifecycleConfiguration"),
+                ("s3", "site", "GetBucketReplication"),
+                ("s3", "site", "GetBucketEncryption"),
+                ("s3", "site", "GetObjectLockConfiguration"),
+            ]),
+            &[],
+        );
+
+        assert_eq!(
+            role.statements,
+            [statement(
+                Target::Bucket("site".to_owned()),
+                &[
+                    "s3:GetAccelerateConfiguration",
+                    "s3:GetBucketCORS",
+                    "s3:GetBucketObjectLockConfiguration",
+                    "s3:GetEncryptionConfiguration",
+                    "s3:GetLifecycleConfiguration",
+                    "s3:GetReplicationConfiguration"
+                ]
+            )]
+        );
+        assert!(role.templates.is_empty() && role.unknown.is_empty());
     }
 
     #[test]

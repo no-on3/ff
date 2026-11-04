@@ -31,6 +31,12 @@ export type AuditAction =
   | 'function.update'
   | 'function.delete'
   | 'function.scaling'
+  // A function's tags, as AWS's: put (a key there taking its new value), removed by key.
+  | 'function.tag'
+  | 'function.untag'
+  // A statement of Lambda's permissions, kept without effect: added to a policy by its ID, and removed.
+  | 'function.add_permission'
+  | 'function.remove_permission'
   // A function's version, as Lambda's: published with its number and code, and deleted.
   | 'function.publish'
   | 'version.delete'
@@ -83,6 +89,12 @@ export type AuditAction =
   | 'bucket.notifications'
   // A bucket's website configuration, set whole or removed, through the S3 front door or FF's API: it makes the bucket a site.
   | 'bucket.website'
+  // A bucket's policy and its public access block, as S3's, set whole or removed through the S3 front door, kept without effect.
+  | 'bucket.policy'
+  | 'bucket.public_access_block'
+  // A bucket's tags, as S3's: replaced whole, or all removed, through the S3 front door.
+  | 'bucket.tag'
+  | 'bucket.untag'
   // A deploy's own key to a bucket, for an hour: `ff sites deploy` signs its uploads with it.
   | 'bucket.deploy_key'
   | 'storage_key.create'
@@ -92,6 +104,12 @@ export type AuditAction =
   | 'queue.update'
   | 'queue.purge'
   | 'queue.delete'
+  // A queue's tags, as SQS's: put and removed by key, through the SQS endpoint.
+  | 'queue.tag'
+  | 'queue.untag'
+  // A stack (ADR 0016), put as a deploy left it, or forgotten: what it made stays.
+  | 'stack.put'
+  | 'stack.delete'
   | 'api_key.create'
   | 'api_key.revoke'
   | 'member.invite'

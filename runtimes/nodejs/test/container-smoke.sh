@@ -44,6 +44,9 @@ check "root filesystem is read-only" denied \
 check "/tmp is writable" ok "$(docker exec "$name" sh -c 'touch /tmp/probe && echo ok')"
 check "no install at start (no npm activity in logs)" 0 "$(docker logs "$name" 2>&1 | grep -c 'npm' || true)"
 check "speaks runtime protocol 3" 1 "$(docker logs "$name" 2>&1 | grep -c '"protocol":3' || true)"
+check "gives back the call's log when asked, from its START to its END" 2 \
+  "$(curl -s -o /dev/null -D - -X POST -H 'x-ff-log-type: Tail' -H 'x-ff-request-id: smoke-tail' -d '{}' "http://127.0.0.1:$port/invoke" |
+    tr -d '\r' | sed -n 's/^x-ff-log-result: //Ip' | base64 -d | grep -c -e '^START RequestId: smoke-tail ' -e '^END RequestId: smoke-tail$' || true)"
 # The TypeScript compiler's code cache, written at the build, taken by V8 in a worker thread with a small heap, as
 # the runtime loads user code: refused, a cold start at 0.1 CPU takes seconds longer, and nothing else says so.
 check "the TypeScript compiler's code cache is taken, in a worker thread" true \

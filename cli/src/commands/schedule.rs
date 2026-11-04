@@ -14,7 +14,7 @@ use crate::table::{table, time};
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Schedule {
-    id: String,
+    pub(super) id: String,
     /// The version or the alias it runs; none: $LATEST. Kept by `ff schedule set` unless `--qualifier` names another.
     #[serde(default)]
     pub(super) qualifier: Option<String>,
@@ -40,7 +40,7 @@ pub struct ScheduleChanges {
     pub disabled: bool,
 }
 
-fn schedules(client: &Client, function_id: &str) -> Result<Vec<Schedule>, Error> {
+pub(super) fn schedules(client: &Client, function_id: &str) -> Result<Vec<Schedule>, Error> {
     client.json(&Call::get(format!("/functions/{function_id}/schedules")))
 }
 
@@ -86,7 +86,7 @@ pub fn list(function: &str, context: &Context) -> Result<(), Error> {
 }
 
 /// Its next runs, as the API's own parser reads the expression: what it is wrong in it, otherwise.
-fn next_runs(client: &Client, expression: &str) -> Result<Vec<String>, Error> {
+pub(super) fn next_runs(client: &Client, expression: &str) -> Result<Vec<String>, Error> {
     #[derive(Deserialize)]
     struct Runs {
         runs: Vec<String>,

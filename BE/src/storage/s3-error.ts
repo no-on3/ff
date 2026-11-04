@@ -1,4 +1,4 @@
-import { escapeXml } from './xml';
+import { XML_DECLARATION, escapeXml } from './xml';
 
 /**
  * An answer the front door gives itself, in S3's words: its status, its code
@@ -32,7 +32,12 @@ export const invalidRequest = (message: string) => new S3Error(400, 'InvalidRequ
 
 export const noSuchBucket = () => new S3Error(404, 'NoSuchBucket', 'The specified bucket does not exist');
 
-export const notImplemented = () => new S3Error(501, 'NotImplemented', 'A header you provided implies functionality that is not implemented');
+/** S3's answer to what it doesn't do, in its words, or in FF's saying what FF doesn't. */
+export const notImplemented = (message = 'A header you provided implies functionality that is not implemented') => new S3Error(501, 'NotImplemented', message);
+
+export const invalidArgument = (message: string) => new S3Error(400, 'InvalidArgument', message);
+
+export const malformedXml = () => new S3Error(400, 'MalformedXML', 'The XML you provided was not well-formed or did not validate against our published schema');
 
 export const incompleteBody = (message = 'You did not provide the number of bytes specified by the Content-Length HTTP header.') =>
   new S3Error(400, 'IncompleteBody', message);
@@ -48,7 +53,7 @@ export const accountProblem = (why: string) =>
 /** S3's error document: its code and message, the resource asked for, and the request's ID. */
 export function errorDocument(error: S3Error, requestId: string, resource?: string): string {
   return (
-    '<?xml version="1.0" encoding="UTF-8"?>\n<Error>' +
+    `${XML_DECLARATION}<Error>` +
     `<Code>${escapeXml(error.code)}</Code><Message>${escapeXml(error.message)}</Message>` +
     (resource ? `<Resource>${escapeXml(resource)}</Resource>` : '') +
     `<RequestId>${escapeXml(requestId)}</RequestId></Error>`

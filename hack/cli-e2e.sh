@@ -10,7 +10,11 @@
 # function is kept, in ERROR, with its error. A second account finds none of the first's. A function's versions
 # and aliases: published by ff deploy --publish and by ff publish, called as name:alias and name:version, an alias
 # moved with a share of its calls and rolled back, its own URL, a schedule through it, a version it names kept. Then
-# ff init for both runtimes, its folder run locally, deployed and invoked; folders deployed as
+# ff init for both runtimes, its folder run locally, deployed and invoked; ff init's SAM application, sam init's hello
+# world with a URL for its API, deployed as a stack, called and deleted with ff delete-stack, and sam init's own refused at
+# its Api event; a stack with an alias, a second function, queues and a bucket's site and notifications, again
+# unchanged, then without them, after asking, a variable with a secret's name refused, and ff delete-stack, stopped by
+# the bucket's files; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
@@ -29,12 +33,13 @@
 # with a key naming that queue alone, received again by ff until the third receive moves it to the
 # dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
 # CLI, its metrics, the queue deleted and the other account seeing none, its month in ff usage; the getting-started
-# guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
-# the latest kept in FF's cache, each one put in a queue with the function's own key, read by a function
-# that writes its receipt to a bucket and e-mails it through the SES endpoint from an address proved by its
-# link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called
-# without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; the account exported
-# to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's role what its keys used; and
+# guide's walkthrough of the small app on FF alone, one SAM template deployed as a stack, internet access off: its
+# orders in FF's database, the latest kept in FF's cache, each one put in a queue with the function's own key, read by
+# a function that writes its receipt to a bucket and e-mails it through the SES endpoint from an address proved by its
+# link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called without
+# waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; its stack deleted at the
+# end; the account exported to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's
+# role what its keys used, the template deployed back on FF by another account, which makes the same; and
 # ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
@@ -54,6 +59,7 @@ export FF_PG_PORT="${FF_CLI_E2E_PG_PORT:-25436}"
 export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-29007}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
+source "$FF_REPO_ROOT/hack/lib/orders-app.sh"
 sections_options "$@"
 e2e_options "${sections_rest[@]}"
 
@@ -75,6 +81,9 @@ ff() {
 out() { cat "$work/out"; }
 err() { cat "$work/err"; }
 code() { cat "$work/code"; }
+# in_folder <folder> <args...>: ff in an application's folder, where a template's CodeUri starts and samconfig.toml
+# names the stack.
+in_folder() { local folder=$1; shift; (cd "$folder" && ff "$@"); }
 
 # sql <statement>: run on FF's database, its answer dropped.
 sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
@@ -451,6 +460,248 @@ for runtime in python nodejs; do
 done
 }
 section_def init section_init backend budget=35
+
+section_stacks() {
+section "SAM templates as stacks: ff init --template sam deployed and called at its URL, sam init's own refused, a stack deployed with a second function, events, queues and a bucket's site and notifications, then without them, ff delete-stack"
+(cd "$work" && rm -rf cli-sam && "$ff_bin" init cli-sam --runtime nodejs --template sam >"$work/out" 2>"$work/err")
+check "ff init --template sam makes sam init's hello world as FF takes it: its template, code, event and test, samconfig.toml naming the stack" \
+  ".gitignore README.md events/event.json hello-world/app.mjs hello-world/package.json samconfig.toml template.yaml tests/unit/test-handler.mjs" \
+  "$(cd "$work/cli-sam" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | paste -sd' ')"
+in_folder "$work/cli-sam" deploy template.yaml --output json
+hello="$(out | jq -r '.functions[0].name')"
+check "ff deploy makes its function in the stack samconfig.toml names, its outputs the function's URL and ARN" \
+  "0 created HelloWorldFunction true true" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId)") | join(", ")') $(out | jq -r --arg name "$hello" \
+    '(.functions[0].url // "" | startswith("http")) and ([.outputs[] | select(.name == "HelloWorldApi") | .value][0] == .functions[0].url),
+     ([.outputs[] | select(.name == "HelloWorldFunction") | .value][0] // "" | endswith(":function:" + $name))' | paste -sd' ')"
+ff invoke "$hello" --http GET /hello
+check "which answers at its URL as sam init's did at its API" "0 HTTP 200 hello world" "$(code) $(out | head -1) $(out | tail -1 | jq -r .message)"
+in_folder "$work/cli-sam" delete-stack --yes
+check "ff delete-stack deletes the stack samconfig.toml names, with what it made" \
+  "0 deleted the function $hello (HelloWorldFunction) deleted the stack cli-sam" "$(code) $(out | paste -sd' ')"
+ff get "$hello"
+check "its function with it" "3" "$(code)"
+
+rm -rf "$work/sam-init" && mkdir -p "$work/sam-init"
+cp "$FF_REPO_ROOT/cli/src/sam/testdata/hello-node.yaml" "$work/sam-init/template.yaml"
+in_folder "$work/sam-init" deploy template.yaml --stack-name sam-init
+check "sam init's own hello world is refused, each problem at its line, its Api event's naming FunctionUrlConfig and HttpApi" "2 true true" \
+  "$(code) $(err | head -1 | grep '^error: ff deploy changed nothing: the template has [0-9]* problems$' >/dev/null && echo true || echo false) $(err | grep "^template.yaml:25: HelloWorldFunction's event HelloWorld: an Api event makes an API Gateway REST API, which FF hasn't: the function's FunctionUrlConfig gives it a URL, and HttpApi events, all of one function, go to that URL$" >/dev/null && echo true || echo false)"
+
+# A stack of the suite's own: a parameter from samconfig.toml, an alias and its URL, a bucket, and, in
+# with-reports.yaml, a second function, whose HttpApi event gives it a URL, whose S3 event the bucket tells and whose
+# DeletionPolicy retains it, a queue with its dead-letter queue, the first's Schedule and SQS events, and the bucket's
+# tags, site and notification to the queue, which the deploy after the next no longer has.
+stack="$work/cli-stack"
+rm -rf "$stack" && mkdir -p "$stack/src"
+cat >"$stack/src/app.mjs" <<'EOF'
+export const handler = async (event) => ({ message: `Hello ${event.queryStringParameters?.name ?? 'world'}`, stage: process.env.STAGE, jobs: process.env.JOBS_URL });
+EOF
+printf 'version = 0.1\n\n[default.deploy.parameters]\nstack_name = "cli-stack"\nparameter_overrides = "Stage=dev"\n' >"$stack/samconfig.toml"
+cat >"$stack/template.yaml" <<'EOF'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Parameters:
+  Stage:
+    Type: String
+    Default: test
+    AllowedValues: [test, dev, prod]
+Globals:
+  Function:
+    Runtime: nodejs24.x
+    MemorySize: 128
+    Timeout: 10
+Resources:
+  HelloFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.handler
+      Description: !Sub Says hello, in ${Stage}
+      Environment:
+        Variables:
+          STAGE: !Ref Stage
+      AutoPublishAlias: live
+      FunctionUrlConfig:
+        AuthType: NONE
+  UploadsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: cli-stack-uploads
+
+Outputs:
+  HelloUrl:
+    Value: !GetAtt HelloFunctionUrl.FunctionUrl
+  HelloFunctionName:
+    Value: !Ref HelloFunction
+EOF
+cat >"$stack/more-resources.yaml" <<'EOF'
+  ReportsFunction:
+    Type: AWS::Serverless::Function
+    DeletionPolicy: Retain
+    Properties:
+      FunctionName: cli-stack-reports
+      CodeUri: src/
+      Handler: app.handler
+      ReservedConcurrentExecutions: 2
+      Tags:
+        team: reports
+      Events:
+        Reports:
+          Type: HttpApi
+          Properties:
+            Path: /reports
+            Method: get
+        Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref UploadsBucket
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: reports/
+  JobsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cli-stack-jobs
+      VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt JobsFailedQueue.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: team
+          Value: jobs
+  JobsFailedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: cli-stack-jobs-failed
+
+EOF
+awk -v more="$stack/more-resources.yaml" '/^Outputs:/ { while ((getline line < more) > 0) print line } { print }' \
+  "$stack/template.yaml" >"$stack/with-reports.yaml"
+printf '  JobsUrl:\n    Value: !Ref JobsQueue\n  UploadsSite:\n    Value: !GetAtt UploadsBucket.WebsiteURL\n' >>"$stack/with-reports.yaml"
+printf '  UploadsDomain:\n    Value: !GetAtt UploadsBucket.DomainName\n' >>"$stack/with-reports.yaml"
+sed -i 's/^          STAGE: !Ref Stage$/&\n          JOBS_URL: !Ref JobsQueue/' "$stack/with-reports.yaml"
+cat >"$stack/uploads-bucket.yaml" <<'EOF'
+      Tags:
+        - Key: team
+          Value: uploads
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectRemoved:*
+            Queue: !GetAtt JobsQueue.Arn
+EOF
+sed -i "/^      BucketName: cli-stack-uploads$/r $stack/uploads-bucket.yaml" "$stack/with-reports.yaml"
+cat >"$stack/hello-events.yaml" <<'EOF'
+      Events:
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+            Input: '{"report": "nightly"}'
+        Jobs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt JobsQueue.Arn
+            BatchSize: 5
+EOF
+sed -i "/^      AutoPublishAlias: live$/r $stack/hello-events.yaml" "$stack/with-reports.yaml"
+# broken.yaml: an expression FF's schedules don't take, queues the account hasn't, a function's and the bucket's, and
+# names another queue and another bucket have.
+sed -e 's/cron(0 2 \* \* ? \*)/cron(0 2 * * *)/' \
+  -e 's/Queue: !GetAtt JobsQueue.Arn/Queue: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:cli-stack-missing/' \
+  -e 's/deadLetterTargetArn: !GetAtt JobsFailedQueue.Arn/deadLetterTargetArn: !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:cli-stack-gone/' \
+  -e 's/QueueName: cli-stack-jobs-failed/QueueName: cli-stack-taken/' \
+  -e 's/BucketName: cli-stack-uploads/BucketName: cli-stack-taken/' "$stack/with-reports.yaml" >"$stack/broken.yaml"
+ff queues create cli-stack-taken
+ff buckets create cli-stack-taken
+in_folder "$stack" deploy broken.yaml
+# refused <message>: whether ff deploy said it at a line of broken.yaml.
+refused() { err | sed -n 's/^broken\.yaml:[0-9][0-9]*: //p' | grep -F -x -- "$1" >/dev/null && echo true || echo false; }
+check "an expression FF's schedules wouldn't take, queues the account hasn't and a queue's name taken outside the stack are refused at their lines, before any change" "2 true true true true" \
+  "$(code) $(refused "HelloFunction: event Nightly's Schedule cron(0 2 * * *): cron() takes six fields, minutes hours day-of-month month day-of-week year; got 5") $(refused "HelloFunction: event Jobs reads the queue cli-stack-missing, which the account hasn't: \`ff queues create cli-stack-missing\` makes it") $(refused "JobsQueue: RedrivePolicy's dead-letter queue cli-stack-gone, which the account hasn't: a queue of the template, or \`ff queues create cli-stack-gone\`, makes it") $(refused "JobsFailedQueue: the account has a queue cli-stack-taken outside the stack: ff deploy doesn't take it over; give JobsFailedQueue another QueueName, or delete that queue with \`ff queues delete cli-stack-taken\`")"
+check "  ... as are a queue a bucket tells that the account hasn't, and a bucket's name taken outside the stack" "true true" \
+  "$(refused "UploadsBucket: the notification UploadsBucketQueue1 tells the queue cli-stack-missing, which the account hasn't: a queue of the template, or \`ff queues create cli-stack-missing\`, makes it") $(refused "UploadsBucket: the account has a bucket cli-stack-taken outside the stack: ff deploy doesn't take it over; give UploadsBucket another BucketName, or delete that bucket with \`ff buckets delete cli-stack-taken\`")"
+ff queues delete cli-stack-taken --yes
+ff buckets delete cli-stack-taken --yes
+in_folder "$stack" deploy with-reports.yaml --output json
+hello="$(out | jq -r '.outputs[] | select(.name == "HelloFunctionName") | .value')"
+jobs_url="$(out | jq -r '.outputs[] | select(.name == "JobsUrl") | .value')"
+queues_made="$(out | jq -r '.queues | map("\(.action) \(.logicalId)") | join(", ")')"
+buckets_made="$(out | jq -r '.buckets | map("\(.action) \(.logicalId)") | join(", ")')"
+uploads_site="$(out | jq -r '.outputs[] | select(.name == "UploadsSite") | .value')"
+uploads_domain="$(out | jq -r '.outputs[] | select(.name == "UploadsDomain") | .value')"
+check "ff deploy makes each function of the template, its alias's version published, its outputs resolved" \
+  "0 created HelloFunction 1, created ReportsFunction - true" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.version // "-")") | join(", ")') $([[ $hello =~ ^cli-stack-HelloFunction-[A-Z0-9]{12}$ ]] && echo true || echo false)"
+ff queues get cli-stack-jobs --output json
+check "and each queue before them, the dead-letter queue first, with the template's attributes and tags; an output gives its public URL" \
+  "created JobsFailedQueue, created JobsQueue 0 60 cli-stack-jobs-failed 3 jobs http://localhost:$sqs_port/$account_a/cli-stack-jobs" \
+  "$queues_made $(code) $(out | jq -r '"\(.visibilityTimeout) \(.redrivePolicy.deadLetterTargetArn | split(":") | last) \(.redrivePolicy.maxReceiveCount) \(.tags.team)"') $jobs_url"
+ff buckets get cli-stack-uploads --output json
+check "and each bucket first, with its tags, a site; outputs give the site's address and the bucket's domain" \
+  "created UploadsBucket 0 uploads http://cli-stack-uploads.site.localhost:$website_port cli-stack-uploads.s3.localhost:$storage_port" \
+  "$buckets_made $(code) $(out | jq -r .tags.team) $uploads_site $uploads_domain"
+ff buckets notifications cli-stack-uploads --output json
+check "whose notifications are its own configuration's and its function's S3 event, put once the function is made" \
+  "0 ReportsFunctionUpload cli-stack-reports s3:ObjectCreated:* reports/, UploadsBucketQueue1 cli-stack-jobs s3:ObjectRemoved:*" \
+  "$(code) $(out | jq -r '(.lambdaFunctionConfigurations + .queueConfigurations) | map([.id, ((.lambdaFunctionArn // .queueArn) | split(":") | last), (.events | join(",")), (.filter.key.filterRules[0].value // empty)] | join(" ")) | join(", ")')"
+ff invoke "$hello:live" --http GET "/?name=Stack"
+check "the function answers at its alias's URL, with samconfig.toml's value of the parameter and the URL it reaches its queue at, in the cluster" \
+  "0 HTTP 200 Hello Stack dev http://$cluster_gateway:$sqs_port/$account_a/cli-stack-jobs" \
+  "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.message) \(.stage) \(.jobs)"')"
+ff get cli-stack-reports --output json
+check "each function is the stack's, as ff get says, with its settings from the template" "0 cli-stack 2 reports" "$(code) $(out | jq -r '"\(.stack) \(.maxInstances) \(.tags.team)"')"
+ff schedule list "$hello" --output json
+check "a Schedule event is a schedule of the function, running its alias, with the event's input" "0 Nightly cron(0 2 * * ? *) live nightly true" \
+  "$(code) $(out | jq -r '.[] | "\(.name) \(.expression) \(.qualifier) \(.input.report) \(.enabled)"')"
+ff event-sources list --function "$hello" --output json
+check "an SQS event has the alias read the queue, five messages a call" "0 cli-stack-jobs 5 live Enabled" \
+  "$(code) $(out | jq -r '.[] | "\(.eventSourceArn | split(":") | last) \(.batchSize) \(.functionArn | split(":") | last) \(.state)"')"
+ff invoke cli-stack-reports --http GET /reports
+check "and the function of an HttpApi event answers its route at its URL" "0 HTTP 200 Hello world" "$(code) $(out | head -1) $(out | tail -1 | jq -r .message)"
+in_folder "$stack" deploy with-reports.yaml --output json
+check "deployed again, nothing changes" "0 unchanged HelloFunction 1, unchanged ReportsFunction - unchanged JobsFailedQueue, unchanged JobsQueue unchanged UploadsBucket" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.version // "-")") | join(", ")') $(out | jq -r '.queues | map("\(.action) \(.logicalId)") | join(", ")') $(out | jq -r '.buckets | map("\(.action) \(.logicalId)") | join(", ")')"
+mkdir -p "$stack/site" && printf '<!doctype html><title>cli stack site</title>' >"$stack/site/index.html"
+ff sites deploy cli-stack-uploads "$stack/site"
+check "ff sites deploy fills the template's site, which answers at the address its output gave" "0 200 cli stack site" \
+  "$(code) $(curl -s -o "$work/page.html" -w '%{http_code}' "$uploads_site/") $(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$work/page.html")"
+echo "token-$account_a" | ff secrets set "$hello" API_TOKEN
+sed 's/^          STAGE: !Ref Stage$/&\n          API_TOKEN: in-the-template/' "$stack/template.yaml" >"$stack/with-secret.yaml"
+in_folder "$stack" deploy with-secret.yaml --yes
+check "a variable with the name of one of the function's secrets is refused, at its line, before any change" "2 true" \
+  "$(code) $(err | grep "^with-secret.yaml:[0-9]*: HelloFunction: API_TOKEN is a secret of $hello's, which stays with \`ff secrets\`" >/dev/null && echo true || echo false)"
+in_folder "$stack" deploy template.yaml --parameter-overrides Stage=prod
+check "what the template no longer has is deleted after asking, which a script says with --yes" \
+  "2 error: ff deploy asks first, and there is no terminal to ask in: say --yes" "$(code) $(err | tail -1)"
+in_folder "$stack" deploy template.yaml --parameter-overrides Stage=prod --yes --output json
+check "with --yes, the function changed and published, the events and the queues the template no longer has deleted, the function it retained kept, the bucket's tags, site and notifications gone" \
+  "0 updated HelloFunction environment,description 2 HelloFunctionNightly HelloFunctionJobs JobsFailedQueue JobsQueue kept ReportsFunction updated UploadsBucket tags,site,notifications" \
+  "$(code) $(out | jq -r '.functions | map("\(.action) \(.logicalId) \(.changed | join(",")) \(.version)") | join(", ")') $(out | jq -r '.deleted | map(.logicalId) | join(" ")') kept $(out | jq -r '.kept | map(.logicalId) | join(" ")') $(out | jq -r '.buckets | map("\(.action) \(.logicalId) \(.changed | join(","))") | join(", ")')"
+ff get cli-stack-reports --output json
+check "which stays in the account, in no stack, as CloudFormation leaves it; the schedule, the queue's reader and the queues are gone" "0 none 0 0 0" \
+  "$(code) $(out | jq -r '.stack // "none"') $(ff schedule list "$hello" --output json; out | jq length) $(ff event-sources list --function "$hello" --output json; out | jq length) $(ff queues list --output json; out | jq '[.[] | select(.name | startswith("cli-stack"))] | length')"
+ff delete cli-stack-reports --yes
+ff invoke "$hello:live" --http GET "/?name=Stack"
+check "and the alias's URL runs the new version" "0 HTTP 200 Hello Stack prod" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.message) \(.stage)"')"
+in_folder "$stack" delete-stack --yes
+check "ff delete-stack stops at a bucket with files, as CloudFormation does, saying how to go on" \
+  "3 error: The bucket cli-stack-uploads (UploadsBucket) isn't empty, and CloudFormation deletes a bucket that is: empty it, or delete it with \`ff buckets delete cli-stack-uploads --force\`, then run this again" \
+  "$(code) $(err | tail -1)"
+ff buckets delete cli-stack-uploads --force --yes
+in_folder "$stack" delete-stack --yes
+check "then deletes the stack with what it made, its function with its alias and URL" \
+  "0 deleted the function $hello (HelloFunction) deleted the bucket cli-stack-uploads (UploadsBucket) deleted the stack cli-stack" \
+  "$(code) $(out | paste -sd' ')"
+ff get "$hello"
+check "which is gone" "3" "$(code)"
+}
+section_def stacks section_stacks backend budget=80
 
 section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"
@@ -976,27 +1227,31 @@ ff delete cli-db-orders --yes
 section_def databases_used section_databases_used databases budget=15
 
 section_small_app() {
-section "the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
+section "the small app on FF alone, as one SAM template, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
 # In account A, whose functions don't reach the internet: FF's database and cache, the S3 front door, the SQS and SES
 # endpoints, they do.
-ff deploy "$app" --name shop-api --handler index.http
-check "examples/orders-app, the Valkey, S3, SQS and SES clients among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
-  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
-ff deploy "$app" --name shop-receipts --handler index.receipts
-ff deploy "$app" --name shop-nightly --handler index.nightly
+# The app as one SAM template, deployed as the stack its samconfig.toml names, the buckets' names the suite's own: its
+# three functions, its queue, the receipts' bucket and the page's, a site, whose origin the API's URL lets in.
+site_origin="http://cli-shop-site.site.localhost:$website_port"
+in_folder "$app" deploy template.yaml --parameter-overrides ReceiptsBucketName=cli-receipts SiteBucketName=cli-shop-site \
+  "SiteOrigin=$site_origin" --output json
+check "examples/orders-app's template.yaml deployed as the stack shop: two buckets, the page's a site, a queue, three functions with the Valkey, S3, SQS and SES clients among their libraries" \
+  "0 shop cli-receipts,cli-shop-site $site_origin shop-new-orders shop-api,shop-receipts,shop-nightly" \
+  "$(code) $(out | jq -r '"\(.stack) \([.buckets[].name] | join(",")) \(.buckets[1].site) \([.queues[].name] | join(",")) \([.functions[].name] | join(","))"')"
+shop_url="$(out | jq -r '.outputs[] | select(.name == "OrdersApi") | .value' | sed 's:/$::')"
+ff env list shop-api --show
+check "the queue's name and the receipts' bucket in the API's variables, as the template's GetAtt and Ref give them" \
+  "0 RECEIPTS_BUCKET=cli-receipts RECEIPTS_QUEUE=shop-new-orders" "$(code) $(out | paste -sd' ')"
+ff event-sources list --function shop-receipts --output json
+check "shop-receipts reads the queue ten messages a call, naming the messages it fails, as the template's SQS event says" \
+  "0 shop-new-orders 10 ReportBatchItemFailures Enabled" \
+  "$(code) $(out | jq -r '.[] | "\(.eventSourceArn | split(":") | last) \(.batchSize) \(.functionResponseTypes | join(",")) \(.state)"')"
+ff schedule list shop-nightly --output json
+check "shop-nightly runs each night at 02:00 UTC, the template's Schedule event" "0 EveryNight cron(0 2 * * ? *) true" \
+  "$(code) $(out | jq -r '.[] | "\(.name) \(.expression) \(.enabled)"')"
 ff db create shop --secret-for shop-api --secret-for shop-nightly --output json
 check "ff db create: FF's database, its connection string the API's and the night's DATABASE_URL" "0 active shop-api,shop-nightly" \
   "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
-ff buckets create cli-receipts
-ff queues create cli-new-orders
-ff env set shop-api RECEIPTS_QUEUE=cli-new-orders RECEIPTS_BUCKET=cli-receipts
-ff env set shop-receipts RECEIPTS_BUCKET=cli-receipts
-ff env set shop-nightly RECEIPTS_BUCKET=cli-receipts
-ff env list shop-receipts
-check "a bucket for the receipts and a queue of new orders, named in the functions' variables" "0 RECEIPTS_BUCKET" "$(code) $(out | paste -sd' ')"
-ff event-sources add cli-new-orders shop-receipts --report-batch-item-failures
-check "shop-receipts reads the queue, naming the messages it fails" "0 true" \
-  "$(code) $(out | grep '^shop-receipts reads the queue cli-new-orders: .*the answer naming the messages that failed' >/dev/null && echo true || echo false)"
 ff caches create cli-orders --secret-for shop-api --secret-for shop-nightly --output json
 check "ff caches create: the app's cache, its address the API's and the night's REDIS_URL" "0 active shop-api,shop-nightly" \
   "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
@@ -1014,9 +1269,14 @@ sender_proved="$(follow_link)"
 ff email add buyer@shop-cli.tn
 check "the receipts' sender and their recipient, each proved by its link" "200 200 SUCCESS SUCCESS" \
   "$sender_proved $(follow_link) $("$ff_bin" email identities --output json | jq -r '[.[].status] | join(" ")')"
-ff env set shop-receipts RECEIPTS_BUCKET=cli-receipts RECEIPTS_FROM=orders@shop-cli.tn
-ff url enable shop-api --auth none
-shop_url="$(out | grep -oE 'http://[a-z0-9]+\.fn\.localhost:[0-9]+' | head -1)"
+# The sender, once proved, as the guide gives it: the template's ReceiptsFrom on a second deploy, each parameter not
+# given keeping the stack's last value, and the secrets ff db and ff caches set left as they are.
+in_folder "$app" deploy template.yaml --parameter-overrides ReceiptsFrom=orders@shop-cli.tn --output json
+check "a second deploy gives shop-receipts its sender alone, the other parameters the stack's last, the secrets kept" \
+  "0 unchanged,updated,unchanged environment RECEIPTS_BUCKET=cli-receipts|RECEIPTS_FROM=orders@shop-cli.tn DATABASE_URL,REDIS_URL" \
+  "$(code) $(out | jq -r '"\([.functions[].action] | join(",")) \(.functions[1].changed | join(","))"') \
+$("$ff_bin" env list shop-receipts --show | paste -sd'|') \
+$("$ff_bin" secrets list shop-api --output json | jq -r '[.secrets[].name] | sort | join(",")')"
 ff invoke shop-api --http POST /orders --data '{"item": "bsissa", "quantity": 4, "email": "buyer@shop-cli.tn"}'
 check "a POST writes the order to FF's database, then puts it in the queue with the function's own key" \
   "0 HTTP 201 bsissa 4 queued" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity) \(.receipt)"')"
@@ -1027,7 +1287,7 @@ ff invoke shop-api --http GET /orders/1/receipt
 check "  ... which shop-receipts reads, writing its receipt to the bucket: a GET reads it back" "0 HTTP 200 Order 1|4 × bsissa" \
   "$(code) $(out | head -1) $(out | sed -n '3,4p' | paste -sd'|')"
 # The receipt is written during the call, its message deleted once the call has ended.
-held() { "$ff_bin" queues get cli-new-orders --output json | jq '.messages.available + .messages.inFlight'; }
+held() { "$ff_bin" queues get shop-new-orders --output json | jq '.messages.available + .messages.inFlight'; }
 for _ in $(seq 30); do
   [ "$("$ff_bin" history shop-receipts --output json | jq -r '.invocations[0].status')" = COMPLETED ] && [ "$(held)" = 0 ] && break
   sleep 1
@@ -1050,19 +1310,14 @@ latest() { curl -s -o /dev/null -D - "$shop_url/orders" | tr -d '\r' | sed -n 's
 check "the latest orders read from the database, then from the cache, over TLS, with the address its secret gives" "miss hit" "$(latest) $(latest)"
 ttl="$(cache_cli "$cache_url" TTL orders:latest)"
 check "  ... the list kept there a minute, as the customer's own client sees it" "true" "$([ "$ttl" -gt 0 ] 2>/dev/null && [ "$ttl" -le 60 ] && echo true || echo false)"
-# Its page: site/ deployed as a site of a bucket of its own, the API's address in config.json beside it, and the
-# function URL letting the page's origin in.
+# Its page: site/'s files deployed to the template's site, as SAM uploads none, the API's address in config.json beside
+# them.
 cp -r "$app/site" "$work/shop-site"
 printf '{"api": "%s"}\n' "$shop_url" >"$work/shop-site/config.json"
-ff buckets create cli-shop-site
 ff sites deploy cli-shop-site "$work/shop-site"
-site_origin="http://cli-shop-site.site.localhost:$website_port"
-check "the app's page deployed as a site of its own bucket" "0 $site_origin" "$(code) $(out | tail -1)"
-check "  ... a browser gets the page, and the API's address beside it" "200 Orders $shop_url" \
-  "$(curl -s -o "$work/shop-page.html" -w '%{http_code}' "$site_origin/") $(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$work/shop-page.html") $(curl -s "$site_origin/config.json" | jq -r .api)"
-ff url enable shop-api --auth none --cors-origin "$site_origin" --cors-method GET --cors-method POST --cors-header content-type
-check "  ... and the function URL lets the page's origin in, as a browser's preflight asks" "$site_origin" \
-  "$(curl -s -o /dev/null -D - -X OPTIONS "$shop_url/orders" -H "Origin: $site_origin" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
+check "the app's page deployed to its bucket's site" "0 $site_origin" "$(code) $(out | tail -1)"
+orders_page_check "$site_origin" "$shop_url" "$work/shop-page.html"
+orders_cors_check "$shop_url" "$site_origin"
 # The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
 ff keys create --bucket cli-receipts --read-only
 out | grep '^export AWS_' >"$work/receipts.env"
@@ -1149,7 +1404,7 @@ check "ff usage lists the queue's month after the buckets, deleted since: its re
 section_def queues_counted section_queues_counted queues budget=5
 
 section_small_app_exported() {
-section "the small app exported to AWS, minutes after: ff export's template and terraform/, which the SAM CLI and OpenTofu take, each function's role what its keys used; then the app removed"
+section "the small app exported to AWS, minutes after: ff export's template and terraform/, which the SAM CLI and OpenTofu take, each function's role what its keys used"
 # Its keys' uses are written at the minute's turn: by now the small app's; run alone, they are waited for, as long as
 # before.
 receipts_id="$("$ff_bin" get shop-receipts --output json | jq -r .id)"
@@ -1168,7 +1423,7 @@ ff url enable shop-api --alias stable --auth none
 ff domains add shop-api stable.shop-cli.tn --alias stable
 check "  ... stable with a URL of its own, and a domain on it" "0 stable.shop-cli.tn: pending" "$(code) $(out | head -1)"
 ff doctor "$app" --output json
-check "ff doctor finds nothing in the small app's code that works on FF alone, its template-free folder read as its package" \
+check "ff doctor finds nothing in the small app's code or its template that works on FF alone, the folder read as its package" \
   "0 0 0" "$(code) $(out | jq -r '"\(.errors) \(.warnings)"')"
 # What still points at FF: the shop's functions reached its S3, SQS and SES through FF's endpoints, as their keys say.
 endpoints_of() { jq -r --arg resource "function $1" '.findings[] | select(.resource == $resource and .check == "ff-endpoints") | .message' "$work/out"; }
@@ -1177,7 +1432,7 @@ check "ff doctor --deployed: shop-receipts reached FF's S3 and SES, shop-api FF'
   "0 true true true" \
   "$(code) $(endpoints_of shop-receipts | grep -F "S3 (cli-receipts" >/dev/null && echo true || echo false) \
 $(endpoints_of shop-receipts | grep -F "SES (" >/dev/null && echo true || echo false) \
-$(endpoints_of shop-api | grep -F "SQS (cli-new-orders)" >/dev/null && echo true || echo false)"
+$(endpoints_of shop-api | grep -F "SQS (shop-new-orders)" >/dev/null && echo true || echo false)"
 deployed="$(jq -c .findings "$work/out")"
 ff doctor --deployed --strict
 check "  ... which --strict fails on, with 1" "1" "$(code)"
@@ -1199,7 +1454,7 @@ check "  ... shop-receipts's role writes the receipts and sends from the proved 
 $(resource_of ShopReceiptsFunction | grep -A1 -- '- ses:SendEmail' | grep -F 'identity/orders@shop-cli.tn' >/dev/null && echo true || echo false) \
 $(resource_of ShopReceiptsFunction | grep -E 'S3ReadPolicy|S3CrudPolicy|SQSSendMessagePolicy' >/dev/null && echo true || echo false)"
 check "  ... shop-api's sends to the queue of new orders, which it can't read, and reads the receipts" "true false true" \
-  "$(resource_of ShopApiFunction | grep -A1 -- '- SQSSendMessagePolicy:' | grep 'QueueName: !GetAtt CliNewOrdersQueue.QueueName' >/dev/null && echo true || echo false) \
+  "$(resource_of ShopApiFunction | grep -A1 -- '- SQSSendMessagePolicy:' | grep 'QueueName: !GetAtt ShopNewOrdersQueue.QueueName' >/dev/null && echo true || echo false) \
 $(resource_of ShopApiFunction | grep -- '- SQSPollerPolicy:' >/dev/null && echo true || echo false) \
 $(resource_of ShopApiFunction | grep -A1 -- '- S3ReadPolicy:' | grep 'BucketName: !Ref CliReceiptsBucketName' >/dev/null && echo true || echo false)"
 # The tools AWS's users check a template and Terraform with, as hack/install-tools.sh pins them, the provider from
@@ -1224,7 +1479,82 @@ initialized="$(code)"
 tool "${tofu[@]}" validate -no-color
 check "  ... terraform/, which tofu fmt leaves as it is, and tofu init and validate take" "0 0 0 Success! The configuration is valid." \
   "$formatted $initialized $(code) $(out | head -1)"
-ff queues delete cli-new-orders --yes
+}
+section_def small_app_exported section_small_app_exported small_app budget=120
+
+section_small_app_round_trip() {
+section "the small app's way back: the template ff export wrote, deployed on FF by account B, makes what A has, compared through FF's API; then the app removed from both"
+trip="$work/shop-round-trip"
+rm -rf "$trip"
+# The small app's functions alone, with what they use, whatever the sections before left in the account.
+ff export "$trip" --functions shop-api,shop-receipts,shop-nightly --with-values --output json
+check "ff export --with-values writes the variables' values in the template, the secrets left to fill" "0 true" \
+  "$(code) $(grep -E '^[A-Za-z0-9]+=$' "$trip/secrets.template.env" >/dev/null && echo true || echo false)"
+# As on AWS: S3's names are global, on FF too, so B names each bucket anew, as its parameter lets, its Default A's
+# name; and the secrets, which FF never shows back, are filled.
+overrides=()
+renamed='{}'
+while read -r parameter bucket; do
+  overrides+=("$parameter=$bucket-b")
+  renamed="$(jq -c --arg bucket "$bucket" '.[$bucket] = $bucket + "-b"' <<<"$renamed")"
+done < <(awk '/^  [A-Za-z0-9]+BucketName:$/ { p = substr($1, 1, length($1) - 1) } p && $1 == "Default:" { print p, $2; p = "" }' \
+  "$trip/template.yaml")
+for parameter in $(sed -n 's/^\([A-Za-z0-9]*\)=$/\1/p' "$trip/secrets.template.env"); do overrides+=("$parameter=filled-by-b"); done
+in_folder "$trip" --profile b deploy template.yaml --stack-name shop --parameter-overrides "${overrides[@]}" --yes
+check "account B deploys it as the stack shop: A's three functions, its queue and its bucket, under the name B gave it" \
+  "0 shop-api,shop-nightly,shop-receipts shop-new-orders cli-receipts-b" \
+  "$(code) $("$ff_bin" --profile b list --output json | jq -r '[.[].name] | sort | join(",")') \
+$("$ff_bin" --profile b queues list --output json | jq -r '[.[].name] | join(",")') \
+$("$ff_bin" --profile b buckets list --output json | jq -r '[.[].name] | join(",")')"
+# What A has, as B should have it: a secret a variable, as Lambda has no other, its value B's; a variable that holds a
+# bucket's name holding B's, which the template gives it. What each account's API gives: a function's settings, code
+# and variables, and its URL.
+function_facts() { # <a|b> <function>
+  local profile=() function secrets url
+  [ "$1" = a ] || profile=(--profile "$1")
+  function="$("$ff_bin" "${profile[@]}" get "$2" --output json)"
+  secrets="$("$ff_bin" "${profile[@]}" secrets list "$2" --output json)"
+  url="$("$ff_bin" "${profile[@]}" url show "$2" --output json 2>/dev/null || echo '{}')"
+  jq -cnS --arg account "$1" --argjson renamed "$renamed" --argjson function "$function" --argjson secrets "$secrets" \
+    --argjson url "$url" '
+    def as_b: if $account == "a" then (map_values(if type == "string" then $renamed[.] // . else . end)
+      + ($secrets.secrets | map({ key: .name, value: "filled-by-b" }) | from_entries)) else . end;
+    $function | { runtime, handler, memory, timeout, eventFormat, minInstances, maxInstances, scaleToZero, codeSha256,
+      description, deadLetterTargetArn, tags, variables: ((.environment // {}) | as_b),
+      url: ($url.url // null | if . then { authType, cors } else . end) }'
+}
+same=()
+for function in shop-api shop-receipts shop-nightly; do
+  if [ "$(function_facts a "$function")" = "$(function_facts b "$function")" ]; then same+=(true); else
+    same+=(false); echo "  $function, A's then B's:"; function_facts a "$function"; function_facts b "$function"; fi
+done
+check "each function B made is A's: its runtime, handler, memory, timeout, instances, code and variables, and its URL with its CORS" \
+  "true true true" "${same[*]}"
+aliases_of() { "$ff_bin" "${@:2}" alias list "$1" --output json | jq -r '[.[].name] | if . == [] then "none" else join(",") end'; }
+check "  ... shop-receipts's alias live, its AutoPublishAlias, B's naming the version its deploy published; shop-api's stable, which names a version, A's alone, as MIGRATION.md says" \
+  "live live 1 stable none" \
+  "$(aliases_of shop-receipts) $(aliases_of shop-receipts --profile b) \
+$("$ff_bin" --profile b alias list shop-receipts --output json | jq -r '.[0].functionVersion') $(aliases_of shop-api) $(aliases_of shop-api --profile b)"
+mapping_facts() { "$ff_bin" "$@" event-sources list --function shop-receipts --output json | jq -c '[.[] | {
+  queue: (.eventSourceArn | split(":") | last), function: (.functionArn | split(":")[6]), batchSize,
+  maximumBatchingWindowInSeconds, functionResponseTypes, scalingConfig, state }]'; }
+queue_facts() { "$ff_bin" "$@" queues get shop-new-orders --output json | jq -c '{ visibilityTimeout, messageRetentionPeriod,
+  delaySeconds, maximumMessageSize, receiveMessageWaitTimeSeconds, redrivePolicy, tags }'; }
+bucket_facts() { "$ff_bin" "${@:2}" buckets get "$1" --output json | jq -c '{ tags }'
+  "$ff_bin" "${@:2}" buckets notifications "$1" --output json | jq -c .; }
+check "  ... the queue's attributes A's, its mapping to shop-receipts A's, on the alias in B, as SAM's SQS event under AutoPublishAlias" \
+  "true true true" \
+  "$([ "$(queue_facts)" = "$(queue_facts --profile b)" ] && echo true || echo false) \
+$([ "$(mapping_facts)" = "$(mapping_facts --profile b)" ] && echo true || echo false) \
+$("$ff_bin" --profile b event-sources list --function shop-receipts --output json | jq '.[0].functionArn | endswith(":shop-receipts:live")')"
+check "  ... and the bucket A's, its tags and notifications" "true" \
+  "$([ "$(bucket_facts cli-receipts)" = "$(bucket_facts cli-receipts-b --profile b)" ] && echo true || echo false)"
+ff --profile b delete-stack shop --yes
+check "B's stack deleted, with all it made; A's app untouched" "0 0 0 0 shop-api,shop-nightly,shop-receipts" \
+  "$(code) $("$ff_bin" --profile b list --output json | jq length) $("$ff_bin" --profile b queues list --output json | jq length) \
+$("$ff_bin" --profile b buckets list --output json | jq length) \
+$("$ff_bin" list --output json | jq -r '[.[].name | select(startswith("shop-"))] | sort | join(",")')"
+ff queues delete shop-new-orders --yes
 check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
 ff buckets delete cli-receipts --force --yes
 ff buckets delete cli-shop-site --force --yes
@@ -1232,11 +1562,12 @@ ff caches delete cli-orders --yes
 ff email delete orders@shop-cli.tn --yes
 ff email delete buyer@shop-cli.tn --yes
 ff db delete shop --yes
-ff delete shop-nightly --yes
-ff delete shop-receipts --yes
-ff delete shop-api --yes
+in_folder "$app" delete-stack --yes --output json
+check "A's stack deleted, its functions with it, what was deleted before it passed by" "0 true shop-api,shop-nightly,shop-receipts none" \
+  "$(code) $(out | jq -r '"\(.deleted) \([.resources[] | select(.type == "AWS::Serverless::Function") | .physicalId] | sort | join(","))"') \
+$("$ff_bin" list --output json | jq -r '[.[].name | select(startswith("shop-"))] | if . == [] then "none" else join(",") end')"
 }
-section_def small_app_exported section_small_app_exported small_app budget=120
+section_def small_app_round_trip section_small_app_round_trip small_app_exported budget=50
 
 section_account() {
 section "the account: who, its plan, what it used and owes, how its functions ran"

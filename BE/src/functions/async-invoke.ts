@@ -2,6 +2,7 @@
  * Asynchronous calls, as AWS Lambda makes them (ADR 0010): what is kept of an
  * event's attempts, and when its next attempt comes, or why it has none.
  */
+import { MessageAttribute } from '../queues/sqs-messages';
 import { LATEST, storedQualifier } from './qualifier';
 
 /** Lambda's limit on an asynchronous call's event, once serialized: 1 MB. */
@@ -151,6 +152,40 @@ export function invocationRecord(call: {
           responsePayload: response.payload,
         }
       : {}),
+  };
+}
+
+/** The most of an error's message that Lambda puts beside an event in its dead-letter queue: a kilobyte. */
+const DEAD_LETTER_ERROR_BYTES = 1024;
+
+/** The start of `text`, at most `bytes` of it in UTF-8, cut between characters. */
+function firstBytes(text: string, bytes: number): string {
+  let used = 0;
+  let end = 0;
+  for (const char of text) {
+    used += Buffer.byteLength(char);
+    if (used > bytes) break;
+    end += char.length;
+  }
+  return text.slice(0, end);
+}
+
+/**
+ * What Lambda puts beside an event it sends to a dead-letter queue, as SQS's
+ * message attributes: its request ID, and, when an attempt answered, its
+ * status (ErrorCode) and the start of its error (ErrorMessage), the error's
+ * type when its message is empty, as SQS takes no empty value.
+ */
+export function deadLetterAttributes(requestId: string, response: AttemptResponse | undefined): Record<string, MessageAttribute> {
+  const attributes: Record<string, MessageAttribute> = { RequestID: { DataType: 'String', StringValue: requestId } };
+  if (!response) return attributes;
+  const payload = response.payload as { errorType?: unknown; errorMessage?: unknown } | null;
+  const text = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined);
+  const message = text(payload?.errorMessage) ?? text(payload?.errorType) ?? 'Error';
+  return {
+    ...attributes,
+    ErrorCode: { DataType: 'Number', StringValue: String(response.statusCode) },
+    ErrorMessage: { DataType: 'String', StringValue: firstBytes(message, DEAD_LETTER_ERROR_BYTES) },
   };
 }
 

@@ -4,12 +4,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
+import { AwsEndpoints, awsEndpoints } from '../common/aws-endpoints';
 import { PlansService } from '../plans/plans.service';
 import { CreateStorageKeyDto, CreatedDeployKey, CreatedStorageKey, StorageKeyView } from './dto/storage.dto';
 import { Bucket, BucketStatus } from './bucket.entity';
 import { StorageDirectory } from './storage-directory.service';
 import { StorageKey } from './storage-key.entity';
-import { newAccessKeyId, newSecretAccessKey } from './storage-names';
+import { bucketNotFound, newAccessKeyId, newSecretAccessKey } from './storage-names';
 
 /** How long a deploy's key works: an hour, as an STS session lasts by default. */
 export const DEPLOY_KEY_MS = 60 * 60_000;
@@ -31,11 +32,7 @@ const ACCOUNT_KEYS = { functionId: IsNull(), expiresAt: IsNull(), revokedAt: IsN
  */
 @Injectable()
 export class StorageKeysService {
-  private readonly endpoint: string;
-  private readonly sqsEndpoint: string;
-  private readonly sesEndpoint: string;
-  private readonly lambdaEndpoint: string;
-  private readonly region: string;
+  private readonly aws: AwsEndpoints;
 
   constructor(
     @InjectRepository(StorageKey) private readonly keys: Repository<StorageKey>,
@@ -44,11 +41,7 @@ export class StorageKeysService {
     private readonly plans: PlansService,
     config: ConfigService,
   ) {
-    this.endpoint = new URL(config.getOrThrow<string>('storage.base')).origin;
-    this.sqsEndpoint = config.get<string>('sqs.base') ?? '';
-    this.sesEndpoint = config.get<string>('ses.base') ?? '';
-    this.lambdaEndpoint = config.get<string>('lambda.base') ?? '';
-    this.region = config.getOrThrow<string>('storage.region');
+    this.aws = awsEndpoints(config);
   }
 
   /** The account's own keys that work, oldest first: never a secret. */
@@ -86,7 +79,8 @@ export class StorageKeysService {
     });
     const { buckets, queues, functions, functionAccess, readOnly } = row;
     await this.audit.record({ accountId, action: 'storage_key.create', resource: `storage_key:${id}`, details: { name, buckets, queues, functions, functionAccess, readOnly } });
-    return { ...this.view(row), secretAccessKey, endpoint: this.endpoint, sqsEndpoint: this.sqsEndpoint, sesEndpoint: this.sesEndpoint, lambdaEndpoint: this.lambdaEndpoint, region: this.region };
+    const { region, s3Endpoint, sqsEndpoint, sesEndpoint, lambdaEndpoint } = this.aws;
+    return { ...this.view(row), secretAccessKey, endpoint: s3Endpoint, sqsEndpoint, sesEndpoint, lambdaEndpoint, region };
   }
 
   /** The key stops working at once: the front door refuses its next request. */
@@ -104,7 +98,7 @@ export class StorageKeysService {
     const expiresAt = new Date(now.getTime() + DEPLOY_KEY_MS);
     await this.keys.insert({ id, accountId, secret: this.directory.sealSecret(id, secretAccessKey), buckets: [bucket], queues: null, readOnly: false, expiresAt });
     await this.audit.record({ accountId, action: 'bucket.deploy_key', resource: `bucket:${bucket}`, details: { accessKeyId: id, expiresAt: expiresAt.toISOString() } });
-    return { bucket, accessKeyId: id, secretAccessKey, expiresAt, endpoint: this.endpoint, region: this.region };
+    return { bucket, accessKeyId: id, secretAccessKey, expiresAt, endpoint: this.aws.s3Endpoint, region: this.aws.region };
   }
 
   /** A deploy's key to the bucket stops working at once, as its deploy ends; its hour is up anyway soon. */
@@ -117,7 +111,7 @@ export class StorageKeysService {
 
   private async bucketOf(accountId: string, name: string): Promise<void> {
     const found = await this.keys.manager.existsBy(Bucket, { accountId, name, status: BucketStatus.ACTIVE });
-    if (!found) throw new NotFoundException(`The account has no bucket named "${name}"`);
+    if (!found) throw bucketNotFound(name);
   }
 
   private view(row: StorageKey): StorageKeyView {

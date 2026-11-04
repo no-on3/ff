@@ -21,6 +21,16 @@ export enum FunctionStatus {
   DELETED = 'DELETED',
 }
 
+/**
+ * How the function's last change went, as Lambda's LastUpdateStatus says it, in
+ * its words: a create's or an update's rollout under way, then live, or failed.
+ */
+export enum UpdateStatus {
+  IN_PROGRESS = 'InProgress',
+  SUCCESSFUL = 'Successful',
+  FAILED = 'Failed',
+}
+
 export enum Runtime {
   NODEJS = 'nodejs',
   PYTHON = 'python',
@@ -45,6 +55,14 @@ export enum PackageType {
   INLINE = 'inline',
   ZIP = 'zip',
 }
+
+/**
+ * The most instances a function runs until it is told otherwise. Lambda's
+ * endpoint reads it as no reserved concurrency, so that a tool's default sees
+ * nothing to change, as `ff export` does with its copy of the number
+ * (cli/src/commands/export/template.rs).
+ */
+export const DEFAULT_MAX_INSTANCES = 3;
 
 /**
  * A name belongs to one function of its account, as on AWS Lambda, compared
@@ -133,21 +151,75 @@ export class Function {
   @Column({ type: 'jsonb', nullable: true })
   metadata: Record<string, unknown>;
 
+  /** What it is for, as Lambda's Description: up to 256 characters, empty for none. */
+  @Column({ type: 'varchar', length: 256, default: '' })
+  description: string;
+
+  /**
+   * The IAM role's ARN that Lambda's CreateFunction was given, kept and shown
+   * back as Lambda shows it, with no effect: FF has no IAM, and the function's
+   * own key to its account's services stands for its role. None for a
+   * function made through FF's API.
+   */
+  @Column({ type: 'varchar', length: 2048, nullable: true })
+  role: string | null;
+
+  /**
+   * Where an asynchronous call that failed for good goes, as Lambda's
+   * DeadLetterConfig: a queue of the account, by its ARN, which gets the call's
+   * event as a message's body. Its versions and aliases follow it too, as they
+   * follow its EventInvokeConfig. Set through Lambda's endpoint, or FF's API
+   * for a SAM template's DeadLetterQueue; its destinations do as much.
+   */
+  @Column({ type: 'varchar', length: 256, nullable: true })
+  deadLetterTargetArn: string | null;
+
   /** Why the function is in ERROR: the last failed deploy or update. Cleared once a rollout succeeds. */
   @Column({ type: 'varchar', nullable: true })
   error?: string | null;
+
+  /**
+   * How its last change went: InProgress while a create, an update or a delete
+   * runs, which holds every other change off; then Successful, or Failed with
+   * its reason, the previous version still live unless the function is in ERROR.
+   */
+  @Column({ type: 'enum', enum: UpdateStatus, default: UpdateStatus.SUCCESSFUL })
+  updateStatus: UpdateStatus;
+
+  /** Why its last change failed, as Lambda's LastUpdateStatusReason; none otherwise. */
+  @Column({ type: 'varchar', nullable: true })
+  updateReason: string | null;
+
+  /**
+   * When the change under way started: it holds the function until then and
+   * for its bound, past which it was stopped, by a restart of the backend, and
+   * another change may take over; it alone saves its outcome while it holds the
+   * function. None while no change runs.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  updateStartedAt: Date | null;
 
   /** Instances kept even when idle (provisioned concurrency on Lambda, billed as such: D8). */
   @Column({ default: 0 })
   minInstances: number;
 
   /** The most instances autoscaling may run: each serves one call at a time (D14). */
-  @Column({ default: 3 })
+  @Column({ default: DEFAULT_MAX_INSTANCES })
   maxInstances: number;
 
   /** Not settable: a function scales to zero exactly when its minInstances is 0. */
   @Column({ default: true })
   scaleToZero: boolean;
+
+  /**
+   * Every call refused as throttled, none run, as Lambda's reserved
+   * concurrency of 0: its versions and aliases too, its queues read no more,
+   * its calls that don't wait retried as Lambda retries a throttle. Set
+   * through Lambda's endpoint; PutFunctionConcurrency with more, or
+   * DeleteFunctionConcurrency, takes calls again.
+   */
+  @Column({ default: false })
+  callsStopped: boolean;
 
   /**
    * Lambda's RevisionId: new with each change of its code, its settings or its

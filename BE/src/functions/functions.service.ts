@@ -4,6 +4,7 @@ import {
   HttpStatus,
   Inject,
   Injectable,
+  HttpException,
   InternalServerErrorException,
   Logger,
   MessageEvent,
@@ -20,6 +21,7 @@ import { ObjectStoreService, StoredObjectMissingError } from '../object-store/ob
 import { jsonBytes } from '../common/byte-limits';
 import { describeError } from '../common/describe-error';
 import { withJobLock } from '../database/job-lock';
+import { readyTimeoutMs } from '../orchestrator/ready-timeout';
 import {
   FunctionRuntimeError,
   FunctionThrottledError,
@@ -28,7 +30,7 @@ import {
   LogStoreUnavailableError,
   initMsOf,
 } from '../orchestrator/orchestrator.errors';
-import { FunctionWorkload, ORCHESTRATOR, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
+import { FunctionWorkload, InvokeOptions, ORCHESTRATOR, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
 import { AuditService } from '../audit/audit.service';
@@ -45,7 +47,20 @@ import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-conf
 import { SecretsView } from './dto/secrets.dto';
 import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { awsEndpointsOf } from '../common/aws-endpoint';
-import { EventFormat, Function, FunctionStatus, PackageType, Runtime } from './entities/function.entity';
+import { EventFormat, Function, FunctionStatus, PackageType, Runtime, UpdateStatus } from './entities/function.entity';
+import {
+  ChangeOutcome,
+  ChangeUnderWay,
+  ChangeUnderWayException,
+  SUCCEEDED,
+  changeBoundMs,
+  endChange,
+  endedAs,
+  failedFor,
+  isUnderWay,
+  revisionMoved,
+  takeFunction,
+} from './change-under-way';
 import { FunctionUrl } from './entities/function-url.entity';
 import { FunctionAlias } from './entities/function-alias.entity';
 import { FunctionVersion } from './entities/function-version.entity';
@@ -110,6 +125,64 @@ export interface CodeImagesRestore {
 
 /** A function as the API answers it: its record and its variables. Its secrets' values are never part of it. */
 export type FunctionView = Function & { environment: Record<string, string> };
+
+/**
+ * What Lambda's operations give a function beside FF's fields: its description, the role it names, kept with no
+ * effect, and its dead-letter queue's ARN, null for none.
+ */
+export interface LambdaFields {
+  description?: string;
+  role?: string;
+  deadLetterTargetArn?: string | null;
+}
+
+/**
+ * The fields of a create or an update that the API's controller handles
+ * itself: Lambda's, checked and sent as LambdaFields, and the tags, put once
+ * the change is live.
+ */
+type HandledByTheController = 'description' | 'deadLetterTargetArn' | 'tags';
+export type NewFunction = Omit<CreateFunctionDto, HandledByTheController>;
+export type FunctionChange = Omit<UpdateFunctionDto, HandledByTheController>;
+
+/** An update's Lambda fields, and the RevisionId its caller read: refused once another change came since, as Lambda's. */
+export interface LambdaUpdateFields extends LambdaFields {
+  revisionId?: string;
+}
+
+/** What is done with a function once its change is live, in the transaction that says so: Lambda's Publish makes a version. */
+export type WhenLive = (manager: EntityManager, function_: Function) => Promise<unknown>;
+
+/**
+ * A change started, its function held, its rollout still to run: Lambda's
+ * operations answer then, and FF's API once it ends.
+ */
+export interface StartedChange {
+  /** The function as the change makes it, under way: its record says so once the change is live. */
+  function_: Function;
+  /** Its environment after the change. */
+  environment: FunctionEnvironmentValues;
+  /** Whether a new version rolls out: a change of the record alone is saved at once. */
+  rollsOut: boolean;
+  /**
+   * Rolls the change out and waits for an instance, then saves it, with what
+   * `whenLive` does; its failure thrown as FF's API answers it, the change
+   * rolled back, or its function in ERROR.
+   */
+  rollOut(whenLive?: WhenLive): Promise<FunctionView>;
+}
+
+/** A change taken in hand, whose run ends it: with the record and the environment it saved. */
+interface HeldChange {
+  function_: Function;
+  environment: FunctionEnvironmentValues;
+  rollsOut: boolean;
+  run(whenLive?: WhenLive): Promise<{ saved: Function; environment: FunctionEnvironmentValues }>;
+}
+
+/** A change's function deleted, or taken over by another change past its bound: what came since stands. */
+const changedMeanwhile = (name: string): ConflictException =>
+  new ConflictException(`The function ${name} was deleted or changed while this change ran: read it again`);
 
 /** The answer for a function: a copy of its record, with its variables. */
 function viewOf(function_: Function, environment: FunctionEnvironmentValues): FunctionView {
@@ -208,22 +281,34 @@ interface EnvironmentChange {
 }
 
 /** The fields of a function a change asks for, without its environment; with new code, how it comes, its hash and size. */
-type FieldChanges = Omit<UpdateFunctionDto, 'environment'> & Partial<CodeFields> & { packageSha256?: string; revisionId?: string };
+type FieldChanges = Omit<FunctionChange, 'environment'> &
+  Partial<CodeFields> &
+  LambdaFields & { packageSha256?: string; revisionId?: string };
 
 /** Each secret's value, by name: to tell which changed, for the audit log, which keeps only the names. */
 const valuesOf = (secrets: Record<string, StoredSecret>): Record<string, string> =>
   Object.fromEntries(Object.entries(secrets).map(([name, secret]) => [name, secret.value]));
 
 /**
- * A call's outcome: the invocation as kept, and the function's output, or why
- * the call failed: the error, and what its caller may see of it.
+ * A call's outcome: the invocation as kept, and the function's output, as a
+ * value and as its runtime sent it, or why the call failed: the error, and what
+ * its caller may see of it. The call's last 4 KB of log, when it asked for them
+ * and its runtime gave them.
  */
-export type CallOutcome =
-  | { invocation: FunctionInvocation; ok: true; output: unknown }
-  | { invocation: FunctionInvocation; ok: false; error: unknown; visible: string };
+export type CallOutcome = { invocation: FunctionInvocation; logResult?: string } & (
+  | { ok: true; output: unknown; outputJson?: string }
+  | { ok: false; error: unknown; visible: string }
+);
+
+/** What a call asks of the runtime, as Lambda's Invoke asks it: the call's log back, and the caller's ClientContext for the handler. */
+export type CallAsks = Pick<InvokeOptions, 'logTail' | 'clientContext'>;
 
 /** A message without its final period, to continue it with another sentence. */
 const clause = (message: string): string => message.replace(/\.\s*$/, '');
+
+/** Why a function whose calls are stopped refuses each, as Lambda throttles a reserved concurrency of 0. */
+export const CALLS_STOPPED =
+  "The function's reserved concurrency is 0: it takes no call until PutFunctionConcurrency reserves more, or DeleteFunctionConcurrency none.";
 
 /** The values a request sets that the account's plan limits (D5). */
 type Sized = Partial<Pick<Function, 'memory' | 'timeout' | 'minInstances' | 'maxInstances'>>;
@@ -297,6 +382,21 @@ function nameTaken(name: string): ConflictException {
 /** How a save goes on when the new name was taken since the update checked it. */
 type WhenNameTaken = 'refuse' | 'keepOldName';
 
+/** What the end of a change saves beside the record: the name it had, and what to do if another took the new one; its new environment; what `whenLive` does. */
+interface EndSaving {
+  previousName: string;
+  whenTaken: WhenNameTaken;
+  environment?: FunctionEnvironmentValues;
+  whenLive?: WhenLive;
+}
+
+/** Lambda's fields an update sends, as the record's changes. */
+const lambdaChanges = ({ description, role, deadLetterTargetArn }: LambdaFields): LambdaFields => ({
+  ...(description !== undefined ? { description } : {}),
+  ...(role !== undefined ? { role } : {}),
+  ...(deadLetterTargetArn !== undefined ? { deadLetterTargetArn } : {}),
+});
+
 /**
  * The function lifecycle (client-readiness plan, P-03). A function's record and
  * its Deployment always describe the same version:
@@ -353,10 +453,27 @@ export class FunctionsService {
   }
 
   private readyTimeoutMs(): number {
-    return this.configService.get<number>('orchestrator.readyTimeoutSeconds', 90) * 1000;
+    return readyTimeoutMs(this.configService);
   }
 
-  async create(accountId: string, createFunctionDto: CreateFunctionDto): Promise<FunctionView> {
+  /** How long a change holds its function at most: past that, it was stopped, and another may take the function. */
+  private changeBound(): number {
+    return changeBoundMs(this.readyTimeoutMs());
+  }
+
+  /** Creates a function and rolls it out, answering once it is ACTIVE; ERROR answers its diagnosis, the function kept. */
+  async create(accountId: string, createFunctionDto: NewFunction): Promise<FunctionView> {
+    return (await this.startCreate(accountId, createFunctionDto)).rollOut();
+  }
+
+  /**
+   * A create's first half: the function checked against the plan and the
+   * account's other functions, its code's image made, its record saved
+   * CREATING, with Lambda's fields when Lambda's CreateFunction made it, held
+   * by its create until it ends. Its rollout is the second half, which that
+   * operation doesn't wait for.
+   */
+  async startCreate(accountId: string, createFunctionDto: NewFunction, lambda: LambdaFields = {}): Promise<StartedChange> {
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, createFunctionDto);
     const { environment: variables, secrets, ...fields } = createFunctionDto;
@@ -374,33 +491,103 @@ export class FunctionsService {
       ...code,
       packageSha256,
       accountId,
+      description: lambda.description ?? '',
+      role: lambda.role ?? null,
+      deadLetterTargetArn: lambda.deadLetterTargetArn ?? null,
       status: FunctionStatus.CREATING,
+      updateStatus: UpdateStatus.IN_PROGRESS,
+      updateStartedAt: new Date(),
     });
+    const saved = await this.insertWithinPlan(plan, function_, environment);
+    const change = { functionId: saved.id, startedAt: saved.updateStartedAt as Date };
+    return { function_: saved, environment, rollsOut: true, rollOut: (whenLive) => this.rollOutCreated(saved, environment, codeImage, change, whenLive) };
+  }
 
-    const savedFunction = await this.insertWithinPlan(plan, function_, environment);
+  /**
+   * A create's second half: the function deployed, then ACTIVE once an
+   * instance is ready; otherwise ERROR with the diagnosis, scaled to zero so a
+   * pod that can't start doesn't hold the quota, and the failure thrown, the
+   * function's ID in it, so the caller fixes it rather than create it again.
+   */
+  private async rollOutCreated(
+    function_: Function,
+    environment: FunctionEnvironmentValues,
+    codeImage: string,
+    change: ChangeUnderWay,
+    whenLive?: WhenLive,
+  ): Promise<FunctionView> {
     try {
       // A copy of inline code's text in object storage, beside the package its pods run; a package is there already.
-      if (savedFunction.packageType === PackageType.INLINE) await this.objectStore.uploadCode(this.codePath(savedFunction), savedFunction.code);
+      if (function_.packageType === PackageType.INLINE) await this.objectStore.uploadCode(this.codePath(function_), function_.code);
 
-      const workload = await this.workload(savedFunction, environment, codeImage);
-      await this.plans.withTenant(accountId, (tenant) => this.orchestrator.deploy(workload, tenant));
+      const workload = await this.workload(function_, environment, codeImage);
+      await this.plans.withTenant(function_.accountId, (tenant) => this.orchestrator.deploy(workload, tenant));
       // ACTIVE only once an instance can actually serve; otherwise ERROR with the diagnostics.
-      await this.orchestrator.waitUntilReady(savedFunction, this.readyTimeoutMs());
+      await this.orchestrator.waitUntilReady(function_, this.readyTimeoutMs());
 
-      savedFunction.status = FunctionStatus.ACTIVE;
-      await this.functionsRepository.save(savedFunction);
-
-      return viewOf(savedFunction, environment);
+      const active = await this.endCreate(change, { status: FunctionStatus.ACTIVE, error: null }, SUCCEEDED, whenLive);
+      if (active) return viewOf(active, environment);
     } catch (error) {
       const failure = callersFailure(error) ?? platformFailure(this.logger, 'Deploying the function', error);
-      savedFunction.status = FunctionStatus.ERROR;
-      savedFunction.error = failure;
-      await this.functionsRepository.save(savedFunction);
       // Its objects and the diagnosis stay, so an update can repair it, and a delete removes everything.
-      await this.releaseInstances(savedFunction);
-      // The function exists all the same: its ID lets the caller open it to fix it, rather than create it again.
-      throw failureResponse(error, failure, { functionId: savedFunction.id });
+      const failed = await this.endCreate(change, { status: FunctionStatus.ERROR, error: failure }, failedFor(failure));
+      if (failed) await this.releaseInstances(function_);
+      throw failureResponse(error, failure, { functionId: function_.id });
     }
+    throw changedMeanwhile(function_.name);
+  }
+
+  /**
+   * Saves a create's outcome, and does what `whenLive` does in the same
+   * transaction, unless the create no longer holds its function: deleted, or
+   * taken over past its bound, which a save of the record would undo, or bring
+   * back. Null then, nothing done.
+   */
+  private endCreate(change: ChangeUnderWay, fields: Pick<Function, 'status' | 'error'>, outcome: ChangeOutcome, whenLive?: WhenLive): Promise<Function | null> {
+    return this.functionsRepository.manager.transaction(async (manager) => {
+      if (!(await endChange(manager, change, outcome, fields))) return null;
+      const ended = await manager.findOneByOrFail(Function, { id: change.functionId });
+      if (whenLive) await whenLive(manager, ended);
+      return ended;
+    });
+  }
+
+  /**
+   * Refuses to change or delete a function that another change holds: its
+   * create, an update or a delete, as Lambda refuses a Pending function's and
+   * one whose update is in progress. Their rollouts would race on the cluster.
+   */
+  private refuseWhileChanging(function_: Function): void {
+    if (this.isChanging(function_)) throw new ChangeUnderWayException(function_);
+  }
+
+  /** Whether a change holds the function now, which a publish waits for too, as Lambda's PublishVersion does. */
+  isChanging(function_: Pick<Function, 'updateStatus' | 'updateStartedAt'>): boolean {
+    return isUnderWay(function_, new Date(), this.changeBound());
+  }
+
+  /**
+   * Takes the function for a change, as it was read: refused while another
+   * change holds it, 409; or once a change came since it was read, 409 again,
+   * or 412 when the caller named the revision it read, as Lambda's RevisionId.
+   * The record read says so from now on.
+   */
+  private async take(function_: Function, revisionSent?: string): Promise<ChangeUnderWay> {
+    const now = new Date();
+    const change = await takeFunction(this.functionsRepository.manager, function_, now, this.changeBound());
+    if (change) {
+      Object.assign(function_, { updateStatus: UpdateStatus.IN_PROGRESS, updateReason: null, updateStartedAt: now });
+      return change;
+    }
+    const current = await this.functionsRepository.findOne({ where: { id: function_.id } });
+    if (current && isUnderWay(current, now, this.changeBound())) throw new ChangeUnderWayException(current);
+    if (current && revisionSent !== undefined) throw revisionMoved(revisionSent, current);
+    throw changedMeanwhile(function_.name);
+  }
+
+  /** Ends a change with nothing else saved: a delete that failed, or an update rolled back. */
+  private endAlone(change: ChangeUnderWay, outcome: ChangeOutcome): Promise<boolean> {
+    return endChange(this.functionsRepository.manager, change, outcome);
   }
 
   /**
@@ -553,15 +740,19 @@ export class FunctionsService {
    * from object storage; inline code as the one-file package its pods run, or, with javascript, Node.js code as the
    * JavaScript Lambda's runtime loads, in `function.js`, which `function.handler` names as it named `function.ts`.
    */
-  async code(accountId: string, id: string, { javascript = false } = {}): Promise<{ name: string; zip: Buffer }> {
+  async code(accountId: string, id: string, { javascript = false, version }: { javascript?: boolean; version?: number } = {}): Promise<{ name: string; zip: Buffer }> {
     const function_ = await this.findOne(accountId, id);
-    if (function_.packageType === PackageType.ZIP) {
-      return { name: function_.name, zip: (await this.objectStore.getDocument(packageKey(accountId, function_.codeSha256))).body };
-    }
-    if (javascript && function_.runtime === Runtime.NODEJS) {
-      return { name: function_.name, zip: oneFileZip('function.js', Buffer.from(await lambdaJavaScript(function_.code), 'utf8')) };
-    }
-    return { name: function_.name, zip: inlinePackage(function_.code, function_.runtime).zip };
+    if (version === undefined) return { name: function_.name, zip: await this.zipOf(accountId, function_, javascript) };
+    const published = await this.publishedVersion(id, version);
+    if (!published) throw noSuchVersion(function_, version);
+    return { name: function_.name, zip: await this.zipOf(accountId, published, javascript) };
+  }
+
+  /** The zip of code as $LATEST or a version holds it: its package from object storage, or inline code's one-file package. */
+  private async zipOf(accountId: string, code: Pick<Function, 'packageType' | 'codeSha256' | 'code' | 'runtime'>, javascript: boolean): Promise<Buffer> {
+    if (code.packageType === PackageType.ZIP) return (await this.objectStore.getDocument(packageKey(accountId, code.codeSha256))).body;
+    if (javascript && code.runtime === Runtime.NODEJS) return oneFileZip('function.js', Buffer.from(await lambdaJavaScript(code.code), 'utf8'));
+    return inlinePackage(code.code, code.runtime).zip;
   }
 
   /** The account's function; another account's is not found, exactly like one that doesn't exist (D4). */
@@ -573,11 +764,25 @@ export class FunctionsService {
     return function_;
   }
 
-  async update(accountId: string, id: string, updateFunctionDto: UpdateFunctionDto): Promise<FunctionView> {
+  /** Changes a function, answering once the change is live; a failure answers its diagnosis, the change rolled back. */
+  async update(accountId: string, id: string, updateFunctionDto: FunctionChange): Promise<FunctionView> {
+    return (await this.startUpdate(accountId, id, updateFunctionDto)).rollOut();
+  }
+
+  /**
+   * An update's first half: the change checked against the plan, the code and
+   * the account's other functions, its code's image made, its function taken,
+   * with Lambda's fields when Lambda's operations change it. Its rollout is the
+   * second half, which they don't wait for.
+   */
+  async startUpdate(accountId: string, id: string, updateFunctionDto: FunctionChange, lambda: LambdaUpdateFields = {}): Promise<StartedChange> {
     const function_ = await this.findOne(accountId, id);
+    this.refuseWhileChanging(function_);
+    if (lambda.revisionId !== undefined && lambda.revisionId !== function_.revisionId) throw revisionMoved(lambda.revisionId, function_);
     const plan = await this.plans.forAccount(accountId);
     refuseOverPlan(plan, updateFunctionDto, function_);
-    const { environment: variables, ...changes } = updateFunctionDto;
+    const { environment: variables, ...sent } = updateFunctionDto;
+    const changes = { ...sent, ...lambdaChanges(lambda) };
     if (changes.awsEndpoints) changes.awsEndpoints = awsEndpointsOf(changes.awsEndpoints);
     const handler = changes.handler ?? function_.handler;
     const runtime = changes.runtime ?? function_.runtime;
@@ -605,8 +810,16 @@ export class FunctionsService {
     );
     if (environmentChanges) changed.push('environment');
     const fieldChanges: FieldChanges = code ? { ...changes, ...code } : changes;
-    const { saved, environment } = await this.change(function_, fieldChanges, { before, after }, changed);
-    return viewOf(saved, environment);
+    const held = await this.startChange(function_, fieldChanges, { before, after }, changed, lambda.revisionId);
+    return {
+      function_: held.function_,
+      environment: held.environment,
+      rollsOut: held.rollsOut,
+      rollOut: async (whenLive) => {
+        const { saved, environment } = await held.run(whenLive);
+        return viewOf(saved, environment);
+      },
+    };
   }
 
   /** The names of the function's variables and secrets, never a value: what the platform's support may see. */
@@ -662,61 +875,112 @@ export class FunctionsService {
    */
   async updateSecrets(accountId: string, id: string, changes: Record<string, string | null>): Promise<SecretsView> {
     const function_ = await this.findOne(accountId, id);
+    this.refuseWhileChanging(function_);
     const before = await this.environments.load(id);
     const { secrets, changed } = changedSecrets(before.secrets, changes, new Date());
     if (!changed) return secretsView(before);
     const after = withSecrets(before, secrets);
     refuseCombined(after);
-    const { environment } = await this.change(function_, {}, { before, after }, ['secrets']);
+    const { environment } = await (await this.startChange(function_, {}, { before, after }, ['secrets'])).run();
     return secretsView(environment);
   }
 
   /**
-   * Applies a change: saved at once when it needs no new version (a new name),
-   * else rolled out and waited for, then saved, with the environment that went
-   * live. A failure rolls back to the working version, or keeps the attempt of
-   * a function that had none, as the lifecycle above describes.
+   * A change's first half: its new revision, and the code image a new version
+   * mounts, made before anything changes; then its function taken, so that no
+   * other change runs until it ends. Its run is the second half: saved at once
+   * when it needs no new version (a new name), else rolled out and waited for,
+   * then saved, with the environment that went live.
    */
-  private async change(
-    function_: Function,
-    sent: FieldChanges,
-    environment: EnvironmentChange,
-    changed: string[],
-  ): Promise<{ saved: Function; environment: FunctionEnvironmentValues }> {
+  private async startChange(function_: Function, sent: FieldChanges, environment: EnvironmentChange, changed: string[], revisionSent?: string): Promise<HeldChange> {
     // Any change is a new revision, as Lambda's RevisionId: a publish given the one read before it is refused.
     const changes: FieldChanges = changed.length ? { ...sent, revisionId: randomUUID() } : sent;
+    const environmentChanges = environment.after !== environment.before;
+    const changesVersion = environmentChanges || ROLLOUT_FIELDS.some((field) => sendsOther(changes[field], function_[field]));
+    // A function that isn't ACTIVE always rolls out, even unchanged, so the same code
+    // can be retried after a passing failure (a full quota, a missing image).
+    const rollsOut = changesVersion || function_.status !== FunctionStatus.ACTIVE;
+    // The code image first: without it, nothing has changed, and nothing needs rolling back.
+    const image = rollsOut ? await this.codeImageOf({ ...function_, ...changes }) : undefined;
+    const change = await this.take(function_, revisionSent);
+    return {
+      function_: { ...function_, ...changes },
+      environment: environment.after,
+      rollsOut,
+      run: (whenLive) =>
+        image ? this.rollOutChange(function_, changes, environment, changed, change, image, whenLive) : this.saveChange(function_, changes, environment, changed, change, whenLive),
+    };
+  }
+
+  /**
+   * A change of the record alone, saved at once, a new name claimed again:
+   * refused when another function took it meanwhile, the change then Failed,
+   * nothing of it saved.
+   */
+  private async saveChange(
+    function_: Function,
+    changes: FieldChanges,
+    environment: EnvironmentChange,
+    changed: string[],
+    change: ChangeUnderWay,
+    whenLive?: WhenLive,
+  ): Promise<{ saved: Function; environment: FunctionEnvironmentValues }> {
+    const previousName = function_.name;
+    let saved: Function | null;
+    try {
+      saved = await this.endSaving(change, this.functionsRepository.create({ ...function_, ...changes }), SUCCEEDED, { previousName, whenTaken: 'refuse', whenLive });
+    } catch (error) {
+      const reason = error instanceof HttpException ? error.message : platformFailure(this.logger, 'Saving the change', error);
+      await this.endAlone(change, failedFor(reason));
+      throw error instanceof HttpException ? error : new InternalServerErrorException(reason);
+    }
+    if (!saved) throw changedMeanwhile(previousName);
+    if (changed.length) await this.recordUpdate(saved, changed, 'saved');
+    return { saved, environment: environment.before };
+  }
+
+  /**
+   * A change that rolls a new version out, then saves it once it is live,
+   * with the environment that went live. A failure rolls back to the working
+   * version, or keeps the attempt of a function that had none, as the
+   * lifecycle above describes; so does a save that fails, what `whenLive` does
+   * included, so that the record and the Deployment still agree.
+   */
+  private async rollOutChange(
+    function_: Function,
+    changes: FieldChanges,
+    environment: EnvironmentChange,
+    changed: string[],
+    change: ChangeUnderWay,
+    image: { codeImage: string; packageSha256: string },
+    whenLive?: WhenLive,
+  ): Promise<{ saved: Function; environment: FunctionEnvironmentValues }> {
     const previousName = function_.name;
     const newName = changes.name !== undefined && changes.name !== previousName ? changes.name : undefined;
     const environmentChanges = environment.after !== environment.before;
     const updated = { ...function_, ...changes };
-    const changesVersion = environmentChanges || ROLLOUT_FIELDS.some((field) => sendsOther(changes[field], function_[field]));
-    // A function that isn't ACTIVE always rolls out, even unchanged, so the same code
-    // can be retried after a passing failure (a full quota, a missing image).
-    const repairing = function_.status !== FunctionStatus.ACTIVE;
-
-    if (!changesVersion && !repairing) {
-      Object.assign(function_, changes);
-      const saved = await this.saveClaimingName(function_, previousName, 'refuse');
-      if (changed.length) await this.recordUpdate(saved, changed, 'saved');
-      return { saved, environment: environment.before };
-    }
-
-    // The code image first: without it, nothing has changed, and nothing needs rolling back.
-    const { codeImage, packageSha256 } = await this.codeImageOf(updated);
-    const workload = await this.workload(updated, environment.after, codeImage);
+    const previousCodePath = this.codePath(function_);
+    let saved: Function | null;
     try {
+      const workload = await this.workload(updated, environment.after, image.codeImage);
       await this.plans.withTenant(function_.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       // The old version keeps serving during the rollout; record the change only once it's live.
       await this.orchestrator.waitUntilReady(updated, this.readyTimeoutMs());
+      // The new version is live, and the record says so even when the new name went to another function meanwhile.
+      const live = this.functionsRepository.create({ ...updated, packageSha256: image.packageSha256, status: FunctionStatus.ACTIVE, error: null });
+      saved = await this.endSaving(change, live, SUCCEEDED, {
+        previousName,
+        whenTaken: 'keepOldName',
+        environment: environmentChanges ? environment.after : undefined,
+        whenLive,
+      });
     } catch (error) {
-      if (repairing) return this.keepFailedAttempt(function_, { ...changes, packageSha256 }, changed, error, environmentChanges ? environment : undefined);
-      return this.rollBack(function_, environment.before, error, changed);
+      if (function_.status !== FunctionStatus.ACTIVE) {
+        return this.keepFailedAttempt(function_, { ...changes, packageSha256: image.packageSha256 }, changed, error, change, environmentChanges ? environment : undefined);
+      }
+      return this.rollBack(function_, environment.before, error, changed, change);
     }
-
-    const previousCodePath = this.codePath(function_);
-    Object.assign(function_, changes, { packageSha256, status: FunctionStatus.ACTIVE, error: null });
-    // The new version is live, and the record says so even when the new name went to another function meanwhile.
-    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName', environmentChanges ? environment.after : undefined);
+    if (!saved) throw changedMeanwhile(previousName);
     const nameLost = newName !== undefined && saved.name !== newName;
     await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'live', environment);
     await this.archiveCode(saved, previousCodePath);
@@ -729,25 +993,32 @@ export class FunctionsService {
   }
 
   /**
-   * Saves the function, and its new environment in the same transaction when
-   * it has one. A new name is claimed with the account's row locked, as creates
-   * do, so that two of its functions never share one. When another has it by
-   * now, `refuse` saves nothing and answers 409, and `keepOldName` saves the
-   * rest under the old name: a version already rolled out, which the record must
-   * describe.
+   * Ends a change saving its record, the record's new environment when it has
+   * one, and what `whenLive` does, in one transaction, unless the change no
+   * longer holds its function: null then, nothing saved. A new name is claimed
+   * with the account's row locked, as creates do, so that two of its functions
+   * never share one. When another has it by now, `refuse` saves nothing and
+   * answers 409, and `keepOldName` saves the rest under the old name: a version
+   * already rolled out, which the record must describe.
    */
-  private saveClaimingName(function_: Function, previousName: string, whenTaken: WhenNameTaken, environment?: FunctionEnvironmentValues): Promise<Function> {
-    if (function_.name === previousName && !environment) return this.functionsRepository.save(function_);
+  private endSaving(change: ChangeUnderWay, record: Function, outcome: ChangeOutcome, saving: EndSaving): Promise<Function | null> {
+    const { previousName, whenTaken, environment, whenLive } = saving;
     return this.functionsRepository.manager.transaction(async (manager) => {
-      if (function_.name !== previousName) {
-        await lockAccount(manager, function_.accountId);
-        if (await nameInUse(manager, function_.accountId, function_.name, function_.id)) {
-          if (whenTaken === 'refuse') throw nameTaken(function_.name);
-          function_.name = previousName;
+      if (!(await endChange(manager, change, outcome))) return null;
+      // As the row says now: the record as read still holds the change, which its save would write back; and the
+      // scaling limits, whose change takes no function and may have come during this one.
+      const { minInstances, maxInstances } = await manager.findOneByOrFail(Function, { id: change.functionId });
+      Object.assign(record, endedAs(outcome), { minInstances, maxInstances });
+      if (record.name !== previousName) {
+        await lockAccount(manager, record.accountId);
+        if (await nameInUse(manager, record.accountId, record.name, record.id)) {
+          if (whenTaken === 'refuse') throw nameTaken(record.name);
+          record.name = previousName;
         }
       }
-      const saved = await manager.save(Function, function_);
+      const saved = await manager.save(Function, record);
       if (environment) await this.environments.save(saved, environment, manager);
+      if (whenLive) await whenLive(manager, saved);
       return saved;
     });
   }
@@ -755,9 +1026,10 @@ export class FunctionsService {
   /**
    * A failed update of a working function: apply the previous version again,
    * with its environment, so the Deployment matches the record, and answer with
-   * the diagnosis. If that fails too, the function is ERROR, with both messages.
+   * the diagnosis, the change Failed for it. If that fails too, the function is
+   * ERROR, with both messages.
    */
-  private async rollBack(previous: Function, previousEnvironment: FunctionEnvironmentValues, error: unknown, changed: string[]): Promise<never> {
+  private async rollBack(previous: Function, previousEnvironment: FunctionEnvironmentValues, error: unknown, changed: string[], change: ChangeUnderWay): Promise<never> {
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
     this.logger.warn(`Update of function ${previous.id} failed, rolling back: ${describeError(error)}`);
     try {
@@ -765,15 +1037,17 @@ export class FunctionsService {
       await this.plans.withTenant(previous.accountId, (tenant) => this.orchestrator.update(workload, tenant));
       await this.orchestrator.waitUntilReady(previous, this.readyTimeoutMs());
     } catch (rollbackError) {
-      previous.status = FunctionStatus.ERROR;
-      previous.error = `The update failed: ${clause(failure)}. ${platformFailure(this.logger, 'Rolling back to the previous version', rollbackError)}`;
-      await this.functionsRepository.save(previous);
-      await this.recordUpdate(previous, changed, 'failed, and so did the rollback: ERROR');
+      const reason = `The update failed: ${clause(failure)}. ${platformFailure(this.logger, 'Rolling back to the previous version', rollbackError)}`;
+      const failed = this.functionsRepository.create({ ...previous, status: FunctionStatus.ERROR, error: reason });
+      await this.endSaving(change, failed, failedFor(reason), { previousName: previous.name, whenTaken: 'refuse' });
+      await this.recordUpdate(failed, changed, 'failed, and so did the rollback: ERROR');
       await this.releaseInstances(previous);
-      throw new InternalServerErrorException({ statusCode: 500, error: 'Internal Server Error', message: previous.error, functionId: previous.id });
+      throw new InternalServerErrorException({ statusCode: 500, error: 'Internal Server Error', message: reason, functionId: previous.id });
     }
     // The function the new version never served is named, as a failed create names the one it saved.
-    throw failureResponse(error, `${clause(failure)}. The update was rolled back: the previous version is still live.`, { functionId: previous.id });
+    const reason = `${clause(failure)}. The update was rolled back: the previous version is still live.`;
+    await this.endAlone(change, failedFor(reason));
+    throw failureResponse(error, reason, { functionId: previous.id });
   }
 
   /**
@@ -787,14 +1061,16 @@ export class FunctionsService {
     changes: FieldChanges,
     changed: string[],
     error: unknown,
+    change: ChangeUnderWay,
     environment?: EnvironmentChange,
   ): Promise<never> {
     const previousCodePath = this.codePath(function_);
     const previousName = function_.name;
     const failure = callersFailure(error) ?? platformFailure(this.logger, 'Updating the function', error);
-    Object.assign(function_, changes, { status: FunctionStatus.ERROR, error: failure });
+    const attempt = this.functionsRepository.create({ ...function_, ...changes, status: FunctionStatus.ERROR, error: failure });
     // The attempt is what the Deployment holds: kept, under the old name if the new one went to another function meanwhile.
-    const saved = await this.saveClaimingName(function_, previousName, 'keepOldName', environment?.after);
+    const saved = await this.endSaving(change, attempt, failedFor(failure), { previousName, whenTaken: 'keepOldName', environment: environment?.after });
+    if (!saved) throw failureResponse(error, failure, { functionId: function_.id });
     const nameLost = changes.name !== undefined && changes.name !== previousName && saved.name === previousName;
     await this.recordUpdate(saved, nameLost ? changed.filter((field) => field !== 'name') : changed, 'failed, kept: ERROR', environment);
     await this.releaseInstances(saved);
@@ -806,8 +1082,9 @@ export class FunctionsService {
   /**
    * Scales a function that can't serve to zero: the idle sweep only scales ACTIVE
    * functions, so a pod that never becomes ready would hold the quota for good.
+   * A failure is only logged.
    */
-  private async releaseInstances(function_: Function): Promise<void> {
+  async releaseInstances(function_: Function): Promise<void> {
     try {
       await this.orchestrator.scale(function_, 0);
     } catch (error) {
@@ -930,8 +1207,10 @@ export class FunctionsService {
       if (!current || !image || current === image) continue;
       try {
         if (await this.codeImages.hasMounted(current)) continue;
-        // As its record is now, if it still runs that package: a change saved meanwhile rolled out its own image.
-        const function_ = await this.functionsRepository.findOne({ where: { id, accountId, status: FunctionStatus.ACTIVE, packageSha256: packageSha256 as string } });
+        // As its record is now, if it still runs that package and no change is under way: a change rolls out its own image.
+        const function_ = await this.functionsRepository.findOne({
+          where: { id, accountId, status: FunctionStatus.ACTIVE, packageSha256: packageSha256 as string, updateStatus: Not(UpdateStatus.IN_PROGRESS) },
+        });
         if (!function_) continue;
         const workload = await this.workload(function_, await this.environments.load(id), image);
         await this.plans.withTenant(accountId, (tenant) => this.orchestrator.update(workload, tenant));
@@ -945,8 +1224,14 @@ export class FunctionsService {
     }
   }
 
+  /**
+   * Deletes the function, its versions, its pods and its key, holding it
+   * meanwhile, as a change does: no rollout runs while what runs goes. A
+   * failure ends the delete Failed, saying why.
+   */
   async remove(accountId: string, id: string): Promise<void> {
     const function_ = await this.findOne(accountId, id);
+    const change = await this.take(function_);
 
     try {
       // Its versions' pods go with its own; their records go with its record.
@@ -958,7 +1243,9 @@ export class FunctionsService {
       await this.functionKeys.revoke(function_.id);
       await this.functionsRepository.remove(function_);
     } catch (error) {
-      throw new InternalServerErrorException(platformFailure(this.logger, 'Deleting the function', error));
+      const reason = platformFailure(this.logger, 'Deleting the function', error);
+      await this.endAlone(change, failedFor(reason));
+      throw new InternalServerErrorException(reason);
     }
     await this.audit.record({ accountId, action: 'function.delete', resource: `function:${id}`, details: { name: function_.name } });
   }
@@ -1007,12 +1294,13 @@ export class FunctionsService {
    * `history` is what the history keeps of the event, when not the event
    * itself: a URL's, without its callers' credentials. `requestId` is the
    * request's ID when the caller chose it first: a URL's event names it, and
-   * an asynchronous call's attempts keep it, each with its `attempt`.
+   * an asynchronous call's attempts keep it, each with its `attempt`. `asks`
+   * is what Lambda's Invoke asks of the runtime.
    */
   async call(
     function_: Function,
     payload: unknown,
-    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number; target?: CallTarget },
+    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number; target?: CallTarget; asks?: CallAsks },
   ): Promise<CallOutcome> {
     const { version, alias } = options.target ?? {};
     const running: Running = version ? versionRun(function_, version) : function_;
@@ -1037,15 +1325,19 @@ export class FunctionsService {
     // A new row: inserted, without the lookup by ID that save() makes first.
     await this.invocationsRepository.insert(invocation as QueryDeepPartialEntity<FunctionInvocation>);
 
-    // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once (D14).
-    this.metricsService.invocationStarted(running);
     const startTime = Date.now();
+    let counted = false;
     try {
+      // A reservation of 0, as Lambda's: throttled before anything runs, or scales up for it.
+      if (function_.callsStopped) throw new FunctionThrottledError(CALLS_STOPPED);
+      // Counted while it runs: concurrency is the scaling signal, and a burst scales up at once.
+      this.metricsService.invocationStarted(running);
+      counted = true;
       // The runtime logs the request's ID, and the usage record is keyed by it and the attempt's start (D6).
       // A version's first call, or its first since it went idle, makes its pods of its workload whole; $LATEST at
       // zero starts with a fresh key when its key is due a renewal.
       const start = version ? () => this.versionWorkload(running, version.version) : () => this.withFreshKey(function_.id);
-      const result = await this.orchestrator.invoke(running, payload, invocation.requestId, start);
+      const result = await this.orchestrator.invoke(running, payload, { requestId: invocation.requestId, start, ...options.asks });
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)
@@ -1062,7 +1354,7 @@ export class FunctionsService {
       invocation.status = InvocationStatus.COMPLETED;
       // Should this fail, the catch below ends the call as a platform failure, unbilled: its outcome couldn't be kept.
       await this.finish(running, invocation, UsageStatus.SUCCESS, result.initMs);
-      return { invocation, ok: true, output: result.output };
+      return { invocation, ok: true, output: result.output, outputJson: result.outputJson, logResult: result.logResult };
     } catch (error) {
       const duration = Date.now() - startTime;
       this.metricsService.recordMetric(function_.id, duration, 0, true);
@@ -1083,9 +1375,9 @@ export class FunctionsService {
       invocation.error = keptError.value;
       invocation.errorTruncated = keptError.truncated;
       await this.finish(running, invocation, failureStatus(error), initMsOf(error));
-      return { invocation, ok: false, error, visible };
+      return { invocation, ok: false, error, visible, logResult: measured?.logResult };
     } finally {
-      this.metricsService.invocationFinished(running);
+      if (counted) this.metricsService.invocationFinished(running);
     }
   }
 
@@ -1214,11 +1506,27 @@ export class FunctionsService {
     if (minInstances > maxInstances) {
       throw new BadRequestException(`minInstances (${minInstances}) can't be more than maxInstances (${maxInstances})`);
     }
-    Object.assign(function_, { minInstances, maxInstances });
-    const saved = await this.functionsRepository.save(function_);
-    await this.audit.record({ accountId, action: 'function.scaling', resource: `function:${id}`, details: { minInstances, maxInstances } });
+    return this.scalingConfig(await this.saveScaling(function_, { minInstances, maxInstances }));
+  }
+
+  /**
+   * Lambda's reserved concurrency, onto the function's instances: their most,
+   * or every call stopped, as a reservation of 0 stops them. Its caller checks
+   * them against the plan and the instances the function keeps running.
+   */
+  async reserveConcurrency(accountId: string, id: string, reserved: Pick<Function, 'maxInstances' | 'callsStopped'>): Promise<Function> {
+    return this.saveScaling(await this.findOne(accountId, id), reserved);
+  }
+
+  /** The scaling fields alone, said in the audit log, the running instances brought within them at once. */
+  private async saveScaling(function_: Function, changes: Partial<Pick<Function, 'minInstances' | 'maxInstances' | 'callsStopped'>>): Promise<Function> {
+    const { id, accountId } = function_;
+    // These fields alone: the record as read, saved whole, would write back what a change under way holds.
+    await this.functionsRepository.update({ id, accountId }, changes);
+    const saved = Object.assign(function_, changes);
+    await this.audit.record({ accountId, action: 'function.scaling', resource: `function:${id}`, details: changes });
     if (saved.status === FunctionStatus.ACTIVE) await this.applyInstanceLimits(saved);
-    return this.scalingConfig(saved);
+    return saved;
   }
 
   private async applyInstanceLimits(function_: Function): Promise<void> {

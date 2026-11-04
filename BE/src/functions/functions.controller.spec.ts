@@ -4,7 +4,7 @@
  * change and invoke functions, viewers only read, and an account deploys and
  * invokes only once it is approved. The logs routes through HTTP (P-40, P-43).
  */
-import { INestApplication, NotFoundException, ValidationPipe } from '@nestjs/common';
+import { BadRequestException, INestApplication, NotFoundException, ValidationPipe } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { AccountStatus } from '../accounts/entities/account.entity';
@@ -14,8 +14,11 @@ import { ACTIVE_ACCOUNT, ROLES, SCOPE } from '../auth/route-rules';
 import { INVOCATION } from '../plans/rate-limits';
 import { FunctionsController, codeFileName, invocationTypeOf } from './functions.controller';
 import { FunctionsService } from './functions.service';
+import { StacksService } from '../stacks/stacks.service';
 import { KeyUses } from '../storage/key-uses.service';
+import { ResourceTagsService } from '../tags/resource-tags.service';
 import { AsyncInvocationsService } from './async-invocations.service';
+import { EventInvokeConfigService } from './event-invoke-config.service';
 import { InvocationType } from './dto/invoke-function.dto';
 import { of } from 'rxjs';
 
@@ -30,7 +33,13 @@ const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
 async function serve(
   role: Principal['role'],
   functions: object,
-  { asyncInvocations = {}, keyUses = {} }: { asyncInvocations?: object; keyUses?: object } = {},
+  {
+    asyncInvocations = {},
+    keyUses = {},
+    stacks = { ofFunctions: async () => new Map() },
+    configs = {},
+    tags = { of: async () => ({}) },
+  }: { asyncInvocations?: object; keyUses?: object; stacks?: object; configs?: object; tags?: object } = {},
 ): Promise<{ app: INestApplication; baseUrl: string }> {
   const moduleRef = await Test.createTestingModule({
     controllers: [FunctionsController],
@@ -38,6 +47,9 @@ async function serve(
       { provide: FunctionsService, useValue: functions },
       { provide: AsyncInvocationsService, useValue: asyncInvocations },
       { provide: KeyUses, useValue: keyUses },
+      { provide: StacksService, useValue: stacks },
+      { provide: EventInvokeConfigService, useValue: configs },
+      { provide: ResourceTagsService, useValue: tags },
     ],
   }).compile();
   const app = moduleRef.createNestApplication({ logger: false });
@@ -393,6 +405,113 @@ describe("GET /functions/:id/key-uses: what the function's keys used, which an e
 
     expect([res.status, (await res.json()).message]).toEqual([404, 'Function with ID 00000000-0000-4000-8000-000000000000 not found']);
     expect(keyUses.of).not.toHaveBeenCalled();
+  });
+});
+
+describe('the stack a function is in, in the answers for it (L1)', () => {
+  const orders = { id: ID, accountId: ACCOUNT, name: 'orders' };
+  const reports = { id: '9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a', accountId: ACCOUNT, name: 'reports' };
+  const functions = {
+    findAll: jest.fn(async () => [orders, reports]),
+    describe: jest.fn(async () => ({ ...orders, environment: {} })),
+    startUpdate: jest.fn(async () => ({ rollOut: async () => ({ ...orders, environment: {} }) })),
+  };
+  const stacks = { ofFunctions: jest.fn(async () => new Map([['orders', 'shop']])) };
+  let app: INestApplication;
+  let baseUrl: string;
+
+  beforeAll(async () => {
+    ({ app, baseUrl } = await serve('developer', functions, { stacks }));
+  });
+
+  afterAll(() => app.close());
+  beforeEach(() => jest.clearAllMocks());
+
+  it("names each listed function's stack, null for one in none, asked once for the whole list", async () => {
+    const res = await fetch(`${baseUrl}/functions`);
+
+    expect([res.status, ((await res.json()) as { name: string; stack: string | null }[]).map(({ name, stack }) => [name, stack])]).toEqual([
+      200,
+      [
+        ['orders', 'shop'],
+        ['reports', null],
+      ],
+    ]);
+    expect(stacks.ofFunctions.mock.calls).toEqual([[ACCOUNT, ['orders', 'reports']]]);
+  });
+
+  it("names it in a function's own answer, and after a change", async () => {
+    const read = await fetch(`${baseUrl}/functions/${ID}`);
+    const changed = await fetch(`${baseUrl}/functions/${ID}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ memory: 256 }) });
+
+    expect([read.status, (await read.json()).stack, changed.status, (await changed.json()).stack]).toEqual([200, 'shop', 200, 'shop']);
+    expect(stacks.ofFunctions).toHaveBeenCalledWith(ACCOUNT, ['orders']);
+  });
+});
+
+describe("a function's description, dead-letter queue and tags, as Lambda's, through FF's API (L1)", () => {
+  const QUEUE = 'arn:aws:sqs:tn-tunis-1:000000000001:orders-failed';
+  const orders = { id: ID, accountId: ACCOUNT, name: 'orders', environment: {} };
+  const rollingOut = (answer: Promise<object>) => async () => ({ rollOut: () => answer });
+  const functions = { startCreate: jest.fn(rollingOut(Promise.resolve(orders))), startUpdate: jest.fn(rollingOut(Promise.resolve(orders))) };
+  const configs = { checkedQueue: jest.fn(async (_accountId: string, _field: string, arn: string) => arn) };
+  const tags = { of: jest.fn(async () => ({ team: 'orders' })), replace: jest.fn(async () => undefined) };
+  let app: INestApplication;
+  let baseUrl: string;
+  const send = (method: 'POST' | 'PUT', body: object) =>
+    fetch(`${baseUrl}/functions${method === 'PUT' ? `/${ID}` : ''}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const created = { name: 'orders', runtime: 'nodejs', code: 'export const handler = () => 1', memory: 128, timeout: 3 };
+
+  beforeAll(async () => {
+    ({ app, baseUrl } = await serve('developer', functions, { configs, tags }));
+  });
+
+  afterAll(() => app.close());
+  beforeEach(() => jest.clearAllMocks());
+
+  it("gives the description and the queue, checked the account's, to the function's change, and puts the tags once it is live, answering them", async () => {
+    const res = await send('POST', { ...created, description: 'Takes orders', deadLetterTargetArn: QUEUE, tags: { team: 'orders' } });
+
+    expect([res.status, (await res.json()).tags]).toEqual([201, { team: 'orders' }]);
+    expect(configs.checkedQueue.mock.calls).toEqual([[ACCOUNT, 'deadLetterTargetArn', QUEUE]]);
+    expect(functions.startCreate.mock.calls).toEqual([[ACCOUNT, created, { description: 'Takes orders', deadLetterTargetArn: QUEUE }]]);
+    expect(tags.replace.mock.calls).toEqual([[ACCOUNT, { kind: 'function', id: ID, resource: `function:${ID}` }, { team: 'orders' }]]);
+  });
+
+  it('on an update, replaces the tags sent, {} removing them, keeps them when none are sent, and removes the queue for null', async () => {
+    expect((await send('PUT', { tags: {} })).status).toBe(200);
+    expect((await send('PUT', { memory: 256, deadLetterTargetArn: null })).status).toBe(200);
+
+    expect(tags.replace.mock.calls).toEqual([[ACCOUNT, { kind: 'function', id: ID, resource: `function:${ID}` }, {}]]);
+    expect(functions.startUpdate.mock.calls).toEqual([
+      [ACCOUNT, ID, {}, { description: undefined, deadLetterTargetArn: undefined }],
+      [ACCOUNT, ID, { memory: 256 }, { description: undefined, deadLetterTargetArn: null }],
+    ]);
+    expect(configs.checkedQueue).not.toHaveBeenCalled();
+  });
+
+  it("leaves the tags as they were when the change fails, as it leaves the rest; a queue the account hasn't stops it before it starts", async () => {
+    functions.startUpdate.mockImplementationOnce(rollingOut(Promise.reject(new NotFoundException('gone meanwhile'))));
+    configs.checkedQueue.mockRejectedValueOnce(new BadRequestException('deadLetterTargetArn: the account has no queue named "orders-failed"'));
+
+    expect((await send('PUT', { tags: { team: 'orders' } })).status).toBe(404);
+    const refused = await send('PUT', { deadLetterTargetArn: QUEUE });
+
+    expect([refused.status, (await refused.json()).message]).toEqual([400, 'deadLetterTargetArn: the account has no queue named "orders-failed"']);
+    expect([tags.replace.mock.calls, functions.startUpdate.mock.calls.length]).toEqual([[], 1]);
+  });
+
+  it("refuses a description past Lambda's 256 characters and tags AWS wouldn't take, before anything changes", async () => {
+    const refusal = async (body: object) => {
+      const res = await send('POST', { ...created, ...body });
+      return [res.status, (await res.json()).message];
+    };
+
+    expect(await refusal({ description: 'd'.repeat(257) })).toEqual([400, ['description must be shorter than or equal to 256 characters']]);
+    expect(await refusal({ tags: { 'aws:team': 'orders' } })).toEqual([400, ['The key aws:team starts with aws:, which AWS keeps for its own tags.']]);
+    expect(await refusal({ tags: ['team'] })).toEqual([400, ["Tags are an object, each tag's value by its key."]]);
+    expect(await refusal({ deadLetterTargetArn: 42 })).toEqual([400, ['deadLetterTargetArn must be shorter than or equal to 256 characters', 'deadLetterTargetArn must be a string']]);
+    expect([functions.startCreate, configs.checkedQueue].map((mock) => mock.mock.calls.length)).toEqual([0, 0]);
   });
 });
 

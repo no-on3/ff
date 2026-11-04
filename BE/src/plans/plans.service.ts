@@ -1,12 +1,13 @@
 import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { isDeepStrictEqual } from 'node:util';
-import { In, QueryFailedError, Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Account } from '../accounts/entities/account.entity';
 import { Plan } from '../accounts/entities/plan.entity';
 import { AuditService } from '../audit/audit.service';
 import { ORCHESTRATOR, Orchestrator, TenantLimits } from '../orchestrator/orchestrator.types';
 import { describeError } from '../common/describe-error';
+import { isUniqueViolation } from '../common/unique-violation';
 import { PlanLimits, PlanView, parsePlanLimits, planLimitsSchema } from './plan-limits';
 
 /** How long a plan read from the database is used: a change (P-73) applies within this time. */
@@ -129,7 +130,7 @@ export class PlansService {
       });
     } catch (error) {
       // Two at once: the primary key took the other one.
-      if (error instanceof QueryFailedError && (error as QueryFailedError & { code?: string }).code === '23505') throw new ConflictException(taken);
+      if (isUniqueViolation(error)) throw new ConflictException(taken);
       throw error;
     }
     return this.get(id, { fresh: true });

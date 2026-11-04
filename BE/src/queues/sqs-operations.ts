@@ -1,8 +1,10 @@
+import { BadRequestException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { Actor } from '../common/request-context';
 import { PlanView } from '../plans/plan-limits';
 import { KeyNames, reachesQueue } from '../storage/key-reach';
+import { ChangedBy, ResourceTagsService, taggedQueue } from '../tags/resource-tags.service';
 import { CustomerQueues, MessageMeta, Outgoing, Received } from './customer-queues';
 import { QueueEvents } from './queue-events';
 import { QueueRequestCounts } from './queue-request-counts.service';
@@ -59,15 +61,12 @@ interface Usage {
 }
 
 /** The operations a read-only key may call, as IAM's read access level has them. */
-export const READ_OPERATIONS = new Set(['GetQueueUrl', 'GetQueueAttributes', 'ListQueues', 'ReceiveMessage']);
+export const READ_OPERATIONS = new Set(['GetQueueUrl', 'GetQueueAttributes', 'ListQueues', 'ListQueueTags', 'ReceiveMessage']);
 
 /** SQS's operations FF doesn't offer, which answer UnsupportedOperation. */
 const NOT_OFFERED = new Set([
   'AddPermission',
   'RemovePermission',
-  'TagQueue',
-  'UntagQueue',
-  'ListQueueTags',
   'ListDeadLetterSourceQueues',
   'StartMessageMoveTask',
   'CancelMessageMoveTask',
@@ -94,6 +93,23 @@ const text = (input: Input, name: string): string | undefined => {
 
 /** A value as an error names it: a string as it is, anything else as JSON. */
 const shown = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value));
+
+/** Who the audit log names for the caller's changes, when FF's API's request doesn't. */
+const changedBy = (caller: Caller): ChangedBy => ({ ...(caller.actor ? { actor: caller.actor } : {}), ...(caller.ip ? { ip: caller.ip } : {}) });
+
+/** TagQueue's Tags, and CreateQueue's tags: an object of strings, each a tag's value by its key. */
+function tagsOf(sent: unknown, name: string): Record<string, string> {
+  if (!sent || typeof sent !== 'object' || Array.isArray(sent) || Object.values(sent).some((value) => typeof value !== 'string')) {
+    throw invalidParameter(`Value for parameter ${name} is invalid. Reason: It must map each tag's key to its value, a string.`);
+  }
+  return sent as Record<string, string>;
+}
+
+/** The tags' refusal, a tag AWS wouldn't take or past 50, as SQS answers it. */
+const asSqs = <T>(work: Promise<T>): Promise<T> =>
+  work.catch((error: unknown) => {
+    throw error instanceof BadRequestException ? invalidParameter(error.message) : error;
+  });
 
 /** A list parameter's items; none when it isn't a list. */
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? (value as unknown[]) : []);
@@ -132,13 +148,14 @@ export class SqsOperations {
     private readonly events: QueueEvents,
     private readonly audit: AuditService,
     private readonly counts: QueueRequestCounts,
+    private readonly tags: ResourceTagsService,
     private readonly base: string,
     private readonly region: string,
   ) {}
 
   /** A change of a queue, in the audit log, whichever way it came. */
   private record(caller: Caller, action: AuditAction, queue: string, details?: Record<string, unknown>): Promise<void> {
-    return this.audit.record({ accountId: caller.accountId, action, resource: `queue:${queue}`, ...(details ? { details } : {}), ...(caller.actor ? { actor: caller.actor } : {}), ...(caller.ip ? { ip: caller.ip } : {}) });
+    return this.audit.record({ accountId: caller.accountId, action, resource: `queue:${queue}`, ...(details ? { details } : {}), ...changedBy(caller) });
   }
 
   /** The operation's answer, by SQS's name for it. */
@@ -227,6 +244,24 @@ export class SqsOperations {
         return {};
       });
     },
+    TagQueue: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
+      if (input.Tags === undefined) throw missingParameter('Tags');
+      await asSqs(this.tags.tag(caller.accountId, taggedQueue(queue), tagsOf(input.Tags, 'Tags'), changedBy(caller)));
+      return {};
+    },
+    UntagQueue: async (input, caller, usage) => {
+      const queue = await this.queueOf(input, caller, usage);
+      const keys = list(input.TagKeys);
+      if (keys.length === 0) throw missingParameter('TagKeys');
+      if (keys.some((key) => typeof key !== 'string')) throw invalidParameter('Value for parameter TagKeys is invalid. Reason: Each tag key must be a string.');
+      await this.tags.untag(caller.accountId, taggedQueue(queue), keys as string[], changedBy(caller));
+      return {};
+    },
+    ListQueueTags: async (input, caller, usage) => {
+      const tags = await this.tags.of(taggedQueue(await this.queueOf(input, caller, usage)));
+      return Object.keys(tags).length > 0 ? { Tags: tags } : {};
+    },
   };
 
   /** A queue's URL, as SQS's: <endpoint>/<account>/<name>, under the endpoint given, else FF_SQS_BASE. */
@@ -263,11 +298,16 @@ export class SqsOperations {
   private async createQueue(input: Input, caller: Caller, usage: Usage): Promise<Output> {
     const name = checkQueueName(input.QueueName);
     this.reach(caller, name, this.urlOf({ accountId: caller.accountId, name }, caller.endpoint));
-    if (input.tags !== undefined && Object.keys(input.tags as object).length > 0) throw invalidParameter("FF's queues have no tags yet.");
     const settings = settingsOf(input.Attributes, this.region, caller.accountId);
-    const { queue, created } = await this.queues.create(caller.accountId, name, settings, { limit: caller.plan.limits.queues, name: caller.plan.name }, this.region);
+    // A new queue's tags, checked and kept in the transaction that makes it; a queue there already keeps its own, as SQS's.
+    const tags = input.tags === undefined ? {} : tagsOf(input.tags, 'tags');
+    const tagged = Object.keys(tags).length > 0;
+    const plan = { limit: caller.plan.limits.queues, name: caller.plan.name };
+    const { queue, created } = await asSqs(
+      this.queues.create(caller.accountId, name, settings, plan, this.region, tagged ? (manager, made) => this.tags.putNew(manager, caller.accountId, taggedQueue(made), tags) : undefined),
+    );
     usage.queue = queue;
-    if (created) await this.record(caller, 'queue.create', queue.name, { attributes: settings });
+    if (created) await this.record(caller, 'queue.create', queue.name, { attributes: settings, ...(tagged ? { tags } : {}) });
     return { QueueUrl: this.urlOf(queue, caller.endpoint) };
   }
 

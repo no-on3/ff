@@ -1,4 +1,4 @@
-import { ALL_FUNCTIONS, type CreatedStorageKey, type FunctionAccess, type StorageKey } from '../services/api';
+import { ALL_FUNCTIONS, type AwsEndpoints, type CreatedStorageKey, type FunctionAccess, type StorageKey } from '../services/api';
 
 /** An access key's name, as an IAM user's: contract.test.ts checks it against the API's. */
 export const KEY_NAME = /^[\w+=,.@-]{1,64}$/;
@@ -28,24 +28,39 @@ export function keyReach(key: Pick<StorageKey, 'buckets' | 'queues' | 'readOnly'
   return reach.charAt(0).toUpperCase() + reach.slice(1);
 }
 
-/** The variables AWS's SDKs and CLI read, for a key just made: to export in a shell, or set as a function's secrets. */
-export function awsVariables(key: CreatedStorageKey): Array<[name: string, value: string]> {
+type Variables = Array<[name: string, value: string]>;
+
+/** What each of those variables is, in words, for the account page. */
+export const ENDPOINT_LABELS: Record<string, string> = {
+  AWS_REGION: 'Region',
+  AWS_ENDPOINT_URL_S3: 'S3, for buckets',
+  AWS_ENDPOINT_URL_SQS: 'SQS, for queues',
+  AWS_ENDPOINT_URL_SESV2: 'SES, for mail',
+  AWS_ENDPOINT_URL_LAMBDA: "Lambda's API, for functions",
+};
+
+/** The variables that say where FF is to AWS's SDKs and CLI: its region and its endpoints, functions' own aside. */
+export function endpointVariables(aws: Omit<AwsEndpoints, 'sqsFunctionEndpoint'>): Variables {
   return [
-    ['AWS_ACCESS_KEY_ID', key.id],
-    ['AWS_SECRET_ACCESS_KEY', key.secretAccessKey],
-    ['AWS_REGION', key.region],
-    ['AWS_ENDPOINT_URL_S3', key.endpoint],
-    ['AWS_ENDPOINT_URL_SQS', key.sqsEndpoint],
-    ['AWS_ENDPOINT_URL_SESV2', key.sesEndpoint],
-    ['AWS_ENDPOINT_URL_LAMBDA', key.lambdaEndpoint],
+    ['AWS_REGION', aws.region],
+    ['AWS_ENDPOINT_URL_S3', aws.s3Endpoint],
+    ['AWS_ENDPOINT_URL_SQS', aws.sqsEndpoint],
+    ['AWS_ENDPOINT_URL_SESV2', aws.sesEndpoint],
+    ['AWS_ENDPOINT_URL_LAMBDA', aws.lambdaEndpoint],
   ];
 }
 
-/** Those variables as shell lines. */
-export const exportLines = (key: CreatedStorageKey): string =>
-  awsVariables(key)
-    .map(([name, value]) => `export ${name}=${value}`)
-    .join('\n');
+/** The variables AWS's SDKs and CLI read, for a key just made: to export in a shell, or set as a function's secrets. */
+export function awsVariables(key: CreatedStorageKey): Variables {
+  const { region, endpoint: s3Endpoint, sqsEndpoint, sesEndpoint, lambdaEndpoint } = key;
+  return [['AWS_ACCESS_KEY_ID', key.id], ['AWS_SECRET_ACCESS_KEY', key.secretAccessKey], ...endpointVariables({ region, s3Endpoint, sqsEndpoint, sesEndpoint, lambdaEndpoint })];
+}
+
+/** Variables as shell lines. */
+export const shellExports = (variables: Variables): string => variables.map(([name, value]) => `export ${name}=${value}`).join('\n');
+
+/** A key's variables as shell lines. */
+export const exportLines = (key: CreatedStorageKey): string => shellExports(awsVariables(key));
 
 /** A command to try a key just made with, as on AWS: null for a key to functions alone. */
 export function tryCommand(key: Pick<StorageKey, 'buckets' | 'queues' | 'functions'>, firstBucket?: string): string | null {

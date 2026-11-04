@@ -21,7 +21,7 @@ import {
   signingKey,
   stringToSign,
 } from '../common/signature-v4';
-import { S3Error, accessDenied, invalidRequest, malformedAuthorization, malformedQueryAuthorization, signatureMismatch } from './s3-error';
+import { S3Error, accessDenied, invalidArgument, invalidRequest, malformedAuthorization, malformedQueryAuthorization, signatureMismatch } from './s3-error';
 
 /** The payload of a request that doesn't sign its body, as presigned URLs never do. */
 export const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
@@ -102,7 +102,7 @@ const QUERY_PARAMETERS = ['X-Amz-Algorithm', 'X-Amz-Credential', 'X-Amz-Signatur
 export function readSignature(headers: IncomingHttpHeaders, query: URLSearchParams): RequestSignature | null {
   const header = single(headers.authorization);
   const presigned = query.has('X-Amz-Algorithm') || query.has('X-Amz-Signature') || query.has('X-Amz-Credential');
-  if (header !== undefined && presigned) throw new S3Error(400, 'InvalidArgument', 'Only one auth mechanism allowed; only the X-Amz-Algorithm query parameter or the Authorization header should be specified');
+  if (header !== undefined && presigned) throw invalidArgument('Only one auth mechanism allowed; only the X-Amz-Algorithm query parameter or the Authorization header should be specified');
   if (headers['x-amz-security-token'] !== undefined || query.has('X-Amz-Security-Token')) throw S3_HEADER.refuse({ kind: 'token' });
   if (header !== undefined) {
     const read = readAuthorization(headers, S3_HEADER) as HeaderSignature;

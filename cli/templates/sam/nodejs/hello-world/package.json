@@ -1,0 +1,8 @@
+{
+  "name": "hello_world",
+  "version": "1.0.0",
+  "description": "hello world sample for Node.js",
+  "main": "app.mjs",
+  "private": true,
+  "license": "MIT"
+}

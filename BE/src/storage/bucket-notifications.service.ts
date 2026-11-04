@@ -1,26 +1,20 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
-import { Actor } from '../common/request-context';
 import { functionArn, parseFunctionArn } from '../functions/arns';
 import { Function } from '../functions/entities/function.entity';
 import { hasQualifier } from '../functions/qualifier';
 import { Queue, QueueKind } from '../queues/queue.entity';
 import { parseQueueArn, queueArn } from '../queues/sqs-attributes';
 import { BucketEvents } from './bucket-events';
+import { ChangedBy, bucketChange } from './bucket-changes';
 import { NotificationConfigurationJson, NotificationRule, checkRules, rulesFromJson, rulesJson, testEvent } from './bucket-notifications';
 import { Bucket, BucketStatus } from './bucket.entity';
-import { S3Error } from './s3-error';
-
-/** Who changed a configuration through the S3 front door: the access key, from its address; FF's API's caller is the request's own. */
-export interface ChangedBy {
-  actor?: Actor;
-  ip?: string;
-  requestId?: string;
-}
+import { S3Error, invalidArgument } from './s3-error';
+import { bucketNotFound } from './storage-names';
 
 /**
  * A bucket's notification configuration, as S3's (ADR 0010): the functions and
@@ -79,30 +73,22 @@ export class BucketNotificationsService {
     const unknown: string[] = [];
     for (const rule of rules) {
       const named = rule.target === 'queue' ? parseQueueArn(rule.arn) : parseFunctionArn(rule.arn);
-      if (!named) throw new S3Error(400, 'InvalidArgument', `The ARN is not well formed: ${rule.arn}`);
+      if (!named) throw invalidArgument(`The ARN is not well formed: ${rule.arn}`);
       if (named.accountId !== bucket.accountId || named.region !== this.region) {
-        throw new S3Error(400, 'InvalidArgument', `A destination must be a ${rule.target} of the bucket's account, in ${this.region}: ${rule.arn}`);
+        throw invalidArgument(`A destination must be a ${rule.target} of the bucket's account, in ${this.region}: ${rule.arn}`);
       }
       const qualifier = rule.target === 'queue' ? undefined : parseFunctionArn(rule.arn)?.qualifier;
       if (!options.skipDestinationValidation && !(await this.exists(bucket.accountId, rule.target, named.name, qualifier))) unknown.push(rule.arn);
     }
     if (unknown.length) {
-      throw new S3Error(
-        400,
-        'InvalidArgument',
+      throw invalidArgument(
         `Unable to validate the following destination configurations: ${unknown.join(', ')}: the account has no such function, version, alias or queue`,
       );
     }
     await this.buckets.update({ id: bucket.id }, { notifications: rules.length ? rules : null });
     const changedBy = options.changedBy ?? {};
-    await this.audit.record({
-      accountId: bucket.accountId,
-      action: 'bucket.notifications',
-      resource: `bucket:${bucket.name}`,
-      details: { configurations: rules.map(({ id, target, arn, events, prefix, suffix }) => ({ id, target, arn, events, prefix, suffix })) },
-      ...(changedBy.actor ? { actor: changedBy.actor } : {}),
-      ...(changedBy.ip ? { ip: changedBy.ip } : {}),
-    });
+    const configurations = rules.map(({ id, target, arn, events, prefix, suffix }) => ({ id, target, arn, events, prefix, suffix }));
+    await this.audit.record(bucketChange(bucket, 'bucket.notifications', { configurations }, changedBy));
     const requestId = changedBy.requestId ?? randomUUID();
     for (const rule of rules.filter((candidate) => candidate.target === 'queue')) {
       await this.events.publish({ kind: 'test', accountId: bucket.accountId, bucket: bucket.name, queueArn: rule.arn, body: testEvent(bucket.name, requestId, new Date()) });
@@ -123,7 +109,7 @@ export class BucketNotificationsService {
 
   private async bucketOf(accountId: string, name: string): Promise<Bucket> {
     const bucket = await this.buckets.findOneBy({ accountId, name, status: BucketStatus.ACTIVE });
-    if (!bucket) throw new NotFoundException(`The account has no bucket named "${name}"`);
+    if (!bucket) throw bucketNotFound(name);
     return bucket;
   }
 }

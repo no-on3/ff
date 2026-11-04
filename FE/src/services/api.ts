@@ -91,6 +91,12 @@ export interface Function {
    * list. Its secrets' values are never in any answer.
    */
   environment?: Record<string, string>;
+  /** Lambda's description, which a SAM template gives; empty for none. */
+  description?: string;
+  /** Its tags, in the answers of GET /functions/:id, a create and an update. */
+  tags?: Record<string, string>;
+  /** The stack a SAM template's deploy made it in, in the answer of GET /functions/:id; null for none. */
+  stack?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -923,7 +929,19 @@ export const ME_ACCOUNT_FIELDS = [
   'storageDisabledAt',
   'storageDisabledReason',
   'bucketStorageNotice',
+  'aws',
 ] as const satisfies ReadonlyArray<keyof MeAccount>;
+
+/** What AWS's SDKs and CLI are given, beside one of the account's access keys: FF's region and its endpoints, each empty where FF has none but S3's. */
+export interface AwsEndpoints {
+  region: string;
+  s3Endpoint: string;
+  sqsEndpoint: string;
+  /** SQS's endpoint as functions reach it, inside the cluster, for `ff deploy`'s queue URLs in their variables: not for AWS's tools. */
+  sqsFunctionEndpoint: string;
+  sesEndpoint: string;
+  lambdaEndpoint: string;
+}
 
 export interface MeAccount {
   /** 12 digits. */
@@ -946,6 +964,8 @@ export interface MeAccount {
   storageDisabledReason: string | null;
   /** The share of its plan's storage its buckets reached together at their last measure: at 100, uploads wait for room; null under 80%. */
   bucketStorageNotice: 80 | 100 | null;
+  /** Where AWS's SDKs and CLI reach the account at FF. */
+  aws: AwsEndpoints;
 }
 // A field missing from ME_ACCOUNT_FIELDS stops the build.
 type UnlistedMeAccountField = Exclude<keyof MeAccount, (typeof ME_ACCOUNT_FIELDS)[number]>;
@@ -1012,6 +1032,8 @@ export const SCOPES = [
   'caches:write',
   'email:read',
   'email:write',
+  'stacks:read',
+  'stacks:write',
 ] as const;
 export type Scope = (typeof SCOPES)[number];
 
@@ -1517,7 +1539,7 @@ export interface CacheMetrics {
 }
 
 /** A bucket's fields, as the API's BucketView names them: contract.test.ts checks them. */
-export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'siteUrl', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
+export const BUCKET_FIELDS = ['name', 'status', 'region', 'endpoint', 'url', 'sizeBytes', 'objects', 'measuredAt', 'siteUrl', 'tags', 'createdAt'] as const satisfies ReadonlyArray<keyof Bucket>;
 
 /** An access key's fields, as the API's StorageKeyView names them; a key just made adds its secret, the endpoint and the region. */
 export const STORAGE_KEY_FIELDS = ['id', 'name', 'buckets', 'queues', 'readOnly', 'functions', 'functionAccess', 'createdAt', 'lastUsedAt'] as const satisfies ReadonlyArray<keyof StorageKey>;
@@ -1546,6 +1568,8 @@ export interface Bucket {
   measuredAt: string | null;
   /** Its site's address, public to read, once its website configuration is set; null for none. */
   siteUrl: string | null;
+  /** Its tags, in a bucket's own answer; not in the list. */
+  tags?: Record<string, string>;
   createdAt: string;
 }
 
@@ -1696,6 +1720,8 @@ export interface Queue {
   maximumMessageSize: number;
   receiveMessageWaitTimeSeconds: number;
   redrivePolicy: RedrivePolicy | null;
+  /** Its tags, in a queue's own answer alone. */
+  tags?: Record<string, string>;
   messages: QueueMessages;
   /** What its messages hold together, as the plan counts them. */
   sizeBytes: number;
@@ -1714,6 +1740,7 @@ export const QUEUE_FIELDS = [
   'maximumMessageSize',
   'receiveMessageWaitTimeSeconds',
   'redrivePolicy',
+  'tags',
   'messages',
   'sizeBytes',
   'createdAt',

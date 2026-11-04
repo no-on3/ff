@@ -438,32 +438,61 @@ pub fn build(root: &Path, options: &Options, out: &Output) -> Result<Package, Er
     if entries.is_empty() {
         return Err(Error::usage(format!("{} has no file to package", root.display())));
     }
-    if entries.len() > MAX_FILES {
-        return Err(Error::usage(format!("The package has {} files: 20,000 at most, as FF takes one", entries.len())));
-    }
     let mut unpacked = 0;
     for entry in &entries {
         unpacked += std::fs::metadata(&entry.source).map(|metadata| metadata.len()).unwrap_or(0);
     }
-    if unpacked > MAX_UNPACKED_BYTES {
-        return Err(Error::usage(format!(
-            "The package is {unpacked} bytes unpacked: 250 MB (262,144,000 bytes) at most, as AWS Lambda takes one"
-        )));
-    }
+    within_limits(entries.len(), unpacked)?;
     let mut files: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
     files.sort();
     let progress = Progress::start(out, &format!("zipping {} files", files.len()));
     let zip = zip::write(entries);
     progress.stop();
     let zip = zip.map_err(|error| failed(format!("Couldn't zip the package: {error}")))?;
+    zip_within_limit(&zip)?;
+    let code_sha256 = STANDARD.encode(ring::digest::digest(&ring::digest::SHA256, &zip));
+    Ok(Package { zip, code_sha256, files, unpacked, runtime: project.runtime })
+}
+
+/// A package's files and their size unpacked within what FF and AWS Lambda take.
+fn within_limits(files: usize, unpacked: u64) -> Result<(), Error> {
+    if files > MAX_FILES {
+        return Err(Error::usage(format!("The package has {files} files: 20,000 at most, as FF takes one")));
+    }
+    if unpacked > MAX_UNPACKED_BYTES {
+        return Err(Error::usage(format!(
+            "The package is {unpacked} bytes unpacked: 250 MB (262,144,000 bytes) at most, as AWS Lambda takes one"
+        )));
+    }
+    Ok(())
+}
+
+fn zip_within_limit(zip: &[u8]) -> Result<(), Error> {
     if zip.len() as u64 > MAX_ZIP_BYTES {
         return Err(Error::usage(format!(
             "The package's zip is {} bytes: 50 MB (52,428,800 bytes) at most, as AWS Lambda takes one uploaded directly",
             zip.len()
         )));
     }
+    Ok(())
+}
+
+/// A zip made elsewhere, as it is, such as one a template's CodeUri names: its files read from it for the handler's
+/// check, within the limits a package FF makes has.
+pub fn from_zip(path: &Path, runtime: Runtime) -> Result<Package, Error> {
+    let zip =
+        std::fs::read(path).map_err(|error| Error::usage(format!("Couldn't read {}: {error}", path.display())))?;
+    zip_within_limit(&zip)?;
+    let listed = zip::files(&zip).map_err(|why| Error::usage(format!("Can't deploy {}: {why}", path.display())))?;
+    if listed.is_empty() {
+        return Err(Error::usage(format!("{} holds no file", path.display())));
+    }
+    let unpacked = listed.iter().map(|(_, size)| size).sum();
+    within_limits(listed.len(), unpacked)?;
+    let mut files: Vec<String> = listed.into_iter().map(|(name, _)| name).collect();
+    files.sort();
     let code_sha256 = STANDARD.encode(ring::digest::digest(&ring::digest::SHA256, &zip));
-    Ok(Package { zip, code_sha256, files, unpacked, runtime: project.runtime })
+    Ok(Package { zip, code_sha256, files, unpacked, runtime })
 }
 
 #[cfg(test)]
@@ -614,5 +643,25 @@ mod tests {
             .map(|_| ())
             .unwrap_err();
         assert!(error.message.ends_with("has no file to package"), "{}", error.message);
+    }
+
+    #[test]
+    fn takes_a_zip_made_elsewhere_as_it_is_its_files_read_from_it() {
+        let dir = folder(&[("app.py", "def handler(event, context):\n    return 1\n"), ("lib/util.py", "X = 1\n")]);
+        let built = build(dir.path(), &AS_IT_IS, &Output::quiet()).unwrap();
+        let zip = dir.path().join("app.zip");
+        std::fs::write(&zip, &built.zip).unwrap();
+
+        let taken = from_zip(&zip, Runtime::Python).unwrap();
+
+        assert_eq!(
+            (taken.files, taken.unpacked, taken.code_sha256, taken.zip),
+            (built.files, built.unpacked, built.code_sha256, built.zip)
+        );
+        std::fs::write(&zip, "not a zip").unwrap();
+        assert_eq!(
+            from_zip(&zip, Runtime::Python).map(|_| ()).unwrap_err().message,
+            format!("Can't deploy {}: it is too short to be a zip", zip.display())
+        );
     }
 }

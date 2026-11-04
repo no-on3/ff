@@ -5,7 +5,15 @@
 //! doesn't take is refused, each at its line: a tag it doesn't have, an alias, a merge, the binary, omap, pairs, set
 //! and timestamp tags; and a key given twice, a key that isn't a scalar, a second document. Step 5's spike measured it
 //! against cfn-flip, AWS's own converter (`hack/spikes/sam-yaml`). A mapping's keys come in serde_json's order, not the
-//! template's: where the template's order matters, its values' lines give it.
+//! template's: where the template's order matters, its values' lines give it. What the template means is the
+//! modules': [`subset`], what of it FF's `ff deploy` takes; [`parameters`], its parameters' values; [`resolve`], the
+//! Globals merged and the intrinsics resolved, as SAM and CloudFormation do; [`plan`], its functions as `ff deploy`
+//! makes them and what a deploy deletes of the stack's last.
+
+pub mod parameters;
+pub mod plan;
+pub mod resolve;
+pub mod subset;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -28,11 +36,28 @@ impl From<Marker> for At {
     }
 }
 
-/// A template read: its value as JSON, and where each of its values starts, by JSON pointer ("" for the whole).
+/// A template read: its value as JSON, where each of its values starts, by JSON pointer ("" for the whole), and
+/// where each mapping's key is, by its value's pointer.
 #[derive(Debug)]
 pub struct Template {
     pub value: Value,
     pub at: BTreeMap<String, At>,
+    pub keys: BTreeMap<String, At>,
+}
+
+impl Template {
+    /// The line a value is named at: its key's, else where it starts, else where the nearest value holding it does,
+    /// as a short tag's long form, which isn't written, is named at its tag. A mapping under a key starts a line below
+    /// it.
+    pub fn line(&self, pointer: &str) -> Option<usize> {
+        let mut pointer = pointer;
+        loop {
+            if let Some(at) = self.keys.get(pointer).or_else(|| self.at.get(pointer)) {
+                return Some(at.line);
+            }
+            pointer = &pointer[..pointer.rfind('/')?];
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -75,16 +100,21 @@ pub fn read(text: &str) -> Result<Template, Error> {
     if let Some(error) = builder.error {
         return Err(error);
     }
-    Ok(Template { value: builder.root.unwrap_or(Value::Null), at: builder.at })
+    Ok(Template { value: builder.root.unwrap_or(Value::Null), at: builder.at, keys: builder.keys })
+}
+
+/// A short tag's name in the long form: `Ref`, `Condition`, else `Fn::` and the tag's.
+fn long_name(name: &str) -> String {
+    match name {
+        "Ref" | "Condition" => name.to_string(),
+        _ => format!("Fn::{name}"),
+    }
 }
 
 /// A tagged value in its long form; a tag CloudFormation doesn't have refused.
 fn long_form(tag: &Tag, value: Value, at: At) -> Result<Value, Error> {
     let name = short_tag(tag, at)?;
-    let key = match name {
-        "Ref" | "Condition" => name.to_string(),
-        _ => format!("Fn::{name}"),
-    };
+    let key = long_name(name);
     let value = match (name, value) {
         // !GetAtt's short form is one string: the resource, and its attribute after the first dot.
         ("GetAtt", Value::String(text)) => match text.split_once('.') {
@@ -265,13 +295,34 @@ enum Frame {
     Mapping { map: Map<String, Value>, key: Option<String>, tag: Option<Tag>, at: At },
 }
 
+impl Frame {
+    fn tag(&self) -> Option<&Tag> {
+        match self {
+            Frame::Sequence { tag, .. } | Frame::Mapping { tag, .. } => tag.as_ref(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Builder {
+    /// The mappings and sequences open, each with the pointer its values are under.
     stack: Vec<(Frame, String)>,
     at: BTreeMap<String, At>,
+    keys: BTreeMap<String, At>,
     root: Option<Value>,
     documents: usize,
     error: Option<Error>,
+}
+
+/// A scalar's text, as CloudFormation takes a parameter's value and compares one with a list: text, numbers and
+/// booleans as they read; None for a list or a mapping.
+fn text_of(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(boolean) => Some(boolean.to_string()),
+        _ => None,
+    }
 }
 
 /// A key in a JSON pointer, its ~ and / escaped.
@@ -319,10 +370,11 @@ impl Builder {
                 return self
                     .fail(at, "a merge (<<): CloudFormation doesn't take YAML's merges, so each key is written out");
             }
-            let Some((Frame::Mapping { map, key, .. }, _)) = self.stack.last_mut() else { unreachable!() };
+            let Some((Frame::Mapping { map, key, .. }, pointer)) = self.stack.last_mut() else { unreachable!() };
             if map.contains_key(&text) {
                 return self.fail(at, format!("{text}: a key given twice in the same mapping"));
             }
+            self.keys.insert(format!("{pointer}/{}", pointer_key(&text)), at);
             *key = Some(text);
             return;
         }
@@ -369,8 +421,13 @@ impl Builder {
         if self.wants_key() {
             return self.fail(at, "a key that is a mapping or a sequence: a key is a name");
         }
-        let pointer = self.next_pointer();
+        let mut pointer = self.next_pointer();
         self.at.insert(pointer.clone(), at);
+        // A short tag's mapping or sequence is its long form's value: what it holds is under the function's name,
+        // `!Sub [text, {A: x}]`'s x at /Fn::Sub/1/A. A tag CloudFormation hasn't is refused at the end.
+        if let Some(name) = frame.tag().filter(|tag| !is_yaml_tag(tag)).and_then(|tag| short_tag(tag, at).ok()) {
+            pointer = format!("{pointer}/{}", pointer_key(&long_name(name)));
+        }
         self.stack.push((frame, pointer));
     }
 
@@ -482,6 +539,23 @@ mod tests {
         assert_eq!(template.at["/Resources/Orders/Properties/Queue"], At { line: 4, column: 22 });
         assert_eq!(template.at["/Resources/Orders/Properties/Batch/1"], At { line: 5, column: 18 });
         assert_eq!(read("a/b: {c~d: 1}").unwrap().at["/a~1b/c~0d"], At { line: 1, column: 12 });
+        // A short tag's list is its long form's value: its items are under the function's name.
+        let template = read("a: !Sub\n  - '${A}-x'\n  - A: !Ref B\n").unwrap();
+        // A tagged scalar's column is its text's: B's, after `!Ref `.
+        assert_eq!(template.at["/a/Fn::Sub/1/A"], At { line: 3, column: 13 });
+        assert_eq!(template.value.pointer("/a/Fn::Sub/1/A"), Some(&json!({"Ref": "B"})));
+    }
+
+    #[test]
+    fn a_value_is_named_at_its_keys_line_a_mapping_below_its_key_too() {
+        let template = read("Conditions:\n  IsProd: !Equals [a, b]\nList:\n  - x\n").unwrap();
+        assert_eq!((template.line("/Conditions"), template.at["/Conditions"].line), (Some(1), 2));
+        assert_eq!(template.line("/Conditions/IsProd"), Some(2));
+        // An item of a list has no key: where it starts.
+        assert_eq!((template.line("/List"), template.line("/List/0")), (Some(3), Some(4)));
+        // A short tag's long form isn't written: it is named at its tag.
+        assert_eq!(template.line("/Conditions/IsProd/Fn::Equals/1"), Some(2));
+        assert_eq!(read("a: !GetAtt Queue.Arn\n").unwrap().line("/a/Fn::GetAtt/1"), Some(1));
     }
 
     #[test]

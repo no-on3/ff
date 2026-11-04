@@ -12,6 +12,7 @@ import { BucketEvents } from './bucket-events';
 import { BucketNotificationsService } from './bucket-notifications.service';
 import { BucketSamplesService } from './bucket-samples.service';
 import { BucketWebsitesService } from './bucket-websites.service';
+import { BucketAccessService } from './bucket-access.service';
 import { Bucket } from './bucket.entity';
 import { BucketsController } from './buckets.controller';
 import { BucketsService } from './buckets.service';
@@ -29,6 +30,7 @@ import { StorageRequestCount } from './storage-request-count.entity';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { StoreBuckets } from './store-buckets';
 import { WebsiteServer } from './website-server';
+import { TagsModule } from '../tags/tags.module';
 
 /**
  * Customers' buckets (ADR 0009): their records and the API that makes them,
@@ -42,9 +44,9 @@ import { WebsiteServer } from './website-server';
  */
 @Module({
   // A notification's destinations are the account's functions and queues, looked up by their rows.
-  imports: [TypeOrmModule.forFeature([Bucket, StorageKey, StorageRequestCount, KeyUse, Account, Function, Queue]), EncryptionModule, AuditModule, PlansModule, BillingModule, NotificationsModule],
+  imports: [TypeOrmModule.forFeature([Bucket, StorageKey, StorageRequestCount, KeyUse, Account, Function, Queue]), EncryptionModule, AuditModule, PlansModule, BillingModule, NotificationsModule, TagsModule],
   controllers: [BucketsController, StorageKeysController, DeployKeysController],
-  providers: [StorageDirectory, StorageRequestCountsService, KeyUses, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys, BucketSamplesService, BucketEvents, BucketNotificationsService, BucketWebsitesService, SiteTransfer, WebsiteServer],
-  exports: [StorageDirectory, KeyUses, S3FrontDoor, BucketsService, StorageKeysService, FunctionKeys, BucketEvents, WebsiteServer],
+  providers: [StorageDirectory, StorageRequestCountsService, KeyUses, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys, BucketSamplesService, BucketEvents, BucketNotificationsService, BucketWebsitesService, BucketAccessService, SiteTransfer, WebsiteServer],
+  exports: [StorageDirectory, KeyUses, S3FrontDoor, StoreBuckets, BucketsService, StorageKeysService, FunctionKeys, BucketEvents, WebsiteServer],
 })
 export class StorageModule {}

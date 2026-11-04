@@ -29,7 +29,7 @@ variable "photos_bucket_name" {
 variable "www_bucket_name" {
   type        = string
   default     = "www"
-  description = "The site www's bucket on S3, for the roles that use it: the output Bucket of data/s3-website.md's stack, FF's name until it is made"
+  description = "The site www's bucket on S3, for the functions that use it: the output Bucket of data/s3-website.md's stack, FF's name until it is made"
 }
 
 variable "send_receipts_log_level" {

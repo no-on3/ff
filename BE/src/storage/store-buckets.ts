@@ -3,12 +3,14 @@ import {
   CreateBucketCommand,
   DeleteBucketCommand,
   DeleteObjectsCommand,
+  GetObjectCommand,
   ListMultipartUploadsCommand,
   ListObjectsV2Command,
   S3Client,
 } from '@aws-sdk/client-s3';
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Readable } from 'node:stream';
 
 /** The store's settings, as the backend's own objects use them. */
 interface StoreSettings {
@@ -22,7 +24,7 @@ interface StoreSettings {
 /**
  * Customers' buckets in the store, by the store's names for them, with FF's
  * own credentials there: made, emptied, deleted. The objects in them come and
- * go through the front door.
+ * go through the front door; Lambda's CreateFunction reads its code from one.
  */
 @Injectable()
 export class StoreBuckets implements OnModuleDestroy {
@@ -48,6 +50,17 @@ export class StoreBuckets implements OnModuleDestroy {
 
   async create(storeName: string): Promise<void> {
     await this.s3.send(new CreateBucketCommand({ Bucket: storeName }));
+  }
+
+  /** An object's bytes, as they come, and how many; null for a key the bucket hasn't. */
+  async object(storeName: string, key: string): Promise<{ body: Readable; length?: number } | null> {
+    try {
+      const answer = await this.s3.send(new GetObjectCommand({ Bucket: storeName, Key: key }));
+      return { body: answer.Body as Readable, ...(answer.ContentLength === undefined ? {} : { length: answer.ContentLength }) };
+    } catch (error) {
+      if ((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404) return null;
+      throw error;
+    }
   }
 
   /** Whether the bucket holds no object and no upload under way. */

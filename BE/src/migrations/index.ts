@@ -71,6 +71,17 @@ import { AlarmDimensions1793600000000 } from './1793600000000-AlarmDimensions';
 import { AccessKeyFunctions1793610000000 } from './1793610000000-AccessKeyFunctions';
 import { FunctionKeyRenewal1793620000000 } from './1793620000000-FunctionKeyRenewal';
 import { LambdaEndpoint1793630000000 } from './1793630000000-LambdaEndpoint';
+import { ResourceTags1793640000000 } from './1793640000000-ResourceTags';
+import { FunctionDescriptions1793650000000 } from './1793650000000-FunctionDescriptions';
+import { FunctionUpdates1793660000000 } from './1793660000000-FunctionUpdates';
+import { FunctionDeadLetterQueues1793670000000 } from './1793670000000-FunctionDeadLetterQueues';
+import { FunctionCallsStopped1793680000000 } from './1793680000000-FunctionCallsStopped';
+import { FunctionPolicies1793690000000 } from './1793690000000-FunctionPolicies';
+import { BucketTags1793700000000 } from './1793700000000-BucketTags';
+import { QueueTags1793710000000 } from './1793710000000-QueueTags';
+import { BucketPolicies1793720000000 } from './1793720000000-BucketPolicies';
+import { Stacks1793730000000 } from './1793730000000-Stacks';
+import { StackDeletionPolicies1793740000000 } from './1793740000000-StackDeletionPolicies';
 
 /**
  * Every migration, oldest first. `npm run migration:generate -- src/migrations/<Name>`
@@ -151,4 +162,15 @@ export const MIGRATIONS: Array<new () => object> = [
   AccessKeyFunctions1793610000000,
   FunctionKeyRenewal1793620000000,
   LambdaEndpoint1793630000000,
+  ResourceTags1793640000000,
+  FunctionDescriptions1793650000000,
+  FunctionUpdates1793660000000,
+  FunctionDeadLetterQueues1793670000000,
+  FunctionCallsStopped1793680000000,
+  FunctionPolicies1793690000000,
+  BucketTags1793700000000,
+  QueueTags1793710000000,
+  BucketPolicies1793720000000,
+  Stacks1793730000000,
+  StackDeletionPolicies1793740000000,
 ];

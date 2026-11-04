@@ -40,9 +40,9 @@ Kubernetes stops the runtime to replace or remove its pod: at a deploy's rollout
 |---|---|
 | `GET /healthz` | `200 {"status": "ok"}` while the main process is alive (liveness probe) |
 | `GET /readyz` | `200 {"status": "ready"}` once user code is loaded. Otherwise `503 {"status": "starting"}`, or `503 {"status": "failed", "error": {"errorType": …, "errorMessage": …}}` (readiness probe) |
-| `POST /invoke` | Body = JSON payload (empty means `{}`; `Content-Length` or chunked). Optional header `X-FF-Request-Id`. Returns `200` with the handler's return value as JSON (`null` for `None`). |
+| `POST /invoke` | Body = JSON payload (empty means `{}`; `Content-Length` or chunked). Optional headers: `X-FF-Request-Id`; `X-FF-Log-Type: Tail`, for the call's log (see [Logs](#logs)); `X-FF-Client-Context`, Lambda's `ClientContext`, the base64 of a JSON object, which the handler gets as `context.client_context`. Returns `200` with the handler's return value as JSON (`null` for `None`). |
 
-**Response headers:** `X-FF-Request-Id`, `X-FF-Duration-Ms`, `X-FF-Max-Memory-Used-Mb`, and `X-FF-Function-Error: Unhandled` on function errors.
+**Response headers:** `X-FF-Request-Id`, `X-FF-Duration-Ms`, `X-FF-Max-Memory-Used-Mb`, `X-FF-Log-Result` when the call's log was asked for, and `X-FF-Function-Error: Unhandled` on function errors.
 
 **Error responses** (body `{"errorType": …, "errorMessage": …}`):
 
@@ -55,7 +55,7 @@ Kubernetes stops the runtime to replace or remove its pod: at a deploy's rollout
 | 500 | `Runtime.MarshalError` | The return value is not JSON-serializable (a `set`, an object, `NaN`) |
 | 500 | `Function.ResponseSizeTooLarge` | Return value above 6 MB |
 | 500 | `Runtime.ImportModuleError`, `Runtime.UserCodeSyntaxError`, `Runtime.HandlerNotFound`, `Runtime.MalformedHandlerName`, `Runtime.BuiltInModuleConflict`, `Sandbox.Timedout` (init) | User code can't be loaded; `/readyz` stays 503, so Kubernetes never routes to the pod |
-| 400 | `InvalidRequestContentException` | Body is not JSON |
+| 400 | `InvalidRequestContentException` | Body is not JSON; or `X-FF-Client-Context` is not the base64 of a JSON object: `Client context must be a valid Base64-encoded JSON object.`, as Lambda says |
 | 413 | `RequestEntityTooLargeException` | Body above 6 MB |
 | 429 | `TooManyRequestsException` | More than `FF_MAX_QUEUE` invocations waiting, or one waited longer than `FF_MAX_QUEUE_WAIT_MS` for its turn: `Rate exceeded: no instance was free within X.XX seconds` |
 | 503 | `ServiceUnavailableException` | The runtime is stopping, and refused the call before it ran: `Runtime is shutting down`, with `X-FF-Not-Run: shutting-down`, so that the caller may send it to another instance, as the backend does (see [Stopping](#stopping)) |
@@ -74,9 +74,10 @@ def handler(event, context):
 # context: function_name, function_version, invoked_function_arn (""),
 #          memory_limit_in_mb (a string, as on Lambda), aws_request_id,
 #          log_group_name (""), log_stream_name (""), identity (None),
-#          client_context (None), get_remaining_time_in_millis()
+#          client_context, get_remaining_time_in_millis()
 ```
 
+- **`context.client_context` is what the caller said of itself,** as Lambda passes it on for a synchronous `Invoke`: `None` without one, or an object whose attributes are its `custom`, `env` and `client`, `client` one with `installation_id`, `app_title`, `app_version_name`, `app_version_code` and `app_package_name`, each `None` when the caller left it out, as Lambda's Python runtime gives them.
 - **The event is the payload,** as on Lambda: `POST /invoke` with `{"name": "Sfax"}` calls the handler with `event["name"] == "Sfax"`. FF's backend builds every event a function gets ([ADR 0007](../../docs/adr/0007-function-events.md)). A function made before protocol 3 keeps FF's original wrapper, which the runtime builds when `FF_EVENT_FORMAT=wrapped`.
 - `get_remaining_time_in_millis()` counts down from the start of *this* invocation, not from process start.
 - The working directory is the task root (`/var/task`), as on Lambda, so relative paths such as `open("config.json")` work.
@@ -154,9 +155,20 @@ REPORT RequestId: <id>	Duration: 12.34 ms	Billed Duration: 13 ms	Memory Size: 12
 
 A worker replaced after `Runtime.OutOfMemory` is logged as `function worker crashed; restarting`, with the request ID, as on the Node.js runtime. **Environment variables are never logged.**
 
+**A call's output comes before its `END`,** as the log collector needs it to give each line its call's request ID ([ADR 0005](../../docs/adr/0005-log-pipeline.md)). The worker's stdout and stderr are pipes that the main process reads, each on a thread of its own, and forwards line by line (`ff_runtime/output.py`), as the Node.js runtime's main thread forwards its worker's:
+- **The end of a call's output is marked.** Before it sends a call's result, the worker flushes `sys.stdout` and `sys.stderr` and writes an end-of-call marker to each, with the call's request ID; the main process takes the markers out of what it forwards, and writes `END` and `REPORT` once both have come.
+- **It waits a second at most,** for markers that a blocked or closed stream holds up, and, when the worker is stopped at a timeout or has died, for its streams to end: what the call wrote before comes ahead of the timeout's line and `END`. `Duration` stops when the result comes, so the wait is never billed.
+- **Both streams merged line by line.** The worker runs unbuffered, so a line can come in parts, a `print`'s text before its newline: a line a stream left open is held until its end, so that the other stream's lines never split it in a log that reads both, and written as it is past 16 KB, as the container's runtime splits a longer line too.
+- **A line left open,** by `sys.stdout.write` without a newline, is ended before the runtime's next line, or when the worker's stream ends, so that `START`, `END`, `REPORT` and the JSON lines always start a line.
+- **Lines written after the handler returned,** by a thread it left running, come after `END`, as on Lambda.
+
+**A call's log, given back.** With `X-FF-Log-Type: Tail`, the answer carries `X-FF-Log-Result`: the base64 of the call's last 4 KB of log, from its `START` to its `REPORT`, which the backend gives back as Lambda's `X-Amz-Log-Result` for `Invoke` with `LogType` `Tail`; the log store has a line only seconds after it is written. The runtime keeps what it writes while the call runs, its own lines and the call's on both streams, merged line by line as above.
+
 ## What changed in v3
 
 Protocol v3 (2026-10-21, step-1 plan U-03, [ADR 0007](../../docs/adr/0007-function-events.md)) changes the event, as for Node.js, and nothing else: the handler gets the payload itself, any JSON value, unless `FF_EVENT_FORMAT=wrapped`, which every function made before v3 has, and which builds v2's wrapper. The startup line says `"protocol": 3`, with `"eventFormat"`, and the server header `ff-runtime-python/3`.
+
+Two optional headers came later in v3 (2026-11-03), for Lambda's `Invoke`: `X-FF-Log-Type: Tail`, answered with `X-FF-Log-Result`, and `X-FF-Client-Context`. A runtime built before them ignores both, and gives back no log.
 
 ## What changed in v2
 

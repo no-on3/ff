@@ -54,11 +54,16 @@ pub fn get(name: &str, context: &Context) -> Result<(), Error> {
     let found = function_named(&client, name)?;
     let function: Function = client.json(&Call::get(format!("/functions/{}", found.id)))?;
     context.out.result(&function.view(), || {
-        let mut lines = vec![
-            format!("name         {}", function.name),
-            format!("id           {}", function.id),
-            format!("runtime      {}", function.runtime),
-        ];
+        let mut lines = vec![format!("name         {}", function.name), format!("id           {}", function.id)];
+        if !function.description.is_empty() {
+            lines.push(format!("description  {}", function.description));
+        }
+        if let Some(stack) = &function.stack {
+            lines.push(format!(
+                "stack        {stack}: a SAM template's deploy keeps it; `ff delete-stack {stack}` deletes it"
+            ));
+        }
+        lines.push(format!("runtime      {}", function.runtime));
         if let Some(handler) = &function.handler {
             lines.push(format!("handler      {handler}"));
         }
@@ -80,6 +85,12 @@ pub fn get(name: &str, context: &Context) -> Result<(), Error> {
         lines.push(format!("code         {}", code(&function)));
         if let Some(environment) = function.environment.as_ref().filter(|environment| !environment.is_empty()) {
             lines.push(format!("environment  {}", environment.keys().cloned().collect::<Vec<_>>().join(", ")));
+        }
+        if let Some(tags) = function.tags.as_ref().filter(|tags| !tags.is_empty()) {
+            lines.push(format!("tags         {}", crate::table::tags(tags)));
+        }
+        if let Some(queue) = &function.dead_letter_target_arn {
+            lines.push(format!("dead letters {queue}"));
         }
         lines.push(format!("created      {} UTC", time(&function.created_at)));
         lines.push(format!("updated      {} UTC", time(&function.updated_at)));

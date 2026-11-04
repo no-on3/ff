@@ -1,5 +1,9 @@
 # What the functions need is index.js and its libraries.
 README.md
+# The app as one SAM template, and the SAM CLI's settings and builds.
+template.yaml
+samconfig.toml
+.aws-sam/
 events/
 # The page is a site of its own (ff sites deploy), not the functions'.
 site/

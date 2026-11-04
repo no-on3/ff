@@ -1,5 +1,20 @@
 //! Text for people: columns that line up, and times as they read.
 
+/// Items in a sentence: `a`, `a and b`, `a, b and c`.
+pub fn in_words<T: AsRef<str>>(items: &[T]) -> String {
+    let items: Vec<&str> = items.iter().map(AsRef::as_ref).collect();
+    match items.as_slice() {
+        [] => String::new(),
+        [only] => (*only).to_owned(),
+        [first @ .., last] => format!("{} and {last}", first.join(", ")),
+    }
+}
+
+/// Tags as they read: `team=shop, stage=prod`, by key.
+pub fn tags(tags: &std::collections::BTreeMap<String, String>) -> String {
+    tags.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join(", ")
+}
+
 /// Rows under their headers, each column as wide as its widest cell, two spaces apart; the last
 /// column isn't padded.
 pub fn table(headers: &[&str], rows: &[Vec<String>]) -> String {
@@ -63,6 +78,14 @@ pub fn first_line(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn items_read_as_a_sentence() {
+        assert_eq!(in_words::<&str>(&[]), "");
+        assert_eq!(in_words(&["lambda"]), "lambda");
+        assert_eq!(in_words(&["lambda", "s3"]), "lambda and s3");
+        assert_eq!(in_words(&["lambda", "s3", "sqs", "sesv2"]), "lambda, s3, sqs and sesv2");
+    }
 
     #[test]
     fn columns_line_up_under_their_headers() {

@@ -1,9 +1,14 @@
 //! The API's records as ff reads them, and the lookups every command on a function starts with.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use super::{Call, Client};
 use crate::error::{Error, Kind};
+
+/// The instances a function runs at most unless its owner says otherwise, FF's default.
+pub const DEFAULT_MAX_INSTANCES: u32 = 3;
 
 /// A function, as `GET /functions` and `GET /functions/:id` answer it.
 #[derive(Clone, Debug, Deserialize)]
@@ -39,6 +44,18 @@ pub struct Function {
     /// Its variables, in `GET /functions/:id` only.
     #[serde(default)]
     pub environment: Option<serde_json::Map<String, serde_json::Value>>,
+    /// What it is for, as Lambda's Description: empty for none, and from an API before it.
+    #[serde(default)]
+    pub description: String,
+    /// The queue its asynchronous calls go to once they failed every try, by its ARN, as Lambda's DeadLetterConfig.
+    #[serde(default)]
+    pub dead_letter_target_arn: Option<String>,
+    /// Its tags, in `GET /functions/:id` only.
+    #[serde(default)]
+    pub tags: Option<BTreeMap<String, String>>,
+    /// The stack it is in, as `ff deploy` made it from a template: none for none, and from an API before stacks.
+    #[serde(default)]
+    pub stack: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -73,6 +90,15 @@ pub struct FunctionView<'a> {
     pub code_sha256: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<&'a serde_json::Map<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub description: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dead_letter_target_arn: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<&'a BTreeMap<String, String>>,
+    /// The stack a SAM template's deploy made it in, if one did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stack: Option<&'a str>,
     pub created_at: &'a str,
     pub updated_at: &'a str,
 }
@@ -101,10 +127,49 @@ impl Function {
             code_size: self.code_size(),
             code_sha256: self.code_sha256.as_deref(),
             environment: self.environment.as_ref(),
+            description: &self.description,
+            dead_letter_target_arn: self.dead_letter_target_arn.as_deref(),
+            tags: self.tags.as_ref(),
+            stack: self.stack.as_deref(),
             created_at: &self.created_at,
             updated_at: &self.updated_at,
         }
     }
+}
+
+/// What becomes of what a resource made once its template has it no more, or its stack is deleted: deleted, or left in
+/// the account, out of the stack. CloudFormation's DeletionPolicy and UpdateReplacePolicy, its other values aside.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum DeletionPolicy {
+    #[default]
+    Delete,
+    Retain,
+}
+
+/// A resource of a stack: its logical ID and type, as the template names them, the FF resource it made, by name, a
+/// version's or an alias's after its function's and a colon, none for what FF keeps without effect; and its
+/// DeletionPolicy, which its removal follows.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StackResource {
+    pub logical_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub physical_id: Option<String>,
+    #[serde(default)]
+    pub deletion_policy: DeletionPolicy,
+}
+
+/// A stack, FF's record of what `ff deploy` made of a SAM template, as `GET /stacks/:name` answers it: its parameters'
+/// values, a `NoEcho` one's left out.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stack {
+    pub name: String,
+    pub template_sha256: String,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
+    pub resources: Vec<StackResource>,
 }
 
 /// One call of a function, as the API keeps it.
@@ -188,6 +253,42 @@ pub struct MeAccount {
     pub data_deletion_due_at: Option<String>,
     #[serde(default)]
     pub data_deleted_at: Option<String>,
+    /// FF's region and endpoints, for AWS's tools; none from an API older than this ff.
+    #[serde(default)]
+    pub aws: Option<AwsEndpoints>,
+}
+
+/// FF's region and the endpoints AWS's tools reach the account's buckets, queues, mail and functions at, as
+/// `GET /me` gives them with each account; each but S3's empty where FF has none.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AwsEndpoints {
+    pub region: String,
+    pub s3_endpoint: String,
+    #[serde(default)]
+    pub sqs_endpoint: String,
+    /// SQS's endpoint as functions reach it, inside the cluster, which a queue's URL in their variables is under.
+    #[serde(default)]
+    pub sqs_function_endpoint: String,
+    #[serde(default)]
+    pub ses_endpoint: String,
+    #[serde(default)]
+    pub lambda_endpoint: String,
+}
+
+#[cfg(test)]
+impl AwsEndpoints {
+    /// FF's endpoints at ffunc.cloud, as the tests take them.
+    pub fn ffunc() -> Self {
+        AwsEndpoints {
+            region: "tn-tunis-1".into(),
+            s3_endpoint: "https://s3.ffunc.cloud".into(),
+            sqs_endpoint: "https://sqs.ffunc.cloud".into(),
+            sqs_function_endpoint: "http://10.43.0.251:3003".into(),
+            ses_endpoint: "https://email.ffunc.cloud".into(),
+            lambda_endpoint: "https://lambda.ffunc.cloud".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -200,6 +301,9 @@ pub struct Plan {
 
 /// `$LATEST`, the function as it is: what a call, an alias, a schedule or a queue reader runs when it names no version.
 pub const LATEST: &str = "$LATEST";
+
+/// Lambda's one function response type for SQS: the call's answer names the messages that failed.
+pub const REPORT_BATCH_ITEM_FAILURES: &str = "ReportBatchItemFailures";
 
 /// A version, as `GET /functions/:id/versions` lists it: the function as it was published, which never changes.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -339,6 +443,13 @@ mod tests {
             "revisionId": "r-1", "createdAt": "2026-11-02T08:00:00.000Z", "updatedAt": "2026-11-02T08:00:00.000Z"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn the_endpoints_have_the_apis_fields() {
+        use crate::backend_source::{class_fields, sorted, sorted_keys};
+        let api = class_fields(include_str!("../../../BE/src/common/aws-endpoints.ts"), "AwsEndpoints");
+        assert_eq!(sorted_keys(&AwsEndpoints::ffunc()), sorted(api));
     }
 
     #[test]

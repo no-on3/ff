@@ -1,0 +1,30 @@
+# Outside FF's subset: IAM's resources, a role of the template's own, and the role SAM makes for a function.
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+  Worker:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: worker/
+      Handler: app.handler
+      Runtime: python3.13
+      Role: !GetAtt WorkerRole.Arn
+  Reader:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: reader/
+      Handler: app.handler
+      Runtime: python3.13
+Outputs:
+  WorkerRole:
+    Value: !GetAtt WorkerRole.Arn
+  ReaderRole:
+    Value: !GetAtt ReaderRole.Arn

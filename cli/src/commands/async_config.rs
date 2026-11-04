@@ -73,7 +73,7 @@ pub fn text(name: &str, config: Option<&Value>) -> String {
 }
 
 /// The settings there are, or none: a 404 is a function following Lambda's defaults.
-fn current(client: &Client, id: &str) -> Result<Option<Value>, Error> {
+pub(super) fn current(client: &Client, id: &str) -> Result<Option<Value>, Error> {
     client.json_if_any(&Call::get(format!("/functions/{id}/event-invoke-config")))
 }
 

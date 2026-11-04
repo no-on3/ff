@@ -4,8 +4,8 @@
 --     call the line belongs to. An instance runs one call at a time (D14), so a call's lines run from its
 --     pod's START line to its REPORT line;
 --   * the limit: each namespace keeps LINES lines, and BYTES bytes, a second, counted by the lines' own
---     time, so that a backlog read after a restart keeps each second's budget. Lines over it are dropped and
---     counted;
+--     time, so that a backlog read after a restart keeps each second's budget, and to the nanosecond, the
+--     second the store files each line in. Lines over it are dropped and counted;
 --   * the cut: a line over MAX bytes is cut at the start of a character, and says so.
 -- Once a second, the dummy input's tick brings out one line per function and second in which lines were
 -- dropped, saying how many, and forgets old state. Fluent Bit runs this in one Lua state per filter, so the
@@ -37,6 +37,14 @@ local function cut(message)
   return string.sub(message, 1, n) .. TRUNCATED
 end
 
+-- The second of a line's time. Fluent Bit gives the time as its seconds and nanoseconds apart (time_as_table
+-- in fluent-bit.yaml): as a number, today's times are a quarter of a microsecond apart, and a line in a
+-- second's last tenth of a microsecond would count in the next, where the store files it in its own.
+local function secondOf(timestamp)
+  if type(timestamp) == "table" then return timestamp.sec end
+  return math.floor(timestamp)
+end
+
 -- Without the pod's metadata, when the API server can't be reached or the pod went before its lines were
 -- read, the kubernetes filter adds nothing, but the file's name still says where a line comes from:
 -- kube.var.log.containers.<pod>_<namespace>_<container>-<container ID>.log. A function's pods are named
@@ -48,7 +56,7 @@ end
 -- The tick: a notice for each function and second whose dropped lines are counted, once that second is two
 -- seconds past. A backlog's later lines for the same second get a notice of their own.
 local function tick(timestamp)
-  local now = math.floor(timestamp)
+  local now = secondOf(timestamp)
   local notices = {}
   for key, n in pairs(dropped) do
     local ns, fn, second = string.match(key, "^(.-)\t(.-)\t(%d+)$")
@@ -98,7 +106,7 @@ function ff(tag, timestamp, record)
   local kind, id = string.match(out.message, "^(%u+) RequestId: (%S+)")
   if kind == "START" or kind == "END" then
     out.request_id = id
-    calls[pod] = { id = id, second = math.floor(timestamp) }
+    calls[pod] = { id = id, second = secondOf(timestamp) }
   elseif kind == "REPORT" then
     out.request_id = id
     calls[pod] = nil
@@ -107,7 +115,7 @@ function ff(tag, timestamp, record)
   end
 
   -- The runtime's own lines count too: a handler could print its markers to get past the limit.
-  local second = math.floor(timestamp)
+  local second = secondOf(timestamp)
   local key = ns .. " " .. second
   local kept, size = (lines[key] or 0) + 1, (bytes[key] or 0) + #out.message
   if kept > LINES or size > BYTES then
