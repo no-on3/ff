@@ -4,16 +4,19 @@
 # administration inside the cluster; each signed in as a browser signs in, the operator setting up a one-time
 # password as at a first login; an account asked for, the operator told by e-mail, and the account approved; a
 # function deployed, invoked inside gVisor and called at its URL; a bucket at its own host, and its site; a queue sent
-# to and read; a database and a cache, reached from a function at the addresses FF gave it; an address proved by its
-# link, and an e-mail from it handed to the server of customers' mail, which gives it to Mailpit. Then everything
-# deleted, the account closed and both users removed, whether the checks passed or not.
+# to and read; a database and a cache, reached from a function at the addresses FF gave it; a function made with the
+# AWS CLI at FF's Lambda endpoint, two versions of it and an alias moved; a SAM template deployed with ff, which
+# server.sh builds; an address proved by its link, and an e-mail from it handed to the server of customers' mail,
+# which gives it to Mailpit. Then everything deleted, the account closed and both users removed, whether the checks
+# passed or not.
 #   /data/ff/src/deploy/dev-server/smoke.sh        (on the server, as root: install.sh runs it after server.sh)
 set -euo pipefail
 home=/data/ff
 secrets=$home/secrets
 proxy=/data/proxy
 # FF's names on this server, as the edge's settings give them (k8s/edge.env): api.<domain> and the others.
-domain="$(sed -n 's/^FF_API_HOST=api\.//p' "$(dirname "${BASH_SOURCE[0]}")/k8s/edge.env")"
+here="$(dirname "${BASH_SOURCE[0]}")"
+domain="$(sed -n 's/^FF_API_HOST=api\.//p' "$here/k8s/edge.env")"
 [ -n "$domain" ] || { echo "smoke.sh: no FF_API_HOST=api.<domain> in k8s/edge.env" >&2; exit 1; }
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml PATH="/usr/local/bin:$PATH"
 work="$(mktemp -d "$home/.smoke-XXXXXX")" # readable by root alone: passwords and tokens
@@ -133,7 +136,7 @@ api() { # <username> <method> <path> [JSON, or @<file> of it]: the API's answer,
 customer="smoke-$run@$domain"
 # FF's realm makes each user's e-mail address its username (registrationEmailAsUsername).
 operator="smoke-operator-$run@$domain"
-account="" function="" bucket="" queue="" database="" cache="" reach="" sender=""
+account="" function="" bucket="" queue="" database="" cache="" reach="" sender="" lambda_key="" made="" stack=""
 cleanup() {
   local status=$?
   set +e
@@ -146,6 +149,9 @@ cleanup() {
     [ -z "$database" ] || api "$customer" DELETE "/databases/$database" >/dev/null 2>&1
     [ -z "$cache" ] || api "$customer" DELETE "/caches/$cache" >/dev/null 2>&1
     [ -z "$sender" ] || api "$customer" DELETE "/email/identities/$sender" >/dev/null 2>&1
+    [ -z "$stack" ] || ff "$stack" delete-stack --yes >/dev/null 2>&1
+    [ -z "$made" ] || api "$customer" DELETE "/functions/$made" >/dev/null 2>&1
+    [ -z "$lambda_key" ] || api "$customer" DELETE "/storage-keys/$lambda_key" >/dev/null 2>&1
     if [ -s "$work/$operator.tokens" ]; then
       refresh ff-admin "$operator" >/dev/null 2>&1
       api "$operator" POST "/admin/accounts/$account/close" '{"reason": "The development server smoke test, done"}' >/dev/null 2>&1
@@ -274,6 +280,79 @@ check "a function with their addresses as its secrets" "201 ACTIVE" "$(api "$cus
 reach="$(jq -r .id "$work/page")"
 check "which reaches both through its NetworkPolicy, their certificates checked: PostgreSQL's TLS, Valkey's AUTH and PING" "201 tls +OK +PONG" \
   "$(api "$customer" POST "/functions/$reach/invoke" '{"input": {}}') $(jq -r '.output.database + " " + .output.cache' "$work/page")"
+
+echo "== Lambda's API, with the AWS CLI at FF's endpoint: a function made, two versions, an alias moved"
+# The AWS CLI and ff in the AWS CLI's image, at the suites' version, whose CA certificates check Let's Encrypt's: on
+# the server's network, FF's names at its proxy, as at() takes them; the run's folder theirs. Their key and token are
+# in files of the run's (--env-file), never on a command line.
+aws_image=amazon/aws-cli:2.34.32
+docker pull -q "$aws_image" >/dev/null
+tools=(docker run --rm --network host --add-host "api.$domain:127.0.0.1" --add-host "lambda.$domain:127.0.0.1" -v "$work:/work")
+lambda() { # <arguments…>: the AWS CLI's answer at Lambda's endpoint, with the run's key; its errors in $work/aws.err
+  "${tools[@]}" -w /work --env-file "$work/lambda.env" "$aws_image" lambda --endpoint-url "https://lambda.$domain" \
+    --output json "$@" 2>"$work/aws.err"
+}
+# <zip> <version>: a package of one module, as Lambda takes one, its handler answering the version it is.
+lambda_zip() {
+  python3 -c 'import sys, zipfile
+with zipfile.ZipFile(sys.argv[1], "w") as archive:
+    archive.writestr("index.mjs", "export const handler = async () => ({ version: %s });" % sys.argv[2])' "$1" "$2"
+}
+check "a key that may change the account's functions, which AWS's tools sign with" 201 \
+  "$(api "$customer" POST /storage-keys "{\"name\": \"smoke-$run-lambda\", \"functions\": [\"*\"], \"functionAccess\": \"write\"}")"
+lambda_key="$(jq -r .id "$work/page")"
+# FF's region, the backend's own, which k8s/backend.env leaves as it is.
+jq -r '"AWS_ACCESS_KEY_ID=\(.id)\nAWS_SECRET_ACCESS_KEY=\(.secretAccessKey)\nAWS_DEFAULT_REGION=tn-tunis-1\nAWS_CONFIG_FILE=/dev/null\nAWS_SHARED_CREDENTIALS_FILE=/dev/null"' \
+  "$work/page" >"$work/lambda.env"
+lambda_zip "$work/made-1.zip" 1
+lambda_zip "$work/made-2.zip" 2
+name="smoke-$run-made"
+state="$(lambda create-function --function-name "$name" --runtime nodejs24.x --role "arn:aws:iam::$account:role/smoke" \
+  --handler index.handler --zip-file fileb://made-1.zip --publish | jq -r .State)"
+api "$customer" GET "/functions?name=$name" >/dev/null
+made="$(jq -r '.[0].id // empty' "$work/page")"
+check "CreateFunction answers Pending, and the CLI's waiter waits for Active, inside gVisor" "Pending accepted" \
+  "$state $(lambda wait function-active-v2 --function-name "$name" >/dev/null && echo accepted || head -c 300 "$work/aws.err")"
+lambda update-function-code --function-name "$name" --zip-file fileb://made-2.zip >/dev/null
+lambda wait function-updated-v2 --function-name "$name" >/dev/null || true
+check "its code changed, and a second version published" 2 "$(lambda publish-version --function-name "$name" | jq -r .Version)"
+# <the alias's version> <the call's answer>, called at the alias.
+alias_call() {
+  lambda invoke --function-name "$name" --qualifier live --payload '{}' --cli-binary-format raw-in-base64-out answer.json >"$work/meta.json"
+  echo "$(jq -r .ExecutedVersion "$work/meta.json") $(jq -r .version "$work/answer.json")"
+}
+lambda create-alias --function-name "$name" --name live --function-version 1 >/dev/null
+check "an alias at version 1, called" "1 1" "$(alias_call)"
+lambda update-alias --function-name "$name" --name live --function-version 2 >/dev/null
+check "the alias moved to version 2: the next call is version 2's" "2 2" "$(alias_call)"
+
+echo "== a SAM template, deployed with ff: ff init's hello world, called at its URL, then its stack deleted"
+ff_bin="$here/../../cli/target/dist/ff-linux-x86_64" # server.sh builds it
+ff() { # <folder in the run's> <ff's arguments…>: as the customer, its output in $work/ff.out and ff.err; its status printed
+  local folder=$1 code=0
+  shift
+  refresh ff-console "$customer" >/dev/null
+  jq -r --arg endpoint "https://api.$domain" --arg account "$account" \
+    '"FF_ENDPOINT=\($endpoint)\nFF_ACCOUNT=\($account)\nFF_TOKEN=\(.access_token)"' "$work/$customer.tokens" >"$work/ff.env"
+  "${tools[@]}" -w "/work/$folder" --env-file "$work/ff.env" -v "$(realpath "$ff_bin"):/usr/local/bin/ff:ro" --entrypoint ff \
+    "$aws_image" "$@" >"$work/ff.out" 2>"$work/ff.err" || code=$?
+  echo "$code"
+}
+template="smoke-$run-sam"
+check "ff init writes sam init's hello world as FF takes it" 0 "$(ff . init "$template" --runtime nodejs --template sam)"
+# The folder as it is: its package.json names no library, and the image has no npm.
+code="$(ff "$template" deploy template.yaml --no-build --output json)"
+stack="$template"
+check "ff deploy makes its function in the stack samconfig.toml names, its URL among the outputs" "0 created HelloWorldFunction true" \
+  "$code $(jq -r '.functions | map("\(.action) \(.logicalId)") | join(", ")' "$work/ff.out") $(jq -r '.functions[0].url // "" | startswith("https://")' "$work/ff.out")"
+url="$(jq -r '.functions[0].url' "$work/ff.out")"
+url_host="${url#https://}"
+url_host="${url_host%%/*}"
+check "which answers at its URL through the proxy, as sam init's did at its API" "200 hello world" \
+  "$(at "$url_host" "${url%/}/hello") $(jq -r .message "$work/page")"
+check "ff delete-stack deletes the stack, with its function" "0 deleted the stack $template" \
+  "$(ff "$template" delete-stack --yes) $(tail -n 1 "$work/ff.out")"
+stack=""
 
 echo "== e-mail from the account, through the server of customers' mail, into Mailpit"
 sender="smoke-$run-mail@$domain"
