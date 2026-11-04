@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  The small app: its page a site, orders taken at a function's URL into PostgreSQL, the latest listed from a cache,
+  each order's receipt made through a queue into a bucket and e-mailed, and a report each night. Its database, its
+  cache and its mail are made apart (ff db create, ff caches create, ff email add), as no resource of SAM's makes them;
+  their connection strings are the functions' secrets, which stay out of the template.
+
+Parameters:
+  ReceiptsBucketName:
+    Type: String
+    Description: The receipts' bucket, a name of yours, as a bucket's name is unique across FF, and across S3
+  SiteBucketName:
+    Type: String
+    Description: The page's bucket, a name of yours too
+  SiteOrigin:
+    Type: String
+    Description: >-
+      The page's address, which the API's URL lets in: on FF, http://<SiteBucketName>.site.localhost:3004 in
+      development; on AWS, CloudFront's in front of the bucket
+  ReceiptsFrom:
+    Type: String
+    Default: ""
+    Description: The address receipts go from, proved by the account or at a domain it proved; empty, none is e-mailed
+
+Globals:
+  Function:
+    Runtime: nodejs24.x
+    CodeUri: .
+    MemorySize: 128
+    Timeout: 5
+    Environment:
+      Variables:
+        RECEIPTS_BUCKET: !Ref ReceiptsBucket
+
+Resources:
+  # Its URL: POST /orders writes an order and puts it in the queue, GET /orders lists the latest, from the cache,
+  # GET /orders/<id>/receipt reads a receipt.
+  Api:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-api"
+      Handler: index.http
+      Environment:
+        Variables:
+          RECEIPTS_QUEUE: !GetAtt NewOrders.QueueName
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins:
+            - !Ref SiteOrigin
+          AllowMethods:
+            - GET
+            - POST
+          AllowHeaders:
+            - content-type
+      # For AWS: FF's keys give each function what its account has.
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt NewOrders.QueueName
+        - S3ReadPolicy:
+            BucketName: !Ref ReceiptsBucketName
+
+  # Each new order's receipt, from the queue in batches, written to the bucket and e-mailed; the messages whose receipt
+  # it couldn't write named in its answer, so that they alone come back.
+  Receipts:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-receipts"
+      Handler: index.receipts
+      Environment:
+        Variables:
+          RECEIPTS_FROM: !Ref ReceiptsFrom
+      Events:
+        NewOrder:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt NewOrders.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref ReceiptsBucketName
+        - Statement:
+            - Effect: Allow
+              Action: ses:SendEmail
+              Resource: "*"
+
+  # Each night at 02:00 UTC: the day before counted, orders older than 90 days removed, with their receipts.
+  Nightly:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-nightly"
+      Handler: index.nightly
+      Events:
+        EveryNight:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ReceiptsBucketName
+
+  NewOrders:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-new-orders"
+
+  ReceiptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ReceiptsBucketName
+
+  # The page's bucket, a site; its files go up with ff sites deploy, as SAM uploads none.
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref SiteBucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: 404.html
+      # For AWS, where a bucket's policy makes its site public; on FF the website configuration does, and these two
+      # are kept without effect.
+      PublicAccessBlockConfiguration:
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  SitePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${SiteBucket.Arn}/*"
+
+Outputs:
+  OrdersApi:
+    Description: The API's address, which the page's config.json names
+    Value: !GetAtt ApiUrl.FunctionUrl
+  OrdersPage:
+    Description: The page's address
+    Value: !GetAtt SiteBucket.WebsiteURL
+  NewOrdersQueue:
+    Description: The queue of new orders
+    Value: !Ref NewOrders

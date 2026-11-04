@@ -806,60 +806,46 @@ ff caches get sessions                                  # its memory used, its c
 
 [`examples/orders-app`](../examples/orders-app/README.md) is a small app as one would write it for AWS Lambda: its page a static site, orders taken at a web address and kept in PostgreSQL, the latest listed from a cache, each order's receipt made in the background, kept in a bucket and e-mailed, and a report each night, from a schedule. One package, with `pg`, the PostgreSQL driver, `@redis/client`, a Valkey client, and AWS's S3, SQS and SES clients, `@aws-sdk/client-s3`, `@aws-sdk/client-sqs` and `@aws-sdk/client-sesv2`, makes its three functions; `site/` is its page. On FF it keeps its orders in one of FF's databases, the latest in one of FF's caches, its new orders in one of FF's queues and its receipts in one of FF's buckets, sends its mail through FF's SES endpoint, and its page is a site of a bucket of FF's, as it would use RDS, ElastiCache, SQS, S3, SES and S3 with CloudFront on AWS: its functions reach them all with the account's internet access off, and its code names neither FF nor AWS, only `DATABASE_URL`, `REDIS_URL`, `RECEIPTS_QUEUE`, `RECEIPTS_BUCKET` and `RECEIPTS_FROM`. In development, functions get their own keys to buckets, queues and mail once the backend knows where they reach its front doors (`FF_STORAGE_FUNCTION_ENDPOINT`, `FF_SQS_FUNCTION_ENDPOINT` and `FF_SES_FUNCTION_ENDPOINT`, in "Files in buckets", "Queues, as Amazon SQS" and "E-mail from apps" above), and the servers of customers' databases, caches and mail run (setup's steps 10 to 12).
 
-**The three functions.** From the app's folder; the second and the third have the same package, so nothing goes up again:
+**The app as one template.** [`template.yaml`](../examples/orders-app/template.yaml) is the app as SAM writes it: its three functions, each a handler of `index.js`, from the one package; `shop-api`'s URL, open to anyone, which lets the page's origin in (CORS); `shop-receipts` reading the queue of new orders, as Lambda's event source mapping for SQS, naming the messages it failed; `shop-nightly`'s schedule, each night at 02:00 UTC; the queue; the receipts' bucket; and the page's, a site. Each function's variables name the bucket (`!Ref ReceiptsBucket`), the API's the queue too (`!GetAtt NewOrders.QueueName`), and their `Policies` are for AWS, where a role gives the clients their credentials. [`samconfig.toml`](../examples/orders-app/samconfig.toml) names the stack, `shop`, which makes `shop-api`, `shop-receipts` and `shop-nightly`, and the parameters: the buckets' names, yours to choose, as a bucket's name is unique across FF, and the page's origin with them. From the app's folder:
 
 ```bash
 cd examples/orders-app
-ff deploy . --name orders-api --handler index.http            # npm installs pg and the clients in a copy of the folder; the package goes up
-ff deploy . --name orders-receipts --handler index.receipts   # "package: …, which the account had"
-ff deploy . --name orders-nightly --handler index.nightly
+ff doctor .                                                   # nothing that works on FF alone, the template read as CloudFormation reads it
+ff deploy template.yaml                                       # the stack shop: its buckets, its queue, then its functions; npm installs pg and the clients in a copy of the folder
 ```
 
-**Its database, its bucket and its queue.** `ff db create` makes the database and sets its connection string as the API's and the night's `DATABASE_URL`, rolling each out; the queue holds the new orders, and the bucket the receipts, each named in a variable: the API sends to the queue and reads the receipts back, the receipts' function writes them, the night removes them. Each function has a key of its own to the account's buckets and queues, with the region and the front doors' addresses, in its environment, so `new S3Client({})` and `new SQSClient({})` need nothing more, as on AWS Lambda with a role:
+The deploy prints what it made and the template's outputs, `OrdersApi`, the API's address, and `OrdersPage`, the page's; the package goes up once, for the three. Each function has a key of its own to the account's buckets and queues, with the region and the front doors' addresses, in its environment, so `new S3Client({})` and `new SQSClient({})` need nothing more, as on AWS Lambda with a role. A change to the template is deployed the same way, and changes what changed ("SAM templates", below).
+
+**Its database, its cache and its mail,** made apart, as no resource of SAM's makes them. `ff db create` makes the database and sets its connection string as the API's and the night's `DATABASE_URL`, a secret, rolling each out; `ff caches create` makes the cache and sets its address as their `REDIS_URL`: the API keeps the latest orders there a minute, a new order clears them, and the night clears them when it removes some; without it, the list is read from the database each time. Secrets stay out of the template, and its next deploy leaves them be. The receipts go from an address the account proved, or one at a domain it proved, and, in the sandbox, only to what it proved: a domain's records, or an address's link, which FF e-mails it (in development, to Mailpit at http://localhost:58025 when `FF_SMTP_URL` names it, else into the backend's log). Then the template's `ReceiptsFrom`, each parameter not given keeping the stack's last value:
 
 ```bash
-ff db create orders --secret-for orders-api --secret-for orders-nightly
-ff buckets create shop-receipts                               # a name of yours: bucket names are unique across FF
-ff queues create new-orders
-ff env set orders-api RECEIPTS_QUEUE=new-orders RECEIPTS_BUCKET=shop-receipts
-ff env set orders-receipts RECEIPTS_BUCKET=shop-receipts
-ff env set orders-nightly RECEIPTS_BUCKET=shop-receipts
-ff event-sources add new-orders orders-receipts --report-batch-item-failures
-```
-
-**Its cache and its mail.** `ff caches create` makes the cache and sets its address as the API's and the night's `REDIS_URL`: the API keeps the latest orders there a minute, a new order clears them, and the night clears them when it removes some; without it, the list is read from the database each time. The receipts go from an address the account proved, or one at a domain it proved, and, in the sandbox, only to what it proved: a domain's records, or an address's link, which FF e-mails it (in development, to Mailpit at http://localhost:58025 when `FF_SMTP_URL` names it, else into the backend's log):
-
-```bash
-ff caches create orders-cache --secret-for orders-api --secret-for orders-nightly
+ff db create shop --secret-for shop-api --secret-for shop-nightly
+ff caches create shop-cache --secret-for shop-api --secret-for shop-nightly
 ff email add orders@example.tn                                # the sender; follow the link FF e-mails it
 ff email add me@example.tn                                    # a recipient, for the sandbox: the same
-ff env set orders-receipts RECEIPTS_FROM=orders@example.tn
+ff deploy template.yaml --parameter-overrides ReceiptsFrom=orders@example.tn   # shop-receipts's RECEIPTS_FROM
 ```
 
-**The web address.**
+**The web address,** the output `OrdersApi`:
 
 ```bash
-ff url enable orders-api --auth none                          # its address: http://<id>.fn.localhost:3001/
-ff invoke orders-api --http POST /orders --data '{"item": "harissa", "quantity": 2, "email": "me@example.tn"}'
+ff invoke shop-api --http POST /orders --data '{"item": "harissa", "quantity": 2, "email": "me@example.tn"}'
 # HTTP 201, then {"id":1,"item":"harissa","quantity":2,"email":"me@example.tn","created_at":"…","receipt":"queued"}
 curl -si http://<id>.fn.localhost:3001/orders | grep -i x-cache   # x-cache: miss, then hit for a minute
-ff invoke orders-api --http GET /orders/1/receipt             # a moment later: Order 1, 2 × harissa, and its time
-ff history orders-receipts                                    # the call that wrote it, its source sqs
+ff invoke shop-api --http GET /orders/1/receipt               # a moment later: Order 1, 2 × harissa, and its time
+ff history shop-receipts                                      # the call that wrote it, its source sqs
 ff email messages                                             # the receipt, sent to me@example.tn
 ```
 
 Its handler, `index.http`, takes AWS Lambda's event for function URLs and answers with a response object. Each instance connects at its first call, with the string the secret gives it, makes the table if it isn't there, and keeps the connection for the calls after; it connects to the cache the same way, over TLS, and a cache it can't reach is logged and passed by, the database answering. `GET /orders` lists the latest without the addresses orders gave, since the page shows them to anyone. The order is written first, then put in the queue, found by its name (`GetQueueUrl`) as on AWS: the answer doesn't wait for the receipt. A message that can't be sent leaves the order, with `"receipt": null` in the answer and a line in the log; without `RECEIPTS_QUEUE`, the handler writes the receipt itself, as the app did before it had a queue.
 
-**The receipts, in the background.** `orders-receipts` reads the queue as Lambda's event source mapping for SQS reads one: FF calls `index.receipts` with SQS's event as soon as an order is sent, and it writes each order's receipt, `receipts/<id>.txt`, to the bucket. With `--report-batch-item-failures`, a receipt it couldn't write names its message in `batchItemFailures`: that message alone comes back, once the queue's visibility timeout ends, and the others are deleted. Then it e-mails the receipt from `RECEIPTS_FROM` to the order's address, with `new SESv2Client({})`; a receipt SES refuses is logged, and its order and receipt kept, since a refusal doesn't change on a retry. A message received twice writes the same receipt again, the same file, and e-mails it again. To keep the orders whose receipt never can be written, give the queue a dead-letter queue (`ff queues create new-orders-dlq`, then `ff queues set new-orders --dead-letter-queue new-orders-dlq`), and an alarm on its `ApproximateNumberOfMessagesVisible`. With one of the account's keys, the AWS CLI reads a receipt as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
+**The receipts, in the background.** `shop-receipts` reads the queue as Lambda's event source mapping for SQS reads one: FF calls `index.receipts` with SQS's event as soon as an order is sent, and it writes each order's receipt, `receipts/<id>.txt`, to the bucket. With `--report-batch-item-failures`, a receipt it couldn't write names its message in `batchItemFailures`: that message alone comes back, once the queue's visibility timeout ends, and the others are deleted. Then it e-mails the receipt from `RECEIPTS_FROM` to the order's address, with `new SESv2Client({})`; a receipt SES refuses is logged, and its order and receipt kept, since a refusal doesn't change on a retry. A message received twice writes the same receipt again, the same file, and e-mails it again. To keep the orders whose receipt never can be written, give the queue a dead-letter queue in the template (a second `AWS::SQS::Queue`, and the first one's `RedrivePolicy` naming its `Arn`), and an alarm on its `ApproximateNumberOfMessagesVisible`. With one of the account's keys, the AWS CLI reads a receipt as well: `aws s3 cp s3://shop-receipts/receipts/1.txt -`.
 
-**Its page, a site.** `site/` is a page of plain HTML and JavaScript: it lists the latest orders and sends new ones to the API, whose address it reads from `config.json`, written beside it at the deploy. Its bucket is a site, and the function URL lets the site's origin in (CORS):
+**Its page, a site.** `site/` is a page of plain HTML and JavaScript: it lists the latest orders and sends new ones to the API, whose address it reads from `config.json`, written beside it at the deploy. Its bucket is the template's site, whose files `ff sites deploy` puts there, as SAM uploads none; the function URL lets the site's origin in, the template's `SiteOrigin`:
 
 ```bash
-ff buckets create shop-site                                   # a name of yours, as the receipts' bucket's
-printf '{"api": "%s"}\n' "$(ff url show orders-api --output json | jq -r .url.functionUrl)" > site/config.json
-ff sites deploy shop-site site                                # http://shop-site.site.localhost:3004
-ff url enable orders-api --auth none --cors-origin http://shop-site.site.localhost:3004 \
-  --cors-method GET --cors-method POST --cors-header content-type
+printf '{"api": "%s"}\n' "$(ff url show shop-api --output json | jq -r .url.functionUrl)" > site/config.json
+ff sites deploy shop-site site                                # http://shop-site.site.localhost:3004, the output OrdersPage
 ```
 
 Open http://shop-site.site.localhost:3004 in a browser: an order made there is in the list at once, the cache cleared by it.
@@ -867,23 +853,22 @@ Open http://shop-site.site.localhost:3004 in a browser: an order made there is i
 **The nightly report, called without waiting.**
 
 ```bash
-ff schedule set orders-nightly "cron(0 2 * * ? *)"            # every night at 02:00 UTC; it says the next runs
-ff invoke orders-nightly --async --data @events/scheduled.json  # a night's run, now, as the schedule calls it: its request ID at once
-ff history orders-nightly                                     # the run, "asynchronously, attempt 1"
-ff logs orders-nightly                                        # report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}
+ff schedule list shop-nightly                                 # the template's EveryNight, cron(0 2 * * ? *), its next run
+ff invoke shop-nightly --async --data @events/scheduled.json  # a night's run, now, as the schedule calls it: its request ID at once
+ff history shop-nightly                                       # the run, "asynchronously, attempt 1"
+ff logs shop-nightly                                          # report {"day":"2026-10-21","orders":1,"items":2,"removed":0,"receipts":0}
 ```
 
-The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself, without waiting, as `--async` does: a run that fails is retried a minute, then two minutes later, as Lambda retries it, and `ff async-config orders-nightly --on-failure <a queue's ARN>` keeps the record of one that fails for good. `ff schedule list orders-nightly` says how the last run went. `hack/cli-e2e.sh` runs this walkthrough end to end.
+The report counts the day before the event's `time`: set it to tomorrow's 02:00 in `events/scheduled.json` to count today's orders. Orders older than 90 days are removed, and their receipts with them, a `DeleteObjects` for each thousand; `receipts` counts the receipts asked to be deleted, as S3 counts a key already gone as deleted. At 02:00 UTC the scheduler calls the function with that event itself, without waiting, as `--async` does: a run that fails is retried a minute, then two minutes later, as Lambda retries it, and an `EventInvokeConfig` in the template, its `DestinationConfig`'s `OnFailure` a queue, keeps the record of one that fails for good. `ff schedule list shop-nightly` says how the last run went. `hack/cli-e2e.sh` runs this walkthrough end to end.
 
-**Its way to AWS,** before you delete it: `ff export ../orders-to-aws` writes what moving it needs, as [Moving to AWS](#moving-to-aws-ff-export) says: its three functions, `orders-receipts`'s role writing the receipts to `shop-receipts` and sending from `orders@example.tn` alone, as its keys did, and the API's sending to `new-orders`, which it can't read; the queue, the buckets, and the runbook that moves the database, the files, the cache and the mail first. Afterwards:
+**Its way to AWS,** before you delete it: `ff export ../orders-to-aws` writes what moving it needs, as [Moving to AWS](#moving-to-aws-ff-export) says: its three functions, `shop-receipts`'s role writing the receipts to `shop-receipts` and sending from `orders@example.tn` alone, as its keys did, and the API's sending to `shop-new-orders`, which it can't read; the queue, the buckets, and the runbook that moves the database, the files, the cache and the mail first. Afterwards:
 
 ```bash
-ff delete orders-nightly --yes && ff delete orders-receipts --yes && ff delete orders-api --yes
-ff queues delete new-orders --yes                             # the queue, and its mapping with it
-ff db delete orders --yes                                     # the database, with its data
-ff caches delete orders-cache --yes                           # the cache, with its keys
-ff buckets delete shop-receipts --force --yes                 # the bucket, with its receipts
+ff buckets delete shop-receipts --force --yes                 # the bucket, with its receipts: a stack deletes empty buckets alone, as CloudFormation
 ff buckets delete shop-site --force --yes                     # the page's bucket, its site with it
+ff delete-stack --yes                                         # the stack samconfig.toml names: its functions, with their URL, schedule and mapping, and its queue
+ff db delete shop --yes                                       # the database, with its data
+ff caches delete shop-cache --yes                             # the cache, with its keys
 ff email delete orders@example.tn --yes && ff email delete me@example.tn --yes
 ```
 
@@ -893,11 +878,11 @@ ff email delete orders@example.tn --yes && ff email delete me@example.tn --yes
 DATABASE_URL=$(hack/k8s/app-database.sh up)                 # postgres://app:…@198.18.0.10:5432/app
 docker compose exec -T postgres psql -U postgres -d serverless_platform \
   -c "UPDATE accounts SET internet_egress = true WHERE id = '$(curl -s "$FF/me" | jq -r '.accounts[0].id')'"
-printf '%s\n' "$DATABASE_URL" | ff secrets set orders-api DATABASE_URL
+printf '%s\n' "$DATABASE_URL" | ff secrets set shop-api DATABASE_URL
 hack/k8s/app-database.sh down                               # afterwards: the database, with its data
 ```
 
-**In production** the database, the cache, the queue, the buckets and the mail are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on; the receipts go from a domain of yours, proved by its records, once FF's operator lets the account out of the sandbox. The same folder runs on AWS Lambda with an RDS database, an ElastiCache cache, an SQS queue, S3 buckets and SES, its page on S3 behind CloudFront: `ff package` writes its zip, the function's role gives the clients their credentials, and the export kit has the queue and its mapping ([`data/sqs.md`](../cli/templates/export/data/sqs.md)), the page ([`data/s3-website.md`](../cli/templates/export/data/s3-website.md)), the cache ([`data/elasticache.md`](../cli/templates/export/data/elasticache.md)) and the mail ([`data/ses.md`](../cli/templates/export/data/ses.md)).
+**In production** the database, the cache, the queue, the buckets and the mail are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on; the receipts go from a domain of yours, proved by its records, once FF's operator lets the account out of the sandbox. The same folder runs on AWS Lambda with an RDS database, an ElastiCache cache, an SQS queue, S3 buckets and SES, its page on S3 behind CloudFront: its `template.yaml` passes `sam validate --lint` as it is, and `sam deploy` takes the one `ff export` writes from the stack, which adds the secrets, `DATABASE_URL` and `REDIS_URL`, as parameters CloudFormation doesn't show back, each function's role giving the clients their credentials; and the export kit has the queue and its mapping ([`data/sqs.md`](../cli/templates/export/data/sqs.md)), the page ([`data/s3-website.md`](../cli/templates/export/data/s3-website.md)), the cache ([`data/elasticache.md`](../cli/templates/export/data/elasticache.md)) and the mail ([`data/ses.md`](../cli/templates/export/data/ses.md)).
 
 ### The way out
 

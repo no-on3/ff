@@ -33,13 +33,13 @@
 # with a key naming that queue alone, received again by ff until the third receive moves it to the
 # dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
 # CLI, its metrics, the queue deleted and the other account seeing none, its month in ff usage; the getting-started
-# guide's walkthrough of the small app on FF alone, internet access off: its orders in FF's database,
-# the latest kept in FF's cache, each one put in a queue with the function's own key, read by a function
-# that writes its receipt to a bucket and e-mails it through the SES endpoint from an address proved by its
-# link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called
-# without waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; the account exported
-# to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's role what its keys used, the
-# template deployed back on FF by another account, which makes the same; and
+# guide's walkthrough of the small app on FF alone, one SAM template deployed as a stack, internet access off: its
+# orders in FF's database, the latest kept in FF's cache, each one put in a queue with the function's own key, read by
+# a function that writes its receipt to a bucket and e-mails it through the SES endpoint from an address proved by its
+# link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called without
+# waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; its stack deleted at the
+# end; the account exported to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's
+# role what its keys used, the template deployed back on FF by another account, which makes the same; and
 # ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
@@ -1226,27 +1226,31 @@ ff delete cli-db-orders --yes
 section_def databases_used section_databases_used databases budget=15
 
 section_small_app() {
-section "the small app on FF alone, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
+section "the small app on FF alone, as one SAM template, as the guide walks through it: its page a site, its orders in FF's database, the latest in a cache, each one's receipt made through a queue and e-mailed"
 # In account A, whose functions don't reach the internet: FF's database and cache, the S3 front door, the SQS and SES
 # endpoints, they do.
-ff deploy "$app" --name shop-api --handler index.http
-check "examples/orders-app, the Valkey, S3, SQS and SES clients among its libraries, deployed as shop-api" "0 created shop-api (nodejs, 128 MB, 5 s): ACTIVE" \
-  "$(code) $(out | head -1 | sed 's/ in [0-9.]* s$//')"
-ff deploy "$app" --name shop-receipts --handler index.receipts
-ff deploy "$app" --name shop-nightly --handler index.nightly
+# The app as one SAM template, deployed as the stack its samconfig.toml names, the buckets' names the suite's own: its
+# three functions, its queue, the receipts' bucket and the page's, a site, whose origin the API's URL lets in.
+site_origin="http://cli-shop-site.site.localhost:$website_port"
+in_folder "$app" deploy template.yaml --parameter-overrides ReceiptsBucketName=cli-receipts SiteBucketName=cli-shop-site \
+  "SiteOrigin=$site_origin" --output json
+check "examples/orders-app's template.yaml deployed as the stack shop: two buckets, the page's a site, a queue, three functions with the Valkey, S3, SQS and SES clients among their libraries" \
+  "0 shop cli-receipts,cli-shop-site $site_origin shop-new-orders shop-api,shop-receipts,shop-nightly" \
+  "$(code) $(out | jq -r '"\(.stack) \([.buckets[].name] | join(",")) \(.buckets[1].site) \([.queues[].name] | join(",")) \([.functions[].name] | join(","))"')"
+shop_url="$(out | jq -r '.outputs[] | select(.name == "OrdersApi") | .value' | sed 's:/$::')"
+ff env list shop-api --show
+check "the queue's name and the receipts' bucket in the API's variables, as the template's GetAtt and Ref give them" \
+  "0 RECEIPTS_BUCKET=cli-receipts RECEIPTS_QUEUE=shop-new-orders" "$(code) $(out | paste -sd' ')"
+ff event-sources list --function shop-receipts --output json
+check "shop-receipts reads the queue ten messages a call, naming the messages it fails, as the template's SQS event says" \
+  "0 shop-new-orders 10 ReportBatchItemFailures Enabled" \
+  "$(code) $(out | jq -r '.[] | "\(.eventSourceArn | split(":") | last) \(.batchSize) \(.functionResponseTypes | join(",")) \(.state)"')"
+ff schedule list shop-nightly --output json
+check "shop-nightly runs each night at 02:00 UTC, the template's Schedule event" "0 EveryNight cron(0 2 * * ? *) true" \
+  "$(code) $(out | jq -r '.[] | "\(.name) \(.expression) \(.enabled)"')"
 ff db create shop --secret-for shop-api --secret-for shop-nightly --output json
 check "ff db create: FF's database, its connection string the API's and the night's DATABASE_URL" "0 active shop-api,shop-nightly" \
   "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
-ff buckets create cli-receipts
-ff queues create cli-new-orders
-ff env set shop-api RECEIPTS_QUEUE=cli-new-orders RECEIPTS_BUCKET=cli-receipts
-ff env set shop-receipts RECEIPTS_BUCKET=cli-receipts
-ff env set shop-nightly RECEIPTS_BUCKET=cli-receipts
-ff env list shop-receipts
-check "a bucket for the receipts and a queue of new orders, named in the functions' variables" "0 RECEIPTS_BUCKET" "$(code) $(out | paste -sd' ')"
-ff event-sources add cli-new-orders shop-receipts --report-batch-item-failures
-check "shop-receipts reads the queue, naming the messages it fails" "0 true" \
-  "$(code) $(out | grep '^shop-receipts reads the queue cli-new-orders: .*the answer naming the messages that failed' >/dev/null && echo true || echo false)"
 ff caches create cli-orders --secret-for shop-api --secret-for shop-nightly --output json
 check "ff caches create: the app's cache, its address the API's and the night's REDIS_URL" "0 active shop-api,shop-nightly" \
   "$(code) $(out | jq -r '"\(.status) \([.secretsSet[].function] | join(","))"')"
@@ -1264,9 +1268,14 @@ sender_proved="$(follow_link)"
 ff email add buyer@shop-cli.tn
 check "the receipts' sender and their recipient, each proved by its link" "200 200 SUCCESS SUCCESS" \
   "$sender_proved $(follow_link) $("$ff_bin" email identities --output json | jq -r '[.[].status] | join(" ")')"
-ff env set shop-receipts RECEIPTS_BUCKET=cli-receipts RECEIPTS_FROM=orders@shop-cli.tn
-ff url enable shop-api --auth none
-shop_url="$(out | grep -oE 'http://[a-z0-9]+\.fn\.localhost:[0-9]+' | head -1)"
+# The sender, once proved, as the guide gives it: the template's ReceiptsFrom on a second deploy, each parameter not
+# given keeping the stack's last value, and the secrets ff db and ff caches set left as they are.
+in_folder "$app" deploy template.yaml --parameter-overrides ReceiptsFrom=orders@shop-cli.tn --output json
+check "a second deploy gives shop-receipts its sender alone, the other parameters the stack's last, the secrets kept" \
+  "0 unchanged,updated,unchanged environment RECEIPTS_BUCKET=cli-receipts|RECEIPTS_FROM=orders@shop-cli.tn DATABASE_URL,REDIS_URL" \
+  "$(code) $(out | jq -r '"\([.functions[].action] | join(",")) \(.functions[1].changed | join(","))"') \
+$("$ff_bin" env list shop-receipts --show | paste -sd'|') \
+$("$ff_bin" secrets list shop-api --output json | jq -r '[.secrets[].name] | sort | join(",")')"
 ff invoke shop-api --http POST /orders --data '{"item": "bsissa", "quantity": 4, "email": "buyer@shop-cli.tn"}'
 check "a POST writes the order to FF's database, then puts it in the queue with the function's own key" \
   "0 HTTP 201 bsissa 4 queued" "$(code) $(out | head -1) $(out | tail -1 | jq -r '"\(.item) \(.quantity) \(.receipt)"')"
@@ -1277,7 +1286,7 @@ ff invoke shop-api --http GET /orders/1/receipt
 check "  ... which shop-receipts reads, writing its receipt to the bucket: a GET reads it back" "0 HTTP 200 Order 1|4 × bsissa" \
   "$(code) $(out | head -1) $(out | sed -n '3,4p' | paste -sd'|')"
 # The receipt is written during the call, its message deleted once the call has ended.
-held() { "$ff_bin" queues get cli-new-orders --output json | jq '.messages.available + .messages.inFlight'; }
+held() { "$ff_bin" queues get shop-new-orders --output json | jq '.messages.available + .messages.inFlight'; }
 for _ in $(seq 30); do
   [ "$("$ff_bin" history shop-receipts --output json | jq -r '.invocations[0].status')" = COMPLETED ] && [ "$(held)" = 0 ] && break
   sleep 1
@@ -1300,18 +1309,15 @@ latest() { curl -s -o /dev/null -D - "$shop_url/orders" | tr -d '\r' | sed -n 's
 check "the latest orders read from the database, then from the cache, over TLS, with the address its secret gives" "miss hit" "$(latest) $(latest)"
 ttl="$(cache_cli "$cache_url" TTL orders:latest)"
 check "  ... the list kept there a minute, as the customer's own client sees it" "true" "$([ "$ttl" -gt 0 ] 2>/dev/null && [ "$ttl" -le 60 ] && echo true || echo false)"
-# Its page: site/ deployed as a site of a bucket of its own, the API's address in config.json beside it, and the
-# function URL letting the page's origin in.
+# Its page: site/'s files deployed to the template's site, as SAM uploads none, the API's address in config.json beside
+# them.
 cp -r "$app/site" "$work/shop-site"
 printf '{"api": "%s"}\n' "$shop_url" >"$work/shop-site/config.json"
-ff buckets create cli-shop-site
 ff sites deploy cli-shop-site "$work/shop-site"
-site_origin="http://cli-shop-site.site.localhost:$website_port"
-check "the app's page deployed as a site of its own bucket" "0 $site_origin" "$(code) $(out | tail -1)"
+check "the app's page deployed to its bucket's site" "0 $site_origin" "$(code) $(out | tail -1)"
 check "  ... a browser gets the page, and the API's address beside it" "200 Orders $shop_url" \
   "$(curl -s -o "$work/shop-page.html" -w '%{http_code}' "$site_origin/") $(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' "$work/shop-page.html") $(curl -s "$site_origin/config.json" | jq -r .api)"
-ff url enable shop-api --auth none --cors-origin "$site_origin" --cors-method GET --cors-method POST --cors-header content-type
-check "  ... and the function URL lets the page's origin in, as a browser's preflight asks" "$site_origin" \
+check "  ... and the function URL lets the page's origin in, as the template's CORS says and a browser's preflight asks" "$site_origin" \
   "$(curl -s -o /dev/null -D - -X OPTIONS "$shop_url/orders" -H "Origin: $site_origin" -H 'Access-Control-Request-Method: POST' -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
 # The same receipt as the AWS CLI sees it, with a key of the account's that reads that bucket alone.
 ff keys create --bucket cli-receipts --read-only
@@ -1418,7 +1424,7 @@ ff url enable shop-api --alias stable --auth none
 ff domains add shop-api stable.shop-cli.tn --alias stable
 check "  ... stable with a URL of its own, and a domain on it" "0 stable.shop-cli.tn: pending" "$(code) $(out | head -1)"
 ff doctor "$app" --output json
-check "ff doctor finds nothing in the small app's code that works on FF alone, its template-free folder read as its package" \
+check "ff doctor finds nothing in the small app's code or its template that works on FF alone, the folder read as its package" \
   "0 0 0" "$(code) $(out | jq -r '"\(.errors) \(.warnings)"')"
 # What still points at FF: the shop's functions reached its S3, SQS and SES through FF's endpoints, as their keys say.
 endpoints_of() { jq -r --arg resource "function $1" '.findings[] | select(.resource == $resource and .check == "ff-endpoints") | .message' "$work/out"; }
@@ -1427,7 +1433,7 @@ check "ff doctor --deployed: shop-receipts reached FF's S3 and SES, shop-api FF'
   "0 true true true" \
   "$(code) $(endpoints_of shop-receipts | grep -F "S3 (cli-receipts" >/dev/null && echo true || echo false) \
 $(endpoints_of shop-receipts | grep -F "SES (" >/dev/null && echo true || echo false) \
-$(endpoints_of shop-api | grep -F "SQS (cli-new-orders)" >/dev/null && echo true || echo false)"
+$(endpoints_of shop-api | grep -F "SQS (shop-new-orders)" >/dev/null && echo true || echo false)"
 deployed="$(jq -c .findings "$work/out")"
 ff doctor --deployed --strict
 check "  ... which --strict fails on, with 1" "1" "$(code)"
@@ -1449,7 +1455,7 @@ check "  ... shop-receipts's role writes the receipts and sends from the proved 
 $(resource_of ShopReceiptsFunction | grep -A1 -- '- ses:SendEmail' | grep -F 'identity/orders@shop-cli.tn' >/dev/null && echo true || echo false) \
 $(resource_of ShopReceiptsFunction | grep -E 'S3ReadPolicy|S3CrudPolicy|SQSSendMessagePolicy' >/dev/null && echo true || echo false)"
 check "  ... shop-api's sends to the queue of new orders, which it can't read, and reads the receipts" "true false true" \
-  "$(resource_of ShopApiFunction | grep -A1 -- '- SQSSendMessagePolicy:' | grep 'QueueName: !GetAtt CliNewOrdersQueue.QueueName' >/dev/null && echo true || echo false) \
+  "$(resource_of ShopApiFunction | grep -A1 -- '- SQSSendMessagePolicy:' | grep 'QueueName: !GetAtt ShopNewOrdersQueue.QueueName' >/dev/null && echo true || echo false) \
 $(resource_of ShopApiFunction | grep -- '- SQSPollerPolicy:' >/dev/null && echo true || echo false) \
 $(resource_of ShopApiFunction | grep -A1 -- '- S3ReadPolicy:' | grep 'BucketName: !Ref CliReceiptsBucketName' >/dev/null && echo true || echo false)"
 # The tools AWS's users check a template and Terraform with, as hack/install-tools.sh pins them, the provider from
@@ -1497,7 +1503,7 @@ done < <(awk '/^  [A-Za-z0-9]+BucketName:$/ { p = substr($1, 1, length($1) - 1) 
 for parameter in $(sed -n 's/^\([A-Za-z0-9]*\)=$/\1/p' "$trip/secrets.template.env"); do overrides+=("$parameter=filled-by-b"); done
 in_folder "$trip" --profile b deploy template.yaml --stack-name shop --parameter-overrides "${overrides[@]}" --yes
 check "account B deploys it as the stack shop: A's three functions, its queue and its bucket, under the name B gave it" \
-  "0 shop-api,shop-nightly,shop-receipts cli-new-orders cli-receipts-b" \
+  "0 shop-api,shop-nightly,shop-receipts shop-new-orders cli-receipts-b" \
   "$(code) $("$ff_bin" --profile b list --output json | jq -r '[.[].name] | sort | join(",")') \
 $("$ff_bin" --profile b queues list --output json | jq -r '[.[].name] | join(",")') \
 $("$ff_bin" --profile b buckets list --output json | jq -r '[.[].name] | join(",")')"
@@ -1533,7 +1539,7 @@ $("$ff_bin" --profile b alias list shop-receipts --output json | jq -r '.[0].fun
 mapping_facts() { "$ff_bin" "$@" event-sources list --function shop-receipts --output json | jq -c '[.[] | {
   queue: (.eventSourceArn | split(":") | last), function: (.functionArn | split(":")[6]), batchSize,
   maximumBatchingWindowInSeconds, functionResponseTypes, scalingConfig, state }]'; }
-queue_facts() { "$ff_bin" "$@" queues get cli-new-orders --output json | jq -c '{ visibilityTimeout, messageRetentionPeriod,
+queue_facts() { "$ff_bin" "$@" queues get shop-new-orders --output json | jq -c '{ visibilityTimeout, messageRetentionPeriod,
   delaySeconds, maximumMessageSize, receiveMessageWaitTimeSeconds, redrivePolicy, tags }'; }
 bucket_facts() { "$ff_bin" "${@:2}" buckets get "$1" --output json | jq -c '{ tags }'
   "$ff_bin" "${@:2}" buckets notifications "$1" --output json | jq -c .; }
@@ -1549,7 +1555,7 @@ check "B's stack deleted, with all it made; A's app untouched" "0 0 0 0 shop-api
   "$(code) $("$ff_bin" --profile b list --output json | jq length) $("$ff_bin" --profile b queues list --output json | jq length) \
 $("$ff_bin" --profile b buckets list --output json | jq length) \
 $("$ff_bin" list --output json | jq -r '[.[].name | select(startswith("shop-"))] | sort | join(",")')"
-ff queues delete cli-new-orders --yes
+ff queues delete shop-new-orders --yes
 check "deleting the queue removes its mapping" "0 0" "$(code) $("$ff_bin" event-sources list --function shop-receipts --output json | jq length)"
 ff buckets delete cli-receipts --force --yes
 ff buckets delete cli-shop-site --force --yes
@@ -1557,9 +1563,10 @@ ff caches delete cli-orders --yes
 ff email delete orders@shop-cli.tn --yes
 ff email delete buyer@shop-cli.tn --yes
 ff db delete shop --yes
-ff delete shop-nightly --yes
-ff delete shop-receipts --yes
-ff delete shop-api --yes
+in_folder "$app" delete-stack --yes --output json
+check "A's stack deleted, its functions with it, what was deleted before it passed by" "0 true shop-api,shop-nightly,shop-receipts none" \
+  "$(code) $(out | jq -r '"\(.deleted) \([.resources[] | select(.type == "AWS::Serverless::Function") | .physicalId] | sort | join(","))"') \
+$("$ff_bin" list --output json | jq -r '[.[].name | select(startswith("shop-"))] | if . == [] then "none" else join(",") end')"
 }
 section_def small_app_round_trip section_small_app_round_trip small_app_exported budget=50
 

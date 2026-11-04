@@ -1,0 +1,21 @@
+# The SAM CLI's settings, which ff deploy reads the stack's name and its parameters' values from: the stack shop makes
+# shop-api, shop-receipts and shop-nightly. The buckets' names are yours to choose, as a bucket's name is unique
+# across FF, and the site's origin follows the page's bucket.
+version = 0.1
+
+[default.global.parameters]
+stack_name = "shop"
+
+[default.deploy.parameters]
+parameter_overrides = [
+  "ReceiptsBucketName=shop-receipts",
+  "SiteBucketName=shop-site",
+  "SiteOrigin=http://shop-site.site.localhost:3004",
+]
+# For AWS alone: SAM uploads the code to a bucket of its own, makes the functions' roles and shows its changes first.
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+
+[default.validate.parameters]
+lint = true

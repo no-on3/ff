@@ -2684,6 +2684,87 @@ Resources:
         );
     }
 
+    /// The small app as one template, examples/orders-app's, planned in the stack its samconfig.toml names: its three
+    /// functions named after the stack, the queue's name in the API's variables, the receipts' bucket in each one's, the
+    /// page's bucket a site and its policy kept without effect.
+    #[test]
+    fn plans_the_small_app_as_one_template() {
+        let values = [
+            ("ReceiptsBucketName", "shop-receipts"),
+            ("SiteBucketName", "shop-site"),
+            ("SiteOrigin", "http://shop-site.site.localhost:3004"),
+        ];
+        let plan = planned(include_str!("../../../examples/orders-app/template.yaml"), &[], &values).unwrap();
+
+        let functions: Vec<_> = plan
+            .functions
+            .iter()
+            .map(|function| {
+                let settings =
+                    (function.runtime.as_str(), function.handler.as_str(), function.memory, function.timeout);
+                let variables: Vec<String> =
+                    function.environment.iter().map(|(name, value)| format!("{name}={value}")).collect();
+                (function.name.as_str(), settings, variables.join(" "))
+            })
+            .collect();
+        assert_eq!(
+            functions,
+            [
+                (
+                    "shop-api",
+                    ("nodejs", "index.http", 128, 5),
+                    "RECEIPTS_BUCKET=shop-receipts RECEIPTS_QUEUE=shop-new-orders".to_owned()
+                ),
+                (
+                    "shop-receipts",
+                    ("nodejs", "index.receipts", 128, 5),
+                    "RECEIPTS_BUCKET=shop-receipts RECEIPTS_FROM=".to_owned()
+                ),
+                ("shop-nightly", ("nodejs", "index.nightly", 128, 5), "RECEIPTS_BUCKET=shop-receipts".to_owned()),
+            ]
+        );
+        let url = plan.functions[0].url.as_ref().unwrap();
+        assert_eq!(
+            (url.auth_type.as_str(), url.cors.clone()),
+            (
+                "NONE",
+                Some(
+                    json!({ "allowOrigins": ["http://shop-site.site.localhost:3004"], "allowMethods": ["GET", "POST"],
+                    "allowHeaders": ["content-type"] })
+                )
+            )
+        );
+        let schedules: Vec<_> = plan.functions[2]
+            .schedules
+            .iter()
+            .map(|schedule| (schedule.name.as_str(), schedule.expression.as_str(), schedule.enabled))
+            .collect();
+        assert_eq!(schedules, [("EveryNight", "cron(0 2 * * ? *)", true)]);
+        let mapping = &plan.functions[1].mappings[0];
+        assert_eq!(
+            (mapping.queue(), mapping.batch_size, mapping.report_batch_item_failures),
+            ("shop-new-orders", 10, true)
+        );
+
+        let queues: Vec<_> = plan.queues.iter().map(|queue| queue.name.as_str()).collect();
+        assert_eq!(queues, ["shop-new-orders"]);
+        let buckets: Vec<_> =
+            plan.buckets.iter().map(|bucket| (bucket.name.as_str(), bucket.website.as_ref())).collect();
+        assert_eq!(
+            buckets,
+            [
+                ("shop-receipts", None),
+                (
+                    "shop-site",
+                    Some(&Website { index_document: "index.html".into(), error_document: Some("404.html".into()) })
+                )
+            ]
+        );
+        let kept: Vec<_> =
+            plan.without_effect.iter().map(|resource| (resource.logical_id.as_str(), resource.kind.as_str())).collect();
+        assert_eq!(kept, [("SitePolicy", "AWS::S3::BucketPolicy")]);
+    }
+
     #[test]
     fn deletes_what_the_last_deploy_made_and_this_one_doesnt_a_url_first_a_function_last_with_its_own() {
         let last = [
