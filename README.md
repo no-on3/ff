@@ -136,7 +136,8 @@ Run them one at a time on a shared machine, with `hack/check-resources.sh` first
 - [Step 2 plan](docs/step-2-plan.md): a database and file storage, managed PostgreSQL and buckets behind an S3 front door, task by task, with its progress log; done in development.
 - [Step 3 plan](docs/step-3-plan.md): background work, a queue shown as Lambda's asynchronous invoke, SQS queues and bucket notifications, task by task, with its progress log; done in development.
 - [Step 4 plan](docs/step-4-plan.md): the whole app runs here, static sites, e-mail from apps and a cache, task by task, with its progress log; done in development.
-- [Step 5 plan](docs/step-5-plan.md): the way out, AWS Lambda's API signed as AWS signs, versions and aliases, Terraform, SAM templates and the export kit; proposed on 2026-10-30, confirmed and started on 2026-10-31 with its fourteen choices as recommended; its [task list](docs/step-5-tasks.md) has the pipeline's tasks too.
+- [Step 5 plan](docs/step-5-plan.md): the way out, AWS Lambda's API signed as AWS signs, versions and aliases, Terraform, SAM templates and the export kit, task by task, with its progress log; done in development on 2026-11-04; its [task list](docs/step-5-tasks.md) has the pipeline's tasks too.
+- [Step 6 plan](docs/step-6-plan.md): the first paying customers, card top-ups through Konnect, invoices El Fatoora accepts, `ff login` and `ff`'s downloads, a domain for customers' content, the development server updating itself; proposed on 2026-11-04, its choices waiting for you.
 - [Console design plan](docs/console-design-plan.md): the console's new look, navy and paper, chosen on 2026-10-22, task by task.
 - [Decision log](docs/decisions.md): every decision you made about FF, with what it changed and what is still to change, and the questions still waiting for you.
 - [deploy/k8s](deploy/k8s/README.md): what the backend is allowed to do in a cluster, and why; how to deploy the platform.

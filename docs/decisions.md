@@ -25,35 +25,44 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 ### Step 5: the way out
 
 **51. The order: the export kit first,** with the cost estimate and `ff doctor`, then versions and aliases, keys, Lambda's API, Terraform, SAM. ✅ Your answer: as recommended. The export only reads FF's API as it is, so the promise is kept soonest with the least risk; Lambda's API comes after the versions it must translate.
-- **Changed already:** X-02, the export kit, and X-03, the cost estimate at AWS's prices, done by 1 November.
-- **Still to change:** X-04 to X-13, in that order.
+- **Changed already:** X-02, the export kit, and X-03, the cost estimate at AWS's prices, done by 1 November; then, in that order, X-04 (`ff doctor`), X-05 and X-06 (versions and aliases), X-07 and X-08 (keys), X-09 and X-10 (Lambda's API), X-11 (Terraform), X-12 and X-13 (SAM), and the close, X-14 and X-15, by 4 November. The step-5 plan's log names each commit.
+- **Still to change:** nothing.
 
 **52. Lambda's API: the 41 operations that AWS's CLI, its SDKs, Terraform's provider and SAM's resources call,** every other one answering a clear "later" in Lambda's shape, which no client retries. ✅ Your answer: as recommended. The same rule as S3's, SQS's and SES's front doors.
-- **Still to change:** X-01's spike confirms the list; X-09 and X-10 build it.
+- **Changed already:** X-01's spikes recorded what each tool calls, and confirmed the 41; X-09 and X-10 built them, each of the 47 others answering `UnknownOperationException` with its name.
+- **Still to change:** nothing.
 
 **53. A change on Lambda's API is answered at once,** `Pending` or `InProgress`, as Lambda answers it and as the tools' waiters expect; FF's own API and the console keep answering once the change is live. ✅ Your answer: as recommended.
-- **Still to change:** X-09.
+- **Changed already:** X-09: a create answered `Pending` and an update `InProgress` at once, then `Active` and `Successful` behind the answer, which the AWS CLI's and Terraform's waiters wait for.
+- **Still to change:** nothing.
 
 **54. Runtime names: `nodejs24.x` and `python3.13` alone,** FF's two runtimes; any other name refused, naming the two. ✅ Your answer: as recommended. More versions come with What to build next §9.1.
-- **Still to change:** X-09 and X-12.
+- **Changed already:** Lambda's API (X-09) and `ff deploy`'s templates (X-12) take `nodejs24.x` and `python3.13` alone, any other name refused, naming the two.
+- **Still to change:** more versions, with What to build next §9.1 (the step-5 task list's §4, B).
 
 **55. An access key names the functions it reaches, or all, at one of three levels: read, invoke, write.** A key made before reaches no function until given some; a function's own key may invoke its account's functions. ✅ Your answer: as recommended. No key gains a right it didn't have; IAM's policy language stays out (What to build next §11).
-- **Still to change:** X-07.
+- **Changed already:** X-07: a key names its functions, or all, at `read`, `invoke` or `write`, the keys made before reaching none; in FF's API, the console's Access keys page, `ff keys` and the admin app.
+- **Still to change:** nothing.
 
 **56. A function's own key lasts 12 hours,** renewed at half its life, the function's pods replaced with the new one before the old ends; no session token. ✅ Your answer: as recommended. It keeps decision 10's promise: a key copied out of a function stops working within hours.
-- **Still to change:** X-08.
+- **Changed already:** X-08: a function's key lasts 12 hours and is renewed at half its life, its pods replaced with no call lost, which its first part made sure of at every rollout (69).
+- **Still to change:** nothing.
 
 **57. Each version that is called runs in pods of its own,** made at its first call and scaled to zero when idle, as `$LATEST` today; an alias can send a share of the calls to a second version. ✅ Your answer: as recommended. Warm instances stay `$LATEST`'s in this step.
-- **Still to change:** X-05.
+- **Changed already:** X-05 and X-06: each version in pods of its own, made at its first call; an alias with a second version's share; in FF's API, the console, `ff` and the admin app, and through Lambda's API (X-10).
+- **Still to change:** nothing.
 
 **58. Lambda's permissions are kept as sent, without effect,** so that Terraform's modules and SAM's templates apply unchanged, and said plainly in the guide, the API's description and by `ff doctor`. ✅ Your answer: as recommended. FF's own rules decide who calls a function.
-- **Still to change:** X-10, X-04 and X-14.
+- **Changed already:** X-10 keeps each statement as sent and gives it back; `ff doctor` (X-04) and the guide's differences (X-14) say it has no effect.
+- **Still to change:** nothing.
 
 **59. A SAM template is read by `ff deploy`,** which records what it made as a stack in FF, so that the next deploy updates and removes; no CloudFormation endpoint. ✅ Your answer: as recommended. One reader, in one place; the template stays the file `sam deploy` takes on AWS.
-- **Still to change:** X-12.
+- **Changed already:** X-12 and X-13: `ff deploy template.yaml`, the stack kept in FF, the next deploy updating and removing, and `ff delete-stack`; X-15: the small app as one template.
+- **Still to change:** nothing.
 
 **60. SAM's web events: `FunctionUrlConfig`, and `HttpApi` events whose routes all go to one function, made its URL;** `Api` events refused, saying why. ✅ Your answer: as recommended. The function gets the same event on both sides; an HTTP router of FF's, as API Gateway, is a product of its own.
-- **Still to change:** X-12 and X-13.
+- **Changed already:** X-12 and X-13: `FunctionUrlConfig`, and `HttpApi` events whose routes all go to one function, made its URL; `Api` events refused, naming the two.
+- **Still to change:** nothing.
 
 **61. Schedules in Terraform: later,** through EventBridge Scheduler's API if customers ask; in this step, `ff schedule` and SAM's events. ✅ Your answer: as recommended.
 - **Still to change:** nothing in this step.
@@ -63,10 +72,12 @@ You said: "start working on the tasks list, one by one, don't spawn too many pro
 - **Still to change:** nothing.
 
 **63. The way out is checked offline in every run** (`sam validate --lint`, cfn-lint, `tofu validate`, Moto), **and on a real AWS account once a month once you have one.** ✅ Your answer: as recommended. Until then the docs say the export is checked offline.
-- **Still to change:** X-02, X-15 and T-10.
+- **Changed already:** offline in every run: the export's template through `sam validate --lint` and cfn-lint, and its Terraform through `tofu validate` (X-02); every SAM template the repository keeps, the small app's among them, in the unit stage (X-13, X-15); and the AWS tools' own job (T-10's part 2).
+- **Still to change:** the monthly run on AWS itself (T-10's part 3), once you have an account.
 
 **64. Beta's limits: 5 GB of code storage per account, 10 access keys, no count of versions, aliases or stacks;** Lambda's API under the plan's 60 changes a minute, its reads free. ✅ Your answer: as recommended. In the plan like every limit, changed in the admin app.
-- **Still to change:** X-05, X-07 and X-09.
+- **Changed already:** the plan's code storage, 5,120 MB on beta (X-05), and its access keys, 10 (X-07), each changed in the admin app; Lambda's changes counted against the plan's 60 a minute, its reads free (X-09).
+- **Still to change:** nothing.
 
 ### The pipeline
 
@@ -386,6 +397,7 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
+| Step 6's fourteen choices, each with a recommendation: the scope (group A of the step-5 task list's §4, without two sites), Konnect alone, building top-ups and El Fatoora before the company's credentials exist, when the buyer details are asked, Arabic on invoices, `ff login` first, where downloads and images live, Windows and macOS, which of Konnect's methods, a domain for customers' content, production's and the development server's certificates, how the development server updates, and two sites. Seven of them answer questions below: 42's domain, 39's updates, the certificates, and the CLI plan's questions 3, 5 and 7 | [Step-6 plan](step-6-plan.md) §9 | Step 6: nothing of it is built until you confirm them |
 | A domain of its own for customers' content, sites and function URLs, so that a phishing page on one never marks `ffunc.cloud` itself, as GitHub keeps `github.io` apart from `github.com`; or both under `ffunc.cloud`, as now | This log, 42 | The public launch: the names customers' sites and function URLs get, and their certificates |
 | How the development server updates: by itself, pulling each commit of `master` whose tests passed on GitHub (recommended: GitHub then holds no key to the server; a private repository takes a read-only deploy key of the server's own, and a token that reads the workflow's results), or by GitHub, through a key to the server | This log, 39 | Deploys without anyone running `install.sh` |
 | Function URLs' and buckets' certificates on the development server: the proxy's own authority, as now (recommended); Let's Encrypt's by DNS-01, through an OVH key that can change every record of `ffunc.cloud`, kept on the server other projects share; or one per host on demand, through a line in the shared proxy's main file | [`deploy/dev-server`](../deploy/dev-server/README.md) | Whether a browser that doesn't trust the proxy's root can call a function at its URL |
