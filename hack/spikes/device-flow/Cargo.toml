@@ -1,0 +1,13 @@
+# The developer tools' spike of `ff login`'s device flow (RFC 8628) against Keycloak: a prototype with the crates ff has
+# already (ureq, serde, serde_json, base64), in a crate of its own so that ff takes on nothing before the spike says how.
+[package]
+name = "device-flow-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+base64 = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }

@@ -200,6 +200,10 @@ hack/.spike-minisign/
 hack/.spike-schedule-expressions/
 # hack/spikes/cross-build: zig, cargo-zigbuild and their caches, the builds, their logs, the results
 hack/.spike-cross-build/
+# hack/spikes/device-flow: the prototype's build, the device codes and tokens of a run, the results
+hack/.spike-device-flow/
+# hack/spikes/mcp: the server's build, each client's log of messages, the results
+hack/.spike-mcp/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/
