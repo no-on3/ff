@@ -1,0 +1,161 @@
+# Developer tools task list: `ff` for everyone, the whole app on a laptop, and what customers see first
+
+| | |
+|---|---|
+| **What this is** | The work the [developer tools plan](dev-tools-plan.md) leaves to do, as one list to work through, each line ticked when its commit lands: its tasks M-00 to M-15, split into the commits each will be; what stays in the [step-6 plan](step-6-plan.md) once this plan takes its four tasks that wait for no company, and what comes after both; and your questions, with the task each holds up. The plan keeps the design and the progress log with the evidence; this list keeps the order and what is left |
+| **Made** | On 2026-11-04, the day step 5 closed, when you asked for a plan and a task list for the developer tools, since the company that step 6's payments and invoices wait for doesn't exist yet. The plan's fourteen choices (its §9) wait for you; this list assumes them as recommended, and changes with your answers |
+| **Branch** | `feat/dev-tools`, from `master` at `05f459e`, step 5's merge of 2026-11-04. The release job runs from a tag on `master`, once M-03 is merged |
+| **Numbers** | M-xx are the developer tools plan's tasks, logged in its §11; the CLI plan's C-40 to C-43 and the step-6 plan's G-02 to G-04 and G-10 are named where this list does them. As with every plan: no task number in the code, its comments or its tests |
+
+## 1. What the documents leave undone
+
+1. **The developer tools** (the [plan](dev-tools-plan.md); [What to build next](what-to-build-next.md) §9.6; the [CLI plan](cli-plan.md)'s phase 4; the [step-5 task list](step-5-tasks.md)'s §4, groups A and D): `ff login`; `ff` built, signed and served by FF for Linux, macOS and Windows, its runtime images published, two CI examples; the whole app on a laptop with `ff local start template.yaml`; six templates; `ff mcp`; a stand-in Konnect; the development server updating itself; a status page; the content domain registered and requested from the Public Suffix List; and one request's trail. Its fourteen choices wait for you. **This list keeps its order,** tasks M-00 to M-15 in §2, split into the commits each will be.
+2. **Step 6, what stays** (the [step-6 plan](step-6-plan.md), trimmed by this plan's D11): card top-ups through Konnect, invoices El Fatoora accepts, the content domain's switch with production's certificates, the accountant's letter and the security test's scope. Each waits for the company, its bank account, Konnect's merchant onboarding or TunTrust's certificate: §3 says which.
+3. **Further out** (What to build next §9 and §12's rows 7 to 10; the step-5 task list's §4, groups B to F; the [code-search plan](code-search-plan.md)): always-on web services, which you asked about on 2026-11-04 (a container kept running behind a web address, as AWS App Runner and Google Cloud Run keep one, billed by the second: a second product, which needs a plan of its own), container functions, login for customers' apps, topics, SMS, the e-invoicing API, environments, deploy previews, code search. A direction, not a plan: §3 names what each waits for.
+4. **Your questions** (the decision log's last table): the plan's fourteen choices, six of them step 6's (its 6, 7, 8, 10, 12 and 13) and the log's questions on the content domain (42), the development server's updates (39) and its certificates, and the CLI plan's questions 3, 5 and 7; and the five actions only you can do: the signing key, the server's deploy key and token, the domain's registration, `ghcr.io`'s packages, each go-ahead on the server. §4 says which task waits on which.
+
+## 2. The tasks
+
+Each task, or part of one, is one commit with its tests and its documents, as the plan's working rules say (its §6, which are the repository's [`CLAUDE.md`](../CLAUDE.md)): `type(scope): summary (M-xx)`; one heavy operation at a time, `hack/check-resources.sh` first; refactor as you go, the counts before and after in the plan's log; L1 to L5 for what each part touches, a new route's L5 rules in both loops; the backend's names mirrored in `ff` and the console; the console checked in a browser, a phone's width too; each tool the tests drive pinned to a release at least two weeks old, installed by `hack/install-tools.sh` with its checksum. And the plan's own: `ff local` proved by the backend's fixtures for every operation it serves; a tool of `ff mcp` is a command; every build passes `cargo test` on its own system; the three new credentials never printed; no real payment in a test; a running script never edited. The order is the plan's (its §7): what waits least and gives most first, `ff local` the step's weight, tracing last as the one phase that changes the backend. The plan's progress log (§11) gets each task's evidence; this list gets its tick.
+
+### Phase 0: groundwork
+- [ ] **M-00** The plan and the baseline:
+  - [ ] the fourteen choices confirmed by you, each written into the decision log, numbered after its last (69 today); the plan's status row says so; where an answer differs from the recommendation, the plan's decision changes with it, and this list too;
+  - [ ] `feat/dev-tools` made from `master` at `05f459e`, step 5's merge; every stage of `hack/ci.sh` green there and GitHub's run of the branch green, the nightly included; the counts in the plan's log as step 5's X-00 wrote them: L1's suites and tests, L2's, L3's checks, L4's, L5's, the `ff` suite's, `cargo test`'s and the console's Vitest;
+  - [ ] the tools the step's tests drive, pinned and installed by `hack/install-tools.sh` with their checksums: minisign, for the signatures the install scripts check; zig and cargo-zigbuild, if M-01 keeps them; each named with its version in the plan's row, and the nightly run (T-09) tries the latest and says what changed.
+- [ ] **M-01** Six spikes, then ADRs 0017 (the whole app on a laptop) and 0018 (`ff`'s releases); each spike a folder under `hack/spikes/` with a README of its findings, as step 5's were:
+  - [ ] part 1, cross-compiling `ff` (`hack/spikes/cross-build/`): the five targets from one Linux machine, MinGW for Windows, zig as the linker for macOS through cargo-zigbuild, `ring`'s C code and the platform verifier's frameworks included; each binary run on its system, and `cargo test` on GitHub's Windows and macOS runners, by a workflow run by hand from the branch; the README says what built, what didn't, and the minutes each runner took. What fails from Linux goes to a macOS runner job in M-03;
+  - [ ] part 2, the device flow (`hack/spikes/device-flow/`): a Rust prototype against the development realm's `ff-cli` client (`docker compose --profile auth`): pending, slow down, expired, denied, success, the refresh, and a refresh after the session's end in Keycloak; the intervals and lifetimes Keycloak gives, and what the realm must change, if anything;
+  - [ ] part 3, the local front door's shape (`hack/spikes/local-front-door/`), the measure behind choice 5: on one side, S3's `PutObject`, `GetObject` and `ListObjectsV2` and SQS's `SendMessage`, `ReceiveMessage` and `DeleteMessage` in Rust, their tests reading the backend's L1 fixtures, driven by the AWS CLI, AWS's SDK for JavaScript v3 and boto3; on the other, the backend's `storage` and `queues` modules run in Node.js without NestJS and without the database, with what carries them (what they need of TypeORM, the settings and the audit log); for each side the lines, the start time, the memory, the fixtures passed, and what a developer must have on the machine;
+  - [ ] part 4, a reader of EventBridge's `cron()` and `rate()` in Rust (`hack/spikes/schedule-expressions/`), against the backend's tests' expressions and next runs, which the spike moves into one JSON table both read, so that M-05 ports a reader whose tests exist;
+  - [ ] part 5, minisign verified in Rust (`hack/spikes/minisign/`): Ed25519 by `ring`, the prehash by the `blake2` crate, against signatures `minisign` makes; a changed file, a wrong key and a cut signature each refused;
+  - [ ] part 6, the MCP handshake (`hack/spikes/mcp/`): a server on stdio that lists one tool, in Rust, connected by hand to Claude Code and to one other client; which protocol version each asks, what each sends before `tools/list`, and how each shows a tool's error;
+  - [ ] part 7, ADR 0017 and ADR 0018 from the spikes' findings; the plan's D2 and D3 amended where the spikes differ from them, and this list with them.
+
+### Phase 1: `ff`, ready for customers
+- [ ] **M-02** `ff login`, `ff logout` and `ff api-keys` (the plan's D1; the CLI plan's C-40; the step-6 plan's G-02):
+  - [ ] part 1, the login: the device flow against `ff-cli`, the address and the code printed, the browser opened by the system's command when there is one, the tokens and the access token's end in `credentials.toml` under the profile, the refresh within a minute of the end, a refused refresh saying to log in again and trying nothing else; a profile's key kept before the tokens, `--replace`; `ff logout`; `ff whoami` with the tokens; `cargo test` against a stand-in authorization server (pending, slow down, expired, denied, success, the refresh, a refresh refused);
+  - [ ] part 2, the account: `ff config set account <id>` and `--account`; one account chosen; several listed and the command stopped, as `ff whoami` lists them;
+  - [ ] part 3, `ff api-keys create --name --scopes [--expires]`, `list` and `revoke`, on `/api-keys` with the user's token; the new key printed once, in its field with `--output json`;
+  - [ ] part 4, the `ff` suite against the development realm: the user's part of the flow done with `curl` at Keycloak's pages, as a browser would; a command after the login, a key's precedence, a logout; the getting-started guide's "Logging in" in place of "paste a key"; C-40 marked done in the CLI plan.
+- [ ] **M-03** `ff`'s builds, signatures and downloads (the plan's D2; C-41; G-03):
+  - [ ] part 1, the five builds: `hack/build-cli.sh` taking a target, the cross builds as M-01 found them; the Unix-only code's Windows counterparts: the credentials file readable by its owner alone through the file's own permissions, a package keeping Lambda's modes without reading the disk's (0644, and 0755 for what starts with `#!`), a symlink in a package refused on Windows saying why, the exported script's mode; `cargo test` on a Linux, a Windows and a macOS runner, in a workflow job run at a release and by hand;
+  - [ ] part 2, the release job: a tag `ff-v<version>` on `master`, `cli/Cargo.toml`'s version checked against it; each file with its SHA-256 and its minisign signature; `latest.json`, signed; GitHub's release as a copy; the public key at `cli/release/minisign.pub`, compiled into `ff` with the verifier M-01 proved; the signing key in GitHub's secrets, yours to make (§4);
+  - [ ] part 3, the downloads site: a bucket of FF's own account, `get.<domain>` as the site's custom domain, deployed by the release job with `ff sites deploy` and a key that reaches that bucket alone; `install.sh` and `install.ps1`, each naming the system and the processor, checking the SHA-256 against `latest.json` and the signature when `minisign` is on the machine, installing into `~/.local/bin` or `--prefix`, saying what to add to `PATH`, and refusing a checksum that differs with nothing installed; the `ff` suite deploys the site to the development stack and runs both scripts against it, once as is, once with a changed checksum, once with a wrong signature;
+  - [ ] part 4, the update notice: `latest.json` read once a day at most after a command that reached the API, verified, the newer version said on stderr with the line that installs it; off with `FF_NO_UPDATE_CHECK=1`, `ff config set update_check false`, `--output json` and `--quiet`; `cargo test` against a stand-in manifest; the guide's "Installing `ff`" in place of its build from source, with the key's fingerprint; C-41 marked done.
+- [ ] **M-04** The runtime images published, and `ff` in a customer's CI (the plan's D2; C-42, C-43; G-04):
+  - [ ] part 1, the images: a manifest of the release's images by digest in place of the two constants of `local.rs`; the release job publishes them to `ghcr.io` under FF's name and as archives on the downloads site (`docker save`, zstd, signed); `ff local` pulls the digest or, when it can't, loads the archive, verified; the overrides for a repository's own build kept; `cargo test` for the manifest and the verification; the `ff` suite loads an archive;
+  - [ ] part 2, the CI examples: `examples/ci/github-actions.yml` and `examples/ci/gitlab-ci.yml`, each installing `ff` from the downloads, an API key with a deploy's scopes in `FF_TOKEN`, `ff deploy --output json`, the job failing on `ff`'s exit codes with the account's message; the GitHub one run as a job of FF's own workflow against the development stack, in the `ff` suite's stage; the guide's "`ff` in your CI"; C-42 and C-43 marked done.
+
+### Phase 2: the whole app on a laptop
+- [ ] **M-05** The local front door: functions, URLs, schedules and Lambda's invoke (the plan's D3):
+  - [ ] part 1, the template and the functions: `ff local start template.yaml` through the reader `ff deploy` uses, with its refusals; each function's container started at its first call and kept, its variables the template's with `!Ref` and `!GetAtt` resolved to local values, the pod's variables pointed at the local front door, `--secrets .env.local`, `--idle`, `--watch`, `.ff/local/`, `ff local reset`; one container runner shared with today's `ff local start` and `invoke`, which keep working as they are (a refactor, its own commit);
+  - [ ] part 2, the port and Lambda's operations: `Invoke` waiting, `Event` with its retries and `EventInvokeConfig`'s destinations, `DryRun`, `GetFunctionConfiguration`; a signed request checked against the local key, an unsigned one taken; the local key printed and written to `.ff/local/credentials`; the backend's Lambda fixtures read by `cargo test`, through a reader of the backend's test files as `ff usage --aws`'s tests read its sources;
+  - [ ] part 3, function URLs at `http://<function>.fn.localhost:<port>`, the event `local_url.rs` builds today, CORS from the template; the URL gateway's fixtures shared;
+  - [ ] part 4, schedules: the reader of EventBridge's expressions ported from the backend's, its tests the JSON table M-01 made, which the backend's L1 reads too (a refactor of that test, its count unchanged); the schedules run on time while the command runs, the Scheduled Event as the backend builds it; `ff local run <schedule>`;
+  - [ ] part 5, in the `ff` suite: `ff init --template sam`'s application started on it and called at its URL; the small app's Api function at its URL and its Nightly schedule run by hand, the queue M-06's; an asynchronous call's retries counted; `ff init`'s templates gain `.ff/` and `.env.local` in their `.gitignore`.
+- [ ] **M-06** Queues and buckets locally (the plan's D3):
+  - [ ] part 1, SQS: `SendMessage`, `SendMessageBatch`, `ReceiveMessage` with its long poll, `DeleteMessage`, `DeleteMessageBatch`, `ChangeMessageVisibility`, `GetQueueUrl`, `GetQueueAttributes`, `PurgeQueue`; the queues in memory, the redrive to the dead-letter queue after `maxReceiveCount`; the backend's SQS fixtures shared; the AWS CLI's SQS cases of L4 against it, in the `ff` suite;
+  - [ ] part 2, the event source mappings: the local queues polled as the backend's poller polls them: batches, the batching window, `ReportBatchItemFailures`, the visibility timeout; the SQS event as the backend builds it, `AWSTraceHeader` kept;
+  - [ ] part 3, S3: `PutObject`, `GetObject`, `HeadObject`, `DeleteObject`, `DeleteObjects`, `ListObjectsV2`, `CopyObject`, the multipart upload, `HeadBucket`, presigned URLs; the objects as files under `.ff/local/buckets/`; the backend's S3 fixtures shared; the AWS CLI's S3 cases of L4 against it;
+  - [ ] part 4, bucket notifications with S3's event, to functions and queues; the sites at `http://<bucket>.site.localhost:<port>` with the index and error documents, and `--site <bucket>=<folder>`; the website server's fixtures shared; the small app's page served from `--site` in the `ff` suite.
+- [ ] **M-07** Databases, caches, mail, and the small app end to end (the plan's D3):
+  - [ ] part 1, `--with postgres` and `--with valkey`: a container each from an image pinned by digest, `DATABASE_URL` and `REDIS_URL` set for every function unless the secrets file names them, the data in volumes of the project's, kept between runs, removed by `ff local reset --data`;
+  - [ ] part 2, mail: SES v2's `SendEmail` taken, each message kept under `.ff/local/mail/` as a file and said on stderr, none sent; `ff local mail` listing them; the SES front door's fixtures shared;
+  - [ ] part 3, the small app on `ff local`, in the `ff` suite: an order posted at the local URL, its receipt made through the local queue into the local bucket, its e-mail captured, the nightly run by hand, the page served, with `--with postgres,valkey`; the conformance written in the plan's row: the fixtures each front door passes, and the AWS CLI's cases of L4 that pass against it;
+  - [ ] part 4, the guide's page "The whole app on your laptop", with the table of what `ff local` is and isn't; `cli/README.md`; ADR 0017 as built; What to build next's §9.6 line on local development marked done.
+
+### Phase 3: templates, agents and the provider's double
+- [ ] **M-08** Six templates (the plan's D4), each for both runtimes with its `template.yaml`, code, `events/`, tests outside the code's folder, `samconfig.toml`, `.gitignore` and README; each a fixture of `hack/test-sam-fixtures.sh` (`sam validate --lint`, cfn-lint); each deployed once by the `ff` suite, called and its stack deleted; each run on `ff local` in the suite:
+  - [ ] part 1, the templates' layout under `cli/templates/`, `ff init --list`, and `rest-api`;
+  - [ ] part 2, `cron-job` and `queue-worker`;
+  - [ ] part 3, `site-with-api`, the small app's shape, smaller;
+  - [ ] part 4, `image-resize`: `sharp` and Pillow built by `ff package --container`; the guide says Docker Desktop is what Windows and macOS need for it;
+  - [ ] part 5, `webhook`: a payment provider's notification received right, Konnect's by default: the request kept, the provider asked again, the redirect's parameters never trusted, each payment handled once by its reference; its tests against the stand-in come with M-10; the guide's "Templates"; the SAM templates page lists them.
+- [ ] **M-09** `ff mcp` (the plan's D5):
+  - [ ] part 1, the refactor, its own commit: `Output` writes to a writer given at its making, stdout for the commands, a buffer for the server and the tests; the counts unchanged;
+  - [ ] part 2, the server: JSON-RPC over stdio, the handshake, `ping`, `tools/list` and `tools/call`, one protocol version named and a client asking another told which; the read tools: the functions, one function, its logs, history and metrics, usage, balance, estimate, queues, buckets, databases, caches, `doctor`; each tool's answer the command's `--output json`, its error the command's message and exit kind; `cargo test` with a scripted stdio session;
+  - [ ] part 3, `--allow-write` and the write tools: `deploy`, `invoke`, `env set`, `publish`, `alias set`, `queues send`, `sites deploy`; a write refused without the flag, saying so; no tool for a delete, a key, `api-keys`, `secrets set` or `login`, which a test proves by listing every command against the tools; the `ff` suite with a small client over a pipe against the development stack: the list, a read, a deploy refused then allowed;
+  - [ ] part 4, the guide's page "FF from your AI coding agent": the one line for Claude Code, Cursor's and VS Code's JSON, what an agent may do; `cli/README.md`.
+- [ ] **M-10** `ff local konnect`, and the `webhook` template's tests (the plan's D6; the step-6 plan's D1):
+  - [ ] part 1, the server: `x-api-key` checked; `POST /payments/init-payment` with amounts in millimes, answering `payUrl` and `paymentRef`; `GET /payments/:id` answering `pending`, `completed` or `failed`; the payer's page at `payUrl` with its two buttons and `?outcome=paid` or `failed`, which calls the merchant's webhook with `payment_ref` and sends the browser to the merchant's address; each answer naming its source document and section in a header; `cargo test` through the whole flow;
+  - [ ] part 2, the faults: `--delay`, a notification sent twice, one for a payment that doesn't exist, the webhook called before `GET /payments/:id` says `completed`;
+  - [ ] part 3, the `webhook` template's tests through it, both runtimes, on `ff local` in the `ff` suite; the guide's section; the step-6 plan's D1 and G-05 pointed at it.
+
+### Phase 4: the server and the public
+- [ ] **M-11** The development server updating itself (the plan's D9; the step-6 plan's G-10; decision 39):
+  - [ ] part 1, the updater, under `deploy/dev-server/updater/`: its script asks GitHub for `master`'s newest commit and its run, with a token that reads the workflow's results, or none while the repository is public; a newer commit whose every job passed is fetched, between 01:00 and 05:00 in Tunis, with the read-only deploy key into a new directory; FF's databases dumped into `/data/ff/backups`; the new directory's `server.sh`, then its `smoke.sh`; the directory made `/data/ff/src`; each update's commit, time and result in its log; a failure stops the timer and is e-mailed through the server's own mail; its systemd service and timer, installed by `server.sh` as its tenth step, doing nothing when done; `install.sh` carrying the key and the token from your machine as it carries the admin allow list;
+  - [ ] part 2, `hack/test-updater.sh` against a stand-in for GitHub's API: a commit that passed, one that failed, one whose run is still going, one installed already, a failed smoke test, outside the night's hours; run by `hack/ci.sh unit`, which needs no cluster;
+  - [ ] part 3, on the server, with your go-ahead: the key and the token made by you (§4), the first update's log in the plan's row; the README's section; the decision log's 39 answered.
+- [ ] **M-12** The status page (the plan's D7):
+  - [ ] part 1, the probe, under `deploy/dev-server/status/`: a probe account of FF's own with a key that reaches its bucket, queue and function alone, its canary function and site made by `server.sh` through `ff`; `probe.sh`, `curl` and `jq`, checking the API's `/healthz`, the console, a login, the Lambda, S3, SQS and SES endpoints, the canary at its URL and the site, appending each minute's results to `/data/ff/status/minutes.log`, kept 90 days; its systemd timer, as a user of its own;
+  - [ ] part 2, the renderer, `render.py`, the standard library alone: the page from the minutes and `incidents.md`, a bar a day for 90 days, the month's uptime, the current state, the line that says it is probed from the server itself; its tests in `hack/` against recorded minutes: up, down, slow, a certificate about to expire, a day with no minutes; run by `hack/ci.sh unit`;
+  - [ ] part 3, the route: `status.<domain>` in `ff.caddy`, FF's ninth fixed name, serving `/data/ff/status/`; its DNS record as the README lists the others; the smoke test checks the page; on the server with your go-ahead; the README's section; the guide's line.
+
+### Phase 5: one request's trail
+- [ ] **M-13** Tracing (the plan's D8):
+  - [ ] part 1, the backend: `trace_id` on `function_invocations` by a migration, indexed with the account and the time; the ID started at each entry: a URL's request from `X-Amzn-Trace-Id` or new, and given back; `POST /functions/:id/invoke` and Lambda's `Invoke` from the header or new; a schedule's run; a bucket notification; a queue message's `AWSTraceHeader` joined by the reader's call; carried to each attempt and to the destination's record; `traceId` in the history's DTO; `GET /traces/:id` with `logs:read`, the calls in time order with how each came, its function, version, duration and status, in both of L5's loops; L1, L2, L4;
+  - [ ] part 2, the runtimes: `_X_AMZN_TRACE_ID` set for each call, as Lambda sets it, and in the structured log lines; both runtimes' tests;
+  - [ ] part 3, `ff trace <id>` as a timeline, `ff logs --trace <id>` across functions, `ff history`'s column; the console's "Trace" link on a history row, checked in a browser at a phone's width; `cargo test` and the console's Vitest with the DTO's name mirrored; the templates' two lines that pass the ID on, the SDK's middleware in Node.js and botocore's hook in Python, with a test each; the guide's page "Following one request".
+
+### Phase 6: close
+- [ ] **M-14** Documentation:
+  - [ ] the guide's pages, each written with its task, read together here: installing `ff`, logging in, the whole app on your laptop, the templates, `ff mcp`, `ff` in your CI, the status page, following one request; a French page for the developer's tools under `fr/`, linked from `fr/README.md`; `cli/README.md`; the CLI plan's C-40 to C-43 marked done and its §10's questions 3, 5 and 7 answered; ADR 0018 as built; `docs/README.md`'s rows; `hack/check-docs.py` on all of it.
+- [ ] **M-15** The step closed:
+  - [ ] part 1, the branch merged into `master` after a green run of every job, and the first release tagged (`ff-v0.1.0`, `cli/Cargo.toml`'s version today, or the one you choose), its files on the downloads site;
+  - [ ] part 2, the development server: installed by hand once more with `install.sh`, both databases dumped first, the updater and the status page with it; then the updater takes over, its first update logged; with your go-ahead;
+  - [ ] part 3, the Public Suffix List's request, with your go-ahead, once the content domain is registered: the `_psl` TXT record at OVH and the pull request's text, both written by this task; the decision log's 42 updated with the domain;
+  - [ ] part 4, What to build next, the decision log, the step-6 plan trimmed to what stays (§3) with its ADRs renumbered 0019 to 0021, this list ticked, the plan's log complete with the counts after against the baseline.
+
+## 3. What stays in step 6, and what comes after
+
+### Step 6, trimmed
+
+What the [step-6 plan](step-6-plan.md) keeps once this plan takes its G-02 to G-04 and G-10 (the plan's D11), each with what it waits for:
+
+| Task | What it is | What it waits for |
+|---|---|---|
+| G-05, G-06 | The providers' interface, Konnect's adapter, its notification, the payments left pending; top-ups in the console and the admin app | Konnect's merchant onboarding, which asks for the company's documents; until then, built against `ff local konnect` (M-10) |
+| G-07, G-08 | The invoice's missing details; El Fatoora | The company's tax number; TunTrust's certificate, which the company applies for |
+| G-09 | The content domain's switch, with production's certificates | The domain registered (§4); the Public Suffix List's answer helps the switch but doesn't block it |
+| G-11 | The accountant's letter; the security test's scope | The company |
+| G-12 | Its close | All of the above |
+
+Its choices 1 to 5, 9, 11 and 14 stay its own; its 6, 7, 8, 10, 12 and 13 are this plan's 2, 3, 4, 13, 14 and 12.
+
+### After both
+
+A direction, not a plan; the step-5 task list's §4 keeps the full list, with each candidate's parent task and size:
+- **Always-on web services** (What to build next §9.1 and §12's row 7): a container kept running behind a web address, with health checks and updates one copy at a time, billed per CPU-second and GB-second, as AWS App Runner and Google Cloud Run bill one. A second product with a plan of its own; it reuses the accounts, quotas, sandbox, logs and metrics that functions have, and the trail (M-13).
+- **Code search** (the [code-search plan](code-search-plan.md)): proposed, not confirmed; it waits for card top-ups, and `ff mcp` (M-09) is where its agents would reach it.
+- **The rest:** container functions, login for customers' apps, topics, SMS, the e-invoicing API, environments and deploy previews, secrets rotation, a second country: the step-5 task list's §4, groups B to F.
+
+## 4. Your questions, and the task each holds up
+
+| Question | Where it is | Holds up |
+|---|---|---|
+| This plan's fourteen choices, each with a recommendation | The [plan](dev-tools-plan.md)'s §9 | M-00: nothing is built until you confirm them; M-01's spikes change nothing and can start before |
+| The signing key: made with `minisign -G` on your machine, its secret half in GitHub's secrets, its public half committed | The plan's §9, your actions | M-03's part 2, the release job |
+| A read-only deploy key and a token that reads the workflow's results, made by you | The plan's §9, your actions; the decision log's 39 | M-11's part 3, the updater on the server |
+| The content domain, chosen and registered at OVH | The decision log's 42; the plan's §9, choice 13 | M-15's part 3, the Public Suffix List's request; step 6's G-09 |
+| `ghcr.io`'s packages made public under FF's name | The plan's §9, your actions | M-04's part 1, the images' copies |
+| Your go-ahead for each run on the development server | The plan's §9, your actions | M-11's part 3, M-12's part 3, M-15's part 2 |
+| Step 6's choices this plan doesn't take: its scope, the card gateway, building before the company's credentials, the buyer details, Arabic on invoices, Konnect's methods, production's wildcard certificates, two sites | The [step-6 plan](step-6-plan.md)'s §9, 1 to 5, 9, 11 and 14 | Step 6, after this plan |
+| The company and the Startup Act label; a bank or payment provider; the team and the launch date; the product's name | The [parent plan](local-markets-and-aws-portability-plan.md)'s §15 | Step 6's top-ups and invoices; nothing here |
+| An AWS account FF can pay for, for the monthly run on AWS itself | The step-5 plan's §9, choice 13 | T-10's part 3, built and skipped until its role is set |
+| The accountant's five questions; the external penetration test | The [client-readiness plan](client-readiness-plan.md)'s §9 | Step 6's G-11 |
+
+## 5. Effort and order
+
+| Part | Size | When |
+|---|---|---|
+| M-00 and M-01: the plan, six spikes, two ADRs | 1 to 1.5 weeks | First; the spikes can start before your answers, since they change nothing |
+| M-02 to M-04: `ff` for customers | 1.5 to 2 weeks | Next: small, and the first thing a customer meets; M-03's part 2 waits for your key |
+| M-05 to M-07: the whole app on a laptop | 3.5 to 5 weeks | The step's weight, after phase 1 |
+| M-08 to M-10: templates, `ff mcp`, the Konnect stand-in | 1.5 to 2.5 weeks | After `ff local`, which their tests run on |
+| M-11 and M-12: the server and the public | 1 to 1.5 weeks | Either side of phase 3; M-11's run on the server waits for your key and token |
+| M-13: tracing | 1 to 1.5 weeks | Last of the building: the one phase that changes the backend and its routes |
+| M-14 and M-15: documentation and the close | 1 to 1.5 weeks | The close; M-15's request to the Public Suffix List waits for the domain |
+| **Together** | **10.5 to 15.5 weeks** (the plan's §10) | After your fourteen answers, on `feat/dev-tools` |
+
+What the step should give, measured and written in the plan's rows: `ff` installed in one line on Linux, macOS and Windows, its signature checked; a customer logged in without a key; the small app running on a laptop from one command, offline, and deployed unchanged on FF and on AWS; the six templates each deployed and run locally by the suites; an agent reading logs and deploying through `ff mcp`; the development server updated by itself at night with no one at the keyboard; the status page up when the backend isn't; and one receipt's trail read from its order's request to its queue's reader.
