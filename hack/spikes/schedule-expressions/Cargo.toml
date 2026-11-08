@@ -1,0 +1,13 @@
+# The developer tools' spike of EventBridge's schedule expressions read in Rust, as `ff local` will run a function's
+# schedules: the backend's reader ported, tested against the table the backend's own tests read
+# (BE/src/schedules/schedule-expressions.json), then compared with the backend's on expressions made at random. A crate
+# of its own, outside the ff command's, with the dependencies ff has already, for its tests alone.
+[package]
+name = "schedule-expressions-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dev-dependencies]
+humantime = "2.4"
+serde_json = "1"

@@ -196,6 +196,8 @@ hack/.spike-keys/
 hack/.spike-sam-yaml/
 # hack/spikes/minisign: the keys' secret halves, the crate's build, minisign's release and the results (the developer tools' spike)
 hack/.spike-minisign/
+# hack/spikes/schedule-expressions: the reader's build, the expressions made at random, both readers' answers, the results
+hack/.spike-schedule-expressions/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/

@@ -1,0 +1,161 @@
+{
+  "about": "EventBridge's schedule expressions as its documentation gives them, and their next runs: the table the backend's reader (schedule-expression.ts) and ff's read for their tests, so that both read an expression alike. Times are UTC. A test's cases run each expression's next runs after `after`: as many as `runs` lists, or `count` when fewer remain; from `anchor`, a rate's first run, when one is given.",
+  "rates": [
+    { "expression": "rate(1 minute)", "intervalMs": 60000 },
+    { "expression": "rate(5 minutes)", "intervalMs": 300000 },
+    { "expression": "rate(1 hour)", "intervalMs": 3600000 },
+    { "expression": "rate(12 hours)", "intervalMs": 43200000 },
+    { "expression": "rate(1 day)", "intervalMs": 86400000 },
+    { "expression": "rate(7 days)", "intervalMs": 604800000 }
+  ],
+  "refused": [
+    { "title": "rate(1 minutes)", "expression": "rate(1 minutes)", "message": "rate(1 minutes) must be rate(1 minute): the unit is singular for 1" },
+    { "title": "rate(5 minute)", "expression": "rate(5 minute)", "message": "rate(5 minute) must be rate(5 minutes): the unit is plural above 1" },
+    { "title": "rate(0 minutes)", "expression": "rate(0 minutes)", "message": "rate() takes a value of 1 or more" },
+    { "title": "rate(5 seconds)", "expression": "rate(5 seconds)", "message": "rate() takes minute(s), hour(s) or day(s), not \"seconds\"" },
+    { "title": "rate(1.5 hours)", "expression": "rate(1.5 hours)", "message": "rate() takes a whole number and a unit, such as rate(5 minutes)" },
+    { "title": "rate(-1 day)", "expression": "rate(-1 day)", "message": "rate() takes a whole number and a unit, such as rate(5 minutes)" },
+    { "title": "rate(5 constructors)", "expression": "rate(5 constructors)", "message": "rate() takes minute(s), hour(s) or day(s), not \"constructors\"" },
+    { "title": "five fields", "expression": "cron(0 10 * * ?)", "message": "cron() takes six fields, minutes hours day-of-month month day-of-week year; got 5" },
+    { "title": "both days", "expression": "cron(0 10 1 * MON *)", "message": "cron(): one of the day-of-month and day-of-week fields must be \"?\", and only one: the other says which days" },
+    { "title": "neither day", "expression": "cron(0 10 ? * ? *)", "message": "cron(): one of the day-of-month and day-of-week fields must be \"?\", and only one: the other says which days" },
+    { "title": "\"?\" for the hours", "expression": "cron(0 ? * * ? *)", "message": "cron(): the hours field can't be \"?\": only the day-of-month or the day-of-week can" },
+    { "title": "minute 60", "expression": "cron(60 10 * * ? *)", "message": "cron(): the minutes field takes 0 to 59; got 60" },
+    { "title": "hour 24", "expression": "cron(0 24 * * ? *)", "message": "cron(): the hours field takes 0 to 23; got 24" },
+    { "title": "day 32", "expression": "cron(0 10 32 * ? *)", "message": "cron(): the day-of-month field takes 1 to 31; got 32" },
+    { "title": "month 13", "expression": "cron(0 10 1 13 ? *)", "message": "cron(): the month field takes 1 to 12; got 13" },
+    { "title": "a day of the week 8", "expression": "cron(0 10 ? * 8 *)", "message": "cron(): the day-of-week field takes 1 to 7; got 8" },
+    { "title": "a year before 1970", "expression": "cron(0 10 * * ? 1969)", "message": "cron(): the year field takes 1970 to 2199; got 1969" },
+    { "title": "a name that is none", "expression": "cron(0 10 ? * FUN *)", "message": "cron(): \"FUN\" is not a value of the day-of-week field" },
+    { "title": "a sixth week", "expression": "cron(0 10 ? * 2#6 *)", "message": "cron(): \"2#6\" must be a day and its week in the month, 1 to 5, such as 2#1, the first Monday" },
+    { "title": "W where it means nothing", "expression": "cron(0 10 W * ? *)", "message": "cron(): \"W\" is not an item of the day-of-month field: L, LW and nW are" },
+    { "title": "a step of 0", "expression": "cron(0/0 * * * ? *)", "message": "cron(): the step in \"0/0\" must be a whole number of 1 or more" },
+    { "title": "seconds, more often than once a minute", "expression": "cron(0 0/1 * * * ? *)", "message": "cron() takes six fields, minutes hours day-of-month month day-of-week year; got 7" },
+    { "title": "neither rate nor cron", "expression": "at(2026-10-21T10:00:00)", "message": "A schedule is rate(value unit), such as rate(5 minutes), or cron(minutes hours day-of-month month day-of-week year), such as cron(0 8 * * ? *)" }
+  ],
+  "runs": [
+    {
+      "title": "rate(): runs every interval from its first run, which a late run doesn't move",
+      "cases": [
+        { "expression": "rate(5 minutes)", "anchor": "2026-10-21T08:00:30Z", "after": "2026-10-21T08:00:30Z", "runs": ["2026-10-21T08:05:30Z"] },
+        { "note": "Late by 12 minutes: the next is the first of its runs after now, not one per run missed.", "expression": "rate(5 minutes)", "anchor": "2026-10-21T08:00:30Z", "after": "2026-10-21T08:17:00Z", "runs": ["2026-10-21T08:20:30Z"] }
+      ]
+    },
+    {
+      "title": "rate(): has no run after 2199, where cron's years end, however long its interval",
+      "cases": [
+        { "expression": "rate(36500 days)", "after": "2026-10-21T00:00:00Z", "count": 2, "runs": ["2126-09-27T00:00:00Z"] },
+        { "note": "Beyond what a Date holds, these would make an invalid date: none instead.", "expression": "rate(100000000 days)", "after": "2026-10-21T00:00:00Z", "count": 1, "runs": [] },
+        { "expression": "rate(9007199254740991 days)", "after": "2026-10-21T00:00:00Z", "count": 1, "runs": [] }
+      ]
+    },
+    { "title": "cron(): runs cron(0 10 * * ? *) as EventBridge's documentation says", "cases": [{ "expression": "cron(0 10 * * ? *)", "after": "2026-10-21T10:00:00Z", "runs": ["2026-10-22T10:00:00Z", "2026-10-23T10:00:00Z"] }] },
+    { "title": "cron(): runs cron(15 12 * * ? *) as EventBridge's documentation says", "cases": [{ "expression": "cron(15 12 * * ? *)", "after": "2026-10-21T10:00:00Z", "runs": ["2026-10-21T12:15:00Z", "2026-10-22T12:15:00Z"] }] },
+    {
+      "title": "cron(): runs cron(0 18 ? * MON-FRI *) as EventBridge's documentation says",
+      "cases": [{ "note": "2026-10-23 is a Friday: then Monday.", "expression": "cron(0 18 ? * MON-FRI *)", "after": "2026-10-23T17:00:00Z", "runs": ["2026-10-23T18:00:00Z", "2026-10-26T18:00:00Z"] }]
+    },
+    { "title": "cron(): runs cron(0 8 1 * ? *) as EventBridge's documentation says", "cases": [{ "expression": "cron(0 8 1 * ? *)", "after": "2026-10-21T10:00:00Z", "runs": ["2026-11-01T08:00:00Z", "2026-12-01T08:00:00Z"] }] },
+    { "title": "cron(): runs cron(0/15 * * * ? *) as EventBridge's documentation says", "cases": [{ "expression": "cron(0/15 * * * ? *)", "after": "2026-10-21T10:07:00Z", "runs": ["2026-10-21T10:15:00Z", "2026-10-21T10:30:00Z"] }] },
+    {
+      "title": "cron(): runs cron(0/10 * ? * MON-FRI *) as EventBridge's documentation says",
+      "cases": [{ "note": "Saturday the 24th: the next is Monday's first.", "expression": "cron(0/10 * ? * MON-FRI *)", "after": "2026-10-23T23:55:00Z", "runs": ["2026-10-26T00:00:00Z", "2026-10-26T00:10:00Z"] }]
+    },
+    { "title": "cron(): runs cron(0/5 8-17 ? * MON-FRI *) as EventBridge's documentation says", "cases": [{ "expression": "cron(0/5 8-17 ? * MON-FRI *)", "after": "2026-10-21T17:52:00Z", "runs": ["2026-10-21T17:55:00Z", "2026-10-22T08:00:00Z"] }] },
+    {
+      "title": "cron(): runs cron(0 9 ? * 2#1 *) as EventBridge's documentation says",
+      "cases": [{ "note": "The first Monday of each month.", "expression": "cron(0 9 ? * 2#1 *)", "after": "2026-10-21T00:00:00Z", "runs": ["2026-11-02T09:00:00Z", "2026-12-07T09:00:00Z"] }]
+    },
+    {
+      "title": "cron(): runs strictly after the time, to the minute, in UTC",
+      "cases": [
+        { "expression": "cron(30 9 * * ? *)", "after": "2026-10-21T09:30:00Z", "runs": ["2026-10-22T09:30:00Z"] },
+        { "expression": "cron(30 9 * * ? *)", "after": "2026-10-21T09:29:59.999Z", "runs": ["2026-10-21T09:30:00Z"] }
+      ]
+    },
+    {
+      "title": "cron(): takes the last day of the month, L, in February of a leap year and not",
+      "cases": [
+        { "expression": "cron(0 0 L * ? *)", "after": "2027-01-31T12:00:00Z", "runs": ["2027-02-28T00:00:00Z", "2027-03-31T00:00:00Z"] },
+        { "expression": "cron(0 0 L 2 ? *)", "after": "2027-03-01T00:00:00Z", "runs": ["2028-02-29T00:00:00Z", "2029-02-28T00:00:00Z"] }
+      ]
+    },
+    {
+      "title": "cron(): takes the last weekday of the month, LW, and the weekday nearest a day, W, without leaving the month",
+      "cases": [
+        {
+          "note": "2026-10-31 is a Saturday: the last weekday is Friday the 30th; 2027-01-31 a Sunday: Friday the 29th.",
+          "expression": "cron(0 12 LW * ? *)",
+          "after": "2026-10-01T00:00:00Z",
+          "runs": ["2026-10-30T12:00:00Z", "2026-11-30T12:00:00Z", "2026-12-31T12:00:00Z", "2027-01-29T12:00:00Z"]
+        },
+        { "note": "2026-08-01 is a Saturday: 1W is Monday the 3rd, never July's 31st.", "expression": "cron(0 12 1W * ? *)", "after": "2026-07-15T00:00:00Z", "runs": ["2026-08-03T12:00:00Z"] },
+        {
+          "note": "2026-05-31 is a Sunday, the month's last day: 31W is Friday the 29th; months without a 31st have none.",
+          "expression": "cron(0 12 31W * ? *)",
+          "after": "2026-04-01T00:00:00Z",
+          "runs": ["2026-05-29T12:00:00Z", "2026-07-31T12:00:00Z"]
+        }
+      ]
+    },
+    {
+      "title": "cron(): takes a day of the week's last in the month, nL, and the nth, # — skipping the months without a fifth",
+      "cases": [
+        { "note": "The last Friday (6) of each month.", "expression": "cron(0 17 ? * 6L *)", "after": "2026-10-01T00:00:00Z", "runs": ["2026-10-30T17:00:00Z", "2026-11-27T17:00:00Z"] },
+        {
+          "note": "The fifth Thursday (5): October 2026 has one (the 29th), November none (its Thursdays end on the 26th), December the 31st.",
+          "expression": "cron(0 9 ? * 5#5 *)",
+          "after": "2026-10-01T00:00:00Z",
+          "runs": ["2026-10-29T09:00:00Z", "2026-12-31T09:00:00Z"]
+        }
+      ]
+    },
+    {
+      "title": "cron(): takes names for months and days, in any case, and \"L\" alone for Saturday",
+      "cases": [
+        { "expression": "cron(0 6 ? jan-mar sun *)", "after": "2026-12-20T00:00:00Z", "runs": ["2027-01-03T06:00:00Z", "2027-01-10T06:00:00Z"] },
+        { "expression": "cron(0 6 ? * L *)", "after": "2026-10-21T00:00:00Z", "runs": ["2026-10-24T06:00:00Z"] }
+      ]
+    },
+    {
+      "title": "cron(): wraps a range around its end: 20-2 is 20:00 to 02:00, FRI-MON the weekend",
+      "cases": [
+        {
+          "expression": "cron(0 20-2 * * ? *)",
+          "after": "2026-10-21T19:30:00Z",
+          "runs": [
+            "2026-10-21T20:00:00Z",
+            "2026-10-21T21:00:00Z",
+            "2026-10-21T22:00:00Z",
+            "2026-10-21T23:00:00Z",
+            "2026-10-22T00:00:00Z",
+            "2026-10-22T01:00:00Z",
+            "2026-10-22T02:00:00Z",
+            "2026-10-22T20:00:00Z"
+          ]
+        },
+        {
+          "expression": "cron(0 12 ? * FRI-MON *)",
+          "after": "2026-10-21T00:00:00Z",
+          "runs": ["2026-10-23T12:00:00Z", "2026-10-24T12:00:00Z", "2026-10-25T12:00:00Z", "2026-10-26T12:00:00Z"]
+        }
+      ]
+    },
+    {
+      "title": "cron(): takes steps from a value, from a range, and from *, and lists",
+      "cases": [
+        { "expression": "cron(5/20 * * * ? *)", "after": "2026-10-21T10:00:00Z", "runs": ["2026-10-21T10:05:00Z", "2026-10-21T10:25:00Z", "2026-10-21T10:45:00Z", "2026-10-21T11:05:00Z"] },
+        { "expression": "cron(0 8-16/4 * * ? *)", "after": "2026-10-21T00:00:00Z", "runs": ["2026-10-21T08:00:00Z", "2026-10-21T12:00:00Z", "2026-10-21T16:00:00Z", "2026-10-22T08:00:00Z"] },
+        { "expression": "cron(0 */12 1,15 * ? *)", "after": "2026-10-01T00:00:00Z", "runs": ["2026-10-01T12:00:00Z", "2026-10-15T00:00:00Z", "2026-10-15T12:00:00Z"] }
+      ]
+    },
+    {
+      "title": "cron(): runs within its years, and no more after them",
+      "cases": [
+        { "expression": "cron(0 0 1 1 ? 2027-2028)", "after": "2026-10-21T00:00:00Z", "count": 3, "runs": ["2027-01-01T00:00:00Z", "2028-01-01T00:00:00Z"] },
+        { "expression": "cron(0 0 1 1 ? 2025)", "after": "2026-10-21T00:00:00Z", "count": 1, "runs": [] },
+        { "expression": "cron(59 23 31 12 ? 2199)", "after": "2199-12-30T00:00:00Z", "count": 2, "runs": ["2199-12-31T23:59:00Z"] }
+      ]
+    }
+  ]
+}
