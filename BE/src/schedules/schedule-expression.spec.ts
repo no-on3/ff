@@ -25,6 +25,7 @@ describe("EventBridge's schedule expressions", () => {
       ['rate(5 seconds)', 'rate() takes minute(s), hour(s) or day(s), not "seconds"'],
       ['rate(1.5 hours)', 'rate() takes a whole number and a unit, such as rate(5 minutes)'],
       ['rate(-1 day)', 'rate() takes a whole number and a unit, such as rate(5 minutes)'],
+      ['rate(5 constructors)', 'rate() takes minute(s), hour(s) or day(s), not "constructors"'],
     ])('refuses %s, saying why', (expression, message) => {
       expect(() => parseScheduleExpression(expression)).toThrow(new InvalidScheduleExpressionError(message));
     });
@@ -36,6 +37,13 @@ describe("EventBridge's schedule expressions", () => {
       expect(nextRun(rate, created, created)).toEqual(at('2026-10-21T08:05:30Z'));
       // Late by 12 minutes: the next is the first of its runs after now, not one per run missed.
       expect(nextRun(rate, at('2026-10-21T08:17:00Z'), created)).toEqual(at('2026-10-21T08:20:30Z'));
+    });
+
+    it('has no run after 2199, where cron\'s years end, however long its interval', () => {
+      expect(runs('rate(36500 days)', '2026-10-21T00:00:00Z', 2)).toEqual(['2126-09-27T00:00:00Z']);
+      // Beyond what a Date holds, these would make an invalid date: none instead.
+      expect(runs('rate(100000000 days)', '2026-10-21T00:00:00Z', 1)).toEqual([]);
+      expect(runs('rate(9007199254740991 days)', '2026-10-21T00:00:00Z', 1)).toEqual([]);
     });
   });
 
