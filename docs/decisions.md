@@ -5,6 +5,14 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-11-09: minisign's hash written by hand
+
+The minisign spike (M-01's part 5) found that `ff` has everything it needs to verify minisign's signatures except BLAKE2b, the hash minisign signs. The plan's D2 named the `blake2` crate for it; the spike's README recommended a BLAKE2b written from RFC 7693. Asked which ADR 0018 should choose, you answered the same day.
+
+**84. `ff`'s BLAKE2b is written from RFC 7693, not the `blake2` crate.** ✅ Your answer: as recommended. It adds no crate to pin at a release two weeks old or to watch in the nightly's advisories, for a hash that never changes; the crate's 8 crates, three of them from RustCrypto's newest generation, buy 0.07 s on an archive of 256 MB. Its tests are RFC 7693's vectors, openssl's digest of 256 MB and minisign's real release.
+- **Changed already:** [ADR 0018](adr/0018-ff-releases.md) records it; the [developer tools plan](dev-tools-plan.md)'s D2 and its task list's M-03, part 2, say it.
+- **Still to change:** M-03's part 2 moves the spike's verifier into `ff`.
+
 ## 2026-11-08: the developer tools started, their fourteen choices as recommended
 
 You said: "read docs/dev-tools-tasks.md and start working on it". The list is the [developer tools task list](dev-tools-tasks.md): the [developer tools plan](dev-tools-plan.md)'s tasks M-00 to M-15. Asked the same day, you took each of the plan's fourteen choices (its §9) as it recommended them, as step 5's were. Six of them are the [step-6 plan](step-6-plan.md)'s 6, 7, 8, 10, 12 and 13 (71, 72, 73, 82, 83 and 81 here), and they answer the CLI plan's questions 3, 5 and 7 and the questions 39 and 42 left open.
