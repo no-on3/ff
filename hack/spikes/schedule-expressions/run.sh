@@ -4,21 +4,20 @@
 # (BE/src/schedules/schedule-expressions.json); then both readers read the same expressions made at random
 # (generate.mjs), the backend's run by Node.js as it is (backend.mts), and must say the same of each, word for word:
 # its next runs to the millisecond, or its refusal. Then what each takes for an expression that never runs, which is
-# read to its last year. What it found lands in hack/.spike-schedule-expressions/results.md.
+# read to its last year. What it found lands in hack/.spikes/schedule-expressions/results.md.
 #   hack/spikes/schedule-expressions/run.sh                    # under a minute
 #   LINES=100000 SEED=2 hack/spikes/schedule-expressions/run.sh   # more expressions, others
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-work="$repo/hack/.spike-schedule-expressions"
+source "$repo/hack/lib/spikes.sh"
+spike_work schedule-expressions
 source "$repo/hack/lib/checks.sh"
 lines="${LINES:-20000}"
 seed="${SEED:-1}"
-mkdir -p "$work"
 results="$work/results.md"
-export CARGO_TARGET_DIR="$work/target" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 backend() { node --no-warnings "$here/backend.mts"; }
-spike="$work/target/release/schedule-expressions-spike"
+spike="$CARGO_TARGET_DIR/release/schedule-expressions-spike"
 
 section "the Rust reader's tests, the backend's table among them"
 "$repo/hack/check-resources.sh"

@@ -7,12 +7,12 @@
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-work="$repo/hack/.spike-cross-build"
+source "$repo/hack/lib/spikes.sh"
+spike_work cross-build
 source "$repo/hack/lib/checks.sh"
 targets=(aarch64-apple-darwin x86_64-apple-darwin)
 mkdir -p "$work/dist" "$work/logs"
 results="$work/results-macos.md"
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" CARGO_TARGET_DIR="$work/target"
 toolchain="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/cli/rust-toolchain.toml")"
 
 section "Rust's targets for toolchain $toolchain, on macOS $(sw_vers -productVersion) $(uname -m)"

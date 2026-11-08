@@ -319,9 +319,9 @@ jobs:
         with:
           name: cross-builds
           path: |
-            hack/.spike-cross-build/dist/
-            hack/.spike-cross-build/results.md
-            hack/.spike-cross-build/logs/
+            hack/.spikes/cross-build/dist/
+            hack/.spikes/cross-build/results.md
+            hack/.spikes/cross-build/logs/
           retention-days: 7
           if-no-files-found: ignore
 
@@ -340,9 +340,9 @@ jobs:
         with:
           name: cross-builds-macos
           path: |
-            hack/.spike-cross-build/dist/
-            hack/.spike-cross-build/results-macos.md
-            hack/.spike-cross-build/logs/
+            hack/.spikes/cross-build/dist/
+            hack/.spikes/cross-build/results-macos.md
+            hack/.spikes/cross-build/logs/
           retention-days: 7
           if-no-files-found: ignore
 

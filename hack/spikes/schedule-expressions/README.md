@@ -7,7 +7,7 @@ hack/spikes/schedule-expressions/run.sh                        # under a minute
 LINES=200000 SEED=2 hack/spikes/schedule-expressions/run.sh    # more expressions, other ones
 ```
 
-It needs Rust (the toolchain `cli/` pins) and Node.js 24, which runs the backend's TypeScript as it is, its types stripped. Its build and results go to `hack/.spike-schedule-expressions/` (`results.md`).
+It needs Rust (the toolchain `cli/` pins) and Node.js 24, which runs the backend's TypeScript as it is, its types stripped. Its build and results go to `hack/.spikes/schedule-expressions/` (`results.md`).
 
 ## What it does
 

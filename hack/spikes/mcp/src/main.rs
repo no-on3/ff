@@ -3,7 +3,7 @@
 //! a client asks (its protocol version, what it sends before tools/list, how it calls a tool) can be read afterwards.
 //! The tool, `ff_functions`, answers a fixed list of functions; asked with `"fail": "tool"`, it answers a tool's error
 //! (a result with isError), and with `"fail": "protocol"`, a JSON-RPC error, to see how a client shows each.
-//!   mcp-spike [<log file>]      the log defaults to $FF_MCP_SPIKE_LOG, else hack/.spike-mcp/<client's pid>.jsonl
+//!   mcp-spike [<log file>]      the log defaults to $FF_MCP_SPIKE_LOG, else hack/.spikes/mcp/<client's pid>.jsonl
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,7 +74,7 @@ fn answer(message: &Value) -> Option<Value> {
 
 fn main() {
     let path = std::env::args().nth(1).or_else(|| std::env::var("FF_MCP_SPIKE_LOG").ok()).unwrap_or_else(|| {
-        let repo = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.spike-mcp");
+        let repo = concat!(env!("CARGO_MANIFEST_DIR"), "/../../.spikes/mcp");
         format!("{repo}/{}.jsonl", std::process::id())
     });
     if let Some(dir) = std::path::Path::new(&path).parent() {

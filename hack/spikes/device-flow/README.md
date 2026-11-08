@@ -6,7 +6,7 @@ How `ff login` will log a developer in: OAuth's device flow (RFC 8628) against t
 hack/spikes/device-flow/run.sh      # about 3 minutes, Keycloak's start among them
 ```
 
-It needs Rust (the toolchain `cli/` pins), Docker with Compose, Python 3, curl and jq. It starts a Keycloak of its own from `docker-compose.yml` (the image it pins, the realm `deploy/keycloak/ff-realm.json` imported), as the compose project `ff-device-flow-spike` on port 28180 (`FF_DEVICE_FLOW_PORT`), removed with its volume at the end: the developer's own Keycloak is never touched. The build, the tokens (in files, never printed) and the results go to `hack/.spike-device-flow/` (`results.md`).
+It needs Rust (the toolchain `cli/` pins), Docker with Compose, Python 3, curl and jq. It starts a Keycloak of its own from `docker-compose.yml` (the image it pins, the realm `deploy/keycloak/ff-realm.json` imported), as the compose project `ff-device-flow-spike` on port 28180 (`FF_DEVICE_FLOW_PORT`), removed with its volume at the end: the developer's own Keycloak is never touched. The build, the tokens (in files, never printed) and the results go to `hack/.spikes/device-flow/` (`results.md`).
 
 ## What it does
 

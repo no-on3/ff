@@ -7,7 +7,7 @@ hack/spikes/minisign/run.sh              # about a minute the first time: the cr
 FIXTURES=1 hack/spikes/minisign/run.sh   # the fixtures made again, with new keys
 ```
 
-It needs Rust (the toolchain `cli/` pins), openssl and curl. It installs minisign through `hack/install-tools.sh minisign`. Its build, the keys' secret halves, minisign's release files and the results go to `hack/.spike-minisign/` (`results.md`). The crate stands apart from `cli/`, so `ff` takes on no dependency before the spike chooses one.
+It needs Rust (the toolchain `cli/` pins), openssl and curl. It installs minisign through `hack/install-tools.sh minisign`. Its build, the keys' secret halves, minisign's release files and the results go to `hack/.spikes/minisign/` (`results.md`). The crate stands apart from `cli/`, so `ff` takes on no dependency before the spike chooses one.
 
 ## What it does
 

@@ -183,7 +183,7 @@ mod tests {
     use super::*;
 
     // Made by run.sh with the minisign hack/install-tools.sh pins (`minisign -G -W`, `minisign -S`), each key's secret
-    // half left in hack/.spike-minisign/: two keys, a manifest as the update notice will read one, the same file
+    // half left in hack/.spikes/minisign/: two keys, a manifest as the update notice will read one, the same file
     // signed in the legacy format.
     const KEY: &str = include_str!("../fixtures/release.pub");
     const OTHER_KEY: &str = include_str!("../fixtures/other.pub");

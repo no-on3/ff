@@ -194,16 +194,9 @@ hack/.spike-versions/
 hack/.spike-keys/
 # hack/spikes/sam-yaml: the reader's build, cfn-flip, sam init's templates and home, the results (step 5's spike)
 hack/.spike-sam-yaml/
-# hack/spikes/minisign: the keys' secret halves, the crate's build, minisign's release and the results (the developer tools' spike)
-hack/.spike-minisign/
-# hack/spikes/schedule-expressions: the reader's build, the expressions made at random, both readers' answers, the results
-hack/.spike-schedule-expressions/
-# hack/spikes/cross-build: zig, cargo-zigbuild and their caches, the builds, their logs, the results
-hack/.spike-cross-build/
-# hack/spikes/device-flow: the prototype's build, the device codes and tokens of a run, the results
-hack/.spike-device-flow/
-# hack/spikes/mcp: the server's build, each client's log of messages, the results
-hack/.spike-mcp/
+# hack/spikes/ of the developer tools' plan (hack/lib/spikes.sh): each spike's downloads, logs and results, and the
+# one folder their Rust builds share
+hack/.spikes/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/

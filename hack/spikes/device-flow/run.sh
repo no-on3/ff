@@ -4,22 +4,21 @@
 # ff-device-flow-spike, port 28180, removed on exit; the developer's own is never touched). The user's part is done as a
 # browser does it (browser.py). Each answer the flow can meet: pending, slow down, denied, approved, expired; the
 # tokens' lifetimes, with and without offline access; a refresh, a refresh token used twice, a refresh after the
-# session's end, an offline token revoked. What it found lands in hack/.spike-device-flow/results.md.
+# session's end, an offline token revoked. What it found lands in hack/.spikes/device-flow/results.md.
 #   hack/spikes/device-flow/run.sh      # about 3 minutes, Keycloak's start among them
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-work="$repo/hack/.spike-device-flow"
+source "$repo/hack/lib/spikes.sh"
+spike_work device-flow
 source "$repo/hack/lib/checks.sh"
 port="${FF_DEVICE_FLOW_PORT:-28180}"
 issuer="http://localhost:$port/realms/ff"
 client=ff-cli
 user=device-spike@ff.test
 password=device-spike-1
-mkdir -p "$work"
 rm -f "$work"/*.json
 results="$work/results.md"
-export CARGO_TARGET_DIR="$work/target" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 compose=(docker compose -p ff-device-flow-spike -f "$repo/docker-compose.yml" --profile auth)
 
 section "the prototype: its tests, against a stand-in issuer"
@@ -27,7 +26,7 @@ section "the prototype: its tests, against a stand-in issuer"
 tests="$( (cd "$here" && cargo test --locked --quiet --lib 2>&1) | sed -n 's/^test result: \(ok\. [0-9]* passed\).*/\1/p')"
 check "the tests pass" true "$([[ "$tests" == "ok. "* ]] && echo true || echo "$tests")"
 (cd "$here" && cargo build --locked --quiet --release)
-spike() { "$work/target/release/device-flow-spike" "$1" "$issuer" "$client" "${@:2}"; }
+spike() { "$CARGO_TARGET_DIR/release/device-flow-spike" "$1" "$issuer" "$client" "${@:2}"; }
 field() { jq -r "$1" <<<"$2"; } # <jq filter> <json>
 browser() { python3 -I "$here/browser.py" "$(jq -r '.verification_uri_complete // .verification_uri' "$1")" "$(jq -r .user_code "$1")" "$user" "$password" "$2"; }
 

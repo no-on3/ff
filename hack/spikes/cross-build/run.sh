@@ -4,13 +4,14 @@
 # being the C compiler and the linker, ring's C code and all; zig and cargo-zigbuild pinned here with their checksums,
 # zig's signature checked too. For each build: whether it built, the time, the size, what the file is; the Linux one
 # run here. The other systems run theirs on GitHub's runners (ci.yml's cross job, dispatched with jobs=cross), whose
-# times and results the README records. What it found lands in hack/.spike-cross-build/results.md.
+# times and results the README records. What it found lands in hack/.spikes/cross-build/results.md.
 #   hack/spikes/cross-build/run.sh             # 15 to 25 minutes the first time: the tools, Rust's targets, 5 builds
 #   TARGETS="x86_64-pc-windows-gnu" hack/spikes/cross-build/run.sh   # some of them
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-work="$repo/hack/.spike-cross-build"
+source "$repo/hack/lib/spikes.sh"
+spike_work cross-build
 source "$repo/hack/lib/checks.sh"
 
 # Pinned to releases at least two weeks old when chosen. zig's SHA-256 is its own index's, of a file whose signature
@@ -24,7 +25,6 @@ read -r -a targets <<<"${TARGETS:-x86_64-unknown-linux-musl aarch64-unknown-linu
 
 mkdir -p "$work/bin" "$work/downloads" "$work/dist" "$work/logs"
 results="$work/results.md"
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" CARGO_TARGET_DIR="$work/target"
 # zig's and cargo-zigbuild's caches here too, where they would be in the home folder's.
 export ZIG_GLOBAL_CACHE_DIR="$work/cache/zig" CARGO_ZIGBUILD_CACHE_DIR="$work/cache/cargo-zigbuild"
 toolchain="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/cli/rust-toolchain.toml")"

@@ -10,7 +10,7 @@ hack/spikes/cross-build/smoke.sh <ff binary>   # on the system the binary is for
 gh workflow run ci.yml --ref <branch> -f jobs=cross   # all of it on GitHub's runners, about 12 minutes
 ```
 
-`run.sh` needs Rust (rustup, with the toolchain `cli/` pins), curl and xz. It installs minisign through `hack/install-tools.sh minisign`, and zig and cargo-zigbuild into `hack/.spike-cross-build/`, where the builds, their logs, zig's caches and the results go too (`results.md`, `results-macos.md`). Nothing lands in the home folder but Rust's targets, which rustup keeps with the toolchain.
+`run.sh` needs Rust (rustup, with the toolchain `cli/` pins), curl and xz. It installs minisign through `hack/install-tools.sh minisign`, and zig and cargo-zigbuild into `hack/.spikes/cross-build/`, where the builds, their logs, zig's caches and the results go too (`results.md`, `results-macos.md`). Nothing lands in the home folder but Rust's targets, which rustup keeps with the toolchain.
 
 ## What it does
 

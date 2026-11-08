@@ -6,7 +6,7 @@ How `ff mcp` will speak to an AI assistant: the Model Context Protocol over stdi
 hack/spikes/mcp/run.sh      # under a minute: the server's tests and build, then a client as the specification describes one
 ```
 
-It needs Rust (the toolchain `cli/` pins), Python 3 and jq. Its build, the logs and the results go to `hack/.spike-mcp/` (`results.md`). The crate stands apart from `cli/` and depends on `serde_json` alone, which `ff` has already.
+It needs Rust (the toolchain `cli/` pins), Python 3 and jq. Its build, the logs and the results go to `hack/.spikes/mcp/` (`results.md`). The crate stands apart from `cli/` and depends on `serde_json` alone, which `ff` has already.
 
 ## What it does
 
@@ -17,18 +17,18 @@ It needs Rust (the toolchain `cli/` pins), Python 3 and jq. Its build, the logs 
   - `tools/call`: a fixed list of two functions, as text and as `structuredContent`. Asked with `"fail": "tool"`, a tool's error: a result with `isError` and the API's message, as `ff mcp` will answer a refused key. Asked with `"fail": "protocol"`, JSON-RPC's error -32602, as an argument the schema doesn't take would be;
   - anything else, -32601; a line that isn't JSON, -32700. A notification gets no answer.
 
-  It writes every message it reads and sends to a log, one JSON line each with the time, so what a client sends can be read afterwards. The log is the file it's given, else `$FF_MCP_SPIKE_LOG`, else `hack/.spike-mcp/<its pid>.jsonl`.
+  It writes every message it reads and sends to a log, one JSON line each with the time, so what a client sends can be read afterwards. The log is the file it's given, else `$FF_MCP_SPIKE_LOG`, else `hack/.spikes/mcp/<its pid>.jsonl`.
 - **A client as the specification describes one** (`client.py`) starts the server and goes through the whole exchange: `initialize`, the `initialized` notification, `tools/list`, the tool called three ways, `ping`, and `resources/list`, which the server hasn't.
 - **The checks,** 9: the server's tests (4), then what the client got back for each exchange, and the log holding the 8 messages in and the 7 answers out.
 
 ## Connecting it to a client by hand
 
-`run.sh` builds the server at `hack/.spike-mcp/target/release/mcp-spike`. Each client starts it with a log file of its own as its one argument, then the log says what that client sent.
+`run.sh` builds the server at `hack/.spikes/target/release/mcp-spike`. Each client starts it with a log file of its own as its one argument, then the log says what that client sent.
 
 **Claude Code,** in a session of its own, as a developer adds `ff mcp`:
 
 ```bash
-claude mcp add ff-spike -- "$PWD/hack/.spike-mcp/target/release/mcp-spike" "$PWD/hack/.spike-mcp/claude-code.jsonl"
+claude mcp add ff-spike -- "$PWD/hack/.spikes/target/release/mcp-spike" "$PWD/hack/.spikes/mcp/claude-code.jsonl"
 claude      # then ask it to call ff_functions three times: with no arguments, with fail "tool", with fail "protocol"
 claude mcp remove ff-spike
 ```
@@ -37,8 +37,8 @@ Or once, in print mode, with this server alone, no other tool, and the stream of
 
 ```bash
 cat >mcp.json <<EOF
-{"mcpServers": {"ff-spike": {"type": "stdio", "command": "$PWD/hack/.spike-mcp/target/release/mcp-spike",
-                             "args": ["$PWD/hack/.spike-mcp/claude-code.jsonl"]}}}
+{"mcpServers": {"ff-spike": {"type": "stdio", "command": "$PWD/hack/.spikes/target/release/mcp-spike",
+                             "args": ["$PWD/hack/.spikes/mcp/claude-code.jsonl"]}}}
 EOF
 claude -p 'Call the ff_functions tool three times, one after the other: first with no arguments, then with {"fail": "tool"}, then with {"fail": "protocol"}. Then quote, word for word, what you received from each call, any error text included. Do nothing else.' \
   --strict-mcp-config --mcp-config mcp.json --tools "" --allowedTools mcp__ff-spike__ff_functions \

@@ -3,23 +3,22 @@
 # a client as the specification describes one (client.py) through the whole exchange: initialize, the initialized
 # notification, tools/list, the tool answered, a tool's error, a protocol's error, ping, a method the server hasn't.
 # The server logs every message, with its time, so that the same server connected to Claude Code and to another client
-# by hand (the README says how) shows what each sends. What it found lands in hack/.spike-mcp/results.md.
+# by hand (the README says how) shows what each sends. What it found lands in hack/.spikes/mcp/results.md.
 #   hack/spikes/mcp/run.sh      # under a minute
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-work="$repo/hack/.spike-mcp"
+source "$repo/hack/lib/spikes.sh"
+spike_work mcp
 source "$repo/hack/lib/checks.sh"
-mkdir -p "$work"
 results="$work/results.md"
-export CARGO_TARGET_DIR="$work/target" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 
 section "the server: its tests"
 "$repo/hack/check-resources.sh"
 tests="$( (cd "$here" && cargo test --locked --quiet 2>&1) | sed -n 's/^test result: \(ok\. [0-9]* passed\).*/\1/p')"
 check "the tests pass" true "$([[ "$tests" == "ok. "* ]] && echo true || echo "$tests")"
 (cd "$here" && cargo build --locked --quiet --release)
-server="$work/target/release/mcp-spike"
+server="$CARGO_TARGET_DIR/release/mcp-spike"
 
 section "a client as the specification describes one"
 log="$work/spec-client.jsonl"
@@ -40,7 +39,7 @@ check "the log holds every message, in and out" "8 7" \
 { echo "# ff mcp's handshake ($(date -u +%F))"; echo
   echo "The server's tests: $tests. A client as the specification describes one, through the whole exchange:"; echo
   echo '```'; jq -c '{sent, reply}' <<<"$exchanges"; echo '```'
-  echo; echo "Connect it to a client by hand as the README says; each connection's log is a file in hack/.spike-mcp/."
+  echo; echo "Connect it to a client by hand as the README says; each connection's log is a file in hack/.spikes/mcp/."
 } >"$results"
 cat "$results"
 checks_done spike-mcp

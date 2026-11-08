@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
 # The developer tools' spike of minisign's signatures verified in Rust, as `ff` will verify its update notice's manifest
 # and the images' archives it loads (src/lib.rs). Its fixtures are signed by the minisign hack/install-tools.sh pins,
-# made once and committed, the keys' secret halves left in hack/.spike-minisign/ (FIXTURES=1 makes them again, new keys
+# made once and committed, the keys' secret halves left in hack/.spikes/minisign/ (FIXTURES=1 makes them again, new keys
 # and all); then the crate's tests, with the blake2 crate and without it; minisign's own release files verified against
 # its author's key, as `minisign -V` verifies them, and a changed one refused; then what each BLAKE2b costs: the crates
 # the blake2 crate brings, the command's size with it and without, and the time each takes over 256 MB, beside
-# openssl's. What it found lands in hack/.spike-minisign/results.md.
+# openssl's. What it found lands in hack/.spikes/minisign/results.md.
 #   hack/spikes/minisign/run.sh      # about a minute the first time
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
-work="$repo/hack/.spike-minisign"
+source "$repo/hack/lib/spikes.sh"
+spike_work minisign
 source "$repo/hack/lib/checks.sh"
 # minisign's own releases are signed by this key, as its README gives it.
 AUTHORS_KEY=RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3
-mkdir -p "$work"
 results="$work/results.md"
-export CARGO_TARGET_DIR="$work/target" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}" RUST_TEST_THREADS="${RUST_TEST_THREADS:-2}"
 "$repo/hack/install-tools.sh" minisign >/dev/null
 minisign="$repo/hack/bin/minisign"
 
@@ -42,9 +41,9 @@ without_crate="$(tests --no-default-features)"
 check "the tests pass with the blake2 crate" true "$([[ "$with_crate" == "ok. "* ]] && echo true || echo "$with_crate")"
 check "the tests pass with the hand-written BLAKE2b alone" true "$([[ "$without_crate" == "ok. "* ]] && echo true || echo "$without_crate")"
 (cd "$here" && cargo build --locked --quiet --release --no-default-features)
-cp "$work/target/release/minisign-spike" "$work/spike-by-hand"
+cp "$CARGO_TARGET_DIR/release/minisign-spike" "$work/spike-by-hand"
 (cd "$here" && cargo build --locked --quiet --release)
-spike="$work/target/release/minisign-spike"
+spike="$CARGO_TARGET_DIR/release/minisign-spike"
 
 section "minisign's own release, verified against its author's key"
 release_files=(minisign-0.12-linux.tar.gz minisign-0.12-macos.zip minisign-0.12-win64.zip minisign-0.12.tar.gz)
