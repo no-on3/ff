@@ -6,7 +6,7 @@
 | **Goal** | A developer's AI coding agent (Claude Code, Cursor, or any other client of the Model Context Protocol, MCP) searches the developer's own code through FF. The index lives on a server of FF's in Tunisia, and the bill is paid in dinars from the account's credit. The service runs CIAK, an open-source (MIT) code index, on FF's own servers. FF does not resell CIAK's subscriptions at ciak.at |
 | **Parent plans** | [What to build next](what-to-build-next.md): §9.6 (developer tools), §9.1 (open models hosted here, which this service pairs with), §9.8 (card top-ups, before FF takes individual developers), §10 (what every new service needs), §11 (nothing that depends on a foreign paid service). The [local markets and AWS portability plan](local-markets-and-aws-portability-plan.md) §1.1: what paying a supplier abroad costs, the card allowances, and INPDP's authorization for personal data sent abroad |
 | **Builds on** | Step 4's server of customers' caches and its agent (`deploy/cache/`), the pattern for the code-index server; the front doors of steps 2 to 5, each a port of the backend's own; plans, the price book and hourly rating, as every service since step 2; FF's credit (P-74) for the pilot's accounts |
-| **Decision records** | ADR 0017 (the code-index server and its front door), from I-02's spike |
+| **Decision records** | An ADR of its own (the code-index server and its front door), from I-02's spike, numbered when this plan is confirmed: the [developer tools plan](dev-tools-plan.md) took 0017 and 0018 |
 
 Task numbers start with I, for *index*. CIAK keeps its own task numbers (R01 to R31, in its repository's `ciak_project/next/remaining_tasks_2026-10-31.md`); I-01 names the ones this plan waits for.
 
@@ -142,11 +142,11 @@ The repository's (`CLAUDE.md`): one heavy process at a time; a commit for each t
 - `ciak sync` and `ciak-mcp-server` with one key, sent as a bearer token, and no tenant of their own.
 - CIAK's R31 (files deleted on disk) and R02 (the evaluation, which the pilot is compared with).
 
-#### I-02: Spike and ADR 0017
+#### I-02: Spike and its ADR
 - CIAK's server on a server apart, with three tenants: its memory and disk, a cold start on a 271 MB index, and one tenant's heavy searches against another's latency.
 - FF's own repository indexed and synced: the index's size and the time each step takes.
 - The routes CIAK's MCP server and `ciak sync` call, recorded: the allow-list.
-- Claude Code through a minimal front door. ADR 0017 records what was measured and decided.
+- Claude Code through a minimal front door. Its ADR records what was measured and decided.
 
 ### Phase 1: the server and the front door
 
@@ -170,7 +170,7 @@ The repository's (`CLAUDE.md`): one heavy process at a time; a commit for each t
 ### Phase 3: the pilot and the close
 
 #### I-08: Documentation
-- Getting started's "Code search for your AI agent", `how-it-works.html`'s scenario, a page in French (`fr/recherche-de-code.md`), the export kit's page, ADR 0017 as built.
+- Getting started's "Code search for your AI agent", `how-it-works.html`'s scenario, a page in French (`fr/recherche-de-code.md`), the export kit's page, its ADR as built.
 
 #### I-09: The pilot and the price
 - Three to five beta accounts, given credit (P-74), on their own repositories: their agents' tokens and answers with and without code search. The SKUs' prices set from it. What to build next §9.6 says code search is there.
@@ -206,7 +206,7 @@ Proposed on 2026-10-31, each with what it means and its recommendation:
 
 | Part | Days |
 |---|---|
-| I-00 and I-02: the plan, the spike, ADR 0017 | 3 to 5 |
+| I-00 and I-02: the plan, the spike, its ADR | 3 to 5 |
 | CIAK's side (I-01) | 5 to 8 |
 | The server and the front door (I-03, I-04) | 6 to 9 |
 | The product (I-05 to I-07) | 6 to 8 |
@@ -221,7 +221,7 @@ I-04's days depend most on how many routes the allow-list holds and on I-01's tr
 |---|---|---|---|
 | I-00 The plan and the baseline | ⏳ Planned | | |
 | I-01 CIAK's side | ⏳ Planned | | |
-| I-02 Spike and ADR 0017 | ⏳ Planned | | |
+| I-02 Spike and its ADR | ⏳ Planned | | |
 | I-03 The server of customers' code indexes | ⏳ Planned | | |
 | I-04 The front door and the API | ⏳ Planned | | |
 | I-05 Plans, usage and the bill | ⏳ Planned | | |

@@ -5,6 +5,53 @@
 | **What this is** | Every decision you have made about FF, newest first: what you decided and what it means, what has already changed because of it (with the commits), and what still has to change (with the task that will do it) |
 | **How it is kept** | When you answer a plan's questions, a new section goes at the top of this log, and the plan's own table says "confirmed". The questions still waiting for you are at the end |
 
+## 2026-11-08: the developer tools started, their fourteen choices as recommended
+
+You said: "read docs/dev-tools-tasks.md and start working on it". The list is the [developer tools task list](dev-tools-tasks.md): the [developer tools plan](dev-tools-plan.md)'s tasks M-00 to M-15. Asked the same day, you took each of the plan's fourteen choices (its §9) as it recommended them, as step 5's were. Six of them are the [step-6 plan](step-6-plan.md)'s 6, 7, 8, 10, 12 and 13 (71, 72, 73, 82, 83 and 81 here), and they answer the CLI plan's questions 3, 5 and 7 and the questions 39 and 42 left open.
+
+**70. The developer tools now, beside the steps,** before step 6's parts that wait for the company, taking the four tasks of step 6 that wait for no company: `ff login`, `ff`'s builds and downloads, the runtime images published, the development server updating itself. ✅ Your answer: as recommended. Step 6 keeps its number and its plan, trimmed to card top-ups, El Fatoora, the content domain's switch with production's certificates, the accountant's letter and the security test's scope.
+- **Changed already:** the plan and its task list confirmed; the step-6 plan's status says which of its tasks and choices this plan took.
+- **Still to change:** M-15 trims the step-6 plan to what stays, its ADRs renumbered 0019 to 0021.
+
+**71. `ff login` first** (the CLI plan's question 7; the step-6 plan's 6). ✅ Your answer: as recommended. It is small, waits for nothing, and the first customers never paste a key.
+- **Still to change:** M-02, the first task after the spikes.
+
+**72. `ff`'s downloads and the runtime images live on FF itself:** a site on a bucket of FF's own at `get.<domain>`, with GitHub's releases and `ghcr.io` as copies (the CLI plan's question 3; the step-6 plan's 7). ✅ Your answer: as recommended. No new service, reachable when GitHub isn't, and FF serves itself as it serves its customers.
+- **Still to change:** M-03's part 3 and M-04's part 1; `ghcr.io`'s packages made public by you (the questions at the end).
+
+**73. `ff` for Windows and macOS now,** cross-compiled on Linux where M-01's spike allows and on a macOS runner otherwise, signed with minisign; Apple's notarization later (the CLI plan's question 5; the step-6 plan's 8). ✅ Your answer: as recommended. Many developers here work on Windows, and Apple's program is paid by card, every year.
+- **Still to change:** M-01's part 1, then M-03; the signing key made by you (the questions at the end).
+
+**74. `ff local` inside `ff`, in Rust:** one binary, one process, the services a subset that the backend's own fixtures prove, after M-01's spike measures it against the backend's front-door modules in a container. ✅ Your answer: as recommended. The whole backend in Docker is the on-premises edition's work, a plan of its own.
+- **Still to change:** M-01's part 3 and ADR 0017; M-05 to M-07.
+
+**75. `ff local` runs all of D3 in this step:** functions, URLs, schedules, Lambda's invoke, queues, buckets with notifications and sites, mail captured, a PostgreSQL and a Valkey on request. ✅ Your answer: as recommended. The small app needs every one of them to run end to end, which is the proof.
+- **Still to change:** M-05 to M-07.
+
+**76. Six templates:** `rest-api`, `cron-job`, `webhook`, `queue-worker`, `image-resize` and `site-with-api`, each for both runtimes. ✅ Your answer: as recommended. Each doubles as a fixture and a test; `image-resize` tests native packages on three systems.
+- **Still to change:** M-08.
+
+**77. `ff mcp`:** a server of the Model Context Protocol on stdio, reads by default, writes with `--allow-write`, never a delete, a key or a secret. ✅ Your answer: as recommended. An agent that can deploy and read logs is what developers ask for; the lines that keep deletes and secrets out are few.
+- **Still to change:** M-01's part 6, then M-09.
+
+**78. The stand-in Konnect in `ff`,** `ff local konnect`, for customers' shops and FF's own suites. ✅ Your answer: as recommended. One stand-in, two users; Konnect's sandbox comes only with a merchant's onboarding.
+- **Still to change:** M-10.
+
+**79. The status page from probes outside the backend,** a static page served by the development server's own proxy, incidents written by hand. ✅ Your answer: as recommended. A hosted service is paid by card abroad; the static page costs nothing to run.
+- **Still to change:** M-12.
+
+**80. One request's trail in this step, last.** ✅ Your answer: as recommended. The IDs exist, the queue carries `AWSTraceHeader` already, and the first question when a receipt doesn't arrive is where it stopped.
+- **Still to change:** M-13.
+
+**81. The development server updates itself,** pulling each commit of `master` whose every job passed, at night, with a backup first and the smoke test after, a failure stopping it (the step-6 plan's 13; the question 39 left open). ✅ Your answer: as recommended. GitHub holds no key to a server that other projects share.
+- **Still to change:** M-11; a read-only deploy key and a token that reads the workflow's results, made by you, and your go-ahead for its first run (the questions at the end).
+
+**82. A domain of its own for customers' content,** registered now and requested from the Public Suffix List now, switched in step 6 with production's certificates (the step-6 plan's 10; the question 42 left open). ✅ Your answer: as recommended. The weeks the list takes pass while this plan is built.
+- **Still to change:** the name chosen and registered at OVH by you (the questions at the end); M-15's part 3 writes and, with your go-ahead, sends the request; step 6's G-09 switches.
+
+**83. The development server's certificates stay the proxy's own authority** (the step-6 plan's 12). ✅ Your answer: as recommended. It is a development server; the OVH key and the shared proxy's main file stay untouched.
+- **Still to change:** nothing.
+
 ## 2026-10-31, later: the repository public again, and X-08's first part on `master` early
 
 GitHub stopped starting the workflow's jobs that morning: each job of the nightly run failed within seconds, its note saying "The job was not started because recent account payments have failed or your spending limit needs to be increased", the month's 2,000 free minutes spent (the nightly that repeated every job used about 2,940 a month until 67). You made the repository public, "so we can have more free time", until the private repository's free minutes are counted again from zero: "I will only leave it public until our time for free minutes reset on private repo". And you said that `master`'s next fast-forward carries X-08's first part: "yes, carry with fast forward x-08".
@@ -110,7 +157,7 @@ You said: "read docs/step-4-plan.md and docs/what-to-build-next.md, extract what
 
 **42. Sites live under FF's domain, at `<bucket>.site.ffunc.cloud`,** as function URLs live under `fn.ffunc.cloud`; on the development server, `<bucket>.site.dev.ffunc.cloud`. ✅ Taken as recommended. A domain of its own for customers' content (sites and function URLs), so that a phishing page on one never marks FF's own domain, as GitHub keeps `github.io` apart from `github.com`, is a question for before the public launch: added at the end of this log.
 - **Changed already:** W-03 (`0eef134`): `<bucket>.site.<domain>` at the edge, its certificates made on demand, and a customer's own domain for a site; on the development server, the record `*.site.dev`, made by you on 2026-10-30, and a site there, which the smoke test visits (Deploy 2).
-- **Still to change:** nothing in this step; a domain of its own for customers' content, before the public launch (the questions at the end).
+- **Still to change:** a domain of its own for customers' content, as 82 says: registered and requested from the Public Suffix List with the developer tools (M-15), switched in step 6 (G-09).
 
 **43. The bytes sites send out are counted, not billed,** as decision 12 says of all bytes out, with a limit a month per plan to protect the server: 10 GB on beta. ✅ Taken as recommended.
 - **Changed already:** W-02 (`6dc2371`): a site's bytes counted, never billed, against the plan's `siteTransferGbPerMonth`, 10 GB on beta, past which the account's sites answer 403 until the month's end; each visit billed as a request of S3's second class, as a `GET` is.
@@ -152,7 +199,7 @@ You said: "I bought ffunc.cloud, i want to use instead", then made its records f
 **39. FF's repository is on GitHub: `no-on3/ff`.** ✅ Your answer, and "push to github". Public when you made it, private since, the same day; public again from 2026-10-31 until the private minutes start again (68).
 - **What it means:** GitHub runs the workflow already in `.github/workflows/ci.yml`, each stage of `hack/ci.sh` on GitHub's own machines. A private repository has 2,000 free minutes of them a month on GitHub Free, each job billed in whole minutes. Measured on 2026-10-31, a push to `master` costs about 82 (seven jobs), and a nightly run that repeated every job 98, about 2,940 a month: since 67, the nightly runs the platform's suite and the advisories' check alone, about 18 with its report, 540 a month. The history pushed has no secret (gitleaks, every commit) and no trace of the server's address.
 - **Changed already:** `master` pushed on 2026-10-24 (`2a381f4`), GitHub's default branch since.
-- **Still to change:** how the development server updates from it (the questions at the end).
+- **Still to change:** the development server updating itself from it, as 81 says (the developer tools plan's M-11).
 
 ## 2026-10-24: step 3 merged, and FF on its development server
 
@@ -397,15 +444,9 @@ Each is recorded in full where it was made, and its changes are in that plan's p
 
 | Question | Where it is | What it affects |
 |---|---|---|
-| The developer tools plan's fourteen choices, each with a recommendation: its scope and place (now, beside the steps, before step 6's company-bound parts), `ff login` first, where downloads and images live, Windows and macOS, `ff local`'s shape (inside `ff`) and what it runs, which templates, `ff mcp`, the Konnect stand-in in `ff`, the status page, tracing in this step, how the development server updates, the content domain registered and requested from the Public Suffix List now, the development server's certificates. Six of them are step 6's (its 6, 7, 8, 10, 12 and 13), and they answer the questions below on 42's domain, 39's updates, the development server's certificates, and the CLI plan's questions 3, 5 and 7 | [Developer tools plan](dev-tools-plan.md) §9 | The developer tools: nothing of it is built until you confirm them |
-| Step 6's fourteen choices, each with a recommendation: the scope (group A of the step-5 task list's §4, without two sites), Konnect alone, building top-ups and El Fatoora before the company's credentials exist, when the buyer details are asked, Arabic on invoices, `ff login` first, where downloads and images live, Windows and macOS, which of Konnect's methods, a domain for customers' content, production's and the development server's certificates, how the development server updates, and two sites. Seven of them answer questions below: 42's domain, 39's updates, the certificates, and the CLI plan's questions 3, 5 and 7 | [Step-6 plan](step-6-plan.md) §9 | Step 6: nothing of it is built until you confirm them |
-| A domain of its own for customers' content, sites and function URLs, so that a phishing page on one never marks `ffunc.cloud` itself, as GitHub keeps `github.io` apart from `github.com`; or both under `ffunc.cloud`, as now | This log, 42 | The public launch: the names customers' sites and function URLs get, and their certificates |
-| How the development server updates: by itself, pulling each commit of `master` whose tests passed on GitHub (recommended: GitHub then holds no key to the server; a private repository takes a read-only deploy key of the server's own, and a token that reads the workflow's results), or by GitHub, through a key to the server | This log, 39 | Deploys without anyone running `install.sh` |
-| Function URLs' and buckets' certificates on the development server: the proxy's own authority, as now (recommended); Let's Encrypt's by DNS-01, through an OVH key that can change every record of `ffunc.cloud`, kept on the server other projects share; or one per host on demand, through a line in the shared proxy's main file | [`deploy/dev-server`](../deploy/dev-server/README.md) | Whether a browser that doesn't trust the proxy's root can call a function at its URL |
+| Step 6's choices the developer tools don't take (70): the scope, Konnect alone, building top-ups and El Fatoora before the company's credentials exist, when the buyer details are asked, Arabic on invoices, which of Konnect's methods, production's wildcard certificates, and two sites; its 6, 7, 8, 10, 12 and 13 are answered by 71, 72, 73, 82, 83 and 81 | [Step-6 plan](step-6-plan.md) §9, 1 to 5, 9, 11 and 14 | Step 6, after the developer tools: nothing of it is built until you confirm them |
+| Your actions for the developer tools: the signing key made with `minisign -G`, its secret half in GitHub's secrets, its public half committed; a read-only deploy key and a token that reads the workflow's results, for the development server's updates; the content domain chosen and registered at OVH; `ghcr.io`'s packages made public under FF's name; your go-ahead for each run on the development server | [Developer tools plan](dev-tools-plan.md) §9, your actions; its [task list](dev-tools-tasks.md) §4 | The release job (M-03), the updater (M-11), the Public Suffix List's request (M-15), the images' copies (M-04) |
 | Production's wildcard certificates: the edge's DNS-01 speaks RFC 2136, which OVH's DNS doesn't take: OVH's module in the edge, a DNS server of FF's for the zones of `fn` and `s3`, or one certificate per host on demand | [`deploy/k8s`](../deploy/k8s/README.md); this log, 17 and 38 | Production's install |
-| Where `ff`'s downloads and the public runtime images are published, if customers can't rely on GitHub | [CLI plan](cli-plan.md) §10, question 3 | The first public release of `ff` |
-| Windows for `ff`: in its phase 4, or when a customer asks | CLI plan §10, question 5 | The CLI's phase 4 |
-| `ff login` sooner, so that the first customers never paste a key | CLI plan §10, question 7 | The order of the CLI's next tasks |
 | Your company and the Startup Act label; FF Cloud or on-premises first; the data center and the hardware budget (a first server, for development: 21); a bank or payment provider; the team and the launch date; the product's name | [Parent plan](local-markets-and-aws-portability-plan.md) §15, questions 1 to 5 and 7 | Priorities, not the direction |
 | Send the accountant's five questions; book the external penetration test | [Client-readiness plan](client-readiness-plan.md) §9 | VAT, invoices and withholding; the public launch |
 | Later: take away the backend's right to create ConfigMaps, once no backend older than C-24 runs anywhere | [`deploy/k8s`](../deploy/k8s/README.md) | Nothing until then |

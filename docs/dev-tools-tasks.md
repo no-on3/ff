@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | **What this is** | The work the [developer tools plan](dev-tools-plan.md) leaves to do, as one list to work through, each line ticked when its commit lands: its tasks M-00 to M-15, split into the commits each will be; what stays in the [step-6 plan](step-6-plan.md) once this plan takes its four tasks that wait for no company, and what comes after both; and your questions, with the task each holds up. The plan keeps the design and the progress log with the evidence; this list keeps the order and what is left |
-| **Made** | On 2026-11-04, the day step 5 closed, when you asked for a plan and a task list for the developer tools, since the company that step 6's payments and invoices wait for doesn't exist yet. The plan's fourteen choices (its §9) wait for you; this list assumes them as recommended, and changes with your answers |
-| **Branch** | `feat/dev-tools`, from `master` at `05f459e`, step 5's merge of 2026-11-04. The release job runs from a tag on `master`, once M-03 is merged |
+| **Made** | On 2026-11-04, the day step 5 closed, when you asked for a plan and a task list for the developer tools, since the company that step 6's payments and invoices wait for doesn't exist yet. **Started on 2026-11-08,** the plan's fourteen choices (its §9) confirmed as recommended: the decision log's 70 to 83 |
+| **Branch** | `feat/dev-tools`, from `feat/step-5` at `babaca6`: `master`'s `05f459e`, step 5's merge of 2026-11-04, with the step-5 plan's log of that merge and its install. The release job runs from a tag on `master`, once M-03 is merged |
 | **Numbers** | M-xx are the developer tools plan's tasks, logged in its §11; the CLI plan's C-40 to C-43 and the step-6 plan's G-02 to G-04 and G-10 are named where this list does them. As with every plan: no task number in the code, its comments or its tests |
 
 ## 1. What the documents leave undone
@@ -20,8 +20,8 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 
 ### Phase 0: groundwork
 - [ ] **M-00** The plan and the baseline:
-  - [ ] the fourteen choices confirmed by you, each written into the decision log, numbered after its last (69 today); the plan's status row says so; where an answer differs from the recommendation, the plan's decision changes with it, and this list too;
-  - [ ] `feat/dev-tools` made from `master` at `05f459e`, step 5's merge; every stage of `hack/ci.sh` green there and GitHub's run of the branch green, the nightly included; the counts in the plan's log as step 5's X-00 wrote them: L1's suites and tests, L2's, L3's checks, L4's, L5's, the `ff` suite's, `cargo test`'s and the console's Vitest;
+  - [x] the fourteen choices confirmed by you, each written into the decision log, numbered after its last: 70 to 83, all as recommended, on 2026-11-08; the plan's status row says so;
+  - [ ] `feat/dev-tools` made from `feat/step-5` at `babaca6` (`master`'s `05f459e` and the step-5 plan's log); every stage of `hack/ci.sh` green there and GitHub's run of the branch green, the nightly included; the counts in the plan's log as step 5's X-00 wrote them: L1's suites and tests, L2's, L3's checks, L4's, L5's, the `ff` suite's, `cargo test`'s and the console's Vitest;
   - [ ] the tools the step's tests drive, pinned and installed by `hack/install-tools.sh` with their checksums: minisign, for the signatures the install scripts check; zig and cargo-zigbuild, if M-01 keeps them; each named with its version in the plan's row, and the nightly run (T-09) tries the latest and says what changed.
 - [ ] **M-01** Six spikes, then ADRs 0017 (the whole app on a laptop) and 0018 (`ff`'s releases); each spike a folder under `hack/spikes/` with a README of its findings, as step 5's were:
   - [ ] part 1, cross-compiling `ff` (`hack/spikes/cross-build/`): the five targets from one Linux machine, MinGW for Windows, zig as the linker for macOS through cargo-zigbuild, `ring`'s C code and the platform verifier's frameworks included; each binary run on its system, and `cargo test` on GitHub's Windows and macOS runners, by a workflow run by hand from the branch; the README says what built, what didn't, and the minutes each runner took. What fails from Linux goes to a macOS runner job in M-03;
@@ -134,7 +134,7 @@ A direction, not a plan; the step-5 task list's §4 keeps the full list, with ea
 
 | Question | Where it is | Holds up |
 |---|---|---|
-| This plan's fourteen choices, each with a recommendation | The [plan](dev-tools-plan.md)'s §9 | M-00: nothing is built until you confirm them; M-01's spikes change nothing and can start before |
+| ~~This plan's fourteen choices, each with a recommendation~~ Confirmed on 2026-11-08, all as recommended: the decision log's 70 to 83 | The [plan](dev-tools-plan.md)'s §9 | Nothing now |
 | The signing key: made with `minisign -G` on your machine, its secret half in GitHub's secrets, its public half committed | The plan's §9, your actions | M-03's part 2, the release job |
 | A read-only deploy key and a token that reads the workflow's results, made by you | The plan's §9, your actions; the decision log's 39 | M-11's part 3, the updater on the server |
 | The content domain, chosen and registered at OVH | The decision log's 42; the plan's §9, choice 13 | M-15's part 3, the Public Suffix List's request; step 6's G-09 |
