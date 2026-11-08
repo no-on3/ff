@@ -6,14 +6,16 @@
 # it from there. On request, the AWS tools the tests of AWS's way in and out drive:
 # OpenTofu and Terraform's CLI into hack/bin, Terraform's AWS and archive providers,
 # for both, into hack/.terraform/mirror (a directory the CLIs install providers from,
-# in place of a registry), and the SAM CLI into hack/.sam, cfn-lint inside it. Each
-# pinned to a release at least two weeks old when chosen. Idempotent: tools
+# in place of a registry), and the SAM CLI into hack/.sam, cfn-lint inside it; and
+# minisign, which checks the signatures of ff's releases. Each pinned to a release
+# at least two weeks old when chosen. Idempotent: tools
 # already at the pinned version are left alone, and so is a Rust at least as
 # recent where there is no rustup to pin it with. Nothing is installed system-wide.
 # FF_TOOLS_BIN and FF_SAM_DIR put the binaries and the SAM CLI elsewhere, as the nightly's newest tools go into a
 # directory of their own, so that the pinned ones the other stages use stay as they are.
 #   hack/install-tools.sh [kubectl] [k3d] [rust]     (all three without an argument)
 #   hack/install-tools.sh tofu terraform aws-provider archive-provider sam, or aws for the five
+#   hack/install-tools.sh minisign
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -32,6 +34,15 @@ SAM_VERSION="${SAM_VERSION:-1.169.0}"
 declare -A SAM_SHA256S=(
   [1.169.0-linux-amd64]=3e921832e9fb39a6563380afc9855eac6dab163238ef3b2bec4a5ba223e4be8b
   [1.169.0-linux-arm64]=a11352c4288a32cd75bb21eb9eb2cd7f23eb59384aa1224497e8de9862290d33
+)
+# minisign publishes no checksum file, only each file's signature by its author's key,
+# RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3, as its README gives it: the SHA-256s copied here are those of
+# the files whose signatures were checked against that key when the version was pinned. Another version needs
+# MINISIGN_SHA256, the same way.
+MINISIGN_VERSION="${MINISIGN_VERSION:-0.12}"
+declare -A MINISIGN_SHA256S=(
+  [0.12-linux]=9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+  [0.12-darwin]=89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63
 )
 bin_dir="${FF_TOOLS_BIN:-$repo_root/hack/bin}"
 sam_dir="${FF_SAM_DIR:-$repo_root/hack/.sam}"
@@ -250,13 +261,35 @@ sam_cfn_lint_version() { # the cfn-lint the SAM CLI's installer brought, by its 
   find "$sam_dir/$SAM_VERSION" -maxdepth 6 -type d -name 'cfn_lint-*.dist-info' 2>/dev/null | head -1 | sed 's/.*cfn_lint-\(.*\)\.dist-info/\1/'
 }
 
+# minisign: Linux's archive holds a static binary for each processor, macOS's one for both.
+install_minisign() {
+  if [ -x "$bin_dir/minisign" ] && "$bin_dir/minisign" -v 2>/dev/null | grep -x "minisign $MINISIGN_VERSION" >/dev/null; then
+    echo "minisign $MINISIGN_VERSION already installed"
+    return
+  fi
+  local expected="${MINISIGN_SHA256:-${MINISIGN_SHA256S[$MINISIGN_VERSION-$os]:-}}" asset binary
+  [ -n "$expected" ] || { echo "no checksum for minisign $MINISIGN_VERSION: give MINISIGN_SHA256, of a file whose signature you checked" >&2; return 1; }
+  if [ "$os" = linux ]; then
+    asset="minisign-$MINISIGN_VERSION-linux.tar.gz"
+    binary="minisign-linux/$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)/minisign"
+  else
+    asset="minisign-$MINISIGN_VERSION-macos.zip"
+    binary=minisign
+  fi
+  curl -fsSL --retry 3 -o "$tmp/$asset" "https://github.com/jedisct1/minisign/releases/download/$MINISIGN_VERSION/$asset"
+  verify "$tmp/$asset" "$expected"
+  if [ "$os" = linux ]; then tar -xzf "$tmp/$asset" -C "$tmp" "$binary" 2>/dev/null; else unzip_to "$tmp/$asset" "$tmp"; fi
+  install -m 0755 "$tmp/$binary" "$bin_dir/minisign"
+  echo "installed minisign $MINISIGN_VERSION (sha256 verified)"
+}
+
 [ $# -gt 0 ] || set -- kubectl k3d rust
 for tool in "$@"; do
   case "$tool" in
-    kubectl | k3d | rust | tofu | terraform | sam) "install_$tool" ;;
+    kubectl | k3d | rust | tofu | terraform | sam | minisign) "install_$tool" ;;
     aws-provider) install_aws_provider ;;
     archive-provider) install_archive_provider ;;
     aws) install_tofu; install_terraform; install_aws_provider; install_archive_provider; install_sam ;;
-    *) echo "unknown tool $tool: kubectl, k3d, rust, tofu, terraform, aws-provider, archive-provider, sam, or aws for the last five" >&2; exit 2 ;;
+    *) echo "unknown tool $tool: kubectl, k3d, rust, tofu, terraform, aws-provider, archive-provider, sam, aws for those five, or minisign" >&2; exit 2 ;;
   esac
 done
