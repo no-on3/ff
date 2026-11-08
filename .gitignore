@@ -198,6 +198,8 @@ hack/.spike-sam-yaml/
 hack/.spike-minisign/
 # hack/spikes/schedule-expressions: the reader's build, the expressions made at random, both readers' answers, the results
 hack/.spike-schedule-expressions/
+# hack/spikes/cross-build: zig, cargo-zigbuild and their caches, the builds, their logs, the results
+hack/.spike-cross-build/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/
