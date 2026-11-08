@@ -1,0 +1,14 @@
+{
+  "about": "The checksums S3 checks uploads against: each algorithm's value for the check input, in hex, as the CRC catalogue gives the CRCs' and any tool the SHAs'; S3 carries them in base64. Then AWS's examples, as its documentation shows them, in base64. The table the backend's checksums (checksums.ts) and ff's read for their tests, so that both check an upload alike.",
+  "checkInput": "123456789",
+  "checkValues": {
+    "crc32": "cbf43926",
+    "crc32c": "e3069283",
+    "crc64nvme": "ae8b14860a799888",
+    "sha1": "f7c3bc1d808e04732adf679965ccc34ca7ae3441",
+    "sha256": "15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225"
+  },
+  "examples": [
+    { "title": "CRC-32C of AWS's example upload, 66,560 bytes of \"a\", the trailer AWS's documentation shows", "algorithm": "crc32c", "byte": "a", "length": 66560, "base64": "sOO8/Q==" }
+  ]
+}
