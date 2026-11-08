@@ -23,7 +23,7 @@ RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@v0.4.7 \
  && XCADDY_SETCAP=0 xcaddy build v2.11.7 --replace golang.org/x/net=golang.org/x/net@v0.60.0 \
       --replace github.com/go-jose/go-jose/v4=github.com/go-jose/go-jose/v4@v4.1.6 --output /tmp/caddy
 
-FROM alpine:3.24.2
+FROM alpine:3.24.3
 LABEL org.opencontainers.image.title="ff-admin" \
       org.opencontainers.image.description="FF's admin, a static build served by Caddy"
 COPY --from=caddy /tmp/caddy /usr/bin/caddy

@@ -4,7 +4,7 @@
 # bounces over HTTPS. Development runs it from docker-compose.yml's mail (its profile "mail"); production runs it on a
 # server and an address of its own (README.md).
 #   docker build -t ff-mail deploy/mail
-FROM alpine:3.24.2
+FROM alpine:3.24.3
 # Node.js for the agent, OpenSSL for a development certificate; the user whose Maildir takes the bounces.
 RUN apk add --no-cache postfix nodejs openssl && adduser -D -H -s /sbin/nologin -u 10025 ff-bounces && postconf -h mail_version
 COPY agent.mjs entrypoint.sh /opt/ff-mail/
