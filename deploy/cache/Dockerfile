@@ -4,10 +4,10 @@
 # its own (README.md).
 #   docker build -t ff-cache deploy/cache
 FROM valkey/valkey:9.1.2-alpine3.24
-# musl from Alpine's repository, whose 1.2.6-r3 fixes regcomp's overflows (CVE-2026-107891), which this Valkey image
+# musl and its utilities from Alpine's repository, whose 1.2.6-r3 fixes regcomp's overflows (CVE-2026-107891), which this Valkey image
 # predates; Node.js for the agent, su-exec to start each cache's process as its own user, OpenSSL for a development
 # certificate.
-RUN apk upgrade --no-cache musl && apk add --no-cache nodejs su-exec openssl && node --version && su-exec nobody true
+RUN apk upgrade --no-cache musl musl-utils && apk add --no-cache nodejs su-exec openssl && node --version && su-exec nobody true
 COPY agent.mjs entrypoint.sh /opt/ff-cache/
 ENV FF_CACHE_DIR=/var/lib/ff-cache
 VOLUME /var/lib/ff-cache
