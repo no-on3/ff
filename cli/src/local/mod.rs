@@ -5,8 +5,10 @@
 //! [`images`] finds its runtime's image, [`http`] serves HTTP on this machine, and [`url`] serves a
 //! function as its URL would.
 
+pub mod front_door;
 pub mod http;
 pub mod images;
+pub mod instances;
 pub mod url;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -40,6 +42,11 @@ pub struct LocalFunction {
     pub handler: String,
     /// The function's own variables.
     pub environment: std::collections::BTreeMap<String, String>,
+    /// Variables whose values `docker run` takes from its own environment, by their names alone, so that no command
+    /// line shows them: a template's secrets, and its functions' key.
+    pub secrets: std::collections::BTreeMap<String, String>,
+    /// Whether it reaches this machine as `host.docker.internal`, where a template's front door listens.
+    pub reaches_this_machine: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,6 +137,12 @@ pub fn run_args(function: &LocalFunction, container: &str, image: &str, port: Op
     };
     args.push("--volume".to_owned());
     args.push(mount);
+    for name in function.secrets.keys() {
+        args.extend(["--env".to_owned(), name.clone()]);
+    }
+    if function.reaches_this_machine {
+        args.extend(["--add-host".to_owned(), "host.docker.internal:host-gateway".to_owned()]);
+    }
     args.push(image.to_owned());
     args
 }
@@ -185,7 +198,14 @@ pub struct Container {
 impl Container {
     pub fn start(function: &LocalFunction, image: &str, port: Option<u16>) -> Result<Container, Error> {
         let name = format!("ff-local-{}-{}", function.name.to_ascii_lowercase(), std::process::id());
-        let started = docker(&run_args(function, &name, image, port))?;
+        let started = Command::new("docker")
+            .args(run_args(function, &name, image, port))
+            .envs(&function.secrets)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| {
+                Error::new(Kind::Failed, format!("Couldn't run docker ({error}): ff local runs a function in Docker"))
+            })?;
         if !started.status.success() {
             return Err(Error::new(
                 Kind::Failed,
@@ -317,6 +337,12 @@ impl Answer {
         the_functions
             .then(|| (error_type.to_owned(), body["errorMessage"].as_str().unwrap_or(self.body.trim()).to_owned()))
     }
+
+    /// Whether the call ended the runtime's process, its memory or its exit, whose container then has to start again.
+    pub fn ended_the_runtime(&self) -> bool {
+        self.function_error()
+            .is_some_and(|(error_type, _)| matches!(error_type.as_str(), "Runtime.OutOfMemory" | "Runtime.ExitError"))
+    }
 }
 
 /// `POST /invoke` with the event to the runtime on this machine's port, as the backend calls a pod,
@@ -400,6 +426,8 @@ mod tests {
             code,
             handler: "function.handler".into(),
             environment: Default::default(),
+            secrets: Default::default(),
+            reaches_this_machine: false,
         }
     }
 
@@ -424,6 +452,22 @@ mod tests {
 
         assert!(args.windows(2).any(|pair| pair == ["--volume", "/home/me/app:/var/task:ro"]));
         assert!(args.windows(2).any(|pair| pair == ["--publish", "127.0.0.1:9000:8080"]));
+    }
+
+    #[test]
+    fn a_templates_function_has_its_handler_its_secrets_by_name_alone_and_reaches_this_machine() {
+        let mut function = hello(Code::Folder(PathBuf::from("/home/me/app")));
+        function.handler = "src/app.handler".into();
+        function.secrets = [("API_TOKEN".to_owned(), "s3cr3t".to_owned())].into();
+        function.reaches_this_machine = true;
+
+        let args = run_args(&function, "c", "img", None);
+
+        assert!(args.windows(2).any(|pair| pair == ["--env", "FF_HANDLER=src/app.handler"]));
+        assert!(args.windows(2).any(|pair| pair == ["--env", "API_TOKEN"]));
+        assert!(!args.iter().any(|arg| arg.contains("s3cr3t")));
+        assert!(args.windows(2).any(|pair| pair == ["--add-host", "host.docker.internal:host-gateway"]));
+        assert_eq!(args.last().map(String::as_str), Some("img"));
     }
 
     #[test]

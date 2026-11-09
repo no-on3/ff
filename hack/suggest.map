@@ -51,6 +51,8 @@ runtimes/*                              static unit security l3 l4 l5 cli aws-to
 cli/src/commands/init.rs                static unit cli:init aws-tools
 cli/release/*                           static unit cli:downloads
 cli/src/local/images.rs                 static unit cli:local,local_images
+cli/src/local/*                         static unit cli:local,local_template
+cli/src/commands/local*                 static unit cli:local,local_template
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.

@@ -549,7 +549,7 @@ pub enum AliasCommand {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum)]
 pub enum Runtime {
     Nodejs,
     Python,
@@ -713,28 +713,55 @@ pub enum LocalCommand {
         raw: bool,
     },
 
-    /// Keep it running on a port of this machine, its log as it comes, until Ctrl-C
+    /// Keep it running on a port of this machine, its log as it comes, until Ctrl-C; or a SAM template's app, each
+    /// function started at its first call through one front door
     Start {
         #[command(flatten)]
         function: LocalArgs,
 
-        /// The port on 127.0.0.1 [default: any free one]
+        /// The port on 127.0.0.1 [default: any free one; a template's front door 3700]
         #[arg(long)]
         port: Option<u16>,
 
-        /// Start it again when its code changes
+        /// Start it again when its code changes; with a template, a running function whose code changed
         #[arg(long)]
         watch: bool,
 
         /// Serve it as its URL would: any request calls it with AWS Lambda's URL event, its answer the response
         #[arg(long)]
         url: bool,
+
+        /// With a template, the secrets every function gets, KEY=value lines [default: .env.local beside it, if there]
+        #[arg(long, value_name = "FILE")]
+        secrets: Option<PathBuf>,
+
+        /// With a template, how long a function is kept without a call before it stops [default: 10m]
+        #[arg(long, value_name = "DURATION")]
+        idle: Option<String>,
+
+        /// With a template, its stack's name, which AWS::StackName gives [default: samconfig.toml's, else the folder's]
+        #[arg(long, value_name = "NAME")]
+        stack_name: Option<String>,
+
+        /// With a template, its parameters' values, as `sam deploy` takes them, in place of samconfig.toml's
+        #[arg(long, num_args = 1.., value_name = "KEY=VALUE")]
+        parameter_overrides: Vec<String>,
+    },
+
+    /// Remove what ff local start keeps for a template's project, in its .ff/local/: the functions' logs
+    Reset {
+        /// The template, or its folder [default: this folder]
+        path: Option<PathBuf>,
+
+        /// Don't ask first
+        #[arg(long, short)]
+        yes: bool,
     },
 }
 
 #[derive(Args)]
 pub struct LocalArgs {
-    /// The function's file, or its folder with a function.ts, .js, .mjs, .cjs or .py
+    /// The function's file, or its folder with a function.ts, .js, .mjs, .cjs or .py; or, to start, a SAM template
     pub path: PathBuf,
 
     /// Its name, as its context gives it, else the file's or the folder's
@@ -745,13 +772,13 @@ pub struct LocalArgs {
     #[arg(long, value_enum)]
     pub runtime: Option<Runtime>,
 
-    /// Memory in MB, the container's limit
-    #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u32).range(128..=10240))]
-    pub memory: u32,
+    /// Memory in MB, the container's limit [default: 128]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(128..=10240))]
+    pub memory: Option<u32>,
 
-    /// Timeout in seconds
-    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=900))]
-    pub timeout: u32,
+    /// Timeout in seconds [default: 5]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=900))]
+    pub timeout: Option<u32>,
 
     /// Environment variables for the run, KEY=value, repeated
     #[arg(long = "env", value_name = "KEY=value")]

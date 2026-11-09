@@ -15,10 +15,16 @@ use serde_json::{Value, json};
 use super::Context;
 use super::deploy::{name_of, runtime_of};
 use super::invoke::input_of;
+use super::local_template;
+use super::template::is_template;
 use crate::cli::{Format, LocalArgs, Runtime};
 use crate::error::{Error, Kind};
 use crate::local::{self, Answer, Code, Container, LocalFunction, images, url as local_url};
 use crate::progress::Progress;
+
+/// A function's memory in MB and its timeout in seconds, unless given.
+const DEFAULT_MEMORY: u32 = 128;
+const DEFAULT_TIMEOUT: u32 = 5;
 
 /// The function a path holds: a file, its runtime from its extension; or a folder, its runtime
 /// from the `function.*` file in it. Its name is the file's or the folder's, unless named.
@@ -41,11 +47,13 @@ pub fn local_function(args: &LocalArgs) -> Result<LocalFunction, Error> {
     Ok(LocalFunction {
         name: name_of(&path, args.name.as_deref())?,
         runtime,
-        memory: args.memory,
-        timeout: args.timeout,
+        memory: args.memory.unwrap_or(DEFAULT_MEMORY),
+        timeout: args.timeout.unwrap_or(DEFAULT_TIMEOUT),
         code,
         handler: "function.handler".to_owned(),
         environment,
+        secrets: Default::default(),
+        reaches_this_machine: false,
     })
 }
 
@@ -109,6 +117,12 @@ fn started(function: &LocalFunction, image: &str, port: Option<u16>, context: &C
 }
 
 pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context) -> Result<(), Error> {
+    if is_template(&args.path) {
+        return Err(Error::usage(format!(
+            "ff local invoke runs a function's file or folder: a template's functions run with `ff local start {}`, each called through its front door",
+            args.path.display()
+        )));
+    }
     let function = local_function(args)?;
     let event = input_of(data)?.unwrap_or_else(|| json!({}));
     local::check_docker()?;
@@ -146,7 +160,36 @@ pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context
     })
 }
 
-pub fn start(args: &LocalArgs, port: Option<u16>, watch: bool, url: bool, context: &Context) -> Result<(), Error> {
+/// `ff local start`: a template's app, or one function.
+pub fn start(args: &LocalArgs, url: bool, options: &local_template::Options, context: &Context) -> Result<(), Error> {
+    if is_template(&args.path) {
+        if url {
+            return Err(Error::usage(
+                "--url is for a function's file or folder: a template's functions answer at its front door",
+            ));
+        }
+        return local_template::start(args, options, context);
+    }
+    let template_flags: Vec<&str> = [
+        ("--secrets", options.secrets.is_some()),
+        ("--idle", options.idle.is_some()),
+        ("--stack-name", options.stack_name.is_some()),
+        ("--parameter-overrides", !options.parameter_overrides.is_empty()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, given)| given.then_some(flag))
+    .collect();
+    if !template_flags.is_empty() {
+        return Err(Error::usage(format!(
+            "{} {} for a SAM template, a .yaml or .yml file: a function's file or folder runs alone",
+            template_flags.join(", "),
+            if template_flags.len() == 1 { "is" } else { "are" }
+        )));
+    }
+    start_function(args, options.port, options.watch, url, context)
+}
+
+fn start_function(args: &LocalArgs, port: Option<u16>, watch: bool, url: bool, context: &Context) -> Result<(), Error> {
     let function = local_function(args)?;
     local::check_docker()?;
     let image = images::for_runtime(function.runtime, context.out)?;
@@ -258,7 +301,7 @@ mod tests {
     use super::*;
 
     fn args(path: &Path) -> LocalArgs {
-        LocalArgs { path: path.to_owned(), name: None, runtime: None, memory: 128, timeout: 5, env: Vec::new() }
+        LocalArgs { path: path.to_owned(), name: None, runtime: None, memory: None, timeout: None, env: Vec::new() }
     }
 
     #[test]

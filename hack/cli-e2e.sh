@@ -46,7 +46,9 @@
 # of the device flow done with curl at the realm's pages, as a browser does it, the login kept and renewed, a user with
 # two accounts shown them, an API key made by ff api-keys and put before the login, then revoked, and ff logout
 # revoking the offline token at the realm; and ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
-# answering on its port until Ctrl-C, no container left behind; then a release's runtime image, made, signed and put on
+# answering on its port until Ctrl-C, no container left behind; a template's app behind its front door, each function
+# started at its first call, its variables resolved there and its secrets from .env.local, one calling another through
+# the front door, started again when its code changes and stopped when idle; then a release's runtime image, made, signed and put on
 # a site of FF's as the release job does, ff pinned to it: pulled by its digest from the dev registry, else its archive
 # loaded from the site, verified, once, and refused when signed by another key or changed.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
@@ -1832,6 +1834,115 @@ wait "$starter" 2>/dev/null || true
 check "and Ctrl-C removes its container too" 0 "$(leftover)"
 }
 section_def local section_local backend budget=45
+
+section_local_template() {
+section "ff local start template.yaml: the template's functions behind one front door, each started at its first call"
+local app="$work/shop" port starter
+leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
+# until_said <text> <file>: waits up to 30 s for the line ff local start says.
+until_said() {
+  local _
+  for _ in $(seq 1 60); do
+    grep -F "$1" "$2" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  return 1
+}
+# invoked <function> <event>: Lambda's Invoke at the front door, its status and its answer.
+invoked() {
+  curl -s -o "$work/invoked" -w '%{http_code}' -X POST "http://127.0.0.1:$port/2015-03-31/functions/$1/invocations" -d "$2"
+  echo " $(cat "$work/invoked")"
+}
+rm -rf "$app" && mkdir -p "$app/greeter" "$app/caller"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Runtime: python3.13
+    Handler: app.handler
+    Timeout: 10
+Resources:
+  Greeter:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: greeter/
+      Environment:
+        Variables:
+          GREETING: Hola
+          QUEUE_URL: !Ref Jobs
+  Caller:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: caller/
+      Environment:
+        Variables:
+          GREETER: !Ref Greeter
+  Jobs:
+    Type: AWS::SQS::Queue
+YAML
+greeter() {
+  printf 'import os\n\n\ndef handler(event, context):\n    print("greeting", event.get("name"))\n    return {"greeting": os.environ["GREETING"], "secret": os.environ["SECRET"], "queue": os.environ["QUEUE_URL"], "code": "%s"}\n' "$1" >"$app/greeter/app.py"
+}
+greeter first
+cat >"$app/caller/app.py" <<'PY'
+import json
+import os
+import urllib.request
+
+
+def handler(event, context):
+    url = f"{os.environ['AWS_ENDPOINT_URL_LAMBDA']}/2015-03-31/functions/{os.environ['GREETER']}/invocations"
+    request = urllib.request.Request(url, data=json.dumps({"name": "Caller"}).encode(), method="POST")
+    with urllib.request.urlopen(request, timeout=10) as answer:
+        return {"called": json.load(answer)}
+PY
+printf '# what the functions are given apart from the template\nSECRET=from-env-local\n' >"$app/.env.local"
+printf 'SECRET=fine\nAWS_REGION=eu-west-1\n' >"$work/reserved.env"
+ff local start "$app/template.yaml" --secrets "$work/reserved.env"
+check "a secrets file's problem is refused at its line, before anything starts" \
+  "2 error: ff local start ran nothing: $work/reserved.env has a problem|$work/reserved.env:2: AWS_REGION is reserved: AWS Lambda or FF's runtime sets it" \
+  "$(code) $(err | grep -A1 '^error:' | paste -sd'|')"
+
+port="$(free_port)"
+"$ff_bin" local start "$app/template.yaml" --port "$port" --idle 4s --watch >"$work/start.out" 2>"$work/start.err" &
+starter=$!
+until_said "Ctrl-C stops them" "$work/start.out" || fail "ff local start said nothing in 30 s: $(cat "$work/start.err")"
+check "it says where the app runs, its functions, and how to call them" \
+  "shop ($app/template.yaml) runs on this machine, its front door at http://127.0.0.1:$port:" \
+  "$(head -1 "$work/start.out")"
+check "  ... with its secrets file" "true" "$(grep -F "Their secrets are $app/.env.local's." "$work/start.out" >/dev/null && echo true || echo false)"
+check "nothing runs before a call" 0 "$(leftover)"
+check "a call starts the function and answers, its variables resolved here and its secret given" \
+  "200 Hola from-env-local http://host.docker.internal:$port/000000000000/Jobs first" \
+  "$(invoked Greeter '{"name": "Curl"}' | sed 's/ .*//') $(jq -r '[.greeting, .secret, .queue, .code] | join(" ")' "$work/invoked")"
+invoked Greeter '{"name": "Again"}' >/dev/null
+check "  ... and the next call finds it running" "1 1" \
+  "$(leftover) $(grep -c '^Greeter: started' "$work/start.err")"
+check "a function calls another through the front door, as AWS_ENDPOINT_URL_LAMBDA leads it from its container" \
+  "200 Hola 2" "$(invoked Caller '{}' | sed 's/ .*//') $(jq -r .called.greeting "$work/invoked") $(leftover)"
+check "each function's log is on stderr after its name, and in its file" "true true" \
+  "$(grep -F 'Greeter | greeting Caller' "$work/start.err" >/dev/null && echo true || echo false) $(grep -F 'greeting Curl' "$app/.ff/local/logs/Greeter.log" >/dev/null && echo true || echo false)"
+check "a function this machine hasn't is Lambda's 404" \
+  "404 Function not found: arn:aws:lambda:tn-tunis-1:000000000000:function:Payments" \
+  "$(invoked Payments '{}' | sed 's/ .*//') $(jq -r .message "$work/invoked")"
+greeter second
+until_said "Greeter: its code changed: starting it again" "$work/start.err" || true
+check "--watch starts a running function again when its code changes" "true 200 second" \
+  "$(grep -F 'Greeter: its code changed' "$work/start.err" >/dev/null && echo true || echo false) $(invoked Greeter '{}' | sed 's/ .*//') $(jq -r .code "$work/invoked")"
+until_said "Greeter: no call for 4s: stopped" "$work/start.err" || true
+until_said "Caller: no call for 4s: stopped" "$work/start.err" || true
+check "--idle stops each function after that long without a call" 0 "$(leftover)"
+check "  ... and its next call starts it again" "200 second 0" \
+  "$(invoked Greeter '{}' | sed 's/ .*//') $(jq -r .code "$work/invoked") $(grep -c 'its code failed' "$work/start.err")"
+kill -INT "$starter"
+wait "$starter" 2>/dev/null || true
+check "Ctrl-C removes their containers" 0 "$(leftover)"
+ff local reset "$app" --yes
+check "ff local reset removes what ff local keeps, the logs" "0 removed $app/.ff/local false" \
+  "$(code) $(out) $([ -e "$app/.ff/local" ] && echo true || echo false)"
+}
+section_def local_template section_local_template backend budget=30
 
 section_local_images() {
 section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"

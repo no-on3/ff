@@ -21,6 +21,7 @@ mod init;
 mod invoke;
 mod keys;
 mod local;
+mod local_template;
 mod login;
 mod logs;
 mod package;
@@ -91,9 +92,27 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Local(LocalCommand::Invoke { function, data, raw }) => {
             local::invoke(&function, data.as_deref(), raw, context)
         }
-        Command::Local(LocalCommand::Start { function, port, watch, url }) => {
-            local::start(&function, port, watch, url, context)
+        Command::Local(LocalCommand::Start {
+            function,
+            port,
+            watch,
+            url,
+            secrets,
+            idle,
+            stack_name,
+            parameter_overrides,
+        }) => {
+            let options = local_template::Options {
+                port,
+                watch,
+                secrets: secrets.as_deref(),
+                idle: idle.as_deref(),
+                stack_name: stack_name.as_deref(),
+                parameter_overrides: &parameter_overrides,
+            };
+            local::start(&function, url, &options, context)
         }
+        Command::Local(LocalCommand::Reset { path, yes }) => local_template::reset(path.as_deref(), yes, context),
         Command::Env(EnvCommand::List { name, show }) => env::list(&name, show, context),
         Command::Env(EnvCommand::Set { name, variables }) => env::set(&name, &variables, context),
         Command::Env(EnvCommand::Unset { name, keys }) => env::unset(&name, &keys, context),
