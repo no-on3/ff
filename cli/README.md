@@ -167,6 +167,8 @@ dev_account = "123456789012"     # a development stack (FF_AUTH_MODE=dev) acts a
 
 `ff local` needs Docker, and a runtime image. A release's `ff` runs the release's own, pinned by digest: its tag when this machine has it; else `docker pull` of its digest from `ghcr.io`, then tagged; else, when Docker can't pull it, its archive from the downloads site, its signature checked with the release's key before `docker load`, which gives the tag, the file removed after. A build from this repository runs the repository's tags, `ff-runtime-nodejs:24-v3` and `ff-runtime-python:3.13-v3`, built from it (`docker build -t ff-runtime-python:3.13-v3 runtimes/python`, or any end-to-end script's run). `FF_RUNTIME_IMAGE_NODEJS` and `FF_RUNTIME_IMAGE_PYTHON` name another, run as it is. It speaks to the runtime as the backend does (`/readyz`, then `POST /invoke` with the event), so a function behaves on this machine as in its pod, but for its variables and secrets, which stay on FF.
 
+`ff local start template.yaml` runs a SAM template's whole app here, as the commands above say: its functions, URLs, schedules, queues, buckets, sites and mail, and a PostgreSQL and a Valkey with `--with`, each front door held to FF's by the tables of requests and answers both read ([ADR 0017](../docs/adr/0017-ff-local.md)). The getting-started guide's [The whole app on your laptop](../docs/getting-started.md#the-whole-app-on-your-laptop-ff-local) says, in a table, what it runs and what only FF does.
+
 ## Packages
 
 `ff package` and `ff deploy <folder>` make a function's folder a zip as AWS Lambda takes one, within its limits, which FF's API applies too: 50 MB zipped, 250 MB and 20,000 files unpacked.

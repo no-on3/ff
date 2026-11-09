@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [developer tools plan](../dev-tools-plan.md)'s D3 and its choices 5 and 6, confirmed on 2026-11-08 (the [decision log](../decisions.md)'s 74 and 75); the shape measured by M-01's spikes the same day |
 | **Date** | 2026-11-09 |
-| **Implementation** | Developer tools plan: decision D3; tasks M-05 (functions, URLs, schedules and Lambda's invoke), M-06 (queues and buckets) and M-07 (databases, caches, mail, and the small app end to end), whose part 4 records here what was built |
+| **Implementation** | Developer tools plan: decision D3; tasks M-05 (functions, URLs, schedules and Lambda's invoke), M-06 (queues and buckets) and M-07 (databases, caches, mail, and the small app end to end). As built: below, under "As built"; M-07's part 4 documented it: the guide's [The whole app on your laptop](../getting-started.md#the-whole-app-on-your-laptop-ff-local), with its table of what `ff local` is and isn't, and [`cli/README.md`](../../cli/README.md) |
 | **Related** | [ADR 0002](0002-cli.md) (the `ff` command); [ADR 0007](0007-function-events.md) (the URL event `ff local` builds); [ADR 0009](0009-buckets.md), [ADR 0010](0010-queue.md), [ADR 0012](0012-customer-mail.md) and [ADR 0014](0014-lambda-api.md) (the front doors it answers as); [ADR 0016](0016-sam-templates.md) (the template it reads); the spikes, [`hack/spikes/local-front-door`](../../hack/spikes/local-front-door/README.md) and [`hack/spikes/schedule-expressions`](../../hack/spikes/schedule-expressions/README.md) |
 
 ## Context
@@ -82,6 +82,17 @@ These are named in the guide's table:
 - S3's versioning.
 
 An operation outside it answers as FF answers one it doesn't offer, in the service's words.
+
+### As built (M-05 to M-07)
+
+The decision held as written. The plan's progress log has each part, its commit and its tests.
+
+- **Its size.** `ff local` is `cli/src/local/`, about 16,200 lines of Rust, and `cli/src/commands/local_template.rs`, about 1,800, where it was 1,270 lines for one function. `cargo test` went from 536 tests to 693. No crate was added: MD5 is `cli/src/md5.rs`, from RFC 1321.
+- **The tables.** Each operation's L1 tests were moved into a table before it was ported, each move a commit of its own, the backend's counts unchanged. `ff`'s tests read twelve: Lambda's `lambda-invoke-examples.json` and `function-url-examples.json`; the schedules' `schedule-expressions.json`; SQS's `sqs-examples.json` and `sqs-event-examples.json`; S3's `s3-examples.json`, `aws-chunked-examples.json`, `checksum-check-values.json`, `bucket-event-examples.json` and `website-examples.json`; SES's `send-email-examples.json`; and the signatures' `signature-v4-suite/cases.json`.
+- **What the port found in the backend.** Four answers were wrong on FF, and each was fixed in the backend, its case added to the table: `PutObject` didn't give back the checksum the client sent, as S3 does; a site answered a condition that failed, or a range past the file, with a length and no body, so that a browser waited; a quiet `DeleteObjects` sent no events, as it read the deleted keys from an answer that names none in quiet mode; and a raw message naming a recipient that is no address was refused as "Illegal address: undefined", where the refusal now names the field.
+- **The client suites.** The `ff` suite runs `ff local` in eight sections, 121 checks: `local` (one function, 13), `local_template` (31), `local_apps` (12), `local_queues` (18), `local_buckets` (20), `local_data` (8), `local_mail` (11) and `local_small_app` (8). The AWS CLI's cases of L4 pass against it: Lambda's `invoke`; SQS's `send-message`, `send-message-batch`, `receive-message`, `delete-message`, `get-queue-url`, `get-queue-attributes`, `list-queues` and `purge-queue`; S3's `cp`, `ls`, `sync` and `presign`, `mb` and `rb` refused in FF's words, and eight `s3api` reads; SES v2's `send-email`, simple and raw. The small app runs on it whole with AWS's SDK for JavaScript: an order through to its e-mail, its nightly removing an old order and its receipt.
+- **Past D3's list.** S3 answers `ListObjects`, `UploadPartCopy`, `ListParts`, `ListMultipartUploads`, `ListBuckets` and `GetBucketLocation` too, and a read of a bucket setting FF's buckets don't have as S3 answers a bucket without it; SQS answers `ListQueues` and the batches of `DeleteMessage` and `ChangeMessageVisibility`. Three commands joined `ff local start`: `ff local run <schedule>`, a schedule run now; `ff local mail`, the mail kept; and `ff local reset --data`, the database's and the cache's volumes removed.
+- **Where it differs from FF, on purpose.** A queue's event source mapping calls one batch at a time, as a function runs here in one container. The mail is checked as FF checks a request, but not as FF checks an account: any sender goes, and the operations on identities, the sandbox and the suppression list are refused, saying they are FF's. A request without a signature is taken, for `curl`. The guide's table lists the rest.
 
 ## Consequences
 
