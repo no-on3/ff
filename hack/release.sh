@@ -6,14 +6,13 @@
 # secret key that isn't its other half fails here rather than at a customer's. The tag must be ff-v<version>,
 # cli/Cargo.toml's version. Nothing is signed when anything is missing or differs.
 #   hack/release.sh <folder> <tag> <commit>
-#   hack/release.sh --check <tag>      the tag checked against cli/Cargo.toml alone, before anything is built
+#   hack/release.sh --check <tag>      before anything is built: the tag against cli/Cargo.toml, and the public key there
 #   FF_RELEASE_KEY            the secret key, its file's text, as GitHub's secret holds it; never printed
 #   FF_RELEASE_KEY_PASSWORD   its password, when it has one
 #   FF_RELEASE_PUBLIC_KEY     another public key file than cli/release/minisign.pub, as the tests' throwaway one
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# The files a release holds, one for each system ff is built for (hack/build-cli.sh's names).
-BINARIES=(ff-linux-x86_64 ff-linux-arm64 ff-windows-x86_64.exe ff-macos-arm64 ff-macos-x86_64)
+source "$repo/hack/lib/ff-builds.sh"
 
 refuse() { echo "release refused: $*; nothing signed" >&2; exit 1; }
 
@@ -27,21 +26,26 @@ version_of() {
   echo "$version"
 }
 
+public_key="${FF_RELEASE_PUBLIC_KEY:-$repo/cli/release/minisign.pub}"
+public_key_there() {
+  [ -f "$public_key" ] || refuse "there is no public key at $public_key: the guide's \"A release of ff\" makes one"
+}
 if [ "${1:-}" = --check ]; then
-  echo "ff $(version_of "${2:?a tag}")"
+  version="$(version_of "${2:?a tag}")"
+  public_key_there
+  echo "ff $version"
   exit 0
 fi
 [ $# -eq 3 ] || { echo "usage: hack/release.sh <folder> <tag> <commit>, or --check <tag>" >&2; exit 2; }
 folder=$1 tag=$2 commit=$3
 version="$(version_of "$tag")"
-public_key="${FF_RELEASE_PUBLIC_KEY:-$repo/cli/release/minisign.pub}"
 minisign="${FF_TOOLS_BIN:-$repo/hack/bin}/minisign"
 [ -x "$minisign" ] || refuse "minisign isn't installed: hack/install-tools.sh minisign"
-[ -f "$public_key" ] || refuse "there is no public key at $public_key"
+public_key_there
 [ -n "${FF_RELEASE_KEY:-}" ] || refuse "FF_RELEASE_KEY holds no secret key"
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
 
-for binary in "${BINARIES[@]}"; do
+for binary in "${FF_BUILDS[@]}"; do
   [ -f "$folder/$binary" ] && [ -f "$folder/$binary.sha256" ] || refuse "$binary or its .sha256 is missing from $folder"
   [ "$(sha256 "$folder/$binary" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$folder/$binary.sha256")" ] ||
     refuse "$binary differs from its .sha256"
@@ -59,23 +63,23 @@ sign() { # <file> <its signature>: minisign's default trusted comment, which hol
     refuse "minisign couldn't sign $(basename "$1") with FF_RELEASE_KEY: a wrong password, or not a secret key"
 }
 
-(cd "$folder" && sha256 "${BINARIES[@]}" >"$work/made/SHA256SUMS")
+(cd "$folder" && sha256 "${FF_BUILDS[@]}" >"$work/made/SHA256SUMS")
 files="{}"
-for binary in "${BINARIES[@]}"; do
+for binary in "${FF_BUILDS[@]}"; do
   files="$(jq -c --arg name "$binary" --arg sha "$(cut -d' ' -f1 "$folder/$binary.sha256")" '. + {($name): $sha}' <<<"$files")"
 done
 jq -n --arg version "$version" --arg commit "$commit" --argjson files "$files" \
   '{version: $version, commit: $commit, files: $files}' >"$work/made/latest.json"
 
-for binary in "${BINARIES[@]}"; do
+for binary in "${FF_BUILDS[@]}"; do
   sign "$folder/$binary" "$work/made/$binary.minisig"
 done
 sign "$work/made/latest.json" "$work/made/latest.json.minisig"
-for binary in "${BINARIES[@]}"; do
+for binary in "${FF_BUILDS[@]}"; do
   "$minisign" -Vqm "$folder/$binary" -x "$work/made/$binary.minisig" -p "$public_key" >/dev/null 2>&1 ||
     refuse "$binary's signature doesn't verify against $public_key: FF_RELEASE_KEY isn't its secret half"
 done
 "$minisign" -Vqm "$work/made/latest.json" -p "$public_key" >/dev/null 2>&1 ||
   refuse "latest.json's signature doesn't verify against $public_key: FF_RELEASE_KEY isn't its secret half"
 mv "$work/made/"* "$folder/"
-echo "ff $version ($commit): ${#BINARIES[@]} files and latest.json signed in $folder, each signature verified"
+echo "ff $version ($commit): ${#FF_BUILDS[@]} files and latest.json signed in $folder, each signature verified"

@@ -102,12 +102,12 @@ free_ports() {
 }
 
 # What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, minisign the release's
-# test signs with, the SAM CLI the unit tests lint the SAM fixtures with, and the AWS tools the ff suite checks an
+# tests sign with, the SAM CLI the unit tests lint the SAM fixtures with, and the AWS tools the ff suite checks an
 # export with. A stage that runs the backend here needs its packages; the images build in Docker
 # with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
   [static]="BE FE admin runtimes/nodejs rust minisign" [unit]="BE FE admin runtimes/nodejs rust sam" [db]=BE [security]=''
-  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [aws-tools]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
+  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws minisign" [aws-tools]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
 )
 stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[aws-tools]} ${stage_uses[images]}"
 stage_uses[all]="${stage_uses[static]} ${stage_uses[unit]} ${stage_uses[db]} ${stage_uses[security]} ${stage_uses[cluster]}"
@@ -187,6 +187,7 @@ stage_static() {
   step "the nightly's latest tools, compared with the pinned ones, on recordings of its own" hack/test-tools-compare.sh
   step "the resource guard, its limits and the load's off" hack/test-check-resources.sh
   step "a release's files signed and listed, with a throwaway key" hack/test-release.sh
+  step "the install scripts against a copy of the downloads site, with stand-in builds" hack/test-install.sh
   step "the suites' sections, alone and with what they need, on suites of their own" hack/test-sections.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')

@@ -205,7 +205,9 @@ An error goes to stderr: `error: <message>`, the API's own when it refused, and 
 | `aarch64-apple-darwin`, on a Mac | `ff-macos-arm64` |
 | `x86_64-apple-darwin`, on a Mac | `ff-macos-x86_64` |
 
-Linux's and Windows's build anywhere with zig as the C compiler and the linker, through cargo-zigbuild, both pinned and installed by `hack/install-tools.sh zig cargo-zigbuild`, which the script runs; macOS's only on a Mac, whose link needs Apple's SDK. `--container` builds the first in the Rust image instead, with musl's own compiler, as the development server does. Copy the file as `ff` (`ff.exe`) anywhere on the `PATH`; it needs nothing else, and `ff version` names the commit it was built from. Signed releases come with the developer tools plan's M-03.
+Linux's and Windows's build anywhere with zig as the C compiler and the linker, through cargo-zigbuild, both pinned and installed by `hack/install-tools.sh zig cargo-zigbuild`, which the script runs; macOS's only on a Mac, whose link needs Apple's SDK. `--container` builds the first in the Rust image instead, with musl's own compiler, as the development server does. Copy the file as `ff` (`ff.exe`) anywhere on the `PATH`; it needs nothing else, and `ff version` names the commit it was built from.
+
+A release signs the five and publishes them on the downloads site with two install scripts, [`release/install.sh`](release/install.sh) for Linux and macOS and [`release/install.ps1`](release/install.ps1) for Windows, which the site serves with its address and the release's public key put in. Each checks the build's SHA-256 against the site's `latest.json`, and both signatures when `minisign` is on the machine, then installs into `~/.local/bin` (`--prefix`, `-Prefix`); a check that fails installs nothing. The getting-started guide's "A release of `ff`" says how a release is made.
 
 ## Build and test
 

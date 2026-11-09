@@ -7,8 +7,9 @@
 # OpenTofu and Terraform's CLI into hack/bin, Terraform's AWS and archive providers,
 # for both, into hack/.terraform/mirror (a directory the CLIs install providers from,
 # in place of a registry), and the SAM CLI into hack/.sam, cfn-lint inside it; and
-# minisign, which checks the signatures of ff's releases; zig, into hack/.zig/ (git-ignored), and cargo-zigbuild, which build
-# ff for Linux and Windows. Each pinned to a release at least two weeks old when chosen. Idempotent: tools
+# minisign, which checks and makes the signatures of ff's releases, in Windows's Git bash too; zig, into
+# hack/.zig/ (git-ignored), and cargo-zigbuild, which build ff for Linux and Windows. Each pinned to a release at
+# least two weeks old when chosen. Idempotent: tools
 # already at the pinned version are left alone, and so is a Rust at least as
 # recent where there is no rustup to pin it with. Nothing is installed system-wide.
 # FF_TOOLS_BIN and FF_SAM_DIR put the binaries and the SAM CLI elsewhere, as the nightly's newest tools go into a
@@ -56,6 +57,7 @@ MINISIGN_VERSION="${MINISIGN_VERSION:-0.12}"
 declare -A MINISIGN_SHA256S=(
   [0.12-linux]=9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
   [0.12-darwin]=89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63
+  [0.12-windows]=37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479
 )
 bin_dir="${FF_TOOLS_BIN:-$repo_root/hack/bin}"
 sam_dir="${FF_SAM_DIR:-$repo_root/hack/.sam}"
@@ -64,6 +66,7 @@ mkdir -p "$bin_dir"
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=darwin ;;
+  MINGW* | MSYS*) os=windows ;; # Git's bash, as GitHub's Windows runners have it: minisign alone
   *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
@@ -91,6 +94,8 @@ unzip_to() { # <zip> <directory>: with unzip, else bsdtar, which keep the files'
     unzip -q -o "$1" -d "$2"
   elif command -v bsdtar >/dev/null; then
     LC_ALL=C bsdtar -xf "$1" -C "$2"
+  elif [ -x /c/Windows/System32/tar.exe ]; then # Windows's own tar, which is bsdtar
+    /c/Windows/System32/tar.exe -xf "$1" -C "$2"
   else
     echo "unzip or bsdtar is needed to unpack $(basename "$1")" >&2
     return 1
@@ -99,7 +104,8 @@ unzip_to() { # <zip> <directory>: with unzip, else bsdtar, which keep the files'
 
 verify() { # <file> <expected sha256>
   local actual
-  actual="$(sha256sum "$1" | awk '{ print $1 }')"
+  if command -v sha256sum >/dev/null; then actual="$(sha256sum "$1")"; else actual="$(shasum -a 256 "$1")"; fi # a Mac's
+  actual="${actual%% *}"
   if [ "$actual" != "$2" ]; then
     echo "checksum mismatch for $(basename "$1"): expected $2, got $actual" >&2
     exit 1
@@ -274,25 +280,34 @@ sam_cfn_lint_version() { # the cfn-lint the SAM CLI's installer brought, by its 
   find "$sam_dir/$SAM_VERSION" -maxdepth 6 -type d -name 'cfn_lint-*.dist-info' 2>/dev/null | head -1 | sed 's/.*cfn_lint-\(.*\)\.dist-info/\1/'
 }
 
-# minisign: Linux's archive holds a static binary for each processor, macOS's one for both.
+# minisign: Linux's and Windows's archives hold a binary for each processor, macOS's one for both.
 install_minisign() {
-  if [ -x "$bin_dir/minisign" ] && "$bin_dir/minisign" -v 2>/dev/null | grep -x "minisign $MINISIGN_VERSION" >/dev/null; then
+  local exe=''
+  [ "$os" = windows ] && exe=.exe
+  if [ -x "$bin_dir/minisign$exe" ] && "$bin_dir/minisign$exe" -v 2>/dev/null | grep -x "minisign $MINISIGN_VERSION" >/dev/null; then
     echo "minisign $MINISIGN_VERSION already installed"
     return
   fi
   local expected="${MINISIGN_SHA256:-${MINISIGN_SHA256S[$MINISIGN_VERSION-$os]:-}}" asset binary
   [ -n "$expected" ] || { echo "no checksum for minisign $MINISIGN_VERSION: give MINISIGN_SHA256, of a file whose signature you checked" >&2; return 1; }
-  if [ "$os" = linux ]; then
-    asset="minisign-$MINISIGN_VERSION-linux.tar.gz"
-    binary="minisign-linux/$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)/minisign"
-  else
-    asset="minisign-$MINISIGN_VERSION-macos.zip"
-    binary=minisign
-  fi
+  case "$os" in
+    linux)
+      asset="minisign-$MINISIGN_VERSION-linux.tar.gz"
+      binary="minisign-linux/$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)/minisign"
+      ;;
+    windows)
+      asset="minisign-$MINISIGN_VERSION-win64.zip"
+      binary="minisign-win64/$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)/minisign.exe"
+      ;;
+    *)
+      asset="minisign-$MINISIGN_VERSION-macos.zip"
+      binary=minisign
+      ;;
+  esac
   curl -fsSL --retry 3 -o "$tmp/$asset" "https://github.com/jedisct1/minisign/releases/download/$MINISIGN_VERSION/$asset"
   verify "$tmp/$asset" "$expected"
   if [ "$os" = linux ]; then tar -xzf "$tmp/$asset" -C "$tmp" "$binary" 2>/dev/null; else unzip_to "$tmp/$asset" "$tmp"; fi
-  install -m 0755 "$tmp/$binary" "$bin_dir/minisign"
+  install -m 0755 "$tmp/$binary" "$bin_dir/minisign$exe"
   echo "installed minisign $MINISIGN_VERSION (sha256 verified)"
 }
 

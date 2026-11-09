@@ -1,5 +1,6 @@
 # The ff command's five builds (hack/build-cli.sh), each run on its own system (hack/cli-smoke.sh) with ff's tests, run
-# there with that system's own toolchain: a workflow ci.yml calls in a run started by hand (jobs=cli-builds), and
+# there with that system's own toolchain, and installed there by its system's install script from a copy of the
+# downloads site (hack/test-install.sh): a workflow ci.yml calls in a run started by hand (jobs=cli-builds), and
 # release.yml at each release. Its two artifacts, cli-builds and cli-builds-macos, hold the five and their SHA-256s.
 # Actions pinned as ci.yml's are.
 name: cli-builds
@@ -22,6 +23,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 4 # the runner's processors, which it runs alone
       - run: hack/cli-smoke.sh cli/target/dist/ff-linux-x86_64
+      - run: hack/install-tools.sh minisign && hack/test-install.sh cli/target/dist
       - run: cargo test --locked
         working-directory: cli
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -41,6 +43,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 3 # the runner's processors, which it runs alone
       - run: hack/cli-smoke.sh cli/target/dist/ff-macos-arm64
+      - run: hack/install-tools.sh minisign && hack/test-install.sh cli/target/dist
       - run: cargo test --locked
         working-directory: cli
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -75,18 +78,22 @@ jobs:
           pattern: cli-builds*
           merge-multiple: true
           path: dist
-      # Both steps run whatever the other's outcome, and the last fails the job if either failed.
+      # The three steps run whatever the others' outcomes, and the last fails the job if any failed.
       - id: binary
         continue-on-error: true
         run: hack/cli-smoke.sh "dist/${{ matrix.binary }}"
+      - id: install
+        continue-on-error: true
+        run: hack/install-tools.sh minisign && hack/test-install.sh dist
       - id: tests
         continue-on-error: true
         working-directory: cli
         run: cargo test --locked --no-fail-fast # every test binary's failures, not the first one's alone
-      - if: steps.binary.outcome != 'success' || steps.tests.outcome != 'success'
+      - if: steps.binary.outcome != 'success' || steps.install.outcome != 'success' || steps.tests.outcome != 'success'
         env:
           BINARY: ${{ steps.binary.outcome }}
+          INSTALL: ${{ steps.install.outcome }}
           TESTS: ${{ steps.tests.outcome }}
         run: |
-          echo "The binary: $BINARY; ff's tests: $TESTS" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "The binary: $BINARY; its install: $INSTALL; ff's tests: $TESTS" | tee -a "$GITHUB_STEP_SUMMARY"
           exit 1

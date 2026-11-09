@@ -28,7 +28,9 @@
 # measure and its month in ff usage, the export kit's s3-sync.sh copying it out to a folder and on
 # to another bucket as to AWS S3, the bucket emptied when told, the key revoked; ff sites: a built folder deployed
 # with a deploy's own key, visited as a single-page app, deployed again changed, its visits in its metrics, a domain of
-# the customer's added, the bucket no site again; ff queues: a queue made
+# the customer's added, the bucket no site again; the downloads site, a release signed with a throwaway key and
+# deployed to FF by ff sites deploy, installed from it by install.sh as a customer would, refused changed (its checks
+# hack/test-install.sh's); ff queues: a queue made
 # with its attributes and a dead-letter queue by name, a message sent by ff and received by the AWS CLI
 # with a key naming that queue alone, received again by ff until the third receive moves it to the
 # dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
@@ -1072,6 +1074,22 @@ ff sites domains remove cli-site www.cli-shop.tn --yes
 check "  ... and remove takes it away" "0 0" "$(code) $("$ff_bin" sites domains list cli-site --output json | jq length)"
 }
 section_def sites section_sites backend budget=5
+
+section_downloads() {
+section "the downloads site: a release signed with a throwaway key, deployed to FF by ff sites deploy, installed from it"
+# This machine's ff as its build in the release, stand-ins for the others: hack/test-install.sh installs it from the
+# site FF serves as a customer would, runs it, and is refused a changed build and signatures by another key.
+local processor
+case "$(uname -m)" in x86_64 | amd64) processor=x86_64 ;; *) processor=arm64 ;; esac
+rm -rf "$work/builds" && mkdir "$work/builds"
+cp "$ff_bin" "$work/builds/ff-linux-$processor"
+ff buckets create cli-downloads
+"$FF_REPO_ROOT/hack/test-install.sh" --site "http://cli-downloads.site.localhost:$website_port" \
+  --deploy "$ff_bin sites deploy cli-downloads" "$work/builds" >"$work/install.out" 2>&1 || true
+check "install.sh installs ff from the site FF serves, and refuses what changed: hack/test-install.sh's checks" \
+  "install: 9 checks passed" "$(tail -1 "$work/install.out")"
+}
+section_def downloads section_downloads backend budget=5
 
 section_queues() {
 section "queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"

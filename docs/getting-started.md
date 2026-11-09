@@ -1694,7 +1694,7 @@ hack/ci.sh suggest           # runs nothing: what the working tree's changes nee
 
 A run stays within AWS's free tier: three functions called a few times, a queue, two buckets and a rule, for minutes. SAM's bucket for the code, which the first run makes, keeps a few megabytes.
 
-**A release of `ff`** (`.github/workflows/release.yml`) starts at a tag `ff-v<version>` pushed on a commit of `master`, `cli/Cargo.toml`'s version being the tag's, which it checks first. It builds the five as a run by hand does (`.github/workflows/cli-builds.yml`), each tested on its own system; then `hack/release.sh` checks each against its SHA-256, signs it with minisign, and writes `SHA256SUMS` and `latest.json` (the version, the commit, each file's SHA-256), signed too, then verifies every signature against `cli/release/minisign.pub`, the public key `ff` trusts, before anything is published. GitHub's release holds a copy. `hack/test-release.sh`, in `static`, runs it with a throwaway key. The signing key's secret half and its password are the job's two secrets, and they can sign a release and nothing else; the key is yours to make, once:
+**A release of `ff`** (`.github/workflows/release.yml`) starts at a tag `ff-v<version>` pushed on a commit of `master`, `cli/Cargo.toml`'s version being the tag's, which it checks first. It builds the five as a run by hand does (`.github/workflows/cli-builds.yml`), each tested on its own system; then `hack/release.sh` checks each against its SHA-256, signs it with minisign, and writes `SHA256SUMS` and `latest.json` (the version, the commit, each file's SHA-256), signed too, then verifies every signature against `cli/release/minisign.pub`, the public key `ff` trusts, before anything is published. `hack/downloads-site.sh` makes the downloads site of them, with the install scripts (`cli/release/install.sh` and `install.ps1`, the site's address and the public key put in) and a page saying how to install, and the Linux build deploys it with `ff sites deploy`. GitHub's release holds a copy. Before building, the job checks the tag, the public key and the settings below. `hack/test-release.sh`, in `static`, runs the signing with a throwaway key; `hack/test-install.sh` runs this system's install script against a copy of the site served here, as a customer runs it (`curl … | sh`, or `irm … | iex` on Windows): installed, then refused a changed build and signatures by another key, nothing installed. It runs in `static` with stand-in builds, in each build job with the real ones, and in the `ff` suite's `downloads` section against the site deployed to FF. The signing key's secret half and its password are the job's two secrets, and they can sign a release and nothing else; the key is yours to make, once:
 
 ```bash
 hack/install-tools.sh minisign
@@ -1704,7 +1704,18 @@ gh secret set FF_RELEASE_KEY_PASSWORD                                           
 git add cli/release/minisign.pub                                                  # committed: ff and the install scripts trust it
 ```
 
-Your copy and GitHub's secret are the only two. A new key means every `ff` installed trusts the old one: a new install by the script, which the downloads page says, with the key's fingerprint. To release, raise the version in `cli/Cargo.toml` on `master`, with `cli/Cargo.lock`, which `cargo check` updates, then `git tag ff-v<version> && git push origin ff-v<version>`.
+Your copy and GitHub's secret are the only two. A new key means every `ff` installed trusts the old one: a new install by the script, which the downloads page says, with the key's fingerprint.
+
+The downloads site is yours to set up too, once: an FF account of its own whose one bucket holds the site, served at `get.<domain>` by a certificate browsers trust (`ff sites domains add`), and an API key of that account with the scopes `storage:read` and `storage:write` alone:
+
+```bash
+gh variable set FF_DOWNLOADS_URL --body https://get.<domain>          # the site's address, in the install lines
+gh variable set FF_DOWNLOADS_ENDPOINT --body https://api.<domain>     # the API ff sites deploy calls
+gh variable set FF_DOWNLOADS_BUCKET --body <bucket>
+gh secret set FF_DOWNLOADS_KEY                                         # asks for the key
+```
+
+To release, raise the version in `cli/Cargo.toml` on `master`, with `cli/Cargo.lock`, which `cargo check` updates, then `git tag ff-v<version> && git push origin ff-v<version>`.
 
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
 

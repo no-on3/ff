@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [developer tools plan](../dev-tools-plan.md)'s D2 and its choices 3 and 4, confirmed on 2026-11-08 (the [decision log](../decisions.md)'s 72 and 73); the builds and the signatures measured by M-01's spikes the same day; the hash written by hand, your choice on 2026-11-09 (84) |
 | **Date** | 2026-11-09 |
-| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's parts 1, the builds and Windows, and 2, the release job (below) |
+| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's parts 1, the builds and Windows, 2, the release job, and 3, the downloads site and the install scripts (below) |
 | **Related** | [ADR 0002](0002-cli.md) (the `ff` command); [ADR 0011](0011-static-sites.md) (the sites that serve the downloads); the spikes, [`hack/spikes/cross-build`](../../hack/spikes/cross-build/README.md) and [`hack/spikes/minisign`](../../hack/spikes/minisign/README.md) |
 
 ## Context
@@ -78,6 +78,13 @@ A tag `ff-v<version>` on `master` starts the release job. `cli/Cargo.toml`'s ver
 - **`latest.json`** is `{"version", "commit", "files": {"<file>": "<SHA-256>"}}`, the spike's shape with the commit added.
 - **The key** is a password's, the password a second secret, so that your copy is protected on your disk. `hack/test-release.sh`, in `static`, makes a throwaway one each run.
 - **The verifier goes into `ff` with the update notice** (part 4), its first use, rather than with the release job, so that no code waits unused in between.
+
+### As built (M-03, part 3): the downloads site and the install scripts
+
+- **`cli/release/install.sh`** (POSIX `sh`, for `curl … | sh`, `sh -s -- --prefix <folder>`) and **`cli/release/install.ps1`** (Windows PowerShell 5.1 and PowerShell 7, for `irm … | iex`, `-Prefix` through a script block) each verify `latest.json`'s signature first when `minisign` is on the machine, then the build's SHA-256 against it, then the build's own signature; they install through a temporary name, and say what was checked and what wasn't. They run from their last line, so that a download cut short runs nothing; `install.ps1` refuses with an error rather than an exit, which would close the window `iex` runs in. A Mac with Apple's processor gets its own build even in a shell Rosetta runs; Windows on Arm gets the x86_64 build, which it runs through its emulation.
+- **`hack/downloads-site.sh`** makes the site from the signed release: the builds and their signatures, `SHA256SUMS`, `latest.json`, `minisign.pub`, the two scripts with the site's address and the public key put in, and a page with the install lines and the key's ID. **The site holds the latest release alone:** `ff sites deploy` removes what the folder hasn't, and GitHub's releases keep the older ones.
+- **The release job** deploys it with the Linux build, `ff sites deploy`, to the bucket the repository's variables name, with an API key of an account that holds that bucket alone (the scopes are a service's, not a bucket's). It checks those settings, the signing key and the public key before building anything.
+- **The tests:** `hack/test-install.sh` signs a release with a throwaway key, makes it a site, and runs this system's script as a customer does: installed with and without `minisign`, then refused a changed build, a build's signature and `latest.json`'s by another key, and the repository's copy, which names no site, nothing installed each time. It runs in `static` with stand-in builds; in each build job and on each system with the real builds, the installed `ff` run; and in the `ff` suite's `downloads` section against the site deployed to FF. **`install.ps1` runs on the Windows runner alone,** against a copy of the site Python serves there, not in the `ff` suite: PowerShell isn't on the Linux machines, and Windows is where it runs.
 
 ### 4. `ff` verifies minisign's signatures itself
 

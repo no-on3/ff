@@ -13,7 +13,7 @@ on_exit 'rm -rf "$work"'
 minisign="${FF_TOOLS_BIN:-$repo/hack/bin}/minisign"
 [ -x "$minisign" ] || fail "minisign is installed (hack/install-tools.sh minisign)"
 version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$repo/cli/Cargo.toml" | head -1)"
-binaries=(ff-linux-x86_64 ff-linux-arm64 ff-windows-x86_64.exe ff-macos-arm64 ff-macos-x86_64)
+source "$repo/hack/lib/ff-builds.sh"
 
 password="throwaway-$RANDOM-$RANDOM"
 printf '%s\n%s\n' "$password" "$password" | "$minisign" -G -p "$work/release.pub" -s "$work/release.key" >/dev/null 2>&1
@@ -21,7 +21,7 @@ printf '%s\n%s\n' "$password" "$password" | "$minisign" -G -p "$work/other.pub" 
 builds() { # a folder of stand-in builds, each with its .sha256 as hack/build-cli.sh writes it
   rm -rf "$work/dist" && mkdir "$work/dist"
   local binary
-  for binary in "${binaries[@]}"; do
+  for binary in "${FF_BUILDS[@]}"; do
     printf 'stand-in for %s\n' "$binary" >"$work/dist/$binary"
     (cd "$work/dist" && sha256sum "$binary" >"$binary.sha256")
   done
@@ -41,13 +41,13 @@ check "the files signed, each signature verified" \
   "0 ff $version (0123456789ab): 5 files and latest.json signed in $work/dist, each signature verified" \
   "$(release "ff-v$version") $(cat "$work/out")"
 verified=0
-for file in "${binaries[@]}" latest.json; do
+for file in "${FF_BUILDS[@]}" latest.json; do
   "$minisign" -Vqm "$work/dist/$file" -p "$work/release.pub" >/dev/null 2>&1 && verified=$((verified + 1))
 done
 check "minisign verifies all six against the public key" 6 "$verified"
 check "the trusted comment names the file, as minisign signs by default" true \
   "$(grep -E '^trusted comment: timestamp:[0-9]+	file:latest\.json	hashed$' "$work/dist/latest.json.minisig" >/dev/null && echo true || echo false)"
-expected_files="$(cd "$work/dist" && for binary in "${binaries[@]}"; do
+expected_files="$(cd "$work/dist" && for binary in "${FF_BUILDS[@]}"; do
   jq -n --arg name "$binary" --arg sha "$(sha256sum "$binary" | cut -d' ' -f1)" '{($name): $sha}'
 done | jq -cs 'add')"
 check "latest.json: the version, the commit, each file's SHA-256" \
@@ -75,6 +75,8 @@ check "a wrong password" "1 release refused: minisign couldn't sign ff-linux-x86
   "$(release "ff-v$version" "$work/release.key" wrong) $(cat "$work/out") $(signed)"
 check "a secret key that isn't the public key's other half" "1 release refused: ff-linux-x86_64's signature doesn't verify against $work/release.pub: FF_RELEASE_KEY isn't its secret half; nothing signed 0" \
   "$(release "ff-v$version" "$work/other.key") $(cat "$work/out") $(signed)"
-check "the tag alone, checked before the builds" "0 ff $version" \
-  "$("$repo/hack/release.sh" --check "ff-v$version" >"$work/out" 2>&1 && echo 0 || echo $?) $(cat "$work/out")"
+check "the tag and the public key alone, checked before the builds" "0 ff $version" \
+  "$(FF_RELEASE_PUBLIC_KEY="$work/release.pub" "$repo/hack/release.sh" --check "ff-v$version" >"$work/out" 2>&1 && echo 0 || echo $?) $(cat "$work/out")"
+check "  ... refused without the public key" "1 release refused: there is no public key at $work/none.pub: the guide's \"A release of ff\" makes one; nothing signed" \
+  "$(FF_RELEASE_PUBLIC_KEY="$work/none.pub" "$repo/hack/release.sh" --check "ff-v$version" >"$work/out" 2>&1 && echo 0 || echo $?) $(cat "$work/out")"
 checks_done release

@@ -1,7 +1,11 @@
 # A release of the ff command: a tag ff-v<version> pushed on a commit of master, cli/Cargo.toml's version being the
 # tag's. The five builds, each tested on its own system (cli-builds.yml); then each signed with minisign by the signing
 # key, whose secret half and password are the job's two secrets, with latest.json, signed too, naming the version, the
-# commit and each file's SHA-256 (hack/release.sh); GitHub's release holds a copy. Actions pinned as ci.yml's are.
+# commit and each file's SHA-256 (hack/release.sh); then the downloads site made of them (hack/downloads-site.sh) and
+# deployed by the Linux build itself with `ff sites deploy`, to a bucket of FF's own; GitHub's release holds a copy.
+# The site's place is the repository's variables FF_DOWNLOADS_URL (its address), FF_DOWNLOADS_ENDPOINT (the API that
+# serves it) and FF_DOWNLOADS_BUCKET, and its secret FF_DOWNLOADS_KEY, an API key of an account that holds that bucket
+# alone, with the scopes storage:read and storage:write. Actions pinned as ci.yml's are.
 name: release
 
 on:
@@ -16,7 +20,8 @@ concurrency:
   cancel-in-progress: false # a release half published is worse than one that waits
 
 jobs:
-  # Before anything is built: the tag names cli/Cargo.toml's version, on a commit of master.
+  # Before anything is built: the tag names cli/Cargo.toml's version, on a commit of master; the public key is
+  # committed, and the secrets and variables the release needs are set.
   tag:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -28,6 +33,18 @@ jobs:
       - run: |
           git merge-base --is-ancestor "$GITHUB_SHA" origin/master ||
             { echo "release refused: $GITHUB_REF_NAME is on no commit of master" >&2; exit 1; }
+      - run: | # their being set alone; the password may be empty, for a key without one
+          missing=''
+          for name in FF_RELEASE_KEY FF_DOWNLOADS_URL FF_DOWNLOADS_ENDPOINT FF_DOWNLOADS_BUCKET FF_DOWNLOADS_KEY; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          [ -z "$missing" ] || { echo "release refused: not set:$missing; the guide's \"A release of ff\" says how" >&2; exit 1; }
+        env:
+          FF_RELEASE_KEY: ${{ secrets.FF_RELEASE_KEY }}
+          FF_DOWNLOADS_URL: ${{ vars.FF_DOWNLOADS_URL }}
+          FF_DOWNLOADS_ENDPOINT: ${{ vars.FF_DOWNLOADS_ENDPOINT }}
+          FF_DOWNLOADS_BUCKET: ${{ vars.FF_DOWNLOADS_BUCKET }}
+          FF_DOWNLOADS_KEY: ${{ secrets.FF_DOWNLOADS_KEY }}
 
   builds:
     needs: tag
@@ -56,6 +73,15 @@ jobs:
         with:
           name: release
           path: dist/
+      - run: |
+          hack/downloads-site.sh dist site "$FF_DOWNLOADS_URL"
+          chmod 755 dist/ff-linux-x86_64 # an artifact keeps no mode
+          dist/ff-linux-x86_64 sites deploy "$FF_DOWNLOADS_BUCKET" site
+        env:
+          FF_DOWNLOADS_URL: ${{ vars.FF_DOWNLOADS_URL }}
+          FF_DOWNLOADS_BUCKET: ${{ vars.FF_DOWNLOADS_BUCKET }}
+          FF_ENDPOINT: ${{ vars.FF_DOWNLOADS_ENDPOINT }}
+          FF_TOKEN: ${{ secrets.FF_DOWNLOADS_KEY }}
       - run: |
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "ff ${GITHUB_REF_NAME#ff-v}" \
             --notes "ff ${GITHUB_REF_NAME#ff-v}, built from $GITHUB_SHA: each file with its SHA-256 and its minisign signature, checked against cli/release/minisign.pub; latest.json names them all." \
