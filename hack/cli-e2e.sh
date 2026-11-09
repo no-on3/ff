@@ -39,8 +39,11 @@
 # link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called without
 # waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; its stack deleted at the
 # end; the account exported to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's
-# role what its keys used, the template deployed back on FF by another account, which makes the same; and
-# ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
+# role what its keys used, the template deployed back on FF by another account, which makes the same; ff login against
+# the development realm in Keycloak (its own port, 28181) and a second backend that takes its tokens: the user's part
+# of the device flow done with curl at the realm's pages, as a browser does it, the login kept and renewed, a user with
+# two accounts shown them, an API key made by ff api-keys and put before the login, then revoked, and ff logout
+# revoking the offline token at the realm; and ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
 # time) is started in its section and read a few sections on, in a section of its own (schedules_ran, databases_used,
@@ -57,9 +60,12 @@ E2E_PROJECT=ff-cli-e2e
 E2E_NAME=cli-e2e
 export FF_PG_PORT="${FF_CLI_E2E_PG_PORT:-25436}"
 export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-29007}"
+# Keycloak, for ff login's section alone.
+export FF_KEYCLOAK_PORT="${FF_CLI_E2E_KEYCLOAK_PORT:-28181}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 source "$FF_REPO_ROOT/hack/lib/orders-app.sh"
+source "$FF_REPO_ROOT/hack/lib/keycloak.sh"
 sections_options "$@"
 e2e_options "${sections_rest[@]}"
 
@@ -1603,6 +1609,120 @@ check "  ... and its calls that didn't wait, as Lambda's metrics count them, cli
   "$(code) $(out | tail -1 | grep -E '; calls without waiting: ([2-9]|[1-9][0-9]+) kept, [1-9][0-9]* dropped' >/dev/null && echo true || echo false)"
 }
 section_def account section_account failures budget=5
+
+section_login() {
+section "ff login against the development realm, the user's part done as a browser does it; the account, an API key, the logout"
+# The realm, and a backend that takes its tokens, beside the development one and on its database.
+e2e_up "Keycloak" keycloak
+keycloak="http://localhost:$FF_KEYCLOAK_PORT"
+api_oidc="http://127.0.0.1:$(free_port)"
+e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
+  FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api
+# A customer as the console's sign-up leaves one: one of this run's own, since a kept stack keeps the realm's users.
+email="cli-e2e-$account_a@ff.test" password=cli-e2e-password-1
+check "the realm has a customer to log in as" 201 "$(keycloak_user "$email" "$password" Cli)"
+
+ff config set endpoint "$api_oidc" --profile login
+"$ff_bin" login --profile login --no-browser >"$work/login.out" 2>"$work/login.err" &
+login_pid=$!
+for _ in $(seq 1 60); do
+  grep 'check that it shows the code' "$work/login.err" >/dev/null 2>&1 && break
+  sleep 0.5
+done
+address="$(sed -n 's/^Open \([^ ]*\) in a browser: check that it shows the code .*/\1/p' "$work/login.err")"
+user_code="$(sed -n 's/.* check that it shows the code \([A-Z0-9-]*\), then sign in and approve this device\.$/\1/p' "$work/login.err")"
+check "ff login asks the API where to log in, and prints the realm's address for this device and the code it shows" \
+  "$keycloak/realms/ff/device?user_code=$user_code" "$address"
+check "the user opens it, signs in and approves the device, as a browser does it" \
+  "the login form, the device's approval, Device Login Successful" \
+  "$(keycloak_approve_device "$address" "$user_code" "$email" "$password")"
+for _ in $(seq 1 30); do
+  kill -0 "$login_pid" 2>/dev/null || break
+  sleep 1
+done
+kill "$login_pid" 2>/dev/null || true
+login_code=0
+wait "$login_pid" || login_code=$?
+credentials="$FF_CONFIG_DIR/credentials.toml"
+check "ff login sees the approval within a poll or two, keeps the login for the profile, readable by its owner alone, and says who logged in" \
+  "0 Logged in on profile login, as: true 600 issuer access_token refresh_token expires_at" \
+  "$login_code $(head -1 "$work/login.out") $(grep -F "$email" "$work/login.out" >/dev/null && echo true || echo false) \
+$(stat -c %a "$credentials") $(sed -n 's/^\([a-z_]*\) = .*/\1/p' "$credentials" | tr '\n' ' ' | sed 's/ $//')"
+ff whoami --profile login --output json
+check "the login's token calls the API: the user, with no account yet" "0 $email 0" "$(code) $(out | jq -r '"\(.user.email) \(.accounts | length)"')"
+
+# Two accounts, the development ones: an owner of A, a developer of B.
+ff whoami --profile b
+sql "INSERT INTO memberships (account_id, user_id, role) SELECT '$account_a', id, 'owner' FROM users WHERE email = '$email'"
+sql "INSERT INTO memberships (account_id, user_id, role) SELECT '$account_b', id, 'developer' FROM users WHERE email = '$email'"
+ff list --profile login
+check "with several accounts and none named, a command lists them, each with the role in it, and stops" \
+  "3 Your login has several accounts: name the one to act for with --account, FF_ACCOUNT or \`ff config set account <ID>\` true true" \
+  "$(code) $(err | head -1 | sed 's/^error: //') $(err | grep -F "  account $account_a " | grep ', as owner$' >/dev/null && echo true || echo false) \
+$(err | grep -F "  account $account_b " | grep ', as developer$' >/dev/null && echo true || echo false)"
+ff list --profile login --account 000000000000
+check "an account named that the login isn't in is said so" \
+  "3 error: You don't belong to account 000000000000 (from --account): \`ff accounts\` lists yours" "$(code) $(err | head -1)"
+ff config set account "$account_a" --profile login
+ff list --profile login --output json
+check "with the account named, a command after the login works" "0 array" "$(code) $(out | jq -r type)"
+
+ff api-keys create --profile login --name "cli e2e" --scopes functions:read,logs:read --expires 1d --output json
+key="$(out | jq -r .key)"
+check "ff api-keys create, with the login: the key once, in its field, its scopes, its expiry a day on" \
+  "0 true functions:read,logs:read true" \
+  "$(code) $([[ $key =~ ^ffk_[0-9a-f]{12}_ ]] && echo true || echo false) $(out | jq -r '.scopes | join(",")') \
+$(out | jq '(.expiresAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) - now | . > 86000 and . < 86500')"
+key_id="$(out | jq -r .id)"
+ff api-keys list --profile login
+check "ff api-keys list shows it working, never the key" "0 true false" \
+  "$(code) $(out | grep -E "^$key_id +cli e2e +functions:read,logs:read +active " >/dev/null && echo true || echo false) \
+$(out | grep -F "$key" >/dev/null && echo true || echo false)"
+FF_TOKEN="$key" ff whoami --profile login --output json
+check "FF_TOKEN's key comes before the login" "0 cli e2e" "$(code) $(out | jq -r .key.name)"
+ff config set-token --profile login <<<"$key"
+ff whoami --profile login --output json
+check "and so does the profile's key" "0 cli e2e" "$(code) $(out | jq -r .key.name)"
+# At most a few seconds: were the key not there, it would wait for a browser until its code's end.
+timeout 20 "$ff_bin" login --profile login --no-browser >"$work/out" 2>"$work/err" && echo 0 >"$work/code" || echo $? >"$work/code"
+check "ff login on a profile with a key says so, and stops" "3 true" \
+  "$(code) $(err | grep -F "Profile login holds an API key (${key:0:17}…), which ff uses before a login" >/dev/null && echo true || echo false)"
+ff api-keys list --profile login
+check "ff api-keys refuses to call with a key, saying how to use the login" "3 true" \
+  "$(code) $(err | grep -F "API keys are managed with an owner's login, never with a key" >/dev/null && echo true || echo false)"
+ff config unset token --profile login
+ff api-keys revoke "cli e2e" --yes --profile login
+check "ff api-keys revoke finds the key by its name and revokes it" "0 Revoked the API key \"cli e2e\" ($key_id): whatever uses it is refused" \
+  "$(code) $(out)"
+FF_TOKEN="$key" ff whoami --profile login
+check "the key is refused from then on" "3 error: The API key was revoked: save another key with \`ff config set-token\`" \
+  "$(code) $(err | head -1)"
+
+# The renewal: the access token's end moved to the past, as five minutes on would leave it.
+access="$(sed -n 's/^access_token = "\(.*\)"$/\1/p' "$credentials")"
+sed -i 's/^expires_at = .*/expires_at = "2000-01-01T00:00:00Z"/' "$credentials"
+ff whoami --profile login --output json
+check "an access token at its end is renewed before the call, and the new one kept" "0 $email true true" \
+  "$(code) $(out | jq -r .user.email) $([ "$(sed -n 's/^access_token = "\(.*\)"$/\1/p' "$credentials")" != "$access" ] && echo true || echo false) \
+$(sed -n 's/^expires_at = "\(.*\)"$/\1/p' "$credentials" | jq -R 'fromdateiso8601 > now')"
+refresh="$(sed -n 's/^refresh_token = "\(.*\)"$/\1/p' "$credentials")"
+refreshed() {
+  curl -sS -o "$work/refreshed.json" -w '%{http_code}' -X POST "$keycloak/realms/ff/protocol/openid-connect/token" \
+    -d grant_type=refresh_token -d client_id=ff-cli --data-urlencode "refresh_token=$refresh"
+}
+check "the login is an offline one, which outlives the realm's session: its token, refreshed at the realm, says so" "200 true" \
+  "$(refreshed) $(jq -r .scope "$work/refreshed.json" | tr ' ' '\n' | grep -x offline_access >/dev/null && echo true || echo false)"
+ff logout --profile login
+check "ff logout revokes the login at the realm, then removes its tokens" \
+  "0 Logged out of profile login: the login revoked at $keycloak/realms/ff, its tokens removed from $credentials 0" \
+  "$(code) $(out) $(grep -c -E '^(issuer|access_token|refresh_token|expires_at) = ' "$credentials" || true)"
+check "the token a copy would hold is refused at the realm from then on" "400 invalid_grant" \
+  "$(refreshed) $(jq -r .error "$work/refreshed.json")"
+ff whoami --profile login
+check "and ff has no token to call with, saying how to log in" "3 true" \
+  "$(code) $(err | grep -F 'There is no token to call' | grep -F '`ff login` logs you in with your browser' >/dev/null && echo true || echo false)"
+}
+section_def login section_login backend budget=60
 
 section_local() {
 section "ff local: on this machine, in Docker, as production runs it"

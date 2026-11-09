@@ -480,7 +480,18 @@ ff usage --aws                                    # the last three months at AWS
 ff metrics hello --since 6h                       # its invocations, errors, durations, a row a minute
 ```
 
-On an FF with logins, an owner of the account makes an API key in the console's API keys page, with the scopes the commands need (`functions:read`, `functions:write`, `functions:invoke`, `logs:read`; `usage:read` for `ff usage` and `ff balance`, `metrics:read` for `ff metrics`), and `ff config set-token` saves it without showing it; `ff config set endpoint https://api.<domain>` names the API. A script reads `--output json`, and the exit codes: 4 a deploy that never became ready, 5 a call that failed, 6 the account refusing (credit, scopes, the plan's rate). [`cli/README.md`](../cli/README.md) has every command, setting and code; `hack/build-cli.sh` makes the static Linux binary, with its SHA-256.
+**Logging in.** On an FF with logins, name the API, then log in with your browser: `ff login` asks the API where its login is, prints an address and the code it shows, opens the browser when there is one, and waits while you sign in and approve this device. The login lasts while `ff` is used, renewed by each command, and `ff logout` revokes it where it was made, so that a copy of its token stops working too. With several accounts, `ff` lists them with your role in each and stops until one is named, by `--account` or `ff config set account <ID>`. A script or a CI calls with an API key instead, which an owner makes with the scopes it needs: `functions:read`, `functions:write`, `functions:invoke`, `logs:read`; `usage:read` for `ff usage` and `ff balance`, `metrics:read` for `ff metrics`. The key is printed once; the CI's `FF_TOKEN` holds it, or `ff config set-token` saves it without showing it, and it comes before a login. A development backend started with `FF_AUTH_MODE=oidc` logs in at the local Keycloak the same way, as a user the console's sign-up made.
+
+```bash
+ff config set endpoint https://api.<domain>
+ff login                                          # open the address it prints, check the code, sign in, approve
+ff whoami                                         # you, and your accounts, your role in each
+ff api-keys create --name ci --expires 90d --scopes functions:read,functions:write,functions:invoke,logs:read
+ff api-keys list                                  # each key's scopes, whether it works, when it was last used
+ff logout                                         # the login revoked, its tokens removed from this machine
+```
+
+A script reads `--output json`, and the exit codes: 4 a deploy that never became ready, 5 a call that failed, 6 the account refusing (credit, scopes, the plan's rate). [`cli/README.md`](../cli/README.md) has every command, setting and code; `hack/build-cli.sh` makes the static Linux binary, with its SHA-256.
 
 ### A database
 

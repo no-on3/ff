@@ -32,8 +32,8 @@ BE/src/monitoring/*                     static unit db l4:monitoring l5
 BE/src/notifications/*                  static unit db l4:alarms l5
 BE/src/admin/*                          static unit db l5
 BE/src/audit/*                          static unit db l5
-BE/src/accounts/*                       static unit db l5
-BE/src/api-keys/*                       static unit db l5
+BE/src/accounts/*                       static unit db l5 cli:login
+BE/src/api-keys/*                       static unit db l5 cli:login
 BE/src/retention/*                      static unit db l5
 BE/src/orchestrator/*                   static unit db l3 l4 l5 cli aws-tools images
 BE/src/*                                static unit db l3 l4 l5 cli aws-tools
@@ -57,7 +57,7 @@ deploy/k8s/*                            static images platform
 deploy/cache/*                          static unit db security images l4:caches,caches_sampled cli:small_app
 deploy/mail/*                           static unit security images l4:mail,mail_sent
 deploy/data-db/*                        static db security images l4:databases,databases_sampled cli:databases
-deploy/keycloak/*                       static security l5 images
+deploy/keycloak/*                       static security l5 cli:login images
 deploy/backup/*                         static security images platform
 deploy/dev-server/*                     static platform
 infrastructure/*                        static l4 l5 cli
@@ -81,6 +81,7 @@ hack/lib/s3-clients/*                   static l4:buckets
 hack/lib/sqs-clients/*                  static l4:queues
 hack/lib/mail-receiver.mjs              static l4:mail_sent
 hack/lib/orders-app.sh                  static cli:small_app
+hack/lib/keycloak.sh                    static l5 cli:login
 hack/lib/dkim-verify.mjs                static l4:mail_sent
 hack/lib/e2e-stack.sh                   static l4 l5 cli aws-tools
 hack/lib/backend-build.sh               static l4 l5 cli aws-tools

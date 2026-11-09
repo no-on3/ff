@@ -77,6 +77,7 @@ export FF_MAIL_SMTP_PORT="${FF_E2E_TENANCY_MAIL_SMTP_PORT:-21026}"
 export FF_MAIL_UI_PORT="${FF_E2E_TENANCY_MAIL_UI_PORT:-28026}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
+source "$FF_REPO_ROOT/hack/lib/keycloak.sh"
 sections_options "$@"
 e2e_options "${sections_rest[@]}"
 
@@ -136,19 +137,6 @@ is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "
 # The local Keycloak (realm "ff", deploy/keycloak/ff-realm.json).
 keycloak="http://localhost:$FF_KEYCLOAK_PORT"
 mailpit="http://localhost:$FF_MAIL_UI_PORT"
-keycloak_admin() {
-  curl -sS -X POST "$keycloak/realms/master/protocol/openid-connect/token" \
-    -d grant_type=password -d client_id=admin-cli -d username=admin -d password=admin | jq -r .access_token
-}
-# keycloak_user <e-mail>: a user with a verified address and the password "l5-password-1", through the admin API.
-keycloak_user() {
-  curl -sS -o /dev/null -w '%{http_code}' -X POST "$keycloak/admin/realms/ff/users" \
-    -H "authorization: Bearer $(keycloak_admin)" -H 'content-type: application/json' \
-    -d "$(jq -cn --arg email "$1" '{username: $email, email: $email, emailVerified: true, enabled: true,
-      firstName: "L5", lastName: "Test", credentials: [{type: "password", value: "l5-password-1", temporary: false}]}')"
-}
-# form_action <html file>: the action URL of the page's form.
-form_action() { grep -o '<form[^>]*action="[^"]*"' "$1" | head -1 | sed 's/.*action="//; s/"$//; s/&amp;/\&/g'; }
 # keycloak_register <e-mail>: Keycloak's own sign-up, as a person does it: the
 # registration form; the verification e-mail, read through Mailpit; its link; then
 # the password "l5-password-1". Prints the last redirect: the console's URL with a code.
@@ -1297,7 +1285,7 @@ user_1="l5-$account_a@ff.test"
 user_2="l5-$account_b@ff.test"
 check "user 1 registers, verifies the address and sets a password, back to the console with a code" true \
   "$([[ "$(keycloak_register "$user_1")" == http://localhost:5199/?*code=* ]] && echo true || echo false)"
-check "user 2 is made through the admin API" 201 "$(keycloak_user "$user_2")"
+check "user 2 is made through the admin API" 201 "$(keycloak_user "$user_2" l5-password-1 L5)"
 token_1="$(keycloak_token ff-e2e "$user_1")"
 token_2="$(keycloak_token ff-e2e "$user_2")"
 [ -n "$token_1" ] && [ "$token_1" != null ] && [ -n "$token_2" ] && [ "$token_2" != null ] ||
