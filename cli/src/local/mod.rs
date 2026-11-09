@@ -2,8 +2,8 @@
 //! Docker, with the pod's hardening (a read-only root, uid 10001, no capability, no new
 //! privileges), its memory and CPU, and the variables the backend gives a function's pod; started,
 //! its code loaded, called and its log followed the same way by each of `ff local`'s commands.
-//! [`images`] finds its runtime's image, [`http`] serves HTTP on this machine, and [`url`] serves a
-//! function as its URL would.
+//! [`images`] finds its runtime's image, [`http`] serves HTTP on this machine, [`url`] serves a
+//! function as its URL would, and [`schedules`] runs a template's schedules.
 
 pub mod events;
 pub mod front_door;
@@ -11,6 +11,8 @@ pub mod http;
 pub mod images;
 pub mod instances;
 pub mod key;
+pub mod schedule_expression;
+pub mod schedules;
 pub mod url;
 
 use std::io::{BufRead, BufReader, Read, Write};

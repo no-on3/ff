@@ -1869,7 +1869,7 @@ lambda_cli() {
   AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
     AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_LAMBDA="http://127.0.0.1:$port" "${aws_cli[@]}" lambda "$@"
 }
-rm -rf "$app" && mkdir -p "$app/greeter" "$app/caller" "$app/failing" "$app/recorder"
+rm -rf "$app" && mkdir -p "$app/greeter" "$app/caller" "$app/failing" "$app/recorder" "$app/reporter"
 cat >"$app/template.yaml" <<'YAML'
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
@@ -1916,6 +1916,21 @@ Resources:
       Environment:
         Variables:
           GREETER: !Ref Greeter
+  Reporter:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: reporter/
+      Events:
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+        Hourly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: rate(1 hour)
+            State: DISABLED
+            Input: '{"report": "hourly"}'
   Jobs:
     Type: AWS::SQS::Queue
 YAML
@@ -1938,6 +1953,8 @@ PY
 printf 'def handler(event, context):\n    raise RuntimeError("no luck")\n' >"$app/failing/app.py"
 printf 'def handler(event, context):\n    request = event["requestContext"]\n    print("recorded", request["condition"], request["approximateInvokeCount"], event["requestPayload"]["n"])\n' \
   >"$app/recorder/app.py"
+printf 'def handler(event, context):\n    print("ran", event.get("source"), event.get("time"), (event.get("resources") or [event.get("report")])[0])\n' \
+  >"$app/reporter/app.py"
 printf '# what the functions are given apart from the template\nSECRET=from-env-local\n' >"$app/.env.local"
 printf 'SECRET=fine\nAWS_REGION=eu-west-1\n' >"$work/reserved.env"
 ff local start "$app/template.yaml" --secrets "$work/reserved.env"
@@ -1946,8 +1963,9 @@ check "a secrets file's problem is refused at its line, before anything starts" 
   "$(code) $(err | grep -A1 '^error:' | paste -sd'|')"
 
 port="$(free_port)"
-# An asynchronous call's second lasts 20 ms in the suite's build: its retry's minute comes in 1.2 s.
-FF_TEST_ASYNC_SECOND_MS=20 "$ff_bin" local start "$app/template.yaml" --port "$port" --idle 4s --watch \
+# An asynchronous call's second lasts 20 ms in the suite's build: its retry's minute comes in 1.2 s. Its schedules' clock
+# is at noon, so that no schedule runs, whenever the suite does.
+FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z "$ff_bin" local start "$app/template.yaml" --port "$port" --idle 4s --watch \
   >"$work/start.out" 2>"$work/start.err" &
 starter=$!
 until_said "Ctrl-C stops them" "$work/start.out" || fail "ff local start said nothing in 30 s: $(cat "$work/start.err")"
@@ -2027,6 +2045,32 @@ $(grep -F 'Recorder | recorded RetriesExhausted 2 1' "$work/start.err" >/dev/nul
 kill -INT "$starter"
 wait "$starter" 2>/dev/null || true
 check "Ctrl-C removes their containers" 0 "$(leftover)"
+
+# The schedules, in a start of their own: its clock, a test build's, three seconds before the Nightly's time.
+port="$(free_port)"
+FF_TEST_NOW=2026-11-10T01:59:57Z "$ff_bin" local start "$app/template.yaml" --port "$port" \
+  >"$work/scheduled.out" 2>"$work/scheduled.err" &
+starter=$!
+until_said "Ctrl-C stops them" "$work/scheduled.out" || fail "ff local start said nothing in 30 s: $(cat "$work/scheduled.err")"
+check "the start lists each schedule, its expression and its next run" "true true" \
+  "$(grep -E '^  Reporter/Nightly +cron\(0 2 \* \* \? \*\)  next 2026-11-10T02:00:00Z$' "$work/scheduled.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  Reporter/Hourly +rate\(1 hour\)  disabled$' "$work/scheduled.out" >/dev/null && echo true || echo false)"
+until_said "Reporter | ran aws.events" "$work/scheduled.err" || true
+check "a schedule runs on time, its function called without waiting with EventBridge's Scheduled Event" "true true" \
+  "$(grep -E '^Reporter: its schedule Nightly runs, due at 2026-11-10T02:00:00Z: the asynchronous call [0-9a-f-]{36}$' "$work/scheduled.err" >/dev/null && echo true || echo false) \
+$(grep -F 'Reporter | ran aws.events 2026-11-10T02:00:00Z arn:aws:events:tn-tunis-1:000000000000:rule/Reporter-Nightly' "$work/scheduled.err" >/dev/null && echo true || echo false)"
+ff local run Hourly "$app"
+until_said "Reporter | ran None None hourly" "$work/scheduled.err" || true
+check "ff local run runs one now, a disabled one too, with its own input" "0 Reporter's schedule Hourly runs now true" \
+  "$(code) $(out | sed 's/: the asynchronous call.*//') $(grep -F 'Reporter | ran None None hourly' "$work/scheduled.err" >/dev/null && echo true || echo false)"
+ff local run Weekly "$app"
+check "  ... and refuses one the template hasn't, naming those it has" \
+  "2 error: No function has a schedule Weekly: the template's are Reporter/Hourly, Reporter/Nightly" "$(code) $(err | grep '^error:')"
+kill -INT "$starter"
+wait "$starter" 2>/dev/null || true
+ff local run Nightly "$app"
+check "  ... and says when ff local start isn't running" "3 true" \
+  "$(code) $(err | grep -F "error: ff local start isn't running for $app: nothing answers at http://127.0.0.1:$port" >/dev/null && echo true || echo false)"
 ff local reset "$app" --yes
 check "ff local reset removes what ff local keeps, the logs and the key" "0 removed $app/.ff/local false" \
   "$(code) $(out) $([ -e "$app/.ff/local" ] && echo true || echo false)"

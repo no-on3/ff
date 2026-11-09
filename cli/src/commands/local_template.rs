@@ -11,10 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use notify::{RecursiveMode, Watcher};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::Context;
@@ -29,11 +29,14 @@ use crate::local::events::{LAMBDA_RETRY_POLICY, RetryPolicy};
 use crate::local::front_door::{FrontDoor, FunctionUrl, Settings, URL_DOMAIN};
 use crate::local::instances::{Docker, Instances};
 use crate::local::key::Key;
+use crate::local::schedule_expression::{Expression, InvalidExpression, Millis, iso};
+use crate::local::schedules::{self, LocalSchedule, Timetable};
 use crate::local::{self, Code, LocalFunction, http, images, url};
 use crate::output::Output;
 use crate::sam::Template;
 use crate::sam::plan::{self, BUCKET, Place, QUEUE};
 use crate::sam::resolve::FUNCTION;
+use crate::sigv4::{Credentials, Signable, amz_date, authorization, sha256_hex, uri_encode};
 
 /// What a refused start says it did.
 const NOTHING: &str = "ff local start ran nothing";
@@ -51,6 +54,8 @@ const KEPT: &str = ".ff/local";
 const SECRETS: &str = ".env.local";
 /// The local key's file, in what ff local keeps.
 const CREDENTIALS: &str = "credentials";
+/// The front door's address while ff local start runs, in what ff local keeps, for ff local run to find it.
+const ENDPOINT: &str = "endpoint";
 
 /// What `ff local start` was given for a template.
 pub struct Options<'a> {
@@ -294,6 +299,23 @@ fn settings(
             }
             FunctionUrl { iam: function_url.auth_type == "AWS_IAM", cors }
         });
+        let mut function_schedules = Vec::new();
+        for schedule in &function.schedules {
+            match Expression::parse(&schedule.expression) {
+                Ok(reader) => function_schedules.push(LocalSchedule {
+                    name: schedule.name.clone(),
+                    expression: schedule.expression.clone(),
+                    reader,
+                    input: schedule.input.clone(),
+                    enabled: schedule.enabled,
+                }),
+                Err(InvalidExpression(why)) => {
+                    let property = plan::expression_key(schedule.kind);
+                    let at = format!("/Resources/{id}/Properties/Events/{}/Properties/{property}", schedule.event);
+                    problems.at(&at, &format!("{id}: the schedule {}: {why}", schedule.name));
+                }
+            }
+        }
         let variables = function.environment.iter().filter(|(name, _)| !secrets.contains_key(*name));
         all.insert(
             function.name.clone(),
@@ -306,6 +328,7 @@ fn settings(
                 on_success,
                 on_failure,
                 url,
+                schedules: function_schedules,
             },
         );
     }
@@ -322,6 +345,15 @@ fn url_host(name: &str) -> String {
 fn async_second() -> Duration {
     let tests = if cfg!(debug_assertions) { std::env::var("FF_TEST_ASYNC_SECOND_MS").ok() } else { None };
     tests.and_then(|milliseconds| milliseconds.parse().ok()).map_or(Duration::from_secs(1), Duration::from_millis)
+}
+
+/// How far the schedules' clock is ahead of this machine's: none, but in a test build, as the `ff` suite's, where
+/// `FF_TEST_NOW` is the time it starts at, for a schedule's run to come in its time.
+fn clock_offset() -> Millis {
+    let tests = if cfg!(debug_assertions) { std::env::var("FF_TEST_NOW").ok() } else { None };
+    let start = tests.and_then(|text| humantime::parse_rfc3339(&text).ok());
+    let millis = |time: SystemTime| time.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_millis());
+    start.map_or(0, |start| Millis::try_from(millis(start)).unwrap_or(0) - schedules::now_ms(0))
 }
 
 /// The address this machine has on Docker's default network, where `host.docker.internal` leads containers on Linux;
@@ -461,6 +493,17 @@ struct StartedFunction {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StartedSchedule {
+    function: String,
+    name: String,
+    expression: String,
+    enabled: bool,
+    /// When it runs next; none when it is disabled or has no run left.
+    next_run: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StartedKey {
     access_key_id: String,
     secret_access_key: String,
@@ -475,6 +518,7 @@ struct Started {
     region: &'static str,
     key: StartedKey,
     functions: Vec<StartedFunction>,
+    schedules: Vec<StartedSchedule>,
     logs: String,
 }
 
@@ -550,7 +594,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     let to_say = Arc::clone(&say);
     let docker = Docker { images: runtime_images, logs: logs.clone(), echo: !quiet };
     let instances = Arc::new(Instances::new(docker, functions.clone(), idle, move |line| to_say(line)));
-    let front_door: Arc<dyn http::Answers> = Arc::new(FrontDoor {
+    let door = FrontDoor {
         instances: Arc::clone(&instances),
         region: REGION.to_owned(),
         account: ACCOUNT.to_owned(),
@@ -559,8 +603,13 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
         started: SystemTime::now(),
         second: async_second(),
         say,
-    });
+        clock_offset: clock_offset(),
+    };
+    let front_door: Arc<dyn http::Answers> = Arc::new(door.clone());
     http::serve(listener, Arc::clone(&front_door));
+    let endpoint_file = kept.join(ENDPOINT);
+    std::fs::write(&endpoint_file, format!("{endpoint}\n"))
+        .map_err(|error| Error::new(Kind::Failed, format!("Couldn't write {}: {error}", endpoint_file.display())))?;
     // Where containers reach this machine on Linux, which Docker Desktop leads to 127.0.0.1 itself.
     if let Some(gateway) = docker_gateway()
         && let Ok(listener) = TcpListener::bind((gateway, port))
@@ -577,6 +626,33 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     if options.watch {
         watch(Arc::clone(&instances), &functions, project.join(".ff"))?;
     }
+    let offset = door.clock_offset;
+    let table = Timetable::new(
+        door.settings.iter().map(|(name, settings)| (name, settings.schedules.as_slice())),
+        schedules::now_ms(offset),
+    );
+    let started_schedules: Vec<StartedSchedule> = door
+        .settings
+        .iter()
+        .flat_map(|(function, settings)| settings.schedules.iter().map(move |schedule| (function, schedule)))
+        .map(|(function, schedule)| StartedSchedule {
+            function: function.clone(),
+            name: schedule.name.clone(),
+            expression: schedule.expression.clone(),
+            enabled: schedule.enabled,
+            next_run: table.next_run(function, &schedule.name).map(iso),
+        })
+        .collect();
+    let scheduled = door.clone();
+    std::thread::spawn(move || {
+        schedules::keep(
+            table,
+            move || schedules::now_ms(offset),
+            move |due| {
+                scheduled.run_schedule(&due.function, &due.schedule, due.at);
+            },
+        )
+    });
 
     let started = Started {
         stack: read.stack_name.clone(),
@@ -600,6 +676,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 auth_type: function.url.as_ref().map(|function_url| function_url.auth_type.clone()),
             })
             .collect(),
+        schedules: started_schedules,
         logs: logs.display().to_string(),
     };
     context.out.result(&started, || {
@@ -620,6 +697,20 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 first.name
             ));
         }
+        if !started.schedules.is_empty() {
+            lines.push("Its schedules, run on time while it runs, or now by ff local run <schedule>:".to_owned());
+            let width =
+                started.schedules.iter().map(|schedule| schedule.function.len() + schedule.name.len() + 1).max().unwrap_or(0);
+            lines.extend(started.schedules.iter().map(|schedule| {
+                let next = match (&schedule.next_run, schedule.enabled) {
+                    (Some(next), _) => format!("next {next}"),
+                    (None, true) => "no run left".to_owned(),
+                    (None, false) => "disabled".to_owned(),
+                };
+                let named = format!("{}/{}", schedule.function, schedule.name);
+                format!("  {named:width$}  {}  {next}", schedule.expression)
+            }));
+        }
         lines.push(format!(
             "Its key, which a signed request is checked against, is in {}: AWS_ACCESS_KEY_ID={} AWS_SECRET_ACCESS_KEY={}, in the region {REGION}",
             started.key.file, started.key.access_key_id, started.key.secret_access_key
@@ -636,16 +727,102 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     }
 }
 
+/// The project of a template, or of its folder; this folder's, without one.
+fn project_of(path: Option<&Path>) -> Result<PathBuf, Error> {
+    let path = path.unwrap_or(Path::new("."));
+    if is_template(path) {
+        Ok(Location::of(path).project)
+    } else if path.is_dir() {
+        Ok(path.to_path_buf())
+    } else {
+        Err(Error::usage(format!("{} is neither a SAM template nor a folder", path.display())))
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScheduleRun {
+    function: String,
+    schedule: String,
+    request_id: String,
+}
+
+/// `ff local run <schedule>`: the template's app, as ff local start runs it, asked to run the schedule now, signed
+/// with the project's key, so that the app of another project, started since on the same port, refuses it.
+pub fn run(schedule: &str, path: Option<&Path>, context: &Context) -> Result<(), Error> {
+    let project = project_of(path)?;
+    let kept = project.join(KEPT);
+    let not_running = || {
+        Error::new(
+            Kind::Failed,
+            format!("ff local start isn't running for {}: start it, then run the schedule", project.display()),
+        )
+    };
+    let endpoint = std::fs::read_to_string(kept.join(ENDPOINT)).map_err(|_| not_running())?.trim().to_owned();
+    let key = Key::read(&kept.join(CREDENTIALS))?.ok_or_else(not_running)?;
+    let target = match schedule.split_once('/') {
+        Some((function, name)) => {
+            format!("/ff-local/schedules/{}/{}", uri_encode(function, false), uri_encode(name, false))
+        }
+        None => format!("/ff-local/schedules/{}", uri_encode(schedule, false)),
+    };
+    let host = endpoint.split_once("://").map_or(endpoint.as_str(), |(_, host)| host).to_owned();
+    let date = amz_date(SystemTime::now());
+    let payload = sha256_hex(b"");
+    let headers = vec![("host".to_owned(), host), ("x-amz-date".to_owned(), date.clone())];
+    let credentials = Credentials { access_key_id: key.id, secret_access_key: key.secret, region: REGION.to_owned() };
+    let signable = Signable { method: "POST", path: &target, query: &[], headers: &headers, payload_sha256: &payload };
+    let signature = authorization(&credentials, &signable, &date, "lambda");
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_global(Some(Duration::from_secs(10)))
+        .user_agent(format!("ff-cli/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .into();
+    let mut answer = agent
+        .post(&format!("{endpoint}{target}"))
+        .header("x-amz-date", &date)
+        .header("authorization", &signature)
+        .send_empty()
+        .map_err(|error| {
+            Error::new(
+                Kind::Failed,
+                format!(
+                    "ff local start isn't running for {}: nothing answers at {endpoint} ({error}): start it, then run the schedule",
+                    project.display()
+                ),
+            )
+        })?;
+    let status = answer.status().as_u16();
+    let body: Value = serde_json::from_str(&answer.body_mut().read_to_string().unwrap_or_default()).unwrap_or_default();
+    let message = body["message"].as_str().unwrap_or_default();
+    match status {
+        202 => {
+            let ran: ScheduleRun = serde_json::from_value(body.clone()).map_err(|error| {
+                Error::new(Kind::Failed, format!("ff local start's answer at {endpoint} can't be read: {error}"))
+            })?;
+            context.out.result(&ran, || {
+                format!(
+                    "{}'s schedule {} runs now: the asynchronous call {}, whose log is ff local start's",
+                    ran.function, ran.schedule, ran.request_id
+                )
+            })
+        }
+        403 => Err(Error::new(
+            Kind::Failed,
+            format!(
+                "the app at {endpoint} isn't {}'s: its ff local start stopped, and another project's runs there",
+                project.display()
+            ),
+        )),
+        400 | 404 => Err(Error::usage(message.to_owned())),
+        _ => Err(Error::new(Kind::Failed, format!("ff local start at {endpoint} answered {status}: {message}"))),
+    }
+}
+
 /// `ff local reset`: what ff local keeps for the template's project removed, after asking.
 pub fn reset(path: Option<&Path>, yes: bool, context: &Context) -> Result<(), Error> {
-    let path = path.unwrap_or(Path::new("."));
-    let project = if is_template(path) {
-        Location::of(path).project
-    } else if path.is_dir() {
-        path.to_path_buf()
-    } else {
-        return Err(Error::usage(format!("{} is neither a SAM template nor a folder", path.display())));
-    };
+    let project = project_of(path)?;
     let kept = project.join(KEPT);
     let folder = kept.display().to_string();
     if !kept.exists() {
@@ -863,6 +1040,136 @@ Resources:
                  {file}:30: Payments: its URL's host, orders.fn.localhost, would be Orders's too, as a host's case doesn't count: name one of them otherwise"
             )
         );
+    }
+
+    /// The template, `Orders` with a Schedule event `Nightly` and a ScheduleV2 event `Often`, its expression `often`,
+    /// disabled, with its own input.
+    fn with_schedules(often: &str) -> String {
+        let events = format!(
+            "      Events:\n        Nightly:\n          Type: Schedule\n          Properties:\n            Schedule: cron(0 2 * * ? *)\n        Often:\n          Type: ScheduleV2\n          Properties:\n            Name: often\n            ScheduleExpression: {often}\n            State: DISABLED\n            Input: '{{\"report\": \"often\"}}'\n"
+        );
+        TEMPLATE.replace("      CodeUri: orders/\n", &format!("      CodeUri: orders/\n{events}"))
+    }
+
+    #[test]
+    fn a_functions_schedules_are_read_and_an_expression_ff_refuses_is_refused_at_its_line() {
+        let (_folder, project) = project(&with_schedules("rate(5 minutes)"));
+        let path = project.join("template.yaml");
+
+        let read_here = prepared(&path, &options(), 3700, &key(), &Output::quiet()).unwrap();
+
+        let read: Vec<(&str, &str, bool, Option<&Value>)> = read_here.settings["Orders"]
+            .schedules
+            .iter()
+            .map(|schedule| {
+                (schedule.name.as_str(), schedule.expression.as_str(), schedule.enabled, schedule.input.as_ref())
+            })
+            .collect();
+        let input = serde_json::json!({ "report": "often" });
+        assert_eq!(
+            read,
+            [("Nightly", "cron(0 2 * * ? *)", true, None), ("often", "rate(5 minutes)", false, Some(&input))]
+        );
+
+        std::fs::write(&path, with_schedules("rate(5 minute)")).unwrap();
+        let error = prepared(&path, &options(), 3700, &key(), &Output::quiet()).err().unwrap();
+
+        assert_eq!(
+            error.message,
+            format!(
+                "ff local start ran nothing: the template has a problem\n{}:21: Orders: the schedule often: rate(5 minute) must be rate(5 minutes): the unit is plural above 1",
+                path.display()
+            )
+        );
+    }
+
+    /// A front door that answers `ff local run` as `answer` says, keeping what it was asked.
+    struct Asked {
+        requests: Arc<std::sync::Mutex<Vec<http::Request>>>,
+    }
+
+    impl http::Answers for Asked {
+        fn answer(&self, request: &http::Request, _: &str, _: &str) -> http::Response {
+            self.requests.lock().unwrap().push(request.clone());
+            let refused = |status: u16, message: &str| http::Response {
+                status,
+                headers: Vec::new(),
+                body: serde_json::json!({ "Type": "User", "message": message }).to_string().into_bytes(),
+            };
+            match request.target.as_str() {
+                "/ff-local/schedules/Reporter/Nightly" => http::Response {
+                    status: 202,
+                    headers: Vec::new(),
+                    body: br#"{"function": "Reporter", "schedule": "Nightly", "requestId": "a-run"}"#.to_vec(),
+                },
+                "/ff-local/schedules/Elsewhere" => {
+                    refused(403, "The security token included in the request is invalid.")
+                }
+                _ => refused(404, "No function has a schedule Hourly: the template's are Reporter/Nightly"),
+            }
+        }
+
+        fn unreadable(&self, _: bool, _: Option<&http::Request>) -> http::Response {
+            http::Response { status: 400, headers: Vec::new(), body: Vec::new() }
+        }
+    }
+
+    #[test]
+    fn run_asks_the_running_app_signed_with_the_projects_key_and_says_why_it_cant() {
+        let (_folder, project) = project(TEMPLATE);
+        let kept = project.join(KEPT);
+        let (connection, out) = (ConnectionArgs::default(), Output::quiet());
+        let context = Context { connection: &connection, out: &out };
+        let not_running =
+            format!("ff local start isn't running for {}: start it, then run the schedule", project.display());
+
+        assert_eq!(run("Nightly", Some(&project), &context).unwrap_err().message, not_running);
+        std::fs::create_dir_all(&kept).unwrap();
+        key().write(&kept.join(CREDENTIALS)).unwrap();
+        let gone = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        std::fs::write(kept.join(ENDPOINT), format!("http://127.0.0.1:{gone}\n")).unwrap();
+        let message = run("Nightly", Some(&project.join("template.yaml")), &context).unwrap_err().message;
+        assert!(
+            message.starts_with(&format!(
+                "ff local start isn't running for {}: nothing answers at http://127.0.0.1:{gone} (",
+                project.display()
+            )),
+            "{message}"
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        http::serve(listener, Arc::new(Asked { requests: Arc::clone(&requests) }));
+        std::fs::write(kept.join(ENDPOINT), format!("{endpoint}\n")).unwrap();
+
+        run("Reporter/Nightly", Some(&project), &context).unwrap();
+        let hourly = run("Hourly", Some(&project), &context).unwrap_err();
+        let elsewhere = run("Elsewhere", Some(&project), &context).unwrap_err();
+
+        assert_eq!(
+            (hourly.kind, hourly.message.as_str()),
+            (Kind::Usage, "No function has a schedule Hourly: the template's are Reporter/Nightly")
+        );
+        assert_eq!(
+            elsewhere.message,
+            format!(
+                "the app at {endpoint} isn't {}'s: its ff local start stopped, and another project's runs there",
+                project.display()
+            )
+        );
+        let asked = requests.lock().unwrap()[0].clone();
+        assert_eq!((asked.method.as_str(), asked.target.as_str()), ("POST", "/ff-local/schedules/Reporter/Nightly"));
+        let signature = crate::sigv4::read_authorization(&asked.headers, "lambda").unwrap().unwrap();
+        let signed = crate::sigv4::SignedRequest {
+            method: &asked.method,
+            raw_path: &asked.target,
+            raw_query: "",
+            headers: &asked.headers,
+        };
+        let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()).unwrap();
+        assert_eq!(signature.access_key_id, key().id);
+        crate::sigv4::check_authorization(&signed, b"", &signature, &key().secret, now, "lambda").unwrap();
     }
 
     #[test]

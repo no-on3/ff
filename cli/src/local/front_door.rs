@@ -8,7 +8,8 @@
 //! `BE/src/lambda/lambda-invoke-examples.json`'s, which the backend's tests read too. And `GetFunctionConfiguration`,
 //! as the backend answers it for `$LATEST`. Each function's URL is at `http://<function>.fn.localhost:<port>`, served
 //! as FF's gateway serves one (`BE/src/function-urls/function-url.gateway.ts`), its CORS applied, and one that takes
-//! the account's credentials refused without the local key's signature.
+//! the account's credentials refused without the local key's signature. A function's schedules run as asynchronous
+//! calls, on time ([`super::schedules`]) or now, when `ff local run` asks.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -22,6 +23,8 @@ use super::events::{self, Attempts, End, Outcome, RetryPolicy, Settlement};
 use super::http::{Answers, PAYLOAD_LIMIT, Request, Response, percent_decode, request_id};
 use super::instances::{Called, Instances, Runner};
 use super::key::Key;
+use super::schedule_expression::{Millis, iso};
+use super::schedules::{self, LocalSchedule};
 use super::url::{self, Caller, Cors, Ran, UrlRequest};
 use super::{Asks, Code};
 use crate::error::{Error, Kind};
@@ -297,6 +300,7 @@ pub struct Settings {
     pub on_success: Option<String>,
     pub on_failure: Option<String>,
     pub url: Option<FunctionUrl>,
+    pub schedules: Vec<LocalSchedule>,
 }
 
 /// The front door to the template's app.
@@ -314,6 +318,8 @@ pub struct FrontDoor<R: Runner> {
     pub second: Duration,
     /// Says what goes wrong that no caller sees: an `Event`'s failure.
     pub say: Arc<dyn Fn(&str) + Send + Sync>,
+    /// How far the schedules' clock is ahead of this machine's: none, but in the `ff` suite's builds.
+    pub clock_offset: Millis,
 }
 
 impl<R: Runner> Clone for FrontDoor<R> {
@@ -327,6 +333,7 @@ impl<R: Runner> Clone for FrontDoor<R> {
             started: self.started,
             second: self.second,
             say: Arc::clone(&self.say),
+            clock_offset: self.clock_offset,
         }
     }
 }
@@ -470,6 +477,81 @@ impl<R: Runner> FrontDoor<R> {
         Err(forbidden(
             "this URL takes a request signed for lambda by an access key of its account, or an API key of it, as \"Authorization: Bearer ffk_…\"",
         ))
+    }
+
+    /// A run of a function's schedule due at `due_at`, as FF's scheduler makes one: an asynchronous call of the
+    /// function, or of its alias, with EventBridge's Scheduled Event or the schedule's input; the call's request ID.
+    pub fn run_schedule(&self, function: &str, name: &str, due_at: Millis) -> Option<String> {
+        let settings = self.settings.get(function)?;
+        let schedule = settings.schedules.iter().find(|schedule| schedule.name == name)?;
+        let request_id = request_id();
+        let rule = schedules::rule_name(function, name);
+        let event = schedule
+            .input
+            .clone()
+            .unwrap_or_else(|| schedules::scheduled_event(&request_id, &self.account, due_at, &self.region, &rule));
+        (self.say)(&format!(
+            "{function}: its schedule {name} runs, due at {}: the asynchronous call {request_id}",
+            iso(due_at)
+        ));
+        self.send(function, event, &request_id, settings.alias.as_deref());
+        Some(request_id)
+    }
+
+    /// `ff local run`'s request: a schedule, named alone or after its function, run now; 202 with the call's request
+    /// ID, as an `Event` is answered.
+    fn run_now(&self, function: Option<&str>, name: &str) -> Result<Response, Response> {
+        let having: Vec<&String> = self
+            .settings
+            .iter()
+            .filter(|(each, settings)| {
+                function.is_none_or(|function| function == each.as_str())
+                    && settings.schedules.iter().any(|schedule| schedule.name == name)
+            })
+            .map(|(each, _)| each)
+            .collect();
+        let missing = match function {
+            Some(function) => format!("{function} has no schedule {name}"),
+            None => format!("No function has a schedule {name}"),
+        };
+        let function = match having.as_slice() {
+            [function] => *function,
+            [] => {
+                let all: Vec<String> = self
+                    .settings
+                    .iter()
+                    .flat_map(|(each, settings)| {
+                        settings.schedules.iter().map(move |schedule| format!("{each}/{}", schedule.name))
+                    })
+                    .collect();
+                let known = if all.is_empty() {
+                    "the template has none".to_owned()
+                } else {
+                    format!("the template's are {}", all.join(", "))
+                };
+                return Err(refusal(404, "ResourceNotFoundException", &format!("{missing}: {known}")));
+            }
+            several => {
+                let names: Vec<&str> = several.iter().map(|each| each.as_str()).collect();
+                return Err(refusal(
+                    400,
+                    "InvalidParameterValueException",
+                    &format!(
+                        "{} have a schedule {name}: name it after its function, as {}/{name}",
+                        names.join(" and "),
+                        names[0]
+                    ),
+                ));
+            }
+        };
+        let now = schedules::now_ms(self.clock_offset);
+        let request_id = self.run_schedule(function, name, now).ok_or_else(|| self.missing(&named(function, None)))?;
+        let body = json!({ "function": function, "schedule": name, "requestId": request_id });
+        Ok(Response {
+            status: 202,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: body.to_string().into_bytes(),
+        })
     }
 
     fn arn(&self, name: &str) -> String {
@@ -774,11 +856,15 @@ impl<R: Runner> Answers for FrontDoor<R> {
             ("GET", ["", "2015-03-31", "functions", function, "configuration"]) => {
                 self.configuration(&percent_decode(function), query)
             }
+            ("POST", ["", "ff-local", "schedules", name]) => self.run_now(None, &percent_decode(name)),
+            ("POST", ["", "ff-local", "schedules", function, name]) => {
+                self.run_now(Some(&percent_decode(function)), &percent_decode(name))
+            }
             (method, _) => Err(refusal(
                 400,
                 "UnknownOperationException",
                 &format!(
-                    "ff local doesn't offer {method} {path}: its front door answers Lambda's Invoke, POST /2015-03-31/functions/<name>/invocations, and GetFunctionConfiguration, GET /2015-03-31/functions/<name>/configuration"
+                    "ff local doesn't offer {method} {path}: its front door answers Lambda's Invoke, POST /2015-03-31/functions/<name>/invocations, GetFunctionConfiguration, GET /2015-03-31/functions/<name>/configuration, and ff local run's POST /ff-local/schedules/[<function>/]<schedule>"
                 ),
             )),
         };
@@ -859,6 +945,7 @@ mod tests {
             started: started(),
             second: Duration::from_millis(1),
             say: Arc::new(move |line| say_to.lock().unwrap().push(line.to_owned())),
+            clock_offset: 0,
         };
         Door { door, said, stand }
     }
@@ -1606,5 +1693,103 @@ mod tests {
             "RequestEntityTooLargeException"
         );
         assert_eq!(refused(&door.door.unreadable(false, None)).1, "InvalidRequestContentException");
+    }
+
+    /// `Cleaner`, with a schedule `Nightly`; and `Reporter`, with one too, and `Weekly`, which has its own input.
+    fn door_with_schedules() -> Door {
+        door_with(vec![function("Cleaner", "app.handler"), function("Reporter", "app.handler")], |name, settings| {
+            let schedule = |name: &str, input: Option<Value>| LocalSchedule {
+                name: name.into(),
+                expression: "cron(0 2 * * ? *)".into(),
+                reader: super::super::schedule_expression::Expression::parse("cron(0 2 * * ? *)").unwrap(),
+                input,
+                enabled: true,
+            };
+            settings.schedules = match name {
+                "Reporter" => vec![schedule("Nightly", None), schedule("Weekly", Some(json!({ "report": "week" })))],
+                _ => vec![schedule("Nightly", None)],
+            };
+        })
+    }
+
+    fn millis(text: &str) -> Millis {
+        let time = humantime::parse_rfc3339(text).unwrap();
+        Millis::try_from(time.duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()
+    }
+
+    /// The events the functions got, as each run ended.
+    fn events_received(door: &Door) -> Vec<Value> {
+        door.stand.received.lock().unwrap().iter().map(|(event, _)| event.clone()).collect()
+    }
+
+    #[test]
+    fn a_schedules_run_is_an_asynchronous_call_with_eventbridges_scheduled_event_or_its_input() {
+        let door = door_with_schedules();
+        let due = millis("2026-11-10T02:00:00Z");
+
+        let nightly = door.door.run_schedule("Reporter", "Nightly", due).unwrap();
+        door.door.run_schedule("Reporter", "Weekly", due).unwrap();
+
+        assert!(door.until(|door| door.stand.received.lock().unwrap().len() == 2), "{:?}", door.said());
+        let events = events_received(&door);
+        let scheduled = schedules::scheduled_event(&nightly, ACCOUNT, due, REGION, "Reporter-Nightly");
+        assert!(events.contains(&scheduled), "{events:?}");
+        assert!(events.contains(&json!({ "report": "week" })), "a schedule's input in place of the event");
+        let said = format!(
+            "Reporter: its schedule Nightly runs, due at 2026-11-10T02:00:00Z: the asynchronous call {nightly}"
+        );
+        assert!(door.said().contains(&said), "{:?}", door.said());
+        assert_eq!(door.door.run_schedule("Reporter", "Hourly", due), None);
+        assert_eq!(door.door.run_schedule("Nobody", "Nightly", due), None);
+    }
+
+    #[test]
+    fn ff_local_run_runs_a_schedule_named_alone_or_after_its_function_now() {
+        let door = door_with_schedules();
+        let run = |target: &str| door.send("POST", target, &[], b"");
+
+        let weekly = run("/ff-local/schedules/Weekly");
+        assert_eq!(
+            (weekly.status, &body_of(&weekly)["function"], &body_of(&weekly)["schedule"]),
+            (202, &json!("Reporter"), &json!("Weekly"))
+        );
+        let cleaner = run("/ff-local/schedules/Cleaner/Nightly");
+        assert_eq!(cleaner.status, 202);
+        let refusals = [
+            (
+                run("/ff-local/schedules/Nightly"),
+                (
+                    400,
+                    "InvalidParameterValueException",
+                    "Cleaner and Reporter have a schedule Nightly: name it after its function, as Cleaner/Nightly",
+                ),
+            ),
+            (
+                run("/ff-local/schedules/Reporter/Hourly"),
+                (
+                    404,
+                    "ResourceNotFoundException",
+                    "Reporter has no schedule Hourly: the template's are Cleaner/Nightly, Reporter/Nightly, Reporter/Weekly",
+                ),
+            ),
+            (
+                run("/ff-local/schedules/Hourly"),
+                (
+                    404,
+                    "ResourceNotFoundException",
+                    "No function has a schedule Hourly: the template's are Cleaner/Nightly, Reporter/Nightly, Reporter/Weekly",
+                ),
+            ),
+        ];
+        for (response, (status, error_type, message)) in refusals {
+            assert_eq!(refused(&response), (status, error_type.to_owned(), message.to_owned()));
+        }
+
+        assert!(door.until(|door| door.stand.received.lock().unwrap().len() == 2), "two runs, and nothing refused ran");
+        let request_id = body_of(&cleaner)["requestId"].as_str().unwrap().to_owned();
+        let event = events_received(&door).into_iter().find(|event| event["id"] == request_id.as_str()).unwrap();
+        let time = millis(event["time"].as_str().unwrap());
+        assert!((schedules::now_ms(0) - time).abs() < 5_000, "a run by hand is due now: {event}");
+        assert_eq!(event["resources"], json!(["arn:aws:events:tn-tunis-1:000000000000:rule/Cleaner-Nightly"]));
     }
 }

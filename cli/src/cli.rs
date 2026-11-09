@@ -748,6 +748,16 @@ pub enum LocalCommand {
         parameter_overrides: Vec<String>,
     },
 
+    /// Run a schedule of the template's app that ff local start runs, now, as it would run on time: its function
+    /// called without waiting, with EventBridge's Scheduled Event or the schedule's input; its log is ff local start's
+    Run {
+        /// The schedule: its name, or <function>/<name> when two functions have one so named
+        schedule: String,
+
+        /// The template, or its folder [default: this folder]
+        path: Option<PathBuf>,
+    },
+
     /// Remove what ff local start keeps for a template's project, in its .ff/local/: the functions' logs
     Reset {
         /// The template, or its folder [default: this folder]

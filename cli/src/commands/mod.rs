@@ -112,6 +112,9 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             };
             local::start(&function, url, &options, context)
         }
+        Command::Local(LocalCommand::Run { schedule, path }) => {
+            local_template::run(&schedule, path.as_deref(), context)
+        }
         Command::Local(LocalCommand::Reset { path, yes }) => local_template::reset(path.as_deref(), yes, context),
         Command::Env(EnvCommand::List { name, show }) => env::list(&name, show, context),
         Command::Env(EnvCommand::Set { name, variables }) => env::set(&name, &variables, context),
