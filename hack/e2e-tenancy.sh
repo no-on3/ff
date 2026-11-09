@@ -128,8 +128,9 @@ upload_package() {
 }
 sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(hashlib.sha256(open(sys.argv[1], "rb").read()).digest()).decode())' "$1"; }
 uri() { jq -rn --arg s "$1" '$s | @uri'; }
-# Routes anyone may call (@Public()): whether the process is alive, and whether it can serve, for the load balancer.
-public_routes=("GET /healthz" "GET /readyz")
+# Routes anyone may call (@Public()): whether the process is alive, and whether it can serve, for the load balancer;
+# where to log in, which `ff login` asks before it has a token.
+public_routes=("GET /healthz" "GET /readyz" "GET /login")
 is_public() { local route; for route in "${public_routes[@]}"; do [ "$route" = "$1" ] && return 0; done; return 1; }
 
 # The local Keycloak (realm "ff", deploy/keycloak/ff-realm.json).
@@ -1285,6 +1286,8 @@ for route in "${routes[@]}"; do
     check "$route: 401" 401 "$(status)"
   fi
 done
+check "where to log in: the realm's issuer, as its tokens name it; none in development mode" \
+  "oidc $keycloak/realms/ff dev" "$(anonymous GET /login | jq -r '"\(.mode) \(.issuer)"') $(as_a GET /login | jq -r .mode)"
 }
 section_def anonymous section_anonymous account_a budget=10
 

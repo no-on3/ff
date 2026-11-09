@@ -89,6 +89,8 @@ One Rust binary that deploys, invokes and reads FF's functions, through FF's API
 | `ff usage --aws [--months N] [--without LINE,...]` | The last months, three unless `--months` says (1 to 12), as FF counted them at AWS's prices, an estimate: a column a month, a row a line in US$ (Lambda, RDS's storage, S3, SQS, SES), then what AWS bills that FF doesn't, each named as `--without` takes it (`coldStarts`, `databaseInstances`, `cacheNodes`, `dataOut`, `logs`, `cloudFront`, `natGateway`), the totals in US$ and in dinars, and FF's own; with what each of those lines assumes and the day AWS's prices were read. Needs `usage:read` |
 | `ff balance` | The balance, this month's charges and how far they are rated, and whether calls go on, are in their grace period, or stopped. Needs `usage:read` |
 | `ff metrics [<name>] [--period 60\|300\|3600] [--since 1h]` | A function's metrics, or the whole account's: a row per period with invocations, errors, throttles, cold starts, the duration's p50, p95 and maximum, and the instances; then the window's totals, and its calls that didn't wait when there were any, as Lambda's metrics count them: kept, dropped, and records their destination didn't take. Needs `metrics:read` |
+| `ff login` | Log in with the browser, by OAuth's device flow: the address and the code printed, the browser opened when there is one (`--no-browser` not to); the login kept for the profile and renewed as it is used. `--replace` removes the profile's API key, which ff would use first |
+| `ff logout` | Revoke the login where it was made, then remove its tokens from the profile; `--no-revoke` removes them alone, when the login's server can't be reached |
 | `ff whoami` | Who the token is, an API key (its name, ID and scopes) or a user (their accounts, and which one acts), and the account it acts for: `GET /me`. The first check of a new key |
 | `ff config set <key> <value>` | Set one of the profile's settings: `endpoint`, `account`, `dev_account` or `allow_http` |
 | `ff config unset <key>` | Remove one of them, or the profile's `token` |
@@ -101,15 +103,24 @@ Every command takes `--output text|json` (one JSON document per command, for scr
 
 ## Settings
 
-An owner of the account makes an API key in the console's API keys page, with the scopes the commands need, and the key is shown once. Then:
+Name the API, then log in with your browser:
 
 ```bash
 ff config set endpoint https://api.ff.example   # the API's address; http://localhost:3000 by default
+ff login                                        # open the address it prints, check the code, sign in, approve
+ff whoami                                       # Salma <salma@ff.example>, then your accounts …
+```
+
+`ff login` asks the API where its login is (`GET /login`), then runs OAuth's device flow (RFC 8628) against that realm's `ff-cli` client, with the scope `offline_access`: the login lasts while it is used, rather than ending with the realm's session after 30 minutes unused. Each command renews the access token first when it ends within a minute; a renewal refused says to log in again. `ff logout` revokes the login at the realm (RFC 7009) before removing it, since a copy of its token would otherwise go on working.
+
+For a script or a CI, an owner of the account makes an API key in the console's API keys page, with the scopes it needs, and the key is shown once. Then:
+
+```bash
 ff config set-token                             # paste the key: it isn't shown, nor kept in the shell's history
 ff whoami                                       # API key "laptop" (ffk_1a2b3c4d5e6f_…) on account 123456789012 …
 ```
 
-The settings are kept in `config.toml`, the token in `credentials.toml` next to it, readable by its owner only (ff warns when others may read it). Both are in `~/.config/ff/` on Linux, `~/Library/Application Support/ff/` on macOS, `%APPDATA%\ff\` on Windows, or in the folder `FF_CONFIG_DIR` names. Each holds profiles:
+The settings are kept in `config.toml`, the tokens in `credentials.toml` next to it, readable by its owner only (ff warns when others may read it). Both are in `~/.config/ff/` on Linux, `~/Library/Application Support/ff/` on macOS, `%APPDATA%\ff\` on Windows, or in the folder `FF_CONFIG_DIR` names. Each holds profiles:
 
 ```toml
 [profiles.default]
@@ -120,6 +131,8 @@ endpoint = "http://localhost:3000"
 dev_account = "123456789012"     # a development stack (FF_AUTH_MODE=dev) acts as this account, with no token
 ```
 
+`credentials.toml` holds a profile's API key, `token`, or its login: `issuer`, the realm it came from, `access_token`, `refresh_token`, and `expires_at`, when the access token ends.
+
 `ff config set` and `unset` change a file keeping its comments and its other profiles; `--profile <name>` picks the profile they change, and the first setting makes a new one.
 
 **Which setting applies:** a flag, then an environment variable, then the profile, then the default.
@@ -129,13 +142,15 @@ dev_account = "123456789012"     # a development stack (FF_AUTH_MODE=dev) acts a
 | The profile | `--profile` | `FF_PROFILE` | `default` |
 | The API's address | `--endpoint` | `FF_ENDPOINT` | `endpoint`, else `http://localhost:3000` |
 | The account, for a login with several | `--account` | `FF_ACCOUNT` | `account` |
-| The token | none: a flag would stay in the shell's history | `FF_TOKEN` | `token`, in `credentials.toml` |
+| The token | none: a flag would stay in the shell's history | `FF_TOKEN` | `token`, in `credentials.toml`, else the login's `access_token` |
 | The account a development stack acts as | | | `dev_account` |
 | Plain http to another machine | `--allow-http` | | `allow_http` |
 
 **Plain `http://`** sends the token in clear, so ff uses it only to this machine (`localhost`, `127.0.0.1`, `[::1]`), unless `--allow-http` or `allow_http = true` says otherwise, for a development stack elsewhere.
 
-**Without a token**, nor a development account, ff says how to get a key, and calls nothing.
+**An API key comes before a login,** in `FF_TOKEN` or the profile, so that a key given to a CI keeps working whatever a login says; `ff login` on a profile that holds a key says so, and replaces it only with `--replace`.
+
+**Without a token**, nor a development account, ff says to log in, or how to get a key, and calls nothing.
 
 ## Running functions on this machine
 
@@ -154,7 +169,7 @@ dev_account = "123456789012"     # a development stack (FF_AUTH_MODE=dev) acts a
 
 ## What ff sends
 
-Each request carries `Authorization: Bearer <token>`, `X-FF-Account` when an account is set, `X-FF-Dev-Account` when a development account is, and `User-Agent: ff-cli/<version>`. It connects within 5 s, and waits 30 s for an answer, unless a command needs longer: a deploy waits 120 s for its rollout, and a package's upload a minute and a second per 100 KB. A package is asked for by its SHA-256 (`GET /packages?codeSha256=`) and uploaded (`POST /packages`, `application/zip`) only when the account hasn't it; when the hourly purge of unused packages takes it between that question and the rollout, ff uploads it and tries once more. `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` are honoured, and certificates are checked against the system's own, so a company's CA works.
+Each request carries `Authorization: Bearer <token>`, `X-FF-Account` when an account is set, `X-FF-Dev-Account` when a development account is, and `User-Agent: ff-cli/<version>`. It connects within 5 s, and waits 30 s for an answer, unless a command needs longer: a deploy waits 120 s for its rollout, and a package's upload a minute and a second per 100 KB. A package is asked for by its SHA-256 (`GET /packages?codeSha256=`) and uploaded (`POST /packages`, `application/zip`) only when the account hasn't it; when the hourly purge of unused packages takes it between that question and the rollout, ff uploads it and tries once more. `HTTPS_PROXY`, `HTTP_PROXY`, `ALL_PROXY` and `NO_PROXY` are honoured, and certificates are checked against the system's own, so a company's CA works. `ff login`, `ff logout` and a login's renewal call the realm the API names in the same way, https unless it is this machine or plain http is allowed, its discovery document asked first and refused when it names another issuer.
 
 A read the plan's rate refused (429) is tried once more after its `Retry-After`, up to 30 s; a change never is, since it may have happened.
 

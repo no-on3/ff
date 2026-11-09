@@ -54,7 +54,7 @@ pub fn api_error(status: u16, body: &str, request_id: Option<String>, api_key: b
     };
     let message = match status {
         401 if api_key => format!("{message}: save another key with `ff config set-token`"),
-        401 => format!("{message}: log in again, or use an API key"),
+        401 => format!("{message}: log in again with `ff login`, or use an API key"),
         _ => message,
     };
     let kind = match status {
@@ -135,7 +135,7 @@ mod tests {
         );
         assert_eq!(
             api_error(401, body, None, false).message,
-            "The API key was revoked: log in again, or use an API key"
+            "The API key was revoked: log in again with `ff login`, or use an API key"
         );
     }
 

@@ -20,6 +20,7 @@ mod init;
 mod invoke;
 mod keys;
 mod local;
+mod login;
 mod logs;
 mod package;
 mod queues;
@@ -298,6 +299,8 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             event_sources::update(&uuid, &settings, context)
         }
         Command::EventSources(EventSourcesCommand::Remove { uuid, yes }) => event_sources::remove(&uuid, yes, context),
+        Command::Login { replace, no_browser } => login::login(replace, no_browser, context),
+        Command::Logout { no_revoke } => login::logout(no_revoke, context),
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),

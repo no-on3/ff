@@ -7,14 +7,17 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use ureq::Agent;
+use ureq::config::ConfigBuilder;
 use ureq::http::Response;
 use ureq::tls::{RootCerts, TlsConfig};
+use ureq::typestate::AgentScope;
 
 use super::error::{api_error, retry_after};
 use super::events::Events;
-use crate::auth;
+use crate::auth::{self, Token};
 use crate::config::{Endpoint, Settings};
 use crate::error::{Error, Kind};
+use crate::login;
 
 /// How long to wait for a connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -111,6 +114,16 @@ impl Call {
     }
 }
 
+/// What each of ff's calls is made with, the API's and the login's: ff's user agent, the system's certificates, a
+/// connection within 5 s, and an answer of any status taken as an answer, for the caller to read.
+pub fn agent_config() -> ConfigBuilder<AgentScope> {
+    Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .user_agent(format!("ff-cli/{}", env!("CARGO_PKG_VERSION")))
+        .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
+}
+
 pub struct Client {
     agent: Agent,
     endpoint: Endpoint,
@@ -120,22 +133,22 @@ pub struct Client {
 
 impl Client {
     /// A client for the settings in effect; refused before any call when there is no token, nor
-    /// a development account.
+    /// a development account. A login's token about to end is renewed first.
     pub fn new(settings: &Settings) -> Result<Client, Error> {
         auth::require_identity(settings)?;
-        let agent = Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(CONNECT_TIMEOUT))
-            .user_agent(format!("ff-cli/{}", env!("CARGO_PKG_VERSION")))
-            .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
-            .build()
-            .into();
-        Ok(Client {
-            agent,
+        let token = login::token_for_call(settings)?;
+        Ok(Client::with_token(settings, token.as_ref()))
+    }
+
+    /// A client that calls with this token, or none, for the accounts the settings name: what `ff login` asks
+    /// before it has a token, and its first call with one.
+    pub fn with_token(settings: &Settings, token: Option<&Token>) -> Client {
+        Client {
+            agent: agent_config().build().into(),
             endpoint: settings.endpoint.value.clone(),
-            headers: auth::identity_headers(settings),
-            api_key: settings.token.as_ref().is_some_and(|token| token.value.is_api_key()),
-        })
+            headers: auth::identity_headers(settings, token),
+            api_key: token.is_some_and(Token::is_api_key),
+        }
     }
 
     /// The call's JSON answer.

@@ -22,7 +22,7 @@ pub fn run(command: ConfigCommand, context: &Context) -> Result<(), Error> {
 }
 
 /// The profile a change goes to, and ff's folder: a new profile is made by its first setting.
-fn target(context: &Context) -> Result<(String, Files), Error> {
+pub(super) fn target(context: &Context) -> Result<(String, Files), Error> {
     let env = |name: &str| std::env::var(name).ok();
     let profile = match &context.connection.profile {
         Some(profile) => profile.clone(),

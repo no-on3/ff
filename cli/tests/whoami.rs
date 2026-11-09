@@ -67,7 +67,7 @@ fn without_a_token_it_says_how_to_get_one_and_calls_nothing() {
     let dir = settings(&format!("[profiles.default]\nendpoint = \"{}\"\n", api.url), "");
 
     ff(&dir).arg("whoami").assert().code(3).stderr(predicate::str::contains(format!(
-        "error: There is no token to call {} with. An owner of the account makes an API key in the console's API keys page",
+        "error: There is no token to call {} with: `ff login` logs you in with your browser. For a script or a CI, an owner of the account makes an API key in the console's API keys page",
         api.url
     )));
     assert!(api.requests().is_empty());

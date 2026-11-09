@@ -279,6 +279,25 @@ pub enum Command {
     /// buckets, each function's code as Lambda runs it, a page for each kind of resource, and MIGRATION.md
     Export(ExportArgs),
 
+    /// Log in with your browser, by OAuth's device flow: the login kept for the profile, renewed as it is used
+    Login {
+        /// Remove the API key the profile holds, which ff would use before the login
+        #[arg(long)]
+        replace: bool,
+
+        /// Print the address to open, without opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+
+    /// Log out: the login revoked where it was made, then its tokens removed from the profile
+    Logout {
+        /// Remove the tokens without revoking the login, when its server can't be reached: a copy of them then works
+        /// until it goes unused for as long as the server allows, 30 days by default
+        #[arg(long)]
+        no_revoke: bool,
+    },
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 

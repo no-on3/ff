@@ -10,6 +10,7 @@ mod config;
 mod error;
 mod local;
 mod local_url;
+mod login;
 mod md5;
 mod output;
 mod package;

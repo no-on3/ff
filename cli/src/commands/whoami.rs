@@ -9,20 +9,24 @@ use crate::error::Error;
 
 pub fn run(context: &Context) -> Result<(), Error> {
     let settings = context.settings()?;
-    let client = Client::new(&settings)?;
-    // The API's answer is printed as it came for scripts; read here for people.
+    let (answer, me) = ask(&Client::new(&settings)?)?;
+    context.out.result(&answer, || text(&me, &settings))
+}
+
+/// `GET /me`: the API's answer as it came, printed so for scripts, and read for people.
+pub(super) fn ask(client: &Client) -> Result<(serde_json::Value, Me), Error> {
     let answer: serde_json::Value = client.json(&Call::get("/me"))?;
-    let me: Me = serde_json::from_value(answer.clone()).map_err(|error| {
+    let me = serde_json::from_value(answer.clone()).map_err(|error| {
         Error::new(crate::error::Kind::Failed, format!("The API's answer to GET /me isn't what ff expects: {error}"))
     })?;
-    context.out.result(&answer, || text(&me, &settings))
+    Ok((answer, me))
 }
 
 fn account_line(account: &Account) -> String {
     format!("account {} \"{}\" ({}, plan {})", account.id, account.name, account.status, account.plan.name)
 }
 
-fn text(me: &Me, settings: &Settings) -> String {
+pub(super) fn text(me: &Me, settings: &Settings) -> String {
     let api = format!("API: {}", settings.endpoint.value);
     if let Some(key) = &me.key {
         let account = me.accounts.first().map(account_line).unwrap_or_default();
@@ -57,21 +61,13 @@ fn text(me: &Me, settings: &Settings) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::config::{Endpoint, Files, Setting, Source};
+    use crate::config::{Setting, Source};
 
     fn settings(account: Option<&str>) -> Settings {
         Settings {
-            profile: Setting { value: "default".into(), source: Source::Default },
-            endpoint: Setting { value: Endpoint::parse("https://api.ff.example").unwrap(), source: Source::ConfigFile },
             account: account.map(|account| Setting { value: account.into(), source: Source::Flag("--account") }),
-            dev_account: None,
-            token: None,
-            allow_http: Setting { value: false, source: Source::Default },
-            files: Files { dir: PathBuf::from("/tmp/ff") },
-            warnings: Vec::new(),
+            ..Settings::example()
         }
     }
 

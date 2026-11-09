@@ -1,9 +1,9 @@
 //! Where ff finds the API, the account and the token (ADR 0002): a flag first, then an
 //! environment variable, then the profile in ff's files, then the default.
 //!
-//! The files are `config.toml`, the profiles' settings, and `credentials.toml`, their tokens,
-//! readable by their owner only. Both hold `[profiles.<name>]` tables, and are rewritten keeping
-//! the comments and order of what is already there.
+//! The files are `config.toml`, the profiles' settings, and `credentials.toml`, their tokens:
+//! an API key, or a login's. It is readable by its owner only. Both hold `[profiles.<name>]`
+//! tables, and are rewritten keeping the comments and order of what is already there.
 
 use std::fmt;
 use std::fs;
@@ -17,6 +17,7 @@ use ureq::http::Uri;
 use crate::auth::Token;
 use crate::cli::ConnectionArgs;
 use crate::error::{Error, Kind};
+use crate::login::Login;
 
 pub const DEFAULT_ENDPOINT: &str = "http://localhost:3000";
 pub const DEFAULT_PROFILE: &str = "default";
@@ -150,6 +151,8 @@ pub enum Source {
     Environment(&'static str),
     ConfigFile,
     CredentialsFile,
+    /// The profile's login, from `ff login`, in credentials.toml.
+    Login,
     Default,
 }
 
@@ -159,6 +162,7 @@ impl fmt::Display for Source {
             Source::Flag(name) | Source::Environment(name) => f.write_str(name),
             Source::ConfigFile => f.write_str("config.toml"),
             Source::CredentialsFile => f.write_str("credentials.toml"),
+            Source::Login => f.write_str("ff login"),
             Source::Default => f.write_str("default"),
         }
     }
@@ -334,10 +338,30 @@ pub struct Settings {
     pub account: Option<Setting<String>>,
     pub dev_account: Option<Setting<String>>,
     pub token: Option<Setting<Token>>,
+    /// The profile's login, when its token is the one in effect: no FF_TOKEN, and no API key in the profile.
+    pub login: Option<Login>,
     pub allow_http: Setting<bool>,
     pub files: Files,
     /// What the files' owner should fix, printed before the command's output.
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+impl Settings {
+    /// For a unit test: the default profile, the API at https://api.ff.example, no account, no token.
+    pub fn example() -> Settings {
+        Settings {
+            profile: Setting { value: DEFAULT_PROFILE.into(), source: Source::Default },
+            endpoint: Setting { value: Endpoint::parse("https://api.ff.example").unwrap(), source: Source::ConfigFile },
+            account: None,
+            dev_account: None,
+            token: None,
+            login: None,
+            allow_http: Setting { value: false, source: Source::Default },
+            files: Files { dir: PathBuf::from("/tmp/ff") },
+            warnings: Vec::new(),
+        }
+    }
 }
 
 /// The first of a flag, an environment variable, and the profile's value.
@@ -430,7 +454,9 @@ pub fn resolve(
         "dev_account",
     )?;
 
+    // FF_TOKEN, then the profile's API key, then its login: a key given to a CI keeps working whatever a login says.
     let mut warnings = Vec::new();
+    let mut login = None;
     let token = match env("FF_TOKEN").and_then(|value| Token::new(&value)) {
         Some(token) => Some(Setting { value: token, source: Source::Environment("FF_TOKEN") }),
         None => match credentials.string(name, "token")? {
@@ -438,11 +464,21 @@ pub fn resolve(
                 warnings.extend(exposed(&credentials.path));
                 Token::new(&value).map(|token| Setting { value: token, source: Source::CredentialsFile })
             }
-            None => None,
+            None => {
+                // A login that can't be read is none, said, so that `ff login` can make another.
+                match Login::read(credentials, name) {
+                    Ok(found) => login = found,
+                    Err(broken) => warnings.push(broken.message),
+                }
+                if login.is_some() {
+                    warnings.extend(exposed(&credentials.path));
+                }
+                login.as_ref().map(|login| Setting { value: login.access_token.clone(), source: Source::Login })
+            }
         },
     };
 
-    Ok(Settings { profile, endpoint, account, dev_account, token, allow_http, files, warnings })
+    Ok(Settings { profile, endpoint, account, dev_account, token, login, allow_http, files, warnings })
 }
 
 /// The settings in effect for this process: its flags, its environment, its files.

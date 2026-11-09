@@ -614,10 +614,8 @@ pub fn metrics(name: Option<&str>, period: u32, since: &str, context: &Context) 
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::config::{Endpoint, Files, Setting, Source};
+    use crate::config::{Setting, Source};
 
     fn me(ids: &[&str]) -> Me {
         let accounts: Vec<Value> = ids
@@ -629,14 +627,8 @@ mod tests {
 
     fn settings(account: Option<&str>) -> Settings {
         Settings {
-            profile: Setting { value: "default".into(), source: Source::Default },
-            endpoint: Setting { value: Endpoint::parse("https://api.ff.example").unwrap(), source: Source::Default },
             account: account.map(|value| Setting { value: value.into(), source: Source::Flag("--account") }),
-            dev_account: None,
-            token: None,
-            allow_http: Setting { value: false, source: Source::Default },
-            files: Files { dir: PathBuf::from("/tmp/ff") },
-            warnings: Vec::new(),
+            ..Settings::example()
         }
     }
 
