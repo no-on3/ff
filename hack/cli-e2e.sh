@@ -20,6 +20,7 @@
 # each run here as its README says, its schedule by hand and a failed run tried three times; ff init's queue worker,
 # the Node.js one deployed, a job done and one dead-lettered after three tries, each the same here; ff init's site with
 # an API, the Node.js one deployed, its page by ff sites deploy and signed from its origin, each here with --site;
+# ff init's image resizer, both deployed with --container and an image's thumbnail made, each the same here;
 # folders deployed as packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
@@ -1226,6 +1227,113 @@ $(find "$app/.ff/local/buckets/entries" -name '*.object.json' | wc -l | tr -d ' 
 done
 }
 section_def template_site_with_api section_template_site_with_api backend budget=50
+
+section_template_image_resize() {
+section "ff init --template image-resize: an image put in a bucket under uploads/ makes its thumbnail under thumbnails/, sharp's or Pillow's native code built for Linux; both runtimes deployed on FF with --container as its README says, an image uploaded by the AWS CLI and its thumbnail waited for; then each runtime's run here as its README says, an image too small to shrink kept its size, a file that is no image left"
+local runtime app bucket port starter made _
+declare -A written=(
+  [nodejs]=".gitignore README.md events/upload.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/upload.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+# png_of <width> <height> <file>: a PNG of a gradient, written by Python alone, as this machine may have no image tool.
+png_of() {
+  python3 -I -c 'import struct, sys, zlib
+width, height = int(sys.argv[1]), int(sys.argv[2])
+rows = b"".join(b"\0" + b"".join(bytes((x * 255 // width, y * 255 // height, 160)) for x in range(width)) for y in range(height))
+chunk = lambda kind, data: struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+open(sys.argv[3], "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+  + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))' "$@"
+}
+# pixels <file>: an image's width x height, as file reads it; webp <file>: WebP when file reads one, which its older
+# versions call Web/P.
+pixels() { file -b "$1" | grep -oE '[0-9]+ ?x ?[0-9]+' | head -1 | tr -d ' '; }
+webp() { file -b "$1" | grep -oE 'Web/?P image' | sed 's|/||; s| image||'; }
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-photos-$runtime" && "$ff_bin" init "cli-photos-$runtime" --runtime "$runtime" --template image-resize >"$work/out" 2>"$work/err")
+  check "ff init --template image-resize makes cli-photos-$runtime's template, code, tests, event and README, and nothing else" "${written[$runtime]}" \
+    "$(template_files "$work/cli-photos-$runtime")"
+done
+png_of 640 480 "$work/photo.png"
+png_of 120 90 "$work/small.png"
+check "the suite's images: a photo, 640x480, and one smaller than a thumbnail, 120x90" "640x480 120x90" \
+  "$(pixels "$work/photo.png") $(pixels "$work/small.png")"
+
+# On FF, each runtime from its folder as ff init wrote it, as the README says: --container installs sharp, or Pillow,
+# in the runtime's build image, Linux's native code. One stack at a time, as the dev cluster has room for one
+# function of this size beside the suite's own.
+for runtime in nodejs python; do
+  app="$work/cli-photos-$runtime"
+  in_folder "$app" deploy template.yaml --container --output json
+  bucket="$(out | jq -r '.outputs[] | select(.name == "ImagesBucket") | .value')"
+  check "the $runtime one deployed with --container as the stack samconfig.toml names: its function, its bucket named after the stack and the account" \
+    "0 cli-photos-$runtime created cli-photos-$runtime-resize true" \
+    "$(code) $(out | jq -r '"\(.stack) \(.functions[0].action) \(.functions[0].name)"') \
+$([[ $bucket =~ ^cli-photos-$runtime-images-[0-9]{12}$ ]] && echo true || echo false)"
+  # As its README says: a key to the bucket alone, its variables for the AWS CLI, none of this machine's settings.
+  ff keys create --name "cli-photos-$runtime" --bucket "$bucket"
+  out | grep '^export ' >"$work/photos.env"
+  photos_aws() { (eval "$(cat "$work/photos.env")"; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+  rm -f "$work/photo.webp"
+  check "  ... an image uploaded under uploads/ by the AWS CLI with that key: its thumbnail waited for as the README says, 200x150, a WebP" \
+    "0 0 0 200x150 WebP" \
+    "$(photos_aws s3 cp "$work/photo.png" "s3://$bucket/uploads/photo.png" --only-show-errors >/dev/null 2>&1; echo $?) \
+$(photos_aws s3api wait object-exists --bucket "$bucket" --key thumbnails/photo.webp >/dev/null 2>&1; echo $?) \
+$(photos_aws s3 cp "s3://$bucket/thumbnails/photo.webp" "$work/photo.webp" --only-show-errors >/dev/null 2>&1; echo $?) \
+$(pixels "$work/photo.webp") $(webp "$work/photo.webp")"
+  for _ in $(seq 1 20); do
+    ff logs "cli-photos-$runtime-resize"
+    out | grep -E '"made": ?"thumbnails/photo.webp", ?"from": ?"uploads/photo.png"' >/dev/null && break
+    sleep 1
+  done
+  check "  ... and its log says so, in ff logs" "0 true" \
+    "$(code) $(out | grep -E '"made": ?"thumbnails/photo.webp", ?"from": ?"uploads/photo.png"' >/dev/null && echo true || echo false)"
+  ff buckets delete "$bucket" --force --yes
+  in_folder "$app" delete-stack --yes
+  made="$(code) $(out | paste -sd' ')"
+  ff keys revoke "cli-photos-$runtime" --yes
+  check "  ... ff buckets delete --force and ff delete-stack delete it, the key revoked" \
+    "0 deleted the function cli-photos-$runtime-resize (Resize) deleted the bucket $bucket (Images) deleted the stack cli-photos-$runtime 0" \
+    "$made $(code)"
+done
+
+# Here, each runtime as its README says: its commands before ff local start install its libraries, Linux's builds,
+# and run its tests; ff local start; its curls, the image put and its thumbnail waited for.
+for runtime in python nodejs; do
+  app="$work/cli-photos-$runtime"
+  bucket="cli-photos-$runtime-images-000000000000"
+  check "cli-photos-$runtime's README: its commands install its libraries and run its 6 tests, which pass" "0 6" "$(readme_here "$app")"
+  port="$(free_port)"
+  local_started "$work/photos.out" "$work/photos.err" "$app/template.yaml" --port "$port"
+  check "  ... ff local start runs the function and its bucket, named as the README says, its files kept in .ff/local, its events to the function" \
+    "true true" \
+    "$(grep -E "^  cli-photos-$runtime-resize  $runtime  512 MB, 30 s$" "$work/photos.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  $bucket  $app/\.ff/local/buckets/$bucket, its events to cli-photos-$runtime-resize$" "$work/photos.out" >/dev/null && echo true || echo false)"
+  cp "$work/photo.png" "$app/photo.png"
+  check "  ... its README's curls: the image put under uploads/, its thumbnail waited for, 200x150, a WebP" "0 200x150 WebP" \
+    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g; s/photo\.jpg/photo.png/g") $(pixels "$app/photo.webp") $(webp "$app/photo.webp")"
+  curl -s -o /dev/null -T "$work/small.png" "http://127.0.0.1:$port/$bucket/uploads/small.png"
+  printf 'no image\n' >"$work/notes.txt"
+  curl -s -o /dev/null -T "$work/notes.txt" "http://127.0.0.1:$port/$bucket/uploads/notes.txt"
+  until_found "http://127.0.0.1:$port/$bucket/thumbnails/small.webp" || true
+  curl -s -o "$work/small.webp" "http://127.0.0.1:$port/$bucket/thumbnails/small.webp"
+  for _ in $(seq 1 60); do
+    grep -E '"left": ?"uploads/notes.txt"' "$work/photos.err" >/dev/null && break
+    sleep 0.5
+  done
+  check "  ... an image smaller than a thumbnail kept its size; a file that is no image left, said in the log, nothing made of it" \
+    "120x90 true 404" \
+    "$(pixels "$work/small.webp") $(grep -E '"left": ?"uploads/notes.txt"' "$work/photos.err" >/dev/null && echo true || echo false) \
+$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/$bucket/thumbnails/notes.webp")"
+  local_stopped
+  check "  ... Ctrl-C leaving no container, the bucket's five files kept for the next start" "0 5" \
+    "$(leftover) $(find "$app/.ff/local/buckets/$bucket" -name '*.object.json' | wc -l | tr -d ' ')"
+  rm -f "$app/photo.png" "$app/photo.webp"
+  ff local reset "$app" --yes
+  check "  ... ff local reset removing them, and its .gitignore leaves out what its README's commands installed: git sees ff init's files alone" \
+    "0 false ${written[$runtime]}" "$(code) $([ -e "$app/.ff/local" ] && echo true || echo false) $(git_sees "$app")"
+done
+}
+section_def template_image_resize section_template_image_resize backend budget=300
 
 section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"

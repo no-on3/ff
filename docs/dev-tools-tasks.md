@@ -70,7 +70,7 @@ Each task, or part of one, is one commit with its tests and its documents, as th
   - [x] part 1, the templates' layout under `cli/templates/`, `ff init --list`, and `rest-api`;
   - [x] part 2, `cron-job` and `queue-worker`;
   - [x] part 3, `site-with-api`, the small app's shape, smaller;
-  - [ ] part 4, `image-resize`: `sharp` and Pillow built by `ff package --container`; the guide says Docker Desktop is what Windows and macOS need for it;
+  - [x] part 4, `image-resize`: `sharp` and Pillow built by `ff package --container`; the guide says Docker Desktop is what Windows and macOS need for it: done. An image put under `uploads/` makes a WebP of 200 pixels at most under `thumbnails/`; the bucket named after the stack and the account, as AWS's policy needs it; `ff deploy --container` on FF, `sam build` in a container on AWS, npm's Linux builds for `ff local`, which every Node.js template's README now installs.
   - [ ] part 5, `webhook`: a payment provider's notification received right, Konnect's by default: the request kept, the provider asked again, the redirect's parameters never trusted, each payment handled once by its reference; its tests against the stand-in come with M-10; the guide's "Templates"; the SAM templates page lists them.
 - [ ] **M-09** `ff mcp` (the plan's D5):
   - [ ] part 1, the refactor, its own commit: `Output` writes to a writer given at its making, stdout for the commands, a buffer for the server and the tests; the counts unchanged;

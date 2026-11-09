@@ -99,12 +99,22 @@ struct App {
     parts: &'static [&'static str],
     /// What its README's lines do, said after `cd <name>`.
     then: &'static str,
+    /// What a bucket named after its stack adds to the name, before the account's ID, if it names one so.
+    bucket: Option<&'static str>,
 }
 
+/// An account's ID, on FF as on AWS: 12 digits.
+const ACCOUNT_DIGITS: usize = 12;
+
 impl App {
-    /// The longest name it takes: its functions' names hold Lambda's 64 characters.
+    /// The longest name it takes: its functions' names hold Lambda's 64 characters, and its bucket's, if named after
+    /// it, S3's 63.
     fn name_most(&self) -> usize {
-        64 - 1 - self.parts.iter().map(|part| part.len()).max().unwrap_or_default()
+        let functions = 64 - 1 - self.parts.iter().map(|part| part.len()).max().unwrap_or_default();
+        match self.bucket {
+            Some(after) => functions.min(63 - after.len() - ACCOUNT_DIGITS),
+            None => functions,
+        }
     }
 }
 
@@ -136,6 +146,7 @@ const REST_API: App = App {
     parts: &["api"],
     then: "its libraries installed, ff local start template.yaml --with postgres here; ff deploy template.yaml and ff \
            db create on FF; sam deploy on AWS",
+    bucket: None,
 };
 
 /// A job on a schedule: each morning, the report of the day before, from the files that arrived in its bucket to a
@@ -165,6 +176,7 @@ const CRON_JOB: App = App {
     parts: &["report"],
     then: "its libraries installed, ff local start template.yaml and ff local run EveryMorning here; ff deploy \
            template.yaml on FF; sam deploy on AWS",
+    bucket: None,
 };
 
 /// A queue and its worker: a URL that takes jobs into the queue, a worker reading it in batches that names the jobs
@@ -198,6 +210,7 @@ const QUEUE_WORKER: App = App {
     what: "a queue worker",
     parts: &["api", "worker"],
     then: "its libraries installed, ff local start template.yaml here; ff deploy template.yaml on FF; sam deploy on AWS",
+    bucket: None,
 };
 
 /// A page and its API: a bucket's site whose page calls a function's URL, a guestbook, each entry an object of a
@@ -231,6 +244,37 @@ const SITE_WITH_API: App = App {
     parts: &["api"],
     then: "its libraries installed, site/config.json written and ff local start template.yaml --site Website=site \
            here; ff deploy template.yaml and ff sites deploy on FF; sam deploy and aws s3 sync on AWS",
+    bucket: None,
+};
+
+/// Thumbnails: an image put in a bucket under `uploads/` makes its thumbnail under `thumbnails/`, through an image
+/// library whose code is native, built for Linux.
+const IMAGE_RESIZE: App = App {
+    files: template_files!(
+        "image-resize",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/upload.json",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
+    ),
+    about: "thumbnails: an image put in a bucket makes its thumbnail beside it, sharp or Pillow built for Linux",
+    what: "an image resizer",
+    parts: &["resize"],
+    then: "its libraries installed, ff local start template.yaml here; ff deploy template.yaml --container on FF; sam \
+           deploy on AWS",
+    bucket: Some("-images-"),
 };
 
 /// The application a template is, if it is one.
@@ -240,6 +284,7 @@ fn app(template: Template) -> Option<&'static App> {
         Template::CronJob => Some(&CRON_JOB),
         Template::QueueWorker => Some(&QUEUE_WORKER),
         Template::SiteWithApi => Some(&SITE_WITH_API),
+        Template::ImageResize => Some(&IMAGE_RESIZE),
         Template::Function | Template::Terraform | Template::Sam => None,
     }
 }
@@ -252,9 +297,11 @@ fn about(template: Template) -> &'static str {
             "an app's Terraform project: FF's provider block and four modules, which apply on FF and on AWS"
         }
         Template::Sam => "sam init's hello world as FF takes it: one function at its URL, as a SAM application",
-        Template::RestApi | Template::CronJob | Template::QueueWorker | Template::SiteWithApi => {
-            app(template).map(|app| app.about).unwrap_or_default()
-        }
+        Template::RestApi
+        | Template::CronJob
+        | Template::QueueWorker
+        | Template::SiteWithApi
+        | Template::ImageResize => app(template).map(|app| app.about).unwrap_or_default(),
     }
 }
 
@@ -315,8 +362,8 @@ fn app_files(app: &App, name: &str, runtime: Runtime) -> Vec<(&'static str, Stri
         Runtime::Nodejs => (
             "JavaScript, for Node.js",
             "mjs",
-            "(cd src && npm ci)                               # its libraries, for ff local start: ff deploy and sam \
-             build install their own",
+            "# its libraries, Linux's builds, for ff local start: ff deploy and sam build install their own\n\
+             (cd src && npm ci --os=linux --cpu=x64 --libc=glibc)",
             "node --test",
         ),
         Runtime::Python => (
@@ -345,14 +392,24 @@ fn app_files(app: &App, name: &str, runtime: Runtime) -> Vec<(&'static str, Stri
 /// Writes an application's folder, which must not exist yet, or be empty.
 fn create_app(folder: &Path, name: &str, runtime: Runtime, app: &App) -> Result<Vec<PathBuf>, Error> {
     let most = app.name_most();
-    if !super::template::is_stack_name(name) || name.len() > most {
+    let lowercase = app.bucket.is_none() || !name.bytes().any(|byte| byte.is_ascii_uppercase());
+    if !super::template::is_stack_name(name) || name.len() > most || !lowercase {
         let functions: Vec<String> = app.parts.iter().map(|part| format!("{name}-{part}")).collect();
-        return Err(Error::usage(format!(
-            "\"{name}\" can't name {}, which names its stack and its functions, {}: letters, digits and hyphens, a \
-             letter first, {most} at most, as Lambda's function names are 64 at most",
-            app.what,
-            functions.join(" and ")
-        )));
+        return Err(Error::usage(match app.bucket {
+            None => format!(
+                "\"{name}\" can't name {}, which names its stack and its functions, {}: letters, digits and hyphens, a \
+                 letter first, {most} at most, as Lambda's function names are 64 at most",
+                app.what,
+                functions.join(" and ")
+            ),
+            Some(after) => format!(
+                "\"{name}\" can't name {}, which names its stack, its functions, {}, and its bucket, \
+                 {name}{after}<account>: lowercase letters, digits and hyphens, a letter first, {most} at most, as a \
+                 bucket's name is lowercase and 63 characters at most",
+                app.what,
+                functions.join(" and ")
+            ),
+        }));
     }
     new_folder(folder, "ff init makes a new folder")?;
     write_folder(folder, app_files(app, name, runtime))
@@ -568,6 +625,7 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
         Template::CronJob => create_app(&folder, name, runtime, &CRON_JOB)?,
         Template::QueueWorker => create_app(&folder, name, runtime, &QUEUE_WORKER)?,
         Template::SiteWithApi => create_app(&folder, name, runtime, &SITE_WITH_API)?,
+        Template::ImageResize => create_app(&folder, name, runtime, &IMAGE_RESIZE)?,
     };
     let created = Created {
         name: name.to_owned(),
@@ -578,7 +636,7 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
         key_command: (template == Template::Terraform).then(|| terraform_key_command(name)),
     };
     context.out.result(&created, || match template {
-        Template::RestApi | Template::CronJob | Template::QueueWorker | Template::SiteWithApi => {
+        Template::RestApi | Template::CronJob | Template::QueueWorker | Template::SiteWithApi | Template::ImageResize => {
             let app = app(template).expect("an application's template");
             format!(
                 "created {}/, {}: template.yaml, its code in src/ with its tests in tests/, its events in events/, \
@@ -633,6 +691,7 @@ mod tests {
         let templates = [
             ("cron-job", CRON_JOB.files),
             ("function", FUNCTION),
+            ("image-resize", IMAGE_RESIZE.files),
             ("queue-worker", QUEUE_WORKER.files),
             ("rest-api", REST_API.files),
             ("sam", SAM),
@@ -1082,6 +1141,52 @@ mod tests {
             assert_eq!(kept, ["WebsitePolicy"]);
         }
         assert_eq!(SITE_WITH_API.name_most(), 60);
+    }
+
+    #[test]
+    fn an_image_resizer_is_a_function_its_bucket_calls_for_uploads_the_bucket_named_after_the_stack_in_lowercase() {
+        for (runtime, library) in [(Runtime::Nodejs, "src/package.json"), (Runtime::Python, "src/requirements.txt")] {
+            let (dir, paths, planned) = written_and_planned(&IMAGE_RESIZE, "photos-2", runtime, &[]);
+            assert!(paths.contains(&library.to_owned()) && paths.contains(&"events/upload.json".to_owned()));
+            let libraries = std::fs::read_to_string(dir.path().join("photos-2").join(library)).unwrap();
+            assert!(libraries.contains("\"sharp\": \"0.35.5\"") || libraries.contains("pillow==13.0.0"), "{libraries}");
+            let readme = std::fs::read_to_string(dir.path().join("photos-2/README.md")).unwrap();
+            assert!(readme.contains("http://127.0.0.1:3700/photos-2-images-000000000000/uploads/photo.jpg"));
+            let install =
+                if runtime == Runtime::Nodejs { "npm ci --os=linux --cpu=x64 --libc=glibc" } else { "--platform" };
+            assert!(readme.contains(install), "{readme}");
+
+            let [function] = &planned.functions[..] else { panic!("one function") };
+            assert_eq!(
+                (function.name.as_str(), function.handler.as_str(), function.memory, function.timeout),
+                ("photos-2-resize", "app.handler", 512, 30)
+            );
+            // The bucket named as the policy names it, the function told of each upload under uploads/ alone.
+            let [bucket] = &planned.buckets[..] else { panic!("one bucket") };
+            assert_eq!(bucket.name, "photos-2-images-000000000001");
+            let [notification] = &bucket.notifications[..] else { panic!("one notification") };
+            assert_eq!(
+                (notification.events.clone(), notification.prefix.as_deref(), notification.suffix.as_deref()),
+                (vec!["s3:ObjectCreated:*".to_owned()], Some("uploads/"), None)
+            );
+        }
+        // A bucket's name holds to S3's 63 characters, and to its lowercase.
+        assert_eq!(IMAGE_RESIZE.name_most(), 43);
+        let dir = tempfile::TempDir::new().unwrap();
+        let longest = "a".repeat(43);
+        assert!(create_app(&dir.path().join(&longest), &longest, Runtime::Nodejs, &IMAGE_RESIZE).is_ok());
+        for name in ["Photos", &"a".repeat(44)] {
+            let refused = create_app(&PathBuf::from(name), name, Runtime::Python, &IMAGE_RESIZE).unwrap_err();
+            assert_eq!(refused.exit_code(), 2);
+            assert!(
+                refused
+                    .message
+                    .contains(&format!("its functions, {name}-resize, and its bucket, {name}-images-<account>"))
+                    && refused.message.contains("lowercase letters, digits and hyphens, a letter first, 43 at most"),
+                "{}",
+                refused.message
+            );
+        }
     }
 
     #[test]

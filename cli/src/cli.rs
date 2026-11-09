@@ -587,6 +587,7 @@ pub enum Template {
     CronJob,
     QueueWorker,
     SiteWithApi,
+    ImageResize,
 }
 
 impl Template {
@@ -599,6 +600,7 @@ impl Template {
             Template::CronJob => "cron-job",
             Template::QueueWorker => "queue-worker",
             Template::SiteWithApi => "site-with-api",
+            Template::ImageResize => "image-resize",
         }
     }
 }

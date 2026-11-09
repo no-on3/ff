@@ -1,0 +1,51 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  {{name}}: an image put in its bucket under uploads/ makes its thumbnail under thumbnails/, a WebP of 200 pixels at
+  most each way. ff deploy --container puts it on FF, sam build --use-container and sam deploy on AWS, and ff local
+  start runs it here.
+
+Globals:
+  Function:
+    Runtime: {{runtime}}
+    CodeUri: src/
+    MemorySize: 512
+    Timeout: 30
+
+Resources:
+  # The thumbnails' maker, called by the bucket for each file put under uploads/, without waiting: a call that fails
+  # is tried twice more.
+  Resize:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-resize"
+      Handler: app.handler
+      Events:
+        Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref Images
+            Events: s3:ObjectCreated:*
+            # Under uploads/ alone, so that a thumbnail, written under thumbnails/, calls nothing.
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+      # For AWS: FF's key gives the function its account's buckets. The policy names the bucket by its name, not by
+      # a !Ref, which would make the bucket and the function each wait for the other.
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}"
+
+  # The images and their thumbnails. Named after the stack and the account, as the policy above names it: a bucket's
+  # name is lowercase, so the stack's is too.
+  Images:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-images-${AWS::AccountId}"
+
+Outputs:
+  ImagesBucket:
+    Description: The bucket, images put under uploads/ and their thumbnails under thumbnails/
+    Value: !Ref Images
