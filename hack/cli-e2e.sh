@@ -2597,6 +2597,105 @@ rm -rf "$work/big.bin" "$work/big.out" "$app/.ff/local/buckets"
 }
 section_def local_buckets section_local_buckets backend budget=45
 
+section_local_data() {
+section "ff local start --with postgres,valkey: each beside the functions at its name and its variable, reached from this machine at its port, its data kept in Docker's volumes from a start to the next, a second start refused, ff local reset --data removing them"
+local app="$work/data" port starter project before
+local postgres_image valkey_image
+# The images ff local pins, whose clients reach each service here as a developer's tools would, at its port.
+postgres_image="$(sed -n 's/^ *"\(postgres:[^"]*@sha256:[0-9a-f]*\)"$/\1/p' "$FF_REPO_ROOT/cli/src/local/services.rs")"
+valkey_image="$(sed -n 's/^ *"\(valkey\/valkey:[^"]*@sha256:[0-9a-f]*\)"$/\1/p' "$FF_REPO_ROOT/cli/src/local/services.rs")"
+[ -n "$postgres_image" ] && [ -n "$valkey_image" ] || fail "the images of cli/src/local/services.rs weren't found"
+leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
+volumes() { docker volume ls --quiet --filter "label=ff.local.project=$project" | wc -l | tr -d ' '; }
+# url_of <service>: its URL from this machine, as the start lists it.
+url_of() { sed -n "s/^  $1 \{1,\}\([a-z]*:\/\/[^,]*\),.*/\1/p" "$work/data.out"; }
+psql_here() { docker run --rm --network host "$postgres_image" psql "$(url_of postgres)" -Atqc "$1" 2>&1; }
+valkey_here() { docker run --rm --network host "$valkey_image" valkey-cli --no-auth-warning -u "$(url_of valkey)" "$@" 2>&1; }
+# started [args...]: ff local start in the background with both, its listing waited for: a first start pulls the
+# images and makes the data.
+started() {
+  "$ff_bin" local start "$app/template.yaml" --port "$port" --with postgres,valkey "$@" >"$work/data.out" 2>"$work/data.err" &
+  starter=$!
+  for _ in $(seq 1 240); do
+    grep -F "Ctrl-C stops them" "$work/data.out" >/dev/null 2>&1 && break
+    kill -0 "$starter" 2>/dev/null || break
+    sleep 0.5
+  done
+  grep -F "Ctrl-C stops them" "$work/data.out" >/dev/null || fail "ff local start --with said nothing in 120 s: $(cat "$work/data.err")"
+}
+stopped() {
+  kill -INT "$starter"
+  wait "$starter" 2>/dev/null || true
+}
+rm -rf "$app" && mkdir -p "$app/probe"
+project="$(cd "$app" && pwd -P)"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Probe:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: probe/
+      Runtime: python3.13
+      Handler: app.handler
+      Timeout: 10
+YAML
+# A function that finds each service at its variable and reaches it at its name: PostgreSQL's answer to a TLS request,
+# and Valkey's to its password and a PING; the runtime images have no driver.
+cat >"$app/probe/app.py" <<'PY'
+import os
+import socket
+from urllib.parse import urlsplit
+
+
+def handler(event, context):
+    database, cache = urlsplit(os.environ["DATABASE_URL"]), urlsplit(os.environ["REDIS_URL"])
+    with socket.create_connection((database.hostname, database.port), timeout=5) as connection:
+        connection.sendall((8).to_bytes(4, "big") + (80877103).to_bytes(4, "big"))
+        tls = connection.recv(1).decode()
+    with socket.create_connection((cache.hostname, cache.port), timeout=5) as connection:
+        connection.sendall(f"AUTH {cache.username} {cache.password}\r\nPING\r\n".encode())
+        answer = b""
+        while answer.count(b"\r\n") < 2:
+            answer += connection.recv(64)
+    return f"{database.hostname}:{database.port}{database.path} {tls} {cache.hostname}:{cache.port} {' '.join(answer.decode().split())}"
+PY
+port="$(free_port)"
+started
+check "the start lists each service at its URL here, with its password, where the functions reach it, and their variable" "true true" \
+  "$(grep -E "^  postgres  postgresql://app:[A-Za-z0-9]{32}@127\.0\.0\.1:[0-9]+/app, at postgres:5432 from the functions, the functions' DATABASE_URL$" "$work/data.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  valkey    redis://default:[A-Za-z0-9]{32}@127\.0\.0\.1:[0-9]+, at valkey:6379 from the functions, the functions' REDIS_URL$" "$work/data.out" >/dev/null && echo true || echo false)"
+check "a function finds each at its variable and reaches it at its name: PostgreSQL answering, Valkey taking its password" \
+  '"postgres:5432/app N valkey:6379 +OK +PONG"' \
+  "$(curl -s -d '{}' "http://127.0.0.1:$port/2015-03-31/functions/Probe/invocations")"
+check "this machine reaches each at its port with its password, and Valkey refuses a client without it" "1 OK NOAUTH" \
+  "$(psql_here "create table kept (word text); insert into kept values ('first'); select count(*) from kept") \
+$(valkey_here set word kept) \
+$(docker run --rm --network host "$valkey_image" valkey-cli -p "$(url_of valkey | sed 's/.*://')" ping 2>&1 | grep -o NOAUTH)"
+ff local start "$app/template.yaml" --port "$(free_port)" --with postgres
+check "a second start of the project is refused while the first runs its data, the container named" \
+  "3 another ff local start of this project runs it" \
+  "$(code) $(err | grep -o 'another ff local start of this project runs it')"
+before="$(url_of postgres)"
+stopped
+check "Ctrl-C removes the containers, the functions' and the services', and keeps their volumes" "0 2" "$(leftover) $(volumes)"
+started
+check "the data is kept from a start to the next, at the same URL" "first kept true" \
+  "$(psql_here "select word from kept") $(valkey_here get word) $([ "$(url_of postgres)" = "$before" ] && echo true || echo false)"
+stopped
+ff local reset "$project" --yes
+started
+check "ff local reset leaves the data: the next start makes another password, and reads the data with it" "true first kept" \
+  "$([ "$(url_of postgres | sed 's/@.*//')" != "$(printf '%s' "$before" | sed 's/@.*//')" ] && echo true || echo false) \
+$(psql_here "select word from kept") $(valkey_here get word)"
+stopped
+ff local reset "$project" --data --yes
+check "ff local reset --data removes the volumes, naming them" "0 2 0" \
+  "$(code) $(out | grep -o "Docker's volume ff-local-data-[0-9a-f]*-[a-z]*" | wc -l | tr -d ' ') $(volumes)"
+}
+section_def local_data section_local_data backend budget=90
+
 section_local_images() {
 section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"
 # The release job's steps with this machine's Python image, which hack/runtime-images.sh pushes to the dev registry

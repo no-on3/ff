@@ -102,6 +102,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             stack_name,
             parameter_overrides,
             sites,
+            with,
         }) => {
             let options = local_template::Options {
                 port,
@@ -111,13 +112,16 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
                 stack_name: stack_name.as_deref(),
                 parameter_overrides: &parameter_overrides,
                 sites: &sites,
+                with: &with,
             };
             local::start(&function, url, &options, context)
         }
         Command::Local(LocalCommand::Run { schedule, path }) => {
             local_template::run(&schedule, path.as_deref(), context)
         }
-        Command::Local(LocalCommand::Reset { path, yes }) => local_template::reset(path.as_deref(), yes, context),
+        Command::Local(LocalCommand::Reset { path, data, yes }) => {
+            local_template::reset(path.as_deref(), data, yes, context)
+        }
         Command::Env(EnvCommand::List { name, show }) => env::list(&name, show, context),
         Command::Env(EnvCommand::Set { name, variables }) => env::set(&name, &variables, context),
         Command::Env(EnvCommand::Unset { name, keys }) => env::unset(&name, &keys, context),

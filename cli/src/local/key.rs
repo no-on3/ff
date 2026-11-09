@@ -23,13 +23,8 @@ impl Key {
     pub fn made() -> Result<Key, Error> {
         const ID: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
         const SECRET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut random = [0u8; 56];
-        getrandom::fill(&mut random)
-            .map_err(|error| Error::new(Kind::Failed, format!("No randomness for the local key: {error}")))?;
-        let pick = |alphabet: &[u8], bytes: &[u8]| -> String {
-            bytes.iter().map(|byte| alphabet[usize::from(*byte) % alphabet.len()] as char).collect()
-        };
-        Ok(Key { id: format!("AKFF{}", pick(ID, &random[..16])), secret: pick(SECRET, &random[16..]) })
+        let id = random_text(ID, 16, "the local key")?;
+        Ok(Key { id: format!("AKFF{id}"), secret: random_text(SECRET, 40, "the local key")? })
     }
 
     /// The key the file holds; None when there is no file.
@@ -80,6 +75,14 @@ impl Key {
         );
         write_whole(path, &text, true)
     }
+}
+
+/// `length` of `alphabet`'s characters, at random, for what `made` says when there is no randomness.
+pub fn random_text(alphabet: &[u8], length: usize, made: &str) -> Result<String, Error> {
+    let mut random = vec![0u8; length];
+    getrandom::fill(&mut random)
+        .map_err(|error| Error::new(Kind::Failed, format!("No randomness for {made}: {error}")))?;
+    Ok(random.iter().map(|byte| alphabet[usize::from(*byte) % alphabet.len()] as char).collect())
 }
 
 #[cfg(test)]

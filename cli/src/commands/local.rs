@@ -53,7 +53,7 @@ pub fn local_function(args: &LocalArgs) -> Result<LocalFunction, Error> {
         handler: "function.handler".to_owned(),
         environment,
         secrets: Default::default(),
-        this_machine_as: Vec::new(),
+        hosts: Vec::new(),
     })
 }
 
@@ -176,6 +176,7 @@ pub fn start(args: &LocalArgs, url: bool, options: &local_template::Options, con
         ("--stack-name", options.stack_name.is_some()),
         ("--parameter-overrides", !options.parameter_overrides.is_empty()),
         ("--site", !options.sites.is_empty()),
+        ("--with", !options.with.is_empty()),
     ]
     .into_iter()
     .filter_map(|(flag, given)| given.then_some(flag))

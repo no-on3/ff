@@ -751,6 +751,11 @@ pub enum LocalCommand {
         /// without a copy; once for each site
         #[arg(long = "site", value_name = "BUCKET=FOLDER")]
         sites: Vec<String>,
+
+        /// With a template, a PostgreSQL or a Valkey beside its functions, at DATABASE_URL or REDIS_URL unless the
+        /// secrets file names them, their data kept in Docker's volumes of the project's
+        #[arg(long = "with", value_enum, value_delimiter = ',', value_name = "SERVICE")]
+        with: Vec<crate::local::services::Service>,
     },
 
     /// Run a schedule of the template's app that ff local start runs, now, as it would run on time: its function
@@ -763,10 +768,15 @@ pub enum LocalCommand {
         path: Option<PathBuf>,
     },
 
-    /// Remove what ff local start keeps for a template's project, in its .ff/local/: the functions' logs
+    /// Remove what ff local start keeps for a template's project, in its .ff/local/: the functions' logs, the
+    /// buckets' objects and the local key
     Reset {
         /// The template, or its folder [default: this folder]
         path: Option<PathBuf>,
+
+        /// Remove the data of its --with services too, Docker's volumes of the project's
+        #[arg(long)]
+        data: bool,
 
         /// Don't ask first
         #[arg(long, short)]

@@ -4,7 +4,8 @@
 //! its code loaded, called and its log followed the same way by each of `ff local`'s commands.
 //! [`images`] finds its runtime's image, [`http`] serves HTTP on this machine, [`url`] serves a
 //! function as its URL would, [`schedules`] runs a template's schedules, [`sqs`] keeps its queues, [`mappings`]
-//! reads them for the functions whose SQS events name them, and [`s3`] keeps its buckets.
+//! reads them for the functions whose SQS events name them, [`s3`] keeps its buckets, and [`services`] runs the
+//! PostgreSQL and the Valkey `--with` asks for.
 
 pub mod events;
 pub mod front_door;
@@ -16,6 +17,7 @@ pub mod mappings;
 pub mod s3;
 pub mod schedule_expression;
 pub mod schedules;
+pub mod services;
 pub mod sqs;
 pub mod sqs_event;
 pub mod url;
@@ -54,9 +56,11 @@ pub struct LocalFunction {
     /// Variables whose values `docker run` takes from its own environment, by their names alone, so that no command
     /// line shows them: a template's secrets, and its functions' key.
     pub secrets: std::collections::BTreeMap<String, String>,
-    /// The names it reaches this machine by, each given to Docker as the host's gateway: `host.docker.internal`, where
-    /// a template's front door listens, and each bucket's name under it, as AWS's SDK for JavaScript addresses a bucket.
-    pub this_machine_as: Vec<String>,
+    /// The names it reaches other machines by, each with its address as Docker's `--add-host` takes it: this machine,
+    /// as `host-gateway`, at `host.docker.internal`, where a template's front door listens, and at each bucket's name
+    /// under it, as AWS's SDK for JavaScript addresses a bucket; the data services, at their addresses on Docker's
+    /// network.
+    pub hosts: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,8 +154,8 @@ pub fn run_args(function: &LocalFunction, container: &str, image: &str, port: Op
     for name in function.secrets.keys() {
         args.extend(["--env".to_owned(), name.clone()]);
     }
-    for host in &function.this_machine_as {
-        args.extend(["--add-host".to_owned(), format!("{host}:host-gateway")]);
+    for (name, address) in &function.hosts {
+        args.extend(["--add-host".to_owned(), format!("{name}:{address}")]);
     }
     args.push(image.to_owned());
     args
@@ -180,8 +184,8 @@ pub fn check_docker() -> Result<(), Error> {
     Ok(())
 }
 
-/// The containers running now, which Ctrl-C removes before ff exits.
-static RUNNING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The containers running now, which Ctrl-C removes before ff exits, each with whether it is stopped first.
+static RUNNING: Mutex<Vec<(String, bool)>> = Mutex::new(Vec::new());
 /// Set by Ctrl-C: from then on, only the handler removes containers, and it ends ff.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -191,21 +195,41 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 pub fn remove_on_interrupt() {
     let _ = ctrlc::set_handler(|| {
         INTERRUPTED.store(true, Ordering::SeqCst);
-        let names = RUNNING.lock().map(|names| names.clone()).unwrap_or_default();
-        for name in names {
-            let _ = docker(&["rm".into(), "--force".into(), name]);
+        let containers = RUNNING.lock().map(|containers| containers.clone()).unwrap_or_default();
+        for (name, gently) in containers {
+            remove(&name, gently);
         }
         std::process::exit(130);
     });
+}
+
+/// Removes a container; one kept `gently`, a data service's, is stopped first, so that it ends as its server ends,
+/// within 10 s.
+fn remove(name: &str, gently: bool) {
+    if gently {
+        let _ = docker(&["stop".into(), "--time".into(), "10".into(), name.to_owned()]);
+    }
+    let _ = docker(&["rm".into(), "--force".into(), name.to_owned()]);
 }
 
 /// A container ff started, removed when dropped: after the command, an error, or Ctrl-C.
 pub struct Container {
     pub name: String,
     pub port: u16,
+    /// Stopped before it is removed, as a data service is.
+    gently: bool,
 }
 
 impl Container {
+    /// A container Docker started for ff, kept from here on as its others are: removed when dropped or at Ctrl-C,
+    /// stopped first when `gently`.
+    pub fn kept(name: String, port: u16, gently: bool) -> Container {
+        if let Ok(mut running) = RUNNING.lock() {
+            running.push((name.clone(), gently));
+        }
+        Container { name, port, gently }
+    }
+
     pub fn start(function: &LocalFunction, image: &str, port: Option<u16>) -> Result<Container, Error> {
         let name = format!("ff-local-{}-{}", function.name.to_ascii_lowercase(), std::process::id());
         let started = Command::new("docker")
@@ -222,11 +246,8 @@ impl Container {
                 format!("Docker couldn't start the function: {}", stderr_of(&started)),
             ));
         }
-        if let Ok(mut running) = RUNNING.lock() {
-            running.push(name.clone());
-        }
         // Removed from here on, whatever happens next.
-        let mut container = Container { name, port: 0 };
+        let mut container = Container::kept(name, 0, false);
         let published = docker(&["port".into(), container.name.clone(), format!("{RUNTIME_PORT}/tcp")])?;
         let text = String::from_utf8_lossy(&published.stdout);
         match text.lines().find_map(|line| line.rsplit(':').next().and_then(|port| port.trim().parse().ok())) {
@@ -311,9 +332,9 @@ impl Drop for Container {
                 std::thread::park();
             }
         }
-        let _ = docker(&["rm".into(), "--force".into(), self.name.clone()]);
+        remove(&self.name, self.gently);
         if let Ok(mut running) = RUNNING.lock() {
-            running.retain(|name| *name != self.name);
+            running.retain(|(name, _)| *name != self.name);
         }
     }
 }
@@ -467,7 +488,7 @@ mod tests {
             handler: "function.handler".into(),
             environment: Default::default(),
             secrets: Default::default(),
-            this_machine_as: Vec::new(),
+            hosts: Vec::new(),
         }
     }
 
@@ -495,11 +516,15 @@ mod tests {
     }
 
     #[test]
-    fn a_templates_function_has_its_handler_its_secrets_by_name_alone_and_reaches_this_machine_by_its_names() {
+    fn a_templates_function_has_its_handler_its_secrets_by_name_alone_and_reaches_other_machines_by_their_names() {
         let mut function = hello(Code::Folder(PathBuf::from("/home/me/app")));
         function.handler = "src/app.handler".into();
         function.secrets = [("API_TOKEN".to_owned(), "s3cr3t".to_owned())].into();
-        function.this_machine_as = vec!["host.docker.internal".into(), "photos.host.docker.internal".into()];
+        function.hosts = [("host.docker.internal", "host-gateway"), ("photos.host.docker.internal", "host-gateway")]
+            .into_iter()
+            .chain([("postgres", "172.17.0.5")])
+            .map(|(name, address)| (name.to_owned(), address.to_owned()))
+            .collect();
 
         let args = run_args(&function, "c", "img", None);
 
@@ -508,6 +533,7 @@ mod tests {
         assert!(!args.iter().any(|arg| arg.contains("s3cr3t")));
         assert!(args.windows(2).any(|pair| pair == ["--add-host", "host.docker.internal:host-gateway"]));
         assert!(args.windows(2).any(|pair| pair == ["--add-host", "photos.host.docker.internal:host-gateway"]));
+        assert!(args.windows(2).any(|pair| pair == ["--add-host", "postgres:172.17.0.5"]));
         assert_eq!(args.last().map(String::as_str), Some("img"));
     }
 

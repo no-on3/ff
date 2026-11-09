@@ -9,7 +9,10 @@
 //! SQS events read them as FF's event source mappings do. Its buckets answer S3 there, each object a file kept from a
 //! start to the next; their notifications send their events to functions and queues, and a bucket whose
 //! WebsiteConfiguration makes it a site answers a browser at `http://<bucket>.site.localhost:<port>`, from a folder
-//! of this machine's when `--site <bucket>=<folder>` names one. `ff local reset` empties what it keeps.
+//! of this machine's when `--site <bucket>=<folder>` names one. `--with postgres` and `--with valkey` run a
+//! PostgreSQL and a Valkey beside the functions, at `DATABASE_URL` and `REDIS_URL` unless the secrets file names them,
+//! their data in Docker's volumes of the project's. `ff local reset` empties what it keeps, and `--data` removes
+//! those volumes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, TcpListener};
@@ -41,6 +44,7 @@ use crate::local::s3::site::{SITES_HOST, Website};
 use crate::local::s3::{Buckets, LocalBucket};
 use crate::local::schedule_expression::{Expression, InvalidExpression, Millis};
 use crate::local::schedules::{self, LocalSchedule, Timetable};
+use crate::local::services::{self, Running, Service};
 use crate::local::sqs::{QueueSettings, Queues};
 use crate::local::{self, Code, LocalFunction, http, images, url};
 use crate::output::Output;
@@ -70,6 +74,8 @@ const CREDENTIALS: &str = "credentials";
 const BUCKETS: &str = "buckets";
 /// The front door's address while ff local start runs, in what ff local keeps, for ff local run to find it.
 const ENDPOINT: &str = "endpoint";
+/// The data services' passwords and ports, in what ff local keeps.
+const SERVICES: &str = "services.json";
 
 /// What `ff local start` was given for a template.
 pub struct Options<'a> {
@@ -81,6 +87,8 @@ pub struct Options<'a> {
     pub parameter_overrides: &'a [String],
     /// `<bucket>=<folder>`: a site that answers a folder's files.
     pub sites: &'a [String],
+    /// The data services to run beside the functions.
+    pub with: &'a [Service],
 }
 
 /// The names the template's functions, queues and buckets have here, as a deploy keeps the last one's: each one's
@@ -195,8 +203,9 @@ fn functions(
 ) -> Vec<LocalFunction> {
     // A bucket's virtual-hosted address, which AWS's SDK for JavaScript makes of a bucket's name, reaches this machine
     // too.
-    let this_machine_as: Vec<String> = std::iter::once(HOST.to_owned())
+    let hosts: Vec<(String, String)> = std::iter::once(HOST.to_owned())
         .chain(planned.buckets.iter().map(|bucket| format!("{}.{HOST}", bucket.name)))
+        .map(|name| (name, "host-gateway".to_owned()))
         .collect();
     let mut functions = Vec::new();
     for function in &planned.functions {
@@ -240,10 +249,29 @@ fn functions(
             handler: function.handler.clone(),
             environment,
             secrets: secret_values,
-            this_machine_as: this_machine_as.clone(),
+            hosts: hosts.clone(),
         });
     }
     functions
+}
+
+/// Each function reaches each running data service at its name, and finds it at its variable, `DATABASE_URL` or
+/// `REDIS_URL`, unless the secrets file names that: the services whose variable it names.
+fn with_services(functions: &mut [LocalFunction], running: &[(Service, String, String)]) -> BTreeSet<Service> {
+    let mut named = BTreeSet::new();
+    for function in functions {
+        for (service, address, password) in running {
+            function.hosts.push((service.name().to_owned(), address.clone()));
+            let variable = service.variable();
+            if function.secrets.contains_key(variable) {
+                named.insert(*service);
+                continue;
+            }
+            function.environment.remove(variable);
+            function.secrets.insert(variable.to_owned(), service.url(service.name(), service.port(), password));
+        }
+    }
+    named
 }
 
 /// What the front door answers of each function besides how it runs, by its name: its alias, its description and
@@ -645,6 +673,22 @@ struct StartedMapping {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StartedService {
+    name: &'static str,
+    image: &'static str,
+    /// Its URL from this machine, with its password.
+    url: String,
+    /// Where the functions reach it.
+    from_functions: String,
+    /// The variable the functions find it by: none when the secrets file names it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    variable: Option<&'static str>,
+    /// Docker's volume its data is kept in.
+    volume: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StartedBucket {
     logical_id: String,
     name: String,
@@ -681,6 +725,8 @@ struct Started {
     queues: Vec<StartedQueue>,
     mappings: Vec<StartedMapping>,
     buckets: Vec<StartedBucket>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    services: Vec<StartedService>,
     logs: String,
 }
 
@@ -717,7 +763,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
         Some(key) => key.clone(),
         None => Key::made()?,
     };
-    let Prepared { read, planned, functions, settings, buckets: local_buckets, secrets_file, notes } =
+    let Prepared { read, planned, mut functions, settings, buckets: local_buckets, secrets_file, notes } =
         prepared(&args.path, options, port, &key, context.out)?;
     for note in &notes {
         context.out.warn(note);
@@ -746,6 +792,23 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
             ),
         )
     })?;
+    // The data services, each answering before a function can start; their passwords and ports kept for the next.
+    let wanted: Vec<Service> = options.with.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
+    let services_file = kept.join(SERVICES);
+    let accesses = services::accesses(&wanted, &services::read_kept(&services_file)?)?;
+    let mut running: Vec<Running> = Vec::new();
+    for &service in &wanted {
+        running.push(services::start(service, &project, &accesses[&service], context.out)?);
+    }
+    // Kept once they run: a start refused, another of the project's running them, leaves the file as it was.
+    if !wanted.is_empty() {
+        services::write_kept(&services_file, &accesses)?;
+    }
+    let reached: Vec<(Service, String, String)> = running
+        .iter()
+        .map(|service| (service.service, service.address.clone(), accesses[&service.service].password.clone()))
+        .collect();
+    let named_by_secrets = with_services(&mut functions, &reached);
 
     let quiet = context.out.quiet;
     let say: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |line: &str| {
@@ -902,6 +965,20 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 site_folder: local.site_folder.as_ref().map(|folder| folder.display().to_string()),
             })
             .collect(),
+        services: running
+            .iter()
+            .map(|service| {
+                let (name, access) = (service.service, &accesses[&service.service]);
+                StartedService {
+                    name: name.name(),
+                    image: name.image(),
+                    url: name.url("127.0.0.1", access.port, &access.password),
+                    from_functions: format!("{}:{}", name.name(), name.port()),
+                    variable: (!named_by_secrets.contains(&name)).then(|| name.variable()),
+                    volume: service.volume.clone(),
+                }
+            })
+            .collect(),
         logs: logs.display().to_string(),
     };
     context.out.result(&started, || {
@@ -989,6 +1066,19 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                     Some(folder) => format!("{line}, {folder}'s files"),
                     None => format!("{line}, its objects"),
                 }
+            }));
+        }
+        if !started.services.is_empty() {
+            lines.push(
+                "Its data, each service's in Docker's volume of the project's, kept until ff local reset --data:".to_owned(),
+            );
+            let width = started.services.iter().map(|service| service.name.len()).max().unwrap_or(0);
+            lines.extend(started.services.iter().map(|service| {
+                let variable = match service.variable {
+                    Some(variable) => format!("the functions' {variable}"),
+                    None => "the secrets file's URL theirs".to_owned(),
+                };
+                format!("  {:width$}  {}, at {} from the functions, {variable}", service.name, service.url, service.from_functions)
             }));
         }
         lines.push(format!(
@@ -1101,24 +1191,55 @@ pub fn run(schedule: &str, path: Option<&Path>, context: &Context) -> Result<(),
 }
 
 /// `ff local reset`: what ff local keeps for the template's project removed, after asking.
-pub fn reset(path: Option<&Path>, yes: bool, context: &Context) -> Result<(), Error> {
+/// `ff local reset`: what ff local keeps for the project removed, and with `data` its data services' volumes, which
+/// Docker finds by the project's folder.
+pub fn reset(path: Option<&Path>, data: bool, yes: bool, context: &Context) -> Result<(), Error> {
     let project = project_of(path)?;
     let kept = project.join(KEPT);
     let folder = kept.display().to_string();
-    if !kept.exists() {
-        return context.out.result(&serde_json::json!({ "reset": false, "folder": folder }), || {
-            format!("Nothing to reset: there is no {folder}")
-        });
+    let volumes = match data {
+        true => services::volumes_of(&std::fs::canonicalize(&project).unwrap_or_else(|_| project.clone()))?,
+        false => Vec::new(),
+    };
+    let answer =
+        |reset: bool, volumes: &[String]| serde_json::json!({ "reset": reset, "folder": folder, "volumes": volumes });
+    if !kept.exists() && volumes.is_empty() {
+        let nor = if data { " nor a volume of its data" } else { "" };
+        return context.out.result(&answer(false, &[]), || format!("Nothing to reset: there is no {folder}{nor}"));
     }
-    let question = format!("Remove {folder}, what ff local keeps: the functions' logs and the local key?");
-    if !confirmed("ff local reset", &question, yes)? {
-        return context
-            .out
-            .result(&serde_json::json!({ "reset": false, "folder": folder }), || "Nothing removed".to_owned());
+    let mut what = Vec::new();
+    if kept.exists() {
+        what.push(format!(
+            "{folder}, what ff local keeps: the functions' logs, the buckets' objects and the local key"
+        ));
     }
-    std::fs::remove_dir_all(&kept)
-        .map_err(|error| Error::new(Kind::Failed, format!("Couldn't remove {folder}: {error}")))?;
-    context.out.result(&serde_json::json!({ "reset": true, "folder": folder }), || format!("removed {folder}"))
+    if !volumes.is_empty() {
+        what.push(format!("its data, Docker's volumes {}", volumes.join(", ")));
+    }
+    if !confirmed("ff local reset", &format!("Remove {}?", what.join(", and ")), yes)? {
+        return context.out.result(&answer(false, &[]), || "Nothing removed".to_owned());
+    }
+    for volume in &volumes {
+        let removed = local::docker(&["volume".into(), "rm".into(), volume.clone()])?;
+        if !removed.status.success() {
+            return Err(Error::new(
+                Kind::Failed,
+                format!(
+                    "Couldn't remove Docker's volume {volume}: {}: stop ff local start first",
+                    local::stderr_of(&removed)
+                ),
+            ));
+        }
+    }
+    if kept.exists() {
+        std::fs::remove_dir_all(&kept)
+            .map_err(|error| Error::new(Kind::Failed, format!("Couldn't remove {folder}: {error}")))?;
+    }
+    context.out.result(&answer(true, &volumes), || {
+        let mut removed = vec![folder.clone()];
+        removed.extend(volumes.iter().map(|volume| format!("Docker's volume {volume}")));
+        format!("removed {}", removed.join(", "))
+    })
 }
 
 #[cfg(test)]
@@ -1191,6 +1312,7 @@ Resources:
             stack_name: None,
             parameter_overrides: &[],
             sites: &[],
+            with: &[],
         }
     }
 
@@ -1200,6 +1322,30 @@ Resources:
 
     fn function<'a>(prepared: &'a Prepared, name: &str) -> &'a LocalFunction {
         prepared.functions.iter().find(|function| function.name == name).unwrap()
+    }
+
+    #[test]
+    fn each_function_reaches_a_running_data_service_at_its_name_and_its_variable_unless_the_secrets_file_names_it() {
+        let (_folder, project) = project(TEMPLATE);
+        std::fs::write(project.join(".env.local"), "REDIS_URL=redis://default:mine@cache.example:6379\n").unwrap();
+        let mut functions =
+            prepared(&project.join("template.yaml"), &options(), 3700, &key(), &Output::quiet()).unwrap().functions;
+        functions[0].environment.insert("DATABASE_URL".into(), "the template's".into());
+        let running = [(Service::Postgres, "172.17.0.5", "pw1"), (Service::Valkey, "172.17.0.6", "pw2")]
+            .map(|(service, address, password)| (service, address.to_owned(), password.to_owned()));
+
+        let named_by_secrets = with_services(&mut functions, &running);
+
+        assert_eq!(named_by_secrets, BTreeSet::from([Service::Valkey]));
+        assert_eq!(functions.len(), 2);
+        for function in &functions {
+            assert_eq!(function.secrets["DATABASE_URL"], "postgresql://app:pw1@postgres:5432/app", "{}", function.name);
+            assert_eq!(function.secrets["REDIS_URL"], "redis://default:mine@cache.example:6379", "the secrets file's");
+            assert!(!function.environment.contains_key("DATABASE_URL"), "given by its name alone");
+            let hosts =
+                [("postgres", "172.17.0.5"), ("valkey", "172.17.0.6")].map(|(name, at)| (name.into(), at.into()));
+            assert!(hosts.iter().all(|host| function.hosts.contains(host)), "{:?}", function.hosts);
+        }
     }
 
     #[test]
@@ -1228,7 +1374,9 @@ Resources:
         assert_eq!(orders.secrets["AWS_SECRET_ACCESS_KEY"], key().secret);
         assert_eq!(prepared.notes, ["Orders: the secret TOKEN takes the place of the template's variable"]);
         assert_eq!(prepared.secrets_file.as_deref().map(|file| file.ends_with(".env.local")), Some(true));
-        assert_eq!(orders.this_machine_as, ["host.docker.internal", "uploads.host.docker.internal"]);
+        let hosts =
+            ["host.docker.internal", "uploads.host.docker.internal"].map(|name| (name.into(), "host-gateway".into()));
+        assert_eq!(orders.hosts, hosts, "this machine, at its name and each bucket's under it");
 
         let (orders, payments) = (&prepared.settings["Orders"], &prepared.settings["payments-fn"]);
         assert_eq!(orders.alias.as_deref(), Some("live"));
@@ -1609,9 +1757,9 @@ Resources:
         let (connection, out) = (ConnectionArgs::default(), Output::quiet());
         let context = Context { connection: &connection, out: &out };
 
-        reset(Some(&project.join("template.yaml")), true, &context).unwrap();
+        reset(Some(&project.join("template.yaml")), false, true, &context).unwrap();
         assert!(!project.join(".ff/local").exists() && project.join("template.yaml").exists());
-        reset(Some(&project), true, &context).unwrap();
-        assert!(reset(Some(&project.join("missing.txt")), true, &context).is_err());
+        reset(Some(&project), false, true, &context).unwrap();
+        assert!(reset(Some(&project.join("missing.txt")), false, true, &context).is_err());
     }
 }
