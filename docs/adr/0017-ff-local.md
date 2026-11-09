@@ -29,7 +29,7 @@
 What else the spike found:
 - **The backend's way still ports.** SQS's two guarantees, that a receive hides a message from the others and that only the last receive's handle deletes it, are in `CustomerQueues`' SQL. Without PostgreSQL, they had to be written again. The S3 front door is a proxy, so it needs a store beside it. And the two front doors load the backend's functions, billing, plans and eleven other folders through their imports.
 - **The fixtures to share mostly don't exist yet.** Of the backend's 287 L1 tests for this code, 130 read a table that Rust can read too: the Signature V4 suite, the checksums' check values and AWS's aws-chunked examples (the last two moved into tables by the spike). The other 157 build their requests in TypeScript, against the classes.
-- **FF already differs from S3 once.** S3 gives back the checksum a client sent in `PutObject`'s answer; the port did, the backend's front door doesn't.
+- **FF already differs from S3 once.** S3 gives back the checksum a client sent in `PutObject`'s answer; the port did, the backend's front door doesn't. (M-06 fixed the backend first.)
 
 `hack/spikes/schedule-expressions/` ported the backend's reader of EventBridge's schedules. The backend's tests now read a table of 47 cases, and so does the port. On 220,000 expressions made at random, the two readers gave the same runs and the same refusals.
 

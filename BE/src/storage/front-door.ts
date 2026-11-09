@@ -133,13 +133,15 @@ interface Exchange {
   expectsContinue: boolean;
   /** The keys a DeleteObjects deleted, as the store's answer names them, for the bucket's notifications. */
   deletedKeys?: string[];
+  /** The checksum the body carries, checked as it streams, which the store never gets. */
+  checksum?: ExpectedChecksum;
 }
 
-/** S3's event for each write that creates an object, by the operation, without its s3: prefix. */
 /** How many times a created object's size and ETag are asked of the store, and the wait before the second, longer for each next. */
 const MEASURE_ATTEMPTS = 3;
 const MEASURE_WAIT_MS = 50;
 
+/** S3's event for each write that creates an object, by the operation, without its s3: prefix. */
 const CREATED_EVENTS: Record<string, string> = {
   PutObject: 'ObjectCreated:Put',
   CopyObject: 'ObjectCreated:Copy',
@@ -672,6 +674,7 @@ export class S3FrontDoor implements OnModuleDestroy {
       this.limit(operation, decodedLength, plan);
       headers['content-length'] = String(decodedLength);
       const { checksum, trailerName } = expectedChecksum(request);
+      exchange.checksum = checksum;
       stages.push(
         new ChunkedBodyReader({
           signed: payload !== STREAMING_UNSIGNED_TRAILER,
@@ -693,6 +696,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     headers['content-length'] = String(length);
     if (signature.kind === 'presigned') return [...stages, counted];
     const { checksum } = expectedChecksum(request);
+    exchange.checksum = checksum;
     const sha256 = payload === UNSIGNED_PAYLOAD ? undefined : payload;
     if (sha256 !== undefined && !/^[0-9a-f]{64}$/.test(sha256)) throw invalidRequest('x-amz-content-sha256 must be UNSIGNED-PAYLOAD, a STREAMING- payload, or a SHA-256 in hexadecimal');
     if (sha256 || checksum) stages.push(new PlainBodyChecker({ sha256, checksum }));
@@ -706,12 +710,21 @@ export class S3FrontDoor implements OnModuleDestroy {
     }
   }
 
-  /** The store's answer to the client, as it comes: an XML one naming the customer's bucket rather than the store's. */
+  /**
+   * The store's answer to the client, as it comes: an XML one naming the
+   * customer's bucket rather than the store's. A PutObject's gives back the
+   * checksum the client sent, as S3's does, the store having none.
+   */
   private async relay(exchange: Exchange, answer: IncomingMessage, bucket: Bucket, operation: S3Operation): Promise<number> {
     const { response, method } = exchange;
     const status = answer.statusCode ?? 502;
     const headers: Record<string, string | string[]> = { 'x-amz-request-id': exchange.id };
     for (const [name, value] of Object.entries(answer.headers)) if (value !== undefined && ANSWERED.test(name)) headers[name] = value;
+    const sent = exchange.checksum;
+    if (operation.name === 'PutObject' && status === 200 && sent?.checked !== undefined) {
+      headers[`x-amz-checksum-${sent.algorithm}`] = sent.checked;
+      headers['x-amz-checksum-type'] = 'FULL_OBJECT';
+    }
     const xml = /xml/i.test(single(answer.headers['content-type']) ?? '');
     if (method === 'HEAD') {
       response.writeHead(status, headers);

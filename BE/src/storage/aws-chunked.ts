@@ -16,6 +16,8 @@ export interface ExpectedChecksum {
   algorithm: ChecksumAlgorithm;
   /** The header's value; undefined when the trailer brings it. */
   value?: string;
+  /** The value sent, header's or trailer's, once the body ends and matches it: PutObject's answer gives it back, as S3's does. */
+  checked?: string;
 }
 
 /** The longest chunk header or trailer line read: anything longer is no aws-chunked body. */
@@ -210,12 +212,13 @@ export class ChunkedBodyReader extends HeldBackTransform {
   }
 }
 
-/** The checksum sent, in its header or the trailer, against the one computed. */
+/** The checksum sent, in its header or the trailer, against the one computed; kept as checked when they match. */
 async function checkChecksum(expected: ExpectedChecksum | undefined, computed: RunningChecksum | null, trailers: Map<string, string>): Promise<void> {
   if (!expected || !computed) return;
   const sent = expected.value ?? trailers.get(`x-amz-checksum-${expected.algorithm}`);
   if (sent === undefined) throw invalidRequest(`The x-amz-checksum-${expected.algorithm} value is missing`);
   if (!sameDigest(sent, await computed.digest())) throw badDigest(expected.algorithm);
+  expected.checked = sent;
 }
 
 /**

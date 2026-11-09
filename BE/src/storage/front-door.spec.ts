@@ -65,7 +65,7 @@ import { S3FrontDoor } from './front-door';
 import { CountedRequest } from './request-tally';
 import { RequestSignature, checkSignature, readSignature, signedForStore } from './s3-signature';
 import { ActiveKey, EXPIRED, StorageDirectory } from './storage-directory.service';
-import { notedUses, useLine } from './test-fixtures';
+import { crc32Of, notedUses, useLine } from './test-fixtures';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { WebsiteConfiguration } from './website';
 
@@ -304,11 +304,12 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     for (const Bucket of ['photos', 'exports']) await client().send(new DeleteObjectCommand({ Bucket, Key: 'noted.txt' }));
   });
 
-  it("puts a string, its SHA-256 and CRC-32 checked, and the store gets the object under its own name, FF's signature, no checksum", async () => {
+  it("puts a string, its SHA-256 and CRC-32 checked, and the store gets the object under its own name, FF's signature, no checksum; the client gets its CRC-32 back, as S3 gives it", async () => {
     const put = await client().send(new PutObjectCommand({ Bucket: 'photos', Key: '2026/a b.txt', Body: 'Hello, Tunis', ContentType: 'text/plain' }));
 
     expect(put.ETag).toBe('"etag-1"');
-    expect(put.ChecksumCRC32).toBeUndefined();
+    // The client's, never the store's own.
+    expect(put).toMatchObject({ ChecksumCRC32: crc32Of('Hello, Tunis'), ChecksumType: 'FULL_OBJECT' });
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({ method: 'PUT', url: '/ff-000000000000000000000001/2026/a%20b.txt', complete: true });
     expect(seen[0].body.toString()).toBe('Hello, Tunis');
@@ -328,10 +329,11 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     expect(seen.map((request) => request.headers['content-type'])).toEqual(['application/octet-stream', undefined, 'binary/octet-stream']);
   });
 
-  it("puts a stream as the SDK sends one, aws-chunked with a trailing CRC-32, and the store gets the data alone, whole", async () => {
+  it("puts a stream as the SDK sends one, aws-chunked with a trailing CRC-32, and the store gets the data alone, whole; the client gets the trailer's CRC-32 back", async () => {
     const data = Buffer.alloc(200_000, 'z');
-    await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'stream.bin', Body: Readable.from([data.subarray(0, 70_000), data.subarray(70_000)]), ContentLength: data.length }));
+    const put = await client().send(new PutObjectCommand({ Bucket: 'photos', Key: 'stream.bin', Body: Readable.from([data.subarray(0, 70_000), data.subarray(70_000)]), ContentLength: data.length }));
 
+    expect(put).toMatchObject({ ChecksumCRC32: crc32Of(data), ChecksumType: 'FULL_OBJECT' });
     expect(seen[0]).toMatchObject({ method: 'PUT', complete: true });
     expect(seen[0].headers['content-length']).toBe(String(data.length));
     expect(seen[0].headers['content-encoding']).toBeUndefined();

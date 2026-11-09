@@ -2,11 +2,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable, Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { crc32 } from 'node:zlib';
-import { ChunkedBodyReader, PlainBodyChecker } from './aws-chunked';
+import { ChunkedBodyReader, ExpectedChecksum, PlainBodyChecker } from './aws-chunked';
 import { S3Error } from './s3-error';
 import { SignedRequest, SigningChain, sha256Hex, signingKey } from '../common/signature-v4';
 import { RequestSignature, checkSignature, readSignature } from './s3-signature';
+import { crc32Of } from './test-fixtures';
 
 interface ExampleChunk {
   size: number;
@@ -148,26 +148,25 @@ describe('aws-chunked, signed, with a signed trailer', () => {
 });
 
 describe("aws-chunked, unsigned, with a trailing checksum: AWS's SDK for JavaScript's streams", () => {
-  const crc = (data: Buffer) => {
-    const bytes = Buffer.alloc(4);
-    bytes.writeUInt32BE(crc32(data));
-    return bytes.toString('base64');
-  };
   const body = (checksum: string) => framed([{ data: DATA.subarray(0, 8192) }, { data: DATA.subarray(8192) }, { data: Buffer.alloc(0) }], `x-amz-checksum-crc32:${checksum}\r\n\r\n`);
-  const reader = () => new ChunkedBodyReader({ signed: false, trailer: true, decodedLength: 66_560, checksum: { algorithm: 'crc32' }, trailerName: 'x-amz-checksum-crc32' });
+  const reader = (checksum: ExpectedChecksum = { algorithm: 'crc32' }) => new ChunkedBodyReader({ signed: false, trailer: true, decodedLength: 66_560, checksum, trailerName: 'x-amz-checksum-crc32' });
 
-  it('passes the data on, its CRC-32 checked at the end', async () => {
-    const { data, completed, error } = await through(reader(), body(crc(DATA)), 1000);
+  it("passes the data on, its CRC-32 checked at the end and kept as checked, for PutObject's answer", async () => {
+    const checksum: ExpectedChecksum = { algorithm: 'crc32' };
+    const { data, completed, error } = await through(reader(checksum), body(crc32Of(DATA)), 1000);
 
     expect([error, completed, data.equals(DATA)]).toEqual([undefined, true, true]);
+    expect(checksum.checked).toBe(crc32Of(DATA));
   });
 
-  it('refuses a CRC-32 that does not match, and a trailer without it, the stream never completing', async () => {
-    const wrong = await through(reader(), body(crc(Buffer.from('other'))));
+  it('refuses a CRC-32 that does not match, and a trailer without it, the stream never completing, nothing kept as checked', async () => {
+    const checksum: ExpectedChecksum = { algorithm: 'crc32' };
+    const wrong = await through(reader(checksum), body(crc32Of(Buffer.from('other'))));
     const none = await through(reader(), framed([{ data: DATA }, { data: Buffer.alloc(0) }], '\r\n'));
 
     expect([wrong.error, wrong.completed, wrong.data.length < DATA.length]).toEqual(['400 BadDigest', false, true]);
     expect([none.error, none.completed, none.data.length < DATA.length]).toEqual(['400 InvalidRequest', false, true]);
+    expect(checksum.checked).toBeUndefined();
   });
 });
 
@@ -180,11 +179,16 @@ describe('a plain body', () => {
     expect([changed.error, changed.completed, changed.data.length < DATA.length]).toEqual(['400 XAmzContentSHA256Mismatch', false, true]);
   });
 
-  it('with a checksum in its header: checked the same way', async () => {
-    const ok = await through(new PlainBodyChecker({ checksum: { algorithm: 'crc32c', value: 'sOO8/Q==' } }), DATA);
-    const wrong = await through(new PlainBodyChecker({ checksum: { algorithm: 'crc32c', value: 'AAAAAA==' } }), DATA);
+  it('with a checksum in its header: checked the same way, and kept as checked only when it matches', async () => {
+    const [right, wrongly]: ExpectedChecksum[] = [
+      { algorithm: 'crc32c', value: 'sOO8/Q==' },
+      { algorithm: 'crc32c', value: 'AAAAAA==' },
+    ];
+    const ok = await through(new PlainBodyChecker({ checksum: right }), DATA);
+    const wrong = await through(new PlainBodyChecker({ checksum: wrongly }), DATA);
 
     expect([ok.error, ok.completed]).toEqual([undefined, true]);
     expect([wrong.error, wrong.completed, wrong.data.length < DATA.length]).toEqual(['400 BadDigest', false, true]);
+    expect([right.checked, wrongly.checked]).toEqual(['sOO8/Q==', undefined]);
   });
 });
