@@ -817,6 +817,22 @@ pub enum LocalCommand {
         #[arg(long, short)]
         yes: bool,
     },
+
+    /// Answer as Konnect's API does, on a port of this machine, until Ctrl-C: a shop's payments made, their pages paid
+    /// or failed with a button, the shop's webhook called; nothing paid, the payments kept while it runs
+    Konnect {
+        /// The port on 127.0.0.1, and on Docker's gateway for ff local start's functions; 0 for any free one
+        #[arg(long, default_value_t = crate::local::konnect::DEFAULT_PORT)]
+        port: u16,
+
+        /// The key it takes in x-api-key, the same at each start unless this says
+        #[arg(long, default_value = crate::local::konnect::DEFAULT_KEY)]
+        key: String,
+
+        /// The ID of its one wallet, which receiverWalletId must name
+        #[arg(long, default_value = crate::local::konnect::DEFAULT_WALLET)]
+        wallet: String,
+    },
 }
 
 #[derive(Args)]

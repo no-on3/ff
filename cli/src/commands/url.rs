@@ -381,18 +381,12 @@ pub fn invoke_http(
     let function = &target.function;
     let url = target.url()?.ok_or_else(|| target.no_url())?;
     let address = format!("{}{}", url.function_url.trim_end_matches('/'), path);
-    let uri: ureq::http::Uri =
-        address.parse().map_err(|_| Error::new(Kind::Failed, format!("The URL {address} doesn't parse")))?;
-    let authority = uri.authority().map(|authority| authority.as_str().to_owned()).unwrap_or_default();
-    let local = uri.host().is_some_and(|host| host.ends_with(".localhost"));
-    let connect_to = if local {
-        address.replacen(
-            &authority,
-            &format!("127.0.0.1{}", uri.port().map(|port| format!(":{port}")).unwrap_or_default()),
-            1,
-        )
-    } else {
-        address.clone()
+    address
+        .parse::<ureq::http::Uri>()
+        .map_err(|_| Error::new(Kind::Failed, format!("The URL {address} doesn't parse")))?;
+    let (connect_to, local_host) = match crate::local::http::through_loopback(&address) {
+        Some((connect_to, host)) => (connect_to, Some(host)),
+        None => (address.clone(), None),
     };
 
     let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -402,8 +396,8 @@ pub fn invoke_http(
         .build()
         .into();
     let mut request = ureq::http::Request::builder().method(method.as_str()).uri(&connect_to);
-    if local {
-        request = request.header("host", &authority);
+    if let Some(host) = &local_host {
+        request = request.header("host", host);
     }
     if url.auth_type != "NONE"
         && let Some(token) = &settings.token

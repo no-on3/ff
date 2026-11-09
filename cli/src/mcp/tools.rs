@@ -657,6 +657,7 @@ mod tests {
         "local start",
         "local run",
         "local mail",
+        "local konnect",
         "env list",
         "url show",
         "url enable",

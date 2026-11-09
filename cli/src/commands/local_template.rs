@@ -16,7 +16,7 @@
 //! listed by `ff local mail`. `ff local reset` empties what it keeps, and `--data` removes those volumes.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{IpAddr, TcpListener};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
@@ -442,15 +442,6 @@ fn clock_offset() -> Millis {
     start.map_or(0, |start| Millis::try_from(millis(start)).unwrap_or(0) - schedules::now_ms(0))
 }
 
-/// The address this machine has on Docker's default network, where `host.docker.internal` leads containers on Linux;
-/// none where Docker runs in a machine of its own, as Docker Desktop does, whose name leads to this machine's 127.0.0.1.
-fn docker_gateway() -> Option<IpAddr> {
-    let inspect = ["network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}"];
-    let output = local::docker(&inspect.map(str::to_owned)).ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.split_whitespace().filter_map(|address| address.parse::<IpAddr>().ok()).find(IpAddr::is_ipv4)
-}
-
 /// Starts each running function again when its code changes, once a second passes without another change; what ff
 /// local keeps, in `.ff/`, and git's folder are let be.
 fn watch(instances: Arc<Instances<Docker>>, functions: &[LocalFunction], kept: PathBuf) -> Result<(), Error> {
@@ -860,7 +851,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     std::fs::write(&endpoint_file, format!("{endpoint}\n"))
         .map_err(|error| Error::new(Kind::Failed, format!("Couldn't write {}: {error}", endpoint_file.display())))?;
     // Where containers reach this machine on Linux, which Docker Desktop leads to 127.0.0.1 itself.
-    if let Some(gateway) = docker_gateway()
+    if let Some(gateway) = local::docker_gateway()
         && let Ok(listener) = TcpListener::bind((gateway, port))
     {
         http::serve(listener, front_door);

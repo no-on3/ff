@@ -13,6 +13,7 @@ pub mod http;
 pub mod images;
 pub mod instances;
 pub mod key;
+pub mod konnect;
 pub mod mail;
 pub mod mappings;
 pub mod s3;
@@ -24,6 +25,7 @@ pub mod sqs_event;
 pub mod url;
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -167,6 +169,15 @@ pub fn docker(args: &[String]) -> Result<Output, Error> {
     Command::new("docker").args(args).stdin(Stdio::null()).output().map_err(|error| {
         Error::new(Kind::Failed, format!("Couldn't run docker ({error}): ff local runs a function in Docker, in the runtime image production uses; install it, or start it"))
     })
+}
+
+/// The address this machine has on Docker's default network, where `host.docker.internal` leads containers on Linux;
+/// none where Docker runs in a machine of its own, as Docker Desktop does, whose name leads to this machine's 127.0.0.1.
+pub fn docker_gateway() -> Option<IpAddr> {
+    let inspect = ["network", "inspect", "bridge", "--format", "{{range .IPAM.Config}}{{.Gateway}} {{end}}"];
+    let output = docker(&inspect.map(str::to_owned)).ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace().filter_map(|address| address.parse::<IpAddr>().ok()).find(IpAddr::is_ipv4)
 }
 
 pub fn stderr_of(output: &Output) -> String {

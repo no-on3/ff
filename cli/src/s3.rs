@@ -111,13 +111,8 @@ impl BucketClient {
             .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
             .build()
             .into();
-        let connect = match host.rsplit_once(':') {
-            Some((name, port)) if name.ends_with(".localhost") => {
-                endpoint.replacen(&host, &format!("127.0.0.1:{port}"), 1)
-            }
-            None if host.ends_with(".localhost") => endpoint.replacen(&host, "127.0.0.1", 1),
-            _ => endpoint.clone(),
-        };
+        let connect =
+            crate::local::http::through_loopback(&endpoint).map_or_else(|| endpoint.clone(), |(connect, _)| connect);
         Ok(BucketClient { agent, endpoint, host, connect, bucket: bucket.to_owned(), credentials })
     }
 

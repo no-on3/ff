@@ -203,6 +203,23 @@ fn read_line(reader: &mut dyn BufRead) -> io::Result<String> {
     String::from_utf8(line).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a line that isn't UTF-8"))
 }
 
+/// Where a request to `address` goes when its host is under `.localhost`, which not every system resolves: the same
+/// address at 127.0.0.1, its port kept, where ff local's servers listen, and the Host header that names it. None for
+/// any other host, which is reached as it is.
+pub fn through_loopback(address: &str) -> Option<(String, String)> {
+    let (scheme, rest) = address.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = match authority.rsplit_once(':') {
+        Some((host, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => host,
+        _ => authority,
+    };
+    if !host.to_ascii_lowercase().ends_with(".localhost") {
+        return None;
+    }
+    let port = &authority[host.len()..];
+    Some((format!("{scheme}://127.0.0.1{port}{}", &rest[authority.len()..]), authority.to_owned()))
+}
+
 /// A random UUID, version 4, for each request's ID.
 pub fn request_id() -> String {
     let mut bytes = [0u8; 16];
@@ -416,6 +433,26 @@ mod tests {
     use std::io::Seek;
 
     use super::*;
+
+    #[test]
+    fn a_host_under_localhost_is_reached_at_127_0_0_1_its_port_path_and_host_kept_any_other_as_it_is() {
+        assert_eq!(
+            through_loopback("http://shop-payments.fn.localhost:3700/webhooks/konnect?payment_ref=5f94"),
+            Some((
+                "http://127.0.0.1:3700/webhooks/konnect?payment_ref=5f94".to_owned(),
+                "shop-payments.fn.localhost:3700".to_owned()
+            ))
+        );
+        assert_eq!(
+            through_loopback("http://Site.S3.LOCALHOST#top"),
+            Some(("http://127.0.0.1#top".to_owned(), "Site.S3.LOCALHOST".to_owned()))
+        );
+        for address in
+            ["http://localhost:3700/", "https://shop.example.tn/hook", "http://[::1]:3700/", "shop.fn.localhost/"]
+        {
+            assert_eq!(through_loopback(address), None, "{address}");
+        }
+    }
 
     #[test]
     fn a_request_is_read_by_its_length_or_its_chunks() {

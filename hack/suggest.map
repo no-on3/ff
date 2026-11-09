@@ -56,6 +56,9 @@ runtimes/*                              static unit security l3 l4 l5 cli aws-to
 # The ff command; its Terraform project is AWS's tools' too.
 cli/src/commands/init.rs                static unit cli:init,local_apps,template_rest_api,template_cron_job,template_queue_worker,template_site_with_api,template_image_resize,template_webhook aws-tools
 cli/release/*                           static unit cli:downloads
+cli/src/local/konnect.rs                static unit
+cli/src/commands/local_konnect.rs       static unit
+cli/tests/local_konnect.rs              static unit
 cli/src/local/images.rs                 static unit cli:local,local_images
 cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail,local_small_app
 cli/src/commands/local*                 static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail,local_small_app

@@ -21,6 +21,7 @@ mod init;
 mod invoke;
 mod keys;
 mod local;
+mod local_konnect;
 mod local_template;
 mod login;
 mod logs;
@@ -131,6 +132,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Local(LocalCommand::Reset { path, data, yes }) => {
             local_template::reset(path.as_deref(), data, yes, context)
         }
+        Command::Local(LocalCommand::Konnect { port, key, wallet }) => local_konnect::start(port, key, wallet, context),
         Command::Env(EnvCommand::List { name, show }) => env::list(&name, show, context),
         Command::Env(EnvCommand::Set { name, variables }) => env::set(&name, &variables, context),
         Command::Env(EnvCommand::Unset { name, keys }) => env::unset(&name, &keys, context),
