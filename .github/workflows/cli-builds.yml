@@ -1,0 +1,92 @@
+# The ff command's five builds (hack/build-cli.sh), each run on its own system (hack/cli-smoke.sh) with ff's tests, run
+# there with that system's own toolchain: a workflow ci.yml calls in a run started by hand (jobs=cli-builds), and
+# release.yml at each release. Its two artifacts, cli-builds and cli-builds-macos, hold the five and their SHA-256s.
+# Actions pinned as ci.yml's are.
+name: cli-builds
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # Linux's two and Windows's on Linux, with zig.
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: hack/install-tools.sh zig cargo-zigbuild
+      - run: for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu; do hack/build-cli.sh "$target"; done
+        env:
+          CARGO_BUILD_JOBS: 4 # the runner's processors, which it runs alone
+      - run: hack/cli-smoke.sh cli/target/dist/ff-linux-x86_64
+      - run: cargo test --locked
+        working-directory: cli
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 5
+        with:
+          name: cli-builds
+          path: cli/target/dist/
+          retention-days: 7
+
+  # macOS's two on an arm64 Mac, as their link needs Apple's SDK.
+  macos:
+    runs-on: macos-15 # arm64, building for both processors
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: for target in aarch64-apple-darwin x86_64-apple-darwin; do hack/build-cli.sh "$target"; done
+        env:
+          CARGO_BUILD_JOBS: 3 # the runner's processors, which it runs alone
+      - run: hack/cli-smoke.sh cli/target/dist/ff-macos-arm64
+      - run: cargo test --locked
+        working-directory: cli
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 5
+        with:
+          name: cli-builds-macos
+          path: cli/target/dist/
+          retention-days: 7
+
+  # The builds no build job runs: each on its own system, with ff's tests, in a checkout as the system's Git makes one
+  # (Windows's with CRLF but where .gitattributes says LF).
+  systems:
+    needs: [linux, macos]
+    if: ${{ !cancelled() }}
+    name: ${{ matrix.system }}
+    strategy:
+      fail-fast: false # every system's results
+      matrix:
+        include:
+          - { system: windows-x86_64, runner: windows-2025, binary: ff-windows-x86_64.exe }
+          - { system: macos-x86_64, runner: macos-15-intel, binary: ff-macos-x86_64 }
+          - { system: linux-arm64, runner: ubuntu-24.04-arm, binary: ff-linux-arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash # Git's bash on Windows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cli-builds*
+          merge-multiple: true
+          path: dist
+      # Both steps run whatever the other's outcome, and the last fails the job if either failed.
+      - id: binary
+        continue-on-error: true
+        run: hack/cli-smoke.sh "dist/${{ matrix.binary }}"
+      - id: tests
+        continue-on-error: true
+        working-directory: cli
+        run: cargo test --locked --no-fail-fast # every test binary's failures, not the first one's alone
+      - if: steps.binary.outcome != 'success' || steps.tests.outcome != 'success'
+        env:
+          BINARY: ${{ steps.binary.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          echo "The binary: $BINARY; ff's tests: $TESTS" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 1

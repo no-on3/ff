@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [developer tools plan](../dev-tools-plan.md)'s D2 and its choices 3 and 4, confirmed on 2026-11-08 (the [decision log](../decisions.md)'s 72 and 73); the builds and the signatures measured by M-01's spikes the same day; the hash written by hand, your choice on 2026-11-09 (84) |
 | **Date** | 2026-11-09 |
-| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's part 1, the builds and Windows (below) |
+| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's parts 1, the builds and Windows, and 2, the release job (below) |
 | **Related** | [ADR 0002](0002-cli.md) (the `ff` command); [ADR 0011](0011-static-sites.md) (the sites that serve the downloads); the spikes, [`hack/spikes/cross-build`](../../hack/spikes/cross-build/README.md) and [`hack/spikes/minisign`](../../hack/spikes/minisign/README.md) |
 
 ## Context
@@ -71,6 +71,13 @@ At each release, and by hand:
 ### 3. A release
 
 A tag `ff-v<version>` on `master` starts the release job. `cli/Cargo.toml`'s version must be the tag's, and the binary names its version and its commit. Each file comes with its SHA-256 and its minisign signature, made by the job with the signing key, which is its one secret. `latest.json`, signed too, names the newest version and each file's SHA-256. GitHub's release holds a copy of the files.
+
+### As built (M-03, part 2): the release job
+
+- **`.github/workflows/release.yml`,** at a tag `ff-v*`: the tag is checked first, against `cli/Cargo.toml`'s version and against `master`'s history; then the five builds, each tested on its own system, through `.github/workflows/cli-builds.yml`, the workflow a run by hand calls too; then `hack/release.sh`. It checks each build against its SHA-256, signs each and `latest.json` with minisign's default trusted comment (the signing time, the file's name), writes `SHA256SUMS`, and verifies every signature against `cli/release/minisign.pub` before anything leaves the job, all of it made in a folder of its own so that a refusal leaves nothing signed. GitHub's release holds a copy.
+- **`latest.json`** is `{"version", "commit", "files": {"<file>": "<SHA-256>"}}`, the spike's shape with the commit added.
+- **The key** is a password's, the password a second secret, so that your copy is protected on your disk. `hack/test-release.sh`, in `static`, makes a throwaway one each run.
+- **The verifier goes into `ff` with the update notice** (part 4), its first use, rather than with the release job, so that no code waits unused in between.
 
 ### 4. `ff` verifies minisign's signatures itself
 

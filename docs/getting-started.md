@@ -1694,6 +1694,18 @@ hack/ci.sh suggest           # runs nothing: what the working tree's changes nee
 
 A run stays within AWS's free tier: three functions called a few times, a queue, two buckets and a rule, for minutes. SAM's bucket for the code, which the first run makes, keeps a few megabytes.
 
+**A release of `ff`** (`.github/workflows/release.yml`) starts at a tag `ff-v<version>` pushed on a commit of `master`, `cli/Cargo.toml`'s version being the tag's, which it checks first. It builds the five as a run by hand does (`.github/workflows/cli-builds.yml`), each tested on its own system; then `hack/release.sh` checks each against its SHA-256, signs it with minisign, and writes `SHA256SUMS` and `latest.json` (the version, the commit, each file's SHA-256), signed too, then verifies every signature against `cli/release/minisign.pub`, the public key `ff` trusts, before anything is published. GitHub's release holds a copy. `hack/test-release.sh`, in `static`, runs it with a throwaway key. The signing key's secret half and its password are the job's two secrets, and they can sign a release and nothing else; the key is yours to make, once:
+
+```bash
+hack/install-tools.sh minisign
+hack/bin/minisign -G -p cli/release/minisign.pub -s ~/.minisign/ff-release.key   # asks for its password
+gh secret set FF_RELEASE_KEY < ~/.minisign/ff-release.key
+gh secret set FF_RELEASE_KEY_PASSWORD                                             # asks for it
+git add cli/release/minisign.pub                                                  # committed: ff and the install scripts trust it
+```
+
+Your copy and GitHub's secret are the only two. A new key means every `ff` installed trusts the old one: a new install by the script, which the downloads page says, with the key's fingerprint. To release, raise the version in `cli/Cargo.toml` on `master`, with `cli/Cargo.lock`, which `cargo check` updates, then `git tag ff-v<version> && git push origin ff-v<version>`.
+
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
 
 ```bash

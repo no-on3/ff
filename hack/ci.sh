@@ -101,11 +101,12 @@ free_ports() {
   return 1
 }
 
-# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, the SAM CLI the unit
-# tests lint the SAM fixtures with, and the AWS tools the ff suite checks an export with. A stage that runs the backend here needs its packages; the images build in Docker
+# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, minisign the release's
+# test signs with, the SAM CLI the unit tests lint the SAM fixtures with, and the AWS tools the ff suite checks an
+# export with. A stage that runs the backend here needs its packages; the images build in Docker
 # with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
-  [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust sam" [db]=BE [security]=''
+  [static]="BE FE admin runtimes/nodejs rust minisign" [unit]="BE FE admin runtimes/nodejs rust sam" [db]=BE [security]=''
   [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [aws-tools]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
 )
 stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[aws-tools]} ${stage_uses[images]}"
@@ -119,6 +120,7 @@ stage_deps() {
     case "$uses" in *" $dir "*) prepare "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund ;; esac
   done
   case "$uses" in *" rust "*) prepare "Rust for the ff command" hack/install-tools.sh rust ;; esac
+  case "$uses" in *" minisign "*) prepare "minisign, pinned and checked" hack/install-tools.sh minisign ;; esac
   case "$uses" in
     *" aws "*) prepare "the SAM CLI, OpenTofu and AWS's provider, pinned and checked" hack/install-tools.sh tofu aws-provider sam ;;
     *" sam "*) prepare "the SAM CLI, pinned and checked" hack/install-tools.sh sam ;;
@@ -184,6 +186,7 @@ stage_static() {
   step "the nightly's SBOMs, the branch's last, against a stand-in gh" hack/test-last-sboms.sh
   step "the nightly's latest tools, compared with the pinned ones, on recordings of its own" hack/test-tools-compare.sh
   step "the resource guard, its limits and the load's off" hack/test-check-resources.sh
+  step "a release's files signed and listed, with a throwaway key" hack/test-release.sh
   step "the suites' sections, alone and with what they need, on suites of their own" hack/test-sections.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')

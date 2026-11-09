@@ -1,0 +1,64 @@
+# A release of the ff command: a tag ff-v<version> pushed on a commit of master, cli/Cargo.toml's version being the
+# tag's. The five builds, each tested on its own system (cli-builds.yml); then each signed with minisign by the signing
+# key, whose secret half and password are the job's two secrets, with latest.json, signed too, naming the version, the
+# commit and each file's SHA-256 (hack/release.sh); GitHub's release holds a copy. Actions pinned as ci.yml's are.
+name: release
+
+on:
+  push:
+    tags: ['ff-v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # a release half published is worse than one that waits
+
+jobs:
+  # Before anything is built: the tag names cli/Cargo.toml's version, on a commit of master.
+  tag:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # master's history, to find the tag's commit in it
+      - run: hack/release.sh --check "$GITHUB_REF_NAME"
+      - run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master ||
+            { echo "release refused: $GITHUB_REF_NAME is on no commit of master" >&2; exit 1; }
+
+  builds:
+    needs: tag
+    uses: ./.github/workflows/cli-builds.yml
+
+  release:
+    needs: builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write # GitHub's release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: cli-builds*
+          merge-multiple: true
+          path: dist
+      - run: hack/install-tools.sh minisign
+      - run: hack/release.sh dist "$GITHUB_REF_NAME" "$GITHUB_SHA"
+        env:
+          FF_RELEASE_KEY: ${{ secrets.FF_RELEASE_KEY }}
+          FF_RELEASE_KEY_PASSWORD: ${{ secrets.FF_RELEASE_KEY_PASSWORD }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 5
+        with:
+          name: release
+          path: dist/
+      - run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "ff ${GITHUB_REF_NAME#ff-v}" \
+            --notes "ff ${GITHUB_REF_NAME#ff-v}, built from $GITHUB_SHA: each file with its SHA-256 and its minisign signature, checked against cli/release/minisign.pub; latest.json names them all." \
+            dist/*
+        env:
+          GH_TOKEN: ${{ github.token }}
