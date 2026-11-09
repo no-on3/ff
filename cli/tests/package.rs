@@ -272,7 +272,9 @@ fn pip_installs_wheels_for_the_runtimes_platform_and_pyproject_names_them() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
     let ran = std::fs::read_to_string(log.path()).unwrap();
-    assert!(ran.starts_with("python3 -m pip install --quiet --disable-pip-version-check --no-compile --target . --platform manylinux_2_28_x86_64 --implementation cp --python-version 3.13 --only-binary=:all: --upgrade -r requirements.txt in "), "{ran}");
+    // Wheels for glibc 2.28 and each older one, down to manylinux2014's: pip widens no platform it is given but that one.
+    assert!(ran.starts_with("python3 -m pip install --quiet --disable-pip-version-check --no-compile --target . --platform manylinux_2_28_x86_64 --platform manylinux_2_27_x86_64 "), "{ran}");
+    assert!(ran.contains(" --platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 --implementation cp --python-version 3.13 --only-binary=:all: --upgrade -r requirements.txt in "), "{ran}");
     assert!(ran.ends_with("requirement: requests>=2\n"), "{ran}");
     let packaged: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(packaged["handler"], "lambda_function.lambda_handler");
