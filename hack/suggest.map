@@ -8,6 +8,8 @@
 # The documents, which static checks: the ff command's templates are code, as it builds them in.
 cli/templates/terraform/*               static unit aws-tools
 cli/templates/rest-api/*                static unit cli:template_rest_api
+cli/templates/cron-job/*                static unit cli:template_cron_job
+cli/templates/queue-worker/*            static unit cli:template_queue_worker
 cli/templates/*                         static unit cli
 docs/*                                  static
 *.md                                    static
@@ -49,7 +51,7 @@ runtimes/python/*                       static unit security l3 l4 cli aws-tools
 runtimes/*                              static unit security l3 l4 l5 cli aws-tools images
 
 # The ff command; its Terraform project is AWS's tools' too.
-cli/src/commands/init.rs                static unit cli:init,local_apps,template_rest_api aws-tools
+cli/src/commands/init.rs                static unit cli:init,local_apps,template_rest_api,template_cron_job,template_queue_worker aws-tools
 cli/release/*                           static unit cli:downloads
 cli/src/local/images.rs                 static unit cli:local,local_images
 cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail,local_small_app

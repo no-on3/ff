@@ -86,28 +86,129 @@ const SAM: Files = template_files!(
     ]
 );
 
-/// A REST API at a function's URL, as SAM writes it: its routes by method and path, its items in PostgreSQL through
-/// `DATABASE_URL`, CORS for one origin; its code in `src/`, its tests in `tests/`, two requests in `events/`.
-const REST_API: Files = template_files!(
-    "rest-api",
-    [
-        "template.yaml",
-        "samconfig.toml",
-        "README.md",
-        "events/list-items.json",
-        "events/create-item.json",
-        "nodejs/gitignore",
-        "nodejs/src/app.mjs",
-        "nodejs/src/package.json",
-        "nodejs/src/package-lock.json",
-        "nodejs/tests/app.test.mjs",
-        "python/gitignore",
-        "python/src/app.py",
-        "python/src/requirements.txt",
-        "python/tests/__init__.py",
-        "python/tests/test_app.py",
-    ]
-);
+/// An application of SAM's that `ff init` writes for both runtimes: `template.yaml`, its code in `src/`, its tests
+/// outside it in `tests/`, its events in `events/`, `samconfig.toml` naming its stack, a `.gitignore`, and a README
+/// for here, FF and AWS. Each function is named after the stack, `<name>-<part>`.
+struct App {
+    files: Files,
+    /// What it is, as `ff init --list` says it.
+    about: &'static str,
+    /// What it is, in a sentence about it.
+    what: &'static str,
+    /// Its functions' parts of their names, after the stack's.
+    parts: &'static [&'static str],
+    /// What its README's lines do, said after `cd <name>`.
+    then: &'static str,
+}
+
+impl App {
+    /// The longest name it takes: its functions' names hold Lambda's 64 characters.
+    fn name_most(&self) -> usize {
+        64 - 1 - self.parts.iter().map(|part| part.len()).max().unwrap_or_default()
+    }
+}
+
+/// A REST API at a function's URL: its routes by method and path, its items in PostgreSQL through `DATABASE_URL`,
+/// CORS for one origin.
+const REST_API: App = App {
+    files: template_files!(
+        "rest-api",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/list-items.json",
+            "events/create-item.json",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
+    ),
+    about: "a REST API at a function's URL: its routes by method and path, its items in PostgreSQL, CORS for one origin",
+    what: "a REST API",
+    parts: &["api"],
+    then: "its libraries installed, ff local start template.yaml --with postgres here; ff deploy template.yaml and ff \
+           db create on FF; sam deploy on AWS",
+};
+
+/// A job on a schedule: each morning, the report of the day before, from the files that arrived in its bucket to a
+/// report beside them; a run that fails tried twice more, then its event in a queue of failed runs.
+const CRON_JOB: App = App {
+    files: template_files!(
+        "cron-job",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/scheduled.json",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
+    ),
+    about: "a job on a schedule: a report of the day before written to a bucket, its failed runs kept in a queue",
+    what: "a cron job",
+    parts: &["report"],
+    then: "its libraries installed, ff local start template.yaml and ff local run EveryMorning here; ff deploy \
+           template.yaml on FF; sam deploy on AWS",
+};
+
+/// A queue and its worker: a URL that takes jobs into the queue, a worker reading it in batches that names the jobs
+/// it failed, and a dead-letter queue for those that failed three times.
+const QUEUE_WORKER: App = App {
+    files: template_files!(
+        "queue-worker",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/post-job.json",
+            "events/batch.json",
+            "nodejs/gitignore",
+            "nodejs/src/api.mjs",
+            "nodejs/src/worker.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/api.test.mjs",
+            "nodejs/tests/worker.test.mjs",
+            "python/gitignore",
+            "python/src/api.py",
+            "python/src/worker.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_api.py",
+            "python/tests/test_worker.py",
+        ]
+    ),
+    about: "a queue and its worker: a URL that takes jobs, a worker reading them in batches, a dead-letter queue",
+    what: "a queue worker",
+    parts: &["api", "worker"],
+    then: "its libraries installed, ff local start template.yaml here; ff deploy template.yaml on FF; sam deploy on AWS",
+};
+
+/// The application a template is, if it is one.
+fn app(template: Template) -> Option<&'static App> {
+    match template {
+        Template::RestApi => Some(&REST_API),
+        Template::CronJob => Some(&CRON_JOB),
+        Template::QueueWorker => Some(&QUEUE_WORKER),
+        Template::Function | Template::Terraform | Template::Sam => None,
+    }
+}
 
 /// What a template makes, as `ff init --list` says it.
 fn about(template: Template) -> &'static str {
@@ -117,8 +218,8 @@ fn about(template: Template) -> &'static str {
             "an app's Terraform project: FF's provider block and four modules, which apply on FF and on AWS"
         }
         Template::Sam => "sam init's hello world as FF takes it: one function at its URL, as a SAM application",
-        Template::RestApi => {
-            "a REST API at a function's URL: its routes by method and path, its items in PostgreSQL, CORS for one origin"
+        Template::RestApi | Template::CronJob | Template::QueueWorker => {
+            app(template).map(|app| app.about).unwrap_or_default()
         }
     }
 }
@@ -173,25 +274,22 @@ pub fn sam_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
     files_for(SAM, runtime).map(|(path, template)| (path, fill(template))).collect()
 }
 
-/// The longest name of the REST API: it names its stack, and its function `<name>-api`, which Lambda's 64 characters
-/// for a function's name hold.
-const REST_API_NAME_MOST: usize = 60;
-
-/// The files of a new REST API, by their path in it: its name, its stack's, in them, and its code in the runtime's
-/// language, with the commands that install its library and run its tests.
-pub fn rest_api_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
-    let (language, handler_file, install, test) = match runtime {
+/// The files of a new application, by their path in it: its name, its stack's, in them, and its code in the
+/// runtime's language, with the commands that install its libraries and run its tests.
+fn app_files(app: &App, name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
+    let (language, extension, install, test) = match runtime {
         Runtime::Nodejs => (
             "JavaScript, for Node.js",
-            "app.mjs",
-            "(cd src && npm ci)                               # pg, for ff local start: ff deploy and sam build install their own",
+            "mjs",
+            "(cd src && npm ci)                               # its libraries, for ff local start: ff deploy and sam \
+             build install their own",
             "node --test",
         ),
         Runtime::Python => (
             "Python",
-            "app.py",
-            "# psycopg, Linux's build, beside the code for ff local start: ff deploy and sam build install their own\n\
-             python3 -m pip install -r src/requirements.txt -t src/ --only-binary=:all: \\\n  \
+            "py",
+            "# its libraries, Linux's builds, beside the code for ff local start: ff deploy and sam build install their \
+             own\npython3 -m pip install -r src/requirements.txt -t src/ --only-binary=:all: \\\n  \
              --implementation cp --python-version 3.13 --platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64",
             "python3 -m unittest",
         ),
@@ -202,24 +300,28 @@ pub fn rest_api_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String
             .replace("{{name_lower}}", &name.to_lowercase())
             .replace("{{runtime}}", runtime.lambda())
             .replace("{{language}}", language)
-            .replace("{{handler_file}}", handler_file)
+            .replace("{{extension}}", extension)
             .replace("{{install}}", install)
             // The README's command, its comment in the column of the others'.
             .replace("{{test}}", &format!("{test:<49}"))
     };
-    files_for(REST_API, runtime).map(|(path, template)| (path, fill(template))).collect()
+    files_for(app.files, runtime).map(|(path, template)| (path, fill(template))).collect()
 }
 
-/// Writes a REST API's folder, which must not exist yet, or be empty.
-fn create_rest_api(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf>, Error> {
-    if !super::template::is_stack_name(name) || name.len() > REST_API_NAME_MOST {
+/// Writes an application's folder, which must not exist yet, or be empty.
+fn create_app(folder: &Path, name: &str, runtime: Runtime, app: &App) -> Result<Vec<PathBuf>, Error> {
+    let most = app.name_most();
+    if !super::template::is_stack_name(name) || name.len() > most {
+        let functions: Vec<String> = app.parts.iter().map(|part| format!("{name}-{part}")).collect();
         return Err(Error::usage(format!(
-            "\"{name}\" can't name a REST API, which names its stack and its function, {name}-api: letters, digits and \
-             hyphens, a letter first, {REST_API_NAME_MOST} at most, as Lambda's function names are 64 at most"
+            "\"{name}\" can't name {}, which names its stack and its functions, {}: letters, digits and hyphens, a \
+             letter first, {most} at most, as Lambda's function names are 64 at most",
+            app.what,
+            functions.join(" and ")
         )));
     }
     new_folder(folder, "ff init makes a new folder")?;
-    write_folder(folder, rest_api_files(name, runtime))
+    write_folder(folder, app_files(app, name, runtime))
 }
 
 /// Writes a SAM application's folder, which must not exist yet, or be empty.
@@ -428,7 +530,9 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
         Template::Function => create(&folder, name, runtime)?,
         Template::Terraform => create_terraform(&folder, name, runtime, context)?,
         Template::Sam => create_sam(&folder, name, runtime)?,
-        Template::RestApi => create_rest_api(&folder, name, runtime)?,
+        Template::RestApi => create_app(&folder, name, runtime, &REST_API)?,
+        Template::CronJob => create_app(&folder, name, runtime, &CRON_JOB)?,
+        Template::QueueWorker => create_app(&folder, name, runtime, &QUEUE_WORKER)?,
     };
     let created = Created {
         name: name.to_owned(),
@@ -439,6 +543,16 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
         key_command: (template == Template::Terraform).then(|| terraform_key_command(name)),
     };
     context.out.result(&created, || match template {
+        Template::RestApi | Template::CronJob | Template::QueueWorker => {
+            let app = app(template).expect("an application's template");
+            format!(
+                "created {}/, {}: template.yaml, its code in src/ with its tests in tests/, its events in events/, \
+                 samconfig.toml naming the stack {name}\nthen: cd {name}, and README.md's lines: {}",
+                folder.display(),
+                app.what,
+                app.then
+            )
+        }
         Template::Function => format!(
             "created {}\nthen: cd {name} && ff local invoke . --data @events/event.json, and ff deploy function.{} to put it on FF",
             created.files.join(", "),
@@ -457,13 +571,6 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
              then: cd {name} && ff deploy template.yaml, again after a change; sam deploy takes the same folder to AWS",
             folder.display(),
             sam_code(runtime).code_uri
-        ),
-        Template::RestApi => format!(
-            "created {}/, a REST API: template.yaml, its function in src/ with its tests in tests/, two requests in \
-             events/, samconfig.toml naming the stack {name}\n\
-             then: cd {name}, and README.md's lines: its library installed, ff local start template.yaml --with \
-             postgres here; ff deploy template.yaml and ff db create on FF; sam deploy on AWS",
-            folder.display()
         ),
     })
 }
@@ -488,7 +595,14 @@ mod tests {
     #[test]
     fn each_template_s_folder_is_written_whole_as_its_list_names_every_file_once() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
-        let templates = [("function", FUNCTION), ("rest-api", REST_API), ("sam", SAM), ("terraform", TERRAFORM)];
+        let templates = [
+            ("cron-job", CRON_JOB.files),
+            ("function", FUNCTION),
+            ("queue-worker", QUEUE_WORKER.files),
+            ("rest-api", REST_API.files),
+            ("sam", SAM),
+            ("terraform", TERRAFORM),
+        ];
         let mut folders: Vec<String> = std::fs::read_dir(&root)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -728,19 +842,65 @@ mod tests {
         assert_eq!(create_sam(&PathBuf::from("2shop"), "2shop", Runtime::Nodejs).unwrap_err().exit_code(), 2);
     }
 
+    /// An application as `ff init` writes it, in a folder of its own, every placeholder filled, and its template as
+    /// `ff deploy` plans it there, in FF's subset: its stack the one samconfig.toml names, its parameters
+    /// samconfig.toml's and those given, each function's handler a module of `src/`. The folder, the files' paths in
+    /// order, and the plan.
+    fn written_and_planned(
+        app: &App,
+        name: &str,
+        runtime: Runtime,
+        given: &[(&str, &str)],
+    ) -> (tempfile::TempDir, Vec<String>, crate::sam::plan::Plan) {
+        use crate::sam::{parameters, plan, subset};
+        let dir = tempfile::TempDir::new().unwrap();
+        let folder = dir.path().join(name);
+        let written = create_app(&folder, name, runtime, app).unwrap();
+        let mut paths: Vec<String> =
+            written.iter().map(|path| path.strip_prefix(&folder).unwrap().display().to_string()).collect();
+        paths.sort();
+        let files = app_files(app, name, runtime);
+        assert!(!files.iter().any(|(_, text)| text.contains("{{")), "every placeholder is filled");
+
+        let read = |file: &str| std::fs::read_to_string(folder.join(file)).unwrap();
+        let template = crate::sam::read(&read("template.yaml")).unwrap();
+        let config = parameters::samconfig(&read("samconfig.toml")).unwrap();
+        assert_eq!(config.stack_name.as_deref(), Some(name));
+        let mut overrides = config.parameter_overrides;
+        overrides.extend(given.iter().map(|(key, value)| (key.to_string(), value.to_string())));
+        let values = parameters::values(&template, &overrides);
+        assert_eq!((values.refused.clone(), values.missing.clone()), (vec![], vec![]));
+        assert_eq!(subset::check(&template, &values.values), []);
+        let place = plan::Place {
+            stack: name,
+            region: "tn-tunis-1",
+            account: "000000000001",
+            sqs_endpoint: "https://sqs.ffunc.cloud",
+            sqs_function_endpoint: "http://10.43.0.251:3003",
+            s3_endpoint: "https://s3.ffunc.cloud",
+        };
+        let planned =
+            plan::plan(&template, &values.values, &place, &[], &folder, &mut || "ABCDEFGHIJKL".into()).unwrap();
+        let code: Vec<String> = paths.iter().filter_map(|path| path.strip_prefix("src/")).map(String::from).collect();
+        for function in &planned.functions {
+            assert_eq!(function.code, folder.join("src/"));
+            assert_eq!(
+                crate::package::handler_problem(&code, &function.handler, runtime),
+                None,
+                "{}",
+                function.handler
+            );
+        }
+        (dir, paths, planned)
+    }
+
     #[test]
     fn a_rest_api_is_one_function_at_its_url_with_cors_for_one_origin_in_ffs_subset_which_ff_deploy_plans() {
-        use crate::sam::{parameters, plan, subset};
         for (runtime, code) in [
             (Runtime::Nodejs, ["app.mjs", "package.json", "package-lock.json"].as_slice()),
             (Runtime::Python, &["app.py", "requirements.txt"]),
         ] {
-            let dir = tempfile::TempDir::new().unwrap();
-            let folder = dir.path().join("Shop-2");
-            let written = create_rest_api(&folder, "Shop-2", runtime).unwrap();
-            let mut paths: Vec<String> =
-                written.iter().map(|path| path.strip_prefix(&folder).unwrap().display().to_string()).collect();
-            paths.sort();
+            let (dir, paths, planned) = written_and_planned(&REST_API, "Shop-2", runtime, &[]);
             let mut expected: Vec<String> = [
                 "template.yaml",
                 "samconfig.toml",
@@ -758,38 +918,103 @@ mod tests {
             });
             expected.sort();
             assert_eq!(paths, expected);
-            let files = rest_api_files("Shop-2", runtime);
-            assert!(!files.iter().any(|(_, text)| text.contains("{{")), "every placeholder is filled");
-            let read = |file: &str| std::fs::read_to_string(folder.join(file)).unwrap();
-            assert!(read("README.md").contains("ff db create shop-2 --secret-for Shop-2-api"));
-            assert!(read("README.md").contains("http://shop-2-api.fn.localhost:3700/items"));
+            let readme = std::fs::read_to_string(dir.path().join("Shop-2/README.md")).unwrap();
+            assert!(readme.contains("ff db create shop-2 --secret-for Shop-2-api"));
+            assert!(readme.contains("http://shop-2-api.fn.localhost:3700/items"));
 
-            let template = crate::sam::read(&read("template.yaml")).unwrap();
-            let config = parameters::samconfig(&read("samconfig.toml")).unwrap();
-            assert_eq!(config.stack_name.as_deref(), Some("Shop-2"));
-            let values = parameters::values(&template, &config.parameter_overrides);
-            assert_eq!(subset::check(&template, &values.values), []);
-            let place = plan::Place {
-                stack: "Shop-2",
-                region: "tn-tunis-1",
-                account: "000000000001",
-                sqs_endpoint: "https://sqs.ffunc.cloud",
-                sqs_function_endpoint: "http://10.43.0.251:3003",
-                s3_endpoint: "https://s3.ffunc.cloud",
-            };
-            let planned = plan::plan(&template, &values.values, &place, &[], &folder, &mut || "ABCDEFGHIJKL".into());
-            let [function] = &planned.unwrap().functions[..] else { panic!("one function") };
+            let [function] = &planned.functions[..] else { panic!("one function") };
             assert_eq!((function.name.as_str(), function.runtime, function.timeout), ("Shop-2-api", runtime, 10));
             let url = function.url.as_ref().unwrap();
             assert_eq!(url.auth_type, "NONE");
             assert_eq!(url.cors.as_ref().unwrap()["allowOrigins"], serde_json::json!(["http://localhost:5173"]));
-            assert_eq!(function.code, folder.join("src/"));
-            let files: Vec<String> = code.iter().map(|file| file.to_string()).collect();
-            assert_eq!(crate::package::handler_problem(&files, &function.handler, runtime), None);
         }
-        for name in ["2shop", "shop_api", &"a".repeat(REST_API_NAME_MOST + 1)] {
-            assert_eq!(create_rest_api(&PathBuf::from(name), name, Runtime::Nodejs).unwrap_err().exit_code(), 2);
+        assert_eq!(REST_API.name_most(), 60);
+        for name in ["2shop", "shop_api", &"a".repeat(REST_API.name_most() + 1)] {
+            assert_eq!(create_app(&PathBuf::from(name), name, Runtime::Nodejs, &REST_API).unwrap_err().exit_code(), 2);
         }
+    }
+
+    #[test]
+    fn a_cron_job_is_a_function_on_a_schedule_with_its_bucket_and_a_queue_for_its_failed_runs_which_ff_deploy_plans() {
+        for (runtime, extension) in [(Runtime::Nodejs, "mjs"), (Runtime::Python, "py")] {
+            let (_dir, paths, planned) = written_and_planned(&CRON_JOB, "Reports", runtime, &[]);
+            for path in [format!("src/app.{extension}"), "events/scheduled.json".into(), ".gitignore".into()] {
+                assert!(paths.contains(&path), "{path}: {paths:?}");
+            }
+
+            let [function] = &planned.functions[..] else { panic!("one function") };
+            assert_eq!(
+                (function.name.as_str(), function.handler.as_str(), function.memory, function.timeout),
+                ("Reports-report", "app.handler", 256, 60)
+            );
+            let [schedule] = &function.schedules[..] else { panic!("one schedule") };
+            assert_eq!(
+                (schedule.name.as_str(), schedule.expression.as_str(), schedule.input.as_ref(), schedule.enabled),
+                ("EveryMorning", "cron(0 6 * * ? *)", None, true)
+            );
+            // The bucket named CloudFormation's way, as a bucket's name is unique across FF; the function told it.
+            let [bucket] = &planned.buckets[..] else { panic!("one bucket") };
+            assert_eq!(bucket.name, "reports-files-abcdefghijkl");
+            assert_eq!(function.environment.get("BUCKET"), Some(&bucket.name));
+            let [queue] = &planned.queues[..] else { panic!("one queue") };
+            assert_eq!(
+                (queue.name.as_str(), &queue.attributes["messageRetentionPeriod"]),
+                ("Reports-failed-runs", &serde_json::json!(1_209_600))
+            );
+            assert_eq!(
+                function.event_invoke_config,
+                Some(serde_json::json!({
+                    "maximumRetryAttempts": 2,
+                    "destinationConfig": { "onFailure": { "destination": "arn:aws:sqs:tn-tunis-1:000000000001:Reports-failed-runs" } }
+                }))
+            );
+        }
+        assert_eq!(CRON_JOB.name_most(), 57);
+    }
+
+    #[test]
+    fn a_queue_worker_is_a_url_that_sends_jobs_a_worker_reading_them_in_batches_and_a_dead_letter_queue_planned() {
+        for (runtime, extension) in [(Runtime::Nodejs, "mjs"), (Runtime::Python, "py")] {
+            let (_dir, paths, planned) = written_and_planned(&QUEUE_WORKER, "Jobs-2", runtime, &[]);
+            for path in [format!("src/api.{extension}"), format!("src/worker.{extension}"), "events/batch.json".into()]
+            {
+                assert!(paths.contains(&path), "{path}: {paths:?}");
+            }
+
+            let [api, worker] = &planned.functions[..] else { panic!("two functions") };
+            assert_eq!((api.name.as_str(), api.handler.as_str()), ("Jobs-2-api", "api.handler"));
+            assert_eq!(api.url.as_ref().map(|url| url.auth_type.as_str()), Some("NONE"));
+            assert_eq!(
+                api.environment.get("JOBS_QUEUE_URL").map(String::as_str),
+                Some("http://10.43.0.251:3003/000000000001/Jobs-2-jobs")
+            );
+            assert_eq!(
+                (worker.name.as_str(), worker.handler.as_str(), worker.timeout),
+                ("Jobs-2-worker", "worker.handler", 10)
+            );
+            let [mapping] = &worker.mappings[..] else { panic!("one SQS event") };
+            assert_eq!(
+                (mapping.queue(), mapping.batch_size, mapping.report_batch_item_failures, mapping.enabled),
+                ("Jobs-2-jobs", 10, true, true)
+            );
+            // The dead-letter queue made first; the jobs' hidden for the parameter's seconds, 60 unless given.
+            let [dead_letters, jobs] = &planned.queues[..] else { panic!("two queues") };
+            assert_eq!((dead_letters.name.as_str(), jobs.name.as_str()), ("Jobs-2-jobs-dead-letters", "Jobs-2-jobs"));
+            assert_eq!(jobs.dead_letter(), Some("Jobs-2-jobs-dead-letters"));
+            assert_eq!(jobs.attributes["redrivePolicy"]["maxReceiveCount"], 3);
+            assert_eq!(jobs.attributes["visibilityTimeout"], 60);
+        }
+        let (_dir, _, planned) =
+            written_and_planned(&QUEUE_WORKER, "jobs", Runtime::Nodejs, &[("JobsVisibilityTimeout", "10")]);
+        assert_eq!(planned.queues[1].attributes["visibilityTimeout"], 10);
+        assert_eq!(QUEUE_WORKER.name_most(), 57);
+        let refused =
+            create_app(&PathBuf::from("a".repeat(58)), &"a".repeat(58), Runtime::Python, &QUEUE_WORKER).unwrap_err();
+        assert!(refused.message.contains("which names its stack and its functions, aaa"), "{}", refused.message);
+        assert!(
+            refused.message.contains("-api and aaa")
+                && refused.message.contains("-worker: letters, digits and hyphens, a letter first, 57 at most")
+        );
     }
 
     #[test]

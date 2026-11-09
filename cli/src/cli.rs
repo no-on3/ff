@@ -584,6 +584,8 @@ pub enum Template {
     Terraform,
     Sam,
     RestApi,
+    CronJob,
+    QueueWorker,
 }
 
 impl Template {
@@ -593,6 +595,8 @@ impl Template {
             Template::Terraform => "terraform",
             Template::Sam => "sam",
             Template::RestApi => "rest-api",
+            Template::CronJob => "cron-job",
+            Template::QueueWorker => "queue-worker",
         }
     }
 }

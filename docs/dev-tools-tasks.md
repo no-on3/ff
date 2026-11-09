@@ -68,7 +68,7 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 ### Phase 3: templates, agents and the provider's double
 - [ ] **M-08** Six templates (the plan's D4), each for both runtimes with its `template.yaml`, code, `events/`, tests outside the code's folder, `samconfig.toml`, `.gitignore` and README; each a fixture of `hack/test-sam-fixtures.sh` (`sam validate --lint`, cfn-lint); each deployed once by the `ff` suite, called and its stack deleted; each run on `ff local` in the suite:
   - [x] part 1, the templates' layout under `cli/templates/`, `ff init --list`, and `rest-api`;
-  - [ ] part 2, `cron-job` and `queue-worker`;
+  - [x] part 2, `cron-job` and `queue-worker`;
   - [ ] part 3, `site-with-api`, the small app's shape, smaller;
   - [ ] part 4, `image-resize`: `sharp` and Pillow built by `ff package --container`; the guide says Docker Desktop is what Windows and macOS need for it;
   - [ ] part 5, `webhook`: a payment provider's notification received right, Konnect's by default: the request kept, the provider asked again, the redirect's parameters never trusted, each payment handled once by its reference; its tests against the stand-in come with M-10; the guide's "Templates"; the SAM templates page lists them.

@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  {{name}}: a job on a schedule, each morning at 06:00 UTC, that reports the day before: the files that arrived in its
+  bucket under incoming/ that day, written beside them as reports/<day>.json. A run that fails is tried twice more,
+  then its event goes to a queue of failed runs. ff deploy puts it on FF, sam deploy on AWS, and ff local start runs
+  it here.
+
+Globals:
+  Function:
+    Runtime: {{runtime}}
+    CodeUri: src/
+    MemorySize: 256
+    Timeout: 60
+
+Resources:
+  # Each morning, the report of the day before: the files under incoming/, to reports/<day>.json.
+  Report:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-report"
+      Handler: app.handler
+      Environment:
+        Variables:
+          BUCKET: !Ref Files
+      Events:
+        EveryMorning:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 6 * * ? *)
+            Description: The report of the day before, at 06:00 UTC
+      EventInvokeConfig:
+        MaximumRetryAttempts: 2
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt FailedRuns.Arn
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref Files
+
+  # The files the job reads and the reports it writes. Its name is made from the stack's, as a bucket's is unique
+  # across FF, and across S3.
+  Files:
+    Type: AWS::S3::Bucket
+
+  # Each run that failed three times: its event and its error, kept 14 days.
+  FailedRuns:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-failed-runs"
+      MessageRetentionPeriod: 1209600
+
+Outputs:
+  FilesBucket:
+    Description: The bucket the job reads under incoming/ and writes its reports to, under reports/
+    Value: !Ref Files
+  FailedRunsQueue:
+    Description: The queue of the runs that failed three times
+    Value: !Ref FailedRuns
+  Report:
+    Description: The job's function
+    Value: !GetAtt Report.Arn

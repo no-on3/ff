@@ -1,0 +1,8 @@
+{
+  "name": "jobs",
+  "private": true,
+  "description": "A queue and its worker, a URL that takes jobs and a worker reading them in batches: on FF, on AWS Lambda, and here with ff local start",
+  "dependencies": {
+    "@aws-sdk/client-sqs": "3.1156.0"
+  }
+}

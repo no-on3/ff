@@ -15,7 +15,10 @@
 # its Api event; a stack with an alias, a second function, queues and a bucket's site and notifications, again
 # unchanged, then without them, after asking, a variable with a secret's name refused, and ff delete-stack, stopped by
 # the bucket's files; ff init's REST API, its README's commands run for both runtimes, the Python one deployed with
-# a database of ff db's and called at its URL, with its CORS, each run with ff local start --with postgres; folders deployed as
+# a database of ff db's and called at its URL, with its CORS, each run with ff local start --with postgres; ff init's
+# cron job, the Python one deployed, a file uploaded with the AWS CLI and reported, a failed run's record in its queue,
+# each run here as its README says, its schedule by hand and a failed run tried three times; ff init's queue worker,
+# the Node.js one deployed, a job done and one dead-lettered after three tries, each the same here; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
@@ -160,6 +163,41 @@ local_aws() {
   AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$project/.ff/local/credentials" AWS_PROFILE=default \
     AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_LAMBDA="$door" AWS_ENDPOINT_URL_SQS="$door" AWS_ENDPOINT_URL_S3="$door" \
     AWS_ENDPOINT_URL_SESV2="$door" "${aws_cli[@]}" "$@"
+}
+
+# template_files <folder>: the files ff init wrote there, sorted, on one line.
+template_files() { (cd "$1" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | paste -sd' '); }
+# git_sees <folder>: the files git takes of the folder made a repository, what its .gitignore leaves in, on one line.
+git_sees() {
+  git -C "$1" init -q
+  git -C "$1" status --porcelain --untracked-files=all | sed 's/^?? //' | LC_ALL=C sort | paste -sd' '
+}
+# readme_here <folder>: a template's README's commands before its ff local start, as written, which install its
+# libraries and run its tests: their exit, then how many tests passed.
+readme_here() {
+  local status=0
+  (cd "$1" && bash -e -o pipefail -c "$(sed -n '/^## Here$/,/^ff local start/p' README.md | sed '1,3d;$d')") \
+    >"$work/here.out" 2>&1 || status=$?
+  echo "$status $(sed -nE 's/^(# |ℹ )pass ([0-9]+)$/\2/p; s/^Ran ([0-9]+) tests? in .*/\1/p' "$work/here.out")"
+}
+# readme_after <folder> <line> <port>: a template's README's commands after the line its pattern finds, to the end of
+# their block, as written but at ff local start's port, with the suite's ff: their exit; what they wrote in
+# $work/after.out, their stderr in $work/after.err.
+readme_after() {
+  local status=0
+  (cd "$1" && PATH="$(dirname "$ff_bin"):$PATH" bash -e -o pipefail -c \
+    "$(sed -n "/$2/,/^\`\`\`\$/p" README.md | sed '1d;$d;/^```bash$/d' | sed "s/:3700/:$3/g")") \
+    >"$work/after.out" 2>"$work/after.err" || status=$?
+  echo "$status"
+}
+# until_found <url>: waits up to 30 s for the URL to answer 200.
+until_found() {
+  local _
+  for _ in $(seq 1 60); do
+    [ "$(curl -s -o /dev/null -w '%{http_code}' "$1")" = 200 ] && return 0
+    sleep 0.5
+  done
+  return 1
 }
 
 # release_site <folder> <bucket>: a release of ff as the release job makes it, on a site FF serves as the downloads
@@ -817,7 +855,7 @@ section_def stacks section_stacks backend budget=80
 
 section_template_rest_api() {
 section "ff init --template rest-api: a REST API at a function's URL, its items in PostgreSQL; the Python one deployed on FF with a database of ff db's, then each runtime's run here as its README says, with ff local start --with postgres"
-local runtime api url items db_conn deleted base port starter id status
+local runtime api url items db_conn deleted base port starter id
 declare -A written=(
   [nodejs]=".gitignore README.md events/create-item.json events/list-items.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
   [python]=".gitignore README.md events/create-item.json events/list-items.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
@@ -832,7 +870,7 @@ preflight() {
 for runtime in python nodejs; do
   (cd "$work" && rm -rf "cli-rest-$runtime" && "$ff_bin" init "cli-rest-$runtime" --runtime "$runtime" --template rest-api >"$work/out" 2>"$work/err")
   check "ff init --template rest-api makes cli-rest-$runtime's template, code, tests, events and README, and nothing else" "${written[$runtime]}" \
-    "$(cd "$work/cli-rest-$runtime" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | paste -sd' ')"
+    "$(template_files "$work/cli-rest-$runtime")"
 done
 
 # On FF, from the folder as ff init wrote it: ff deploy installs psycopg's Linux build itself.
@@ -871,13 +909,7 @@ check "ff delete-stack deletes its function with its URL, ff db delete its datab
 # its tests; then ff local start --with postgres, called with its curl.
 for runtime in python nodejs; do
   api="$work/cli-rest-$runtime"
-  if (cd "$api" && bash -e -o pipefail -c "$(sed -n '/^## Here$/,/^ff local start/p' README.md | sed '1,3d;$d')") >"$work/rest-steps.out" 2>&1; then
-    status=0
-  else
-    status=$?
-  fi
-  check "cli-rest-$runtime's README: its commands install its library and run its 7 tests, which pass" "0 7" \
-    "$status $(sed -nE 's/^(# |ℹ )pass ([0-9]+)$/\2/p; s/^Ran ([0-9]+) tests? in .*/\1/p' "$work/rest-steps.out")"
+  check "cli-rest-$runtime's README: its commands install its library and run its 7 tests, which pass" "0 7" "$(readme_here "$api")"
   port="$(free_port)"
   base="http://cli-rest-$runtime-api.fn.localhost:$port"
   local_started "$work/rest.out" "$work/rest.err" "$api/template.yaml" --port "$port" --with postgres
@@ -900,12 +932,210 @@ $(at "$base/items/$id" -X PUT | sed 's/ .*//') $(sed -n 's/^allow: //Ip' "$work/
   ff local reset "$api" --data --yes
   check "  ... Ctrl-C leaving no container, ff local reset --data its database's volume gone" "0 0 0" \
     "$(code) $(leftover) $(docker volume ls --quiet --filter "label=ff.local.project=$(cd "$api" && pwd -P)" | wc -l | tr -d ' ')"
-  git -C "$api" init -q
   check "  ... and its .gitignore leaves out what its README's commands installed and ff local kept: git sees ff init's files alone" \
-    "${written[$runtime]}" "$(git -C "$api" status --porcelain --untracked-files=all | sed 's/^?? //' | LC_ALL=C sort | paste -sd' ')"
+    "${written[$runtime]}" "$(git_sees "$api")"
 done
 }
 section_def template_rest_api section_template_rest_api backend budget=90
+
+section_template_cron_job() {
+section "ff init --template cron-job: a job on a schedule, its bucket and a queue of its failed runs; the Python one deployed on FF, a file uploaded with the AWS CLI and reported, its schedule, a failed run's record in its queue; then each runtime's run here as its README says, its schedule run by hand, a failed run tried three times then recorded in the local queue"
+local runtime job bucket today yesterday size port starter failed_id deleted
+declare -A written=(
+  [nodejs]=".gitignore README.md events/scheduled.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/scheduled.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-cron-$runtime" && "$ff_bin" init "cli-cron-$runtime" --runtime "$runtime" --template cron-job >"$work/out" 2>"$work/err")
+  check "ff init --template cron-job makes cli-cron-$runtime's template, code, tests, event and README, and nothing else" "${written[$runtime]}" \
+    "$(template_files "$work/cli-cron-$runtime")"
+done
+today="$(date -u +%F)"
+yesterday="$(date -u -d yesterday +%F)"
+
+# On FF, from the folder as ff init wrote it: ff deploy installs boto3, which FF's Python runtime hasn't.
+job="$work/cli-cron-python"
+in_folder "$job" deploy template.yaml --output json
+bucket="$(out | jq -r '.outputs[] | select(.name == "FilesBucket") | .value')"
+check "the Python one deployed as the stack samconfig.toml names: its function, its bucket named from the stack's, its queue" \
+  "0 cli-cron-python created cli-cron-python-report true cli-cron-python-failed-runs" \
+  "$(code) $(out | jq -r '"\(.stack) \(.functions[0].action) \(.functions[0].name)"') \
+$([[ $bucket =~ ^cli-cron-python-files-[a-z0-9]{12}$ ]] && echo true || echo false) \
+$(out | jq -r '.outputs[] | select(.name == "FailedRunsQueue") | .value | split("/") | last')"
+# As its README says: a key to the bucket alone, its variables for the AWS CLI, none of this machine's settings.
+ff keys create --name cli-cron-files --bucket "$bucket"
+out | grep '^export ' >"$work/cron.env"
+cron_aws() { (eval "$(cat "$work/cron.env")"; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+size="$(wc -c <"$job/README.md" | tr -d ' ')"
+uploaded="$(cron_aws s3 cp "$job/README.md" "s3://$bucket/incoming/README.md" --only-show-errors >/dev/null 2>&1; echo $?)"
+ff invoke cli-cron-python-report --data "{\"day\": \"$today\"}"
+check "  ... a file uploaded to its bucket by the AWS CLI with that key; ff invoke naming today reports it" \
+  "0 0 $today 1 $size incoming/README.md" \
+  "$uploaded $(code) $(out | sed '$d' | jq -r '"\(.day) \(.files) \(.bytes) \(.largest.key)"')"
+check "  ... in the bucket, beside the files, as reports/<day>.json" "$today 1 $size" \
+  "$(cron_aws s3 cp "s3://$bucket/reports/$today.json" - 2>/dev/null | jq -r '"\(.day) \(.files) \(.bytes)"')"
+ff schedule list cli-cron-python-report --output json
+check "  ... its schedule, the template's Schedule event: 06:00 UTC each day, running" "0 EveryMorning cron(0 6 * * ? *) true" \
+  "$(code) $(out | jq -r '.[] | "\(.name) \(.expression) \(.enabled)"')"
+ff async-config cli-cron-python-report
+check "  ... a run that fails tried twice more, then sent to its queue, as its EventInvokeConfig says" \
+  "0 cli-cron-python-report: a call that fails is retried twice, and kept 6 hours at most; one that fails for good to the queue cli-cron-python-failed-runs" \
+  "$(code) $(out)"
+# FF tries a run again a minute after it failed, then two minutes after: with no retry, its record comes at once.
+ff async-config cli-cron-python-report --retries 0
+ff invoke cli-cron-python-report --async --data '{"time": "yesterday"}' --raw
+failed_id="$(out)"
+ff queues receive cli-cron-python-failed-runs --wait 20s --output json
+check "  ... a run that failed for good: its record in that queue, as Lambda writes it, its event under requestPayload" \
+  "0 RetriesExhausted $failed_id yesterday The event's time is no date: \"yesterday\"" \
+  "$(code) $(out | jq -r '.[0].body | fromjson | "\(.requestContext.condition) \(.requestContext.requestId) \(.requestPayload.time) \(.responsePayload.errorMessage)"')"
+in_folder "$job" delete-stack --yes
+check "ff delete-stack stops at the bucket while it holds files, as CloudFormation does, saying what deletes it" "3 true" \
+  "$(code) $(err | grep -F "The bucket $bucket (Files) isn't empty" | grep -F "ff buckets delete $bucket --force" >/dev/null && echo true || echo false)"
+ff buckets delete "$bucket" --force --yes
+deleted="$(code)"
+in_folder "$job" delete-stack --yes
+check "  ... ff buckets delete --force deletes it with its files, then ff delete-stack the rest" \
+  "0 0 deleted the function cli-cron-python-report (Report) deleted the bucket $bucket (Files) deleted the queue cli-cron-python-failed-runs (FailedRuns) deleted the stack cli-cron-python" \
+  "$deleted $(code) $(out | paste -sd' ')"
+ff keys revoke cli-cron-files --yes
+
+# Here, each runtime as its README says: its commands before ff local start, then the start, then the commands for
+# another terminal, at the suite's port. A failed run's retries come in 1.2 s and 2.4 s, a second of the test build's
+# asynchronous calls 20 ms.
+for runtime in python nodejs; do
+  job="$work/cli-cron-$runtime"
+  check "cli-cron-$runtime's README: its commands install its library and run its 6 tests, which pass" "0 6" "$(readme_here "$job")"
+  port="$(free_port)"
+  FF_TEST_ASYNC_SECOND_MS=20 local_started "$work/cron.out" "$work/cron.err" "$job/template.yaml" --port "$port"
+  check "  ... ff local start runs the job, its schedule, its queue and its bucket, its files kept in .ff/local/buckets/files" \
+    "true true true true" \
+    "$(grep -E "^  cli-cron-$runtime-report  $runtime  256 MB, 60 s$" "$work/cron.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  cli-cron-$runtime-report/EveryMorning  cron\(0 6 \* \* \? \*\)  next [0-9-]{10}T06:00:00Z$" "$work/cron.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  cli-cron-$runtime-failed-runs  http://127\.0\.0\.1:$port/000000000000/cli-cron-$runtime-failed-runs$" "$work/cron.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  files  $job/\.ff/local/buckets/files$" "$work/cron.out" >/dev/null && echo true || echo false)"
+  check "  ... its README's commands for another terminal: a file put in the bucket by curl, today's report made by Lambda's Invoke" \
+    "0 200 $today 1 $(wc -c <"$job/README.md" | tr -d ' ') incoming/README.md" \
+    "$(readme_after "$job" '^In another terminal' "$port") $(at "http://127.0.0.1:$port/files/reports/$today.json" | sed -n '1s/ .*//p') \
+$(jq -r '"\(.day) \(.files) \(.bytes) \(.largest.key)"' "$work/at.body")"
+  until_found "http://127.0.0.1:$port/files/reports/$yesterday.json" || true
+  check "  ... and ff local run EveryMorning, the schedule's run now, yesterday's report, with none of today's files" \
+    "200 $yesterday 0 null true" \
+    "$(at "http://127.0.0.1:$port/files/reports/$yesterday.json" | sed -n '1s/ .*//p') $(jq -r '"\(.day) \(.files) \(.largest)"' "$work/at.body") \
+$(grep -F "cli-cron-$runtime-report | " "$work/cron.err" | grep -F "reported $yesterday: 0 files, 0 bytes" >/dev/null && echo true || echo false)"
+  curl -s -o /dev/null -X POST -H 'X-Amz-Invocation-Type: Event' \
+    "http://127.0.0.1:$port/2015-03-31/functions/cli-cron-$runtime-report/invocations" -d '{"time": "yesterday"}'
+  local_aws "$job" "$port" sqs receive-message --wait-time-seconds 20 --output json \
+    --queue-url "http://127.0.0.1:$port/000000000000/cli-cron-$runtime-failed-runs" >"$work/cron-record.json" 2>&1 || true
+  check "  ... a run that fails, tried three times as on FF, then its record in the local queue, read by the AWS CLI with the local key" \
+    "RetriesExhausted 3 yesterday The event's time is no date: \"yesterday\"" \
+    "$(jq -r '.Messages[0].Body | fromjson | "\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.requestPayload.time) \(.responsePayload.errorMessage)"' "$work/cron-record.json" 2>&1)"
+  local_stopped
+  check "  ... Ctrl-C leaving no container, the bucket's three files kept for the next start" "0 3" \
+    "$(leftover) $(find "$job/.ff/local/buckets/files" -name '*.object.json' | wc -l | tr -d ' ')"
+  ff local reset "$job" --yes
+  check "  ... ff local reset removing them, and its .gitignore leaves out what its README's commands installed: git sees ff init's files alone" \
+    "0 false ${written[$runtime]}" "$(code) $([ -e "$job/.ff/local" ] && echo true || echo false) $(git_sees "$job")"
+done
+}
+section_def template_cron_job section_template_cron_job backend budget=70
+
+section_template_queue_worker() {
+section "ff init --template queue-worker: a URL that takes jobs into a queue, a worker reading it in batches, a dead-letter queue; the Node.js one deployed on FF, a job done and one of a task it hasn't failed three times then dead-lettered; then each runtime's run here as its README says, the same"
+local runtime app url failing_on_ff good bad port base starter jobs
+declare -A written=(
+  [nodejs]=".gitignore README.md events/batch.json events/post-job.json samconfig.toml src/api.mjs src/package-lock.json src/package.json src/worker.mjs template.yaml tests/api.test.mjs tests/worker.test.mjs"
+  [python]=".gitignore README.md events/batch.json events/post-job.json samconfig.toml src/api.py src/requirements.txt src/worker.py template.yaml tests/__init__.py tests/test_api.py tests/test_worker.py"
+)
+# json_lines: the JSON objects of log lines, whatever comes before each, as each runtime writes a line differently.
+json_lines() { sed -n 's/^[^{]*\({.*}\)$/\1/p'; }
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-jobs-$runtime" && "$ff_bin" init "cli-jobs-$runtime" --runtime "$runtime" --template queue-worker >"$work/out" 2>"$work/err")
+  check "ff init --template queue-worker makes cli-jobs-$runtime's template, code, tests, events and README, and nothing else" \
+    "${written[$runtime]}" "$(template_files "$work/cli-jobs-$runtime")"
+done
+
+# On FF, the Node.js one: ff deploy installs AWS's SDK's SQS client. A job the worker failed comes back after 10 s, not
+# 60, so that its third failure comes within the section, whose part here runs meanwhile.
+app="$work/cli-jobs-nodejs"
+in_folder "$app" deploy template.yaml --parameter-overrides JobsVisibilityTimeout=10 --output json
+url="$(out | jq -r '.outputs[] | select(.name == "ApiUrl") | .value')"
+check "the Node.js one deployed as the stack samconfig.toml names: the API and its URL, the worker, the two queues" \
+  "0 cli-jobs-nodejs cli-jobs-nodejs-api cli-jobs-nodejs-worker true cli-jobs-nodejs-jobs cli-jobs-nodejs-jobs-dead-letters" \
+  "$(code) $(out | jq -r '"\(.stack) \([.functions[].name] | sort | join(" "))"') $([[ $url == http*/ ]] && echo true || echo false) \
+$(out | jq -r '[.outputs[] | select(.name == "JobsQueue" or .name == "DeadLettersQueue") | .value | split("/") | last] | sort | join(" ")')"
+ff invoke cli-jobs-nodejs-api --http POST /jobs --data '{"task": "resize"}'
+failing_on_ff="$(out | tail -1 | jq -r .id)"
+check "  ... ff invoke --http POST /jobs, a job of a task the worker hasn't: 202, its ID" "0 HTTP 202 resize true" \
+  "$(code) $(out | head -1) $(out | tail -1 | jq -r .task) $([[ $failing_on_ff =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false)"
+ff invoke cli-jobs-nodejs-api --http POST /jobs --data '{"task": "greet", "name": "Amira"}'
+good="$(out | tail -1 | jq -r .id)"
+jobs=""
+for _ in $(seq 1 30); do
+  ff logs cli-jobs-nodejs-worker
+  jobs="$(out | json_lines | jq -r --arg job "$good" 'select(.job == $job) | "\(.task) \(.done)"' 2>/dev/null)"
+  [ -n "$jobs" ] && break
+  sleep 1
+done
+check "  ... and a greeting's, done by the worker from the queue, its line in ff logs" "greet Hello Amira" "$jobs"
+check "  ... the API's refusals at its URL: a job without a task 400, another path 404, another method 405 with Allow" \
+  "400 A job names its task, {\"task\": \"…\"}, 1 to 100 characters 404 405 POST" \
+  "$(at "${url}jobs" -d '{"name": "Amira"}' | sed 's/ .*//') $(jq -r .message "$work/at.body") $(at "${url}orders" | sed 's/ .*//') \
+$(at "${url}jobs" | sed 's/ .*//') $(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+ff event-sources list --function cli-jobs-nodejs-worker --output json
+check "  ... the worker reads the jobs' queue in batches of 10, naming the jobs it failed" "0 cli-jobs-nodejs-jobs 10 Enabled ReportBatchItemFailures" \
+  "$(code) $(out | jq -r '.[] | "\(.eventSourceArn | split(":") | last) \(.batchSize) \(.state) \(.functionResponseTypes | join(","))"')"
+
+# Here, each runtime as its README says, the same 10 s.
+for runtime in python nodejs; do
+  app="$work/cli-jobs-$runtime"
+  check "cli-jobs-$runtime's README: its commands install its library and run its 9 tests, which pass" "0 9" "$(readme_here "$app")"
+  port="$(free_port)"
+  base="http://cli-jobs-$runtime-api.fn.localhost:$port"
+  local_started "$work/jobs.out" "$work/jobs.err" "$app/template.yaml" --port "$port" --parameter-overrides JobsVisibilityTimeout=10
+  check "  ... ff local start runs the API at the address its README names, the worker reading the jobs' queue, the two queues" \
+    "true true true" \
+    "$(grep -E "^  cli-jobs-$runtime-api +$runtime  256 MB, 10 s  $base/$" "$work/jobs.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  cli-jobs-$runtime-worker/Jobs  cli-jobs-$runtime-jobs: batches of 10, ReportBatchItemFailures$" "$work/jobs.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  cli-jobs-$runtime-jobs +http://127\.0\.0\.1:$port/000000000000/cli-jobs-$runtime-jobs, to cli-jobs-$runtime-jobs-dead-letters after 3 receives$" "$work/jobs.out" >/dev/null && echo true || echo false)"
+  check "  ... its README's two curls: each job taken, 202 with its ID" "0 greet resize" \
+    "$(readme_after "$app" '^ff local start' "$port") $(jq -r .task "$work/after.out" | paste -sd' ')"
+  good="$(jq -r 'select(.task == "greet") | .id' "$work/after.out")"
+  bad="$(jq -r 'select(.task == "resize") | .id' "$work/after.out")"
+  # The job the worker fails is received a fourth time 30 s after it came, and goes to the dead-letter queue then.
+  for _ in 1 2 3; do
+    local_aws "$app" "$port" sqs receive-message --wait-time-seconds 20 --output json \
+      --queue-url "http://127.0.0.1:$port/000000000000/cli-jobs-$runtime-jobs-dead-letters" >"$work/jobs-dead.json" 2>&1 || true
+    jq -e '.Messages | length > 0' "$work/jobs-dead.json" >/dev/null 2>&1 && break
+  done
+  grep -F "cli-jobs-$runtime-worker | " "$work/jobs.err" | json_lines >"$work/worker.lines"
+  check "  ... the greeting's job done by the worker, its line on ff local start's stderr as its README shows it" "greet Hello Amira" \
+    "$(jq -r --arg job "$good" 'select(.job == $job) | "\(.task) \(.done)"' "$work/worker.lines")"
+  check "  ... the other failed at each of its three tries, then in the dead-letter queue, read by the AWS CLI with the local key" \
+    "1,2,3 No task \"resize\" $bad resize" \
+    "$(jq -r --arg job "$bad" 'select(.job == $job) | .tries' "$work/worker.lines" | paste -sd,) \
+$(jq -r --arg job "$bad" 'select(.job == $job) | .failed' "$work/worker.lines" | sort -u) \
+$(jq -r '.Messages[0] | "\(.MessageId) \(.Body | fromjson | .task)"' "$work/jobs-dead.json" 2>&1)"
+  local_stopped
+  ff local reset "$app" --yes
+  check "  ... Ctrl-C leaving no container, ff local reset what ff local kept, and git sees ff init's files alone" \
+    "0 0 ${written[$runtime]}" "$(leftover) $(code) $(git_sees "$app")"
+done
+
+# On FF meanwhile, the job the worker failed: received three times, 10 s apart, then in the dead-letter queue.
+ff queues receive cli-jobs-nodejs-jobs-dead-letters --wait 20s --output json
+check "the job the worker failed on FF: in the dead-letter queue after its three tries, as its redrive policy says" \
+  "0 resize" "$(code) $(out | jq -r '.[0].body | fromjson | .task')"
+ff logs cli-jobs-nodejs-worker
+check "  ... its three tries' lines in ff logs, each failed" "1,2,3 No task \"resize\"" \
+  "$(out | json_lines | jq -r --arg job "$failing_on_ff" 'select(.job == $job) | .tries' | paste -sd,) \
+$(out | json_lines | jq -r --arg job "$failing_on_ff" 'select(.job == $job) | .failed' | sort -u)"
+in_folder "$work/cli-jobs-nodejs" delete-stack --yes
+check "ff delete-stack deletes both functions, with the URL and the worker's reading of the queue, and the two queues" \
+  "0 deleted the function cli-jobs-nodejs-api (Api) deleted the function cli-jobs-nodejs-worker (Worker) deleted the queue cli-jobs-nodejs-jobs-dead-letters (DeadLetters) deleted the queue cli-jobs-nodejs-jobs (Jobs) deleted the stack cli-jobs-nodejs" \
+  "$(code) $(out | paste -sd' ')"
+}
+section_def template_queue_worker section_template_queue_worker backend budget=180
 
 section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"

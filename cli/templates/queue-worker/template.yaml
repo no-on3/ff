@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  {{name}}: a queue and its worker. A function's URL takes jobs into the queue; the worker reads it in batches of up to
+  ten and names the jobs it failed, which the queue keeps for another try while it deletes the others; a job that
+  failed three times goes to the dead-letter queue. ff deploy puts it on FF, sam deploy on AWS, and ff local start runs
+  it here.
+
+Parameters:
+  JobsVisibilityTimeout:
+    Type: Number
+    Default: 60
+    MinValue: 10
+    MaxValue: 43200
+    Description: >-
+      Seconds a job is hidden from other reads while the worker does it, and so the time before a job it failed is
+      tried again: at least the worker's Timeout, 10
+
+Globals:
+  Function:
+    Runtime: {{runtime}}
+    CodeUri: src/
+    MemorySize: 256
+    Timeout: 10
+
+Resources:
+  # POST /jobs at its URL: a job, {"task": "…", …}, sent to the queue.
+  Api:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-api"
+      Handler: api.handler
+      Environment:
+        Variables:
+          JOBS_QUEUE_URL: !Ref Jobs
+      FunctionUrlConfig:
+        AuthType: NONE
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt Jobs.QueueName
+
+  # The queue's jobs, ten at most a call; those it failed named in its answer.
+  Worker:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-worker"
+      Handler: worker.handler
+      Events:
+        Jobs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Jobs.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  Jobs:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-jobs"
+      VisibilityTimeout: !Ref JobsVisibilityTimeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetters.Arn
+        maxReceiveCount: 3
+
+  # The jobs that failed three times, kept 14 days.
+  DeadLetters:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-jobs-dead-letters"
+      MessageRetentionPeriod: 1209600
+
+Outputs:
+  ApiUrl:
+    Description: The API's address, its function's URL, which takes jobs at POST /jobs
+    Value: !GetAtt ApiUrl.FunctionUrl
+  JobsQueue:
+    Description: The queue of jobs
+    Value: !Ref Jobs
+  DeadLettersQueue:
+    Description: The jobs that failed three times
+    Value: !Ref DeadLetters

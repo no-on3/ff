@@ -9,7 +9,7 @@ A REST API at a function's URL, in {{language}}: its routes by method and path, 
 | `GET /items/<id>` | The item, or 404 |
 | `DELETE /items/<id>` | 204, or 404 |
 
-A path without a route is 404, and a method its route lacks 405, with the methods it takes in `Allow`. `src/` is the function's code, `CodeUri` in `template.yaml`: `src/{{handler_file}}` routes the requests, and makes the table `items` at its first call if it isn't there. `tests/` tries each route with a stand-in for the database, `events/` holds two requests as the URL sends them, and `samconfig.toml` names the stack, `{{name}}`.
+A path without a route is 404, and a method its route lacks 405, with the methods it takes in `Allow`. `src/` is the function's code, `CodeUri` in `template.yaml`: `src/app.{{extension}}` routes the requests, and makes the table `items` at its first call if it isn't there. `tests/` tries each route with a stand-in for the database, `events/` holds two requests as the URL sends them, and `samconfig.toml` names the stack, `{{name}}`.
 
 ## Here
 

@@ -473,6 +473,8 @@ ff local invoke examples/hello.py --data '{"name": "here"}'   # on this machine,
 ff init orders --runtime python                   # a new function's folder: its handler and an event
 ff init shop --template terraform --runtime nodejs   # an app's Terraform project, for FF and, its provider changed, AWS
 ff init items --template rest-api --runtime python  # a REST API at a function's URL, its items in PostgreSQL
+ff init daily --template cron-job --runtime nodejs  # a job on a schedule, its bucket, a queue of its failed runs
+ff init jobs --template queue-worker --runtime python  # a URL taking jobs into a queue, its worker, a dead-letter queue
 ff init --list                                    # the templates, each with what it makes
 ff deploy ./orders                                # a folder: packaged with its libraries, uploaded when new
 ff package ./orders                               # the same zip, for AWS Lambda too: ./orders/.ff/orders.zip
