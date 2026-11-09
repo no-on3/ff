@@ -5,12 +5,13 @@
 //! names them; their variables the template's, its `Ref`s and `GetAtt`s resolved to what they are here, with the
 //! variables FF gives a pod pointed at the front door, and the secrets file's. The functions sign with the local key,
 //! which the front door checks a signed request against: made at the first start, printed at each, and kept in
-//! `.ff/local/credentials`. Its queues answer SQS at the front door, kept in memory while it runs. `ff local reset`
-//! empties what it keeps.
+//! `.ff/local/credentials`. Its queues answer SQS at the front door, kept in memory while it runs, and its functions'
+//! SQS events read them as FF's event source mappings do. `ff local reset` empties what it keeps.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, TcpListener};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -30,6 +31,7 @@ use crate::local::events::{LAMBDA_RETRY_POLICY, RetryPolicy};
 use crate::local::front_door::{FrontDoor, FunctionUrl, Settings, URL_DOMAIN};
 use crate::local::instances::{Docker, Instances};
 use crate::local::key::Key;
+use crate::local::mappings::LocalMapping;
 use crate::local::schedule_expression::{Expression, InvalidExpression, Millis, iso};
 use crate::local::schedules::{self, LocalSchedule, Timetable};
 use crate::local::sqs::{QueueSettings, Queues};
@@ -230,11 +232,14 @@ fn functions(
 
 /// What the front door answers of each function besides how it runs, by its name: its alias, its description and
 /// the template's variables, a secret's left out; its asynchronous calls' retries and destinations, each within what
-/// FF takes, else a problem at its line; and its URL, its CORS as FF takes it, its host no other's.
+/// FF takes, else a problem at its line; its URL, its CORS as FF takes it, its host no other's; its schedules; and the
+/// queues of the template it reads, each hiding a message received for the function's timeout at least, as FF
+/// requires, a queue that isn't the template's noted.
 fn settings(
     planned: &plan::Plan,
     secrets: &BTreeMap<String, String>,
     problems: &mut Problems,
+    notes: &mut Vec<String>,
 ) -> BTreeMap<String, Settings> {
     let mut all = BTreeMap::new();
     // Each URL's host, by the function whose logical ID has it.
@@ -319,6 +324,35 @@ fn settings(
                 }
             }
         }
+        let mut mappings = Vec::new();
+        for mapping in &function.mappings {
+            let Some(queue) = planned.queues.iter().find(|queue| queue.name == mapping.queue()) else {
+                notes.push(format!(
+                    "{id}: its event {} reads the queue {}, which isn't the template's: nothing reads it here, as ff local has the template's queues alone",
+                    mapping.event,
+                    mapping.queue()
+                ));
+                continue;
+            };
+            let visibility = QueueSettings::of(&queue.attributes).visibility_timeout;
+            if visibility < i64::from(function.timeout) {
+                let message = format!(
+                    "{id}: event {} reads the queue {}, whose VisibilityTimeout of {visibility} s is shorter than the function's Timeout of {timeout} s: FF refuses it in Lambda's words, Invalid parameter: Queue visibility timeout: {visibility} seconds is less than Function timeout: {timeout} seconds",
+                    mapping.event,
+                    queue.name,
+                    timeout = function.timeout
+                );
+                problems.at(&format!("/Resources/{id}/Properties/Events/{}/Properties/Queue", mapping.event), &message);
+            }
+            mappings.push(LocalMapping {
+                event: mapping.event.clone(),
+                queue: queue.name.clone(),
+                batch_size: usize::try_from(mapping.batch_size).unwrap_or(usize::MAX),
+                batching_window: Duration::from_secs(u64::from(mapping.batching_window)),
+                report_batch_item_failures: mapping.report_batch_item_failures,
+                enabled: mapping.enabled,
+            });
+        }
         let variables = function.environment.iter().filter(|(name, _)| !secrets.contains_key(*name));
         all.insert(
             function.name.clone(),
@@ -332,6 +366,7 @@ fn settings(
                 on_failure,
                 url,
                 schedules: function_schedules,
+                mappings,
             },
         );
     }
@@ -469,7 +504,8 @@ fn prepared(path: &Path, options: &Options, port: u16, key: &Key, out: &Output) 
     let mut notes = Vec::new();
     let (functions, settings) = match &planned {
         Some(planned) => {
-            (functions(planned, &pod, &secrets, &mut problems, &mut notes), settings(planned, &secrets, &mut problems))
+            let functions = functions(planned, &pod, &secrets, &mut problems, &mut notes);
+            (functions, settings(planned, &secrets, &mut problems, &mut notes))
         }
         None => (Vec::new(), BTreeMap::new()),
     };
@@ -521,6 +557,19 @@ struct StartedQueue {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StartedMapping {
+    function: String,
+    event: String,
+    queue: String,
+    batch_size: usize,
+    /// How long a batch waits for more messages, in seconds.
+    batching_window: u64,
+    report_batch_item_failures: bool,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StartedKey {
     access_key_id: String,
     secret_access_key: String,
@@ -537,6 +586,7 @@ struct Started {
     functions: Vec<StartedFunction>,
     schedules: Vec<StartedSchedule>,
     queues: Vec<StartedQueue>,
+    mappings: Vec<StartedMapping>,
     logs: String,
 }
 
@@ -673,6 +723,21 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
             },
         )
     });
+    door.read_queues(&Arc::new(AtomicBool::new(false)));
+    let started_mappings: Vec<StartedMapping> = door
+        .settings
+        .iter()
+        .flat_map(|(function, settings)| settings.mappings.iter().map(move |mapping| (function, mapping)))
+        .map(|(function, mapping)| StartedMapping {
+            function: function.clone(),
+            event: mapping.event.clone(),
+            queue: mapping.queue.clone(),
+            batch_size: mapping.batch_size,
+            batching_window: mapping.batching_window.as_secs(),
+            report_batch_item_failures: mapping.report_batch_item_failures,
+            enabled: mapping.enabled,
+        })
+        .collect();
 
     let started = Started {
         stack: read.stack_name.clone(),
@@ -708,6 +773,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 max_receive_count: queue.attributes.pointer("/redrivePolicy/maxReceiveCount").and_then(Value::as_u64),
             })
             .collect(),
+        mappings: started_mappings,
         logs: logs.display().to_string(),
     };
     context.out.result(&started, || {
@@ -751,6 +817,25 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                     (Some(dead), Some(count)) => format!("{line}, to {dead} after {count} receives"),
                     _ => line,
                 }
+            }));
+        }
+        if !started.mappings.is_empty() {
+            lines.push("Its SQS events, each reading its queue while it runs, as FF's event source mappings:".to_owned());
+            let width =
+                started.mappings.iter().map(|mapping| mapping.function.len() + mapping.event.len() + 1).max().unwrap_or(0);
+            lines.extend(started.mappings.iter().map(|mapping| {
+                let named = format!("{}/{}", mapping.function, mapping.event);
+                let mut line = format!("  {named:width$}  {}: batches of {}", mapping.queue, mapping.batch_size);
+                if mapping.batching_window > 0 {
+                    line.push_str(&format!(" within {} s", mapping.batching_window));
+                }
+                if mapping.report_batch_item_failures {
+                    line.push_str(", ReportBatchItemFailures");
+                }
+                if !mapping.enabled {
+                    line.push_str(", disabled");
+                }
+                line
             }));
         }
         lines.push(format!(
@@ -1120,6 +1205,51 @@ Resources:
             error.message,
             format!(
                 "ff local start ran nothing: the template has a problem\n{}:21: Orders: the schedule often: rate(5 minute) must be rate(5 minutes): the unit is plural above 1",
+                path.display()
+            )
+        );
+    }
+
+    /// The template, `Orders`, its timeout `timeout` seconds, reading `Jobs`, the template's queue, in batches of 5
+    /// within 2 s, its failures reported; and a queue of the account the template hasn't, through a literal ARN.
+    fn with_mappings(timeout: u32) -> String {
+        let events = format!(
+            "      Timeout: {timeout}\n      Events:\n        Work:\n          Type: SQS\n          Properties:\n            Queue: !GetAtt Jobs.Arn\n            BatchSize: 5\n            MaximumBatchingWindowInSeconds: 2\n            FunctionResponseTypes:\n              - ReportBatchItemFailures\n        Elsewhere:\n          Type: SQS\n          Properties:\n            Queue: arn:aws:sqs:tn-tunis-1:000000000000:elsewhere\n            Enabled: false\n"
+        );
+        TEMPLATE.replace("      CodeUri: orders/\n", &format!("      CodeUri: orders/\n{events}"))
+    }
+
+    #[test]
+    fn a_functions_sqs_events_read_the_templates_queues_each_hiding_a_message_for_its_timeout() {
+        let (_folder, project) = project(&with_mappings(30));
+        let path = project.join("template.yaml");
+
+        let read_here = prepared(&path, &options(), 3700, &key(), &Output::quiet()).unwrap();
+
+        let work = LocalMapping {
+            event: "Work".into(),
+            queue: "Jobs".into(),
+            batch_size: 5,
+            batching_window: Duration::from_secs(2),
+            report_batch_item_failures: true,
+            enabled: true,
+        };
+        assert_eq!(read_here.settings["Orders"].mappings, [work]);
+        assert!(read_here.settings["payments-fn"].mappings.is_empty());
+        assert_eq!(
+            read_here.notes,
+            [
+                "Orders: its event Elsewhere reads the queue elsewhere, which isn't the template's: nothing reads it here, as ff local has the template's queues alone"
+            ]
+        );
+
+        std::fs::write(&path, with_mappings(31)).unwrap();
+        let error = prepared(&path, &options(), 3700, &key(), &Output::quiet()).err().unwrap();
+
+        assert_eq!(
+            error.message,
+            format!(
+                "ff local start ran nothing: the template has a problem\n{}:17: Orders: event Work reads the queue Jobs, whose VisibilityTimeout of 30 s is shorter than the function's Timeout of 31 s: FF refuses it in Lambda's words, Invalid parameter: Queue visibility timeout: 30 seconds is less than Function timeout: 31 seconds",
                 path.display()
             )
         );

@@ -24,6 +24,7 @@ use serde_json::{Map, Value, json};
 use super::http::{Request, Response};
 use super::key::Key;
 use super::schedule_expression::Millis;
+use super::sqs_event;
 use crate::md5;
 use crate::sigv4::{SignedRequest, Words, check_authorization, read_authorization, words};
 
@@ -387,7 +388,7 @@ struct Receipt {
 
 /// A receive's receipt handle: each receive of a message gives another, and only the last one's deletes it or changes
 /// its visibility.
-fn receipt_handle(row: u64, receive_count: u64, message_id: &str) -> String {
+pub(super) fn receipt_handle(row: u64, receive_count: u64, message_id: &str) -> String {
     URL_SAFE_NO_PAD.encode(format!("{row}:{receive_count}:{message_id}"))
 }
 
@@ -478,18 +479,18 @@ impl QueueSettings {
 
 /// A message as the queue keeps it.
 #[derive(Clone, Debug)]
-struct Message {
-    row: u64,
-    message_id: String,
-    body: String,
-    attributes: Attributes,
-    trace_header: Option<String>,
-    sender_id: String,
-    sent_at: Millis,
-    visible_at: Millis,
-    expires_at: Millis,
-    receive_count: u64,
-    first_received_at: Option<Millis>,
+pub(super) struct Message {
+    pub(super) row: u64,
+    pub(super) message_id: String,
+    pub(super) body: String,
+    pub(super) attributes: Attributes,
+    pub(super) trace_header: Option<String>,
+    pub(super) sender_id: String,
+    pub(super) sent_at: Millis,
+    pub(super) visible_at: Millis,
+    pub(super) expires_at: Millis,
+    pub(super) receive_count: u64,
+    pub(super) first_received_at: Option<Millis>,
 }
 
 impl Message {
@@ -831,18 +832,15 @@ impl Queues {
             "SendMessage" => self.send_message(input, caller),
             "SendMessageBatch" => self.send_message_batch(input, caller),
             "ReceiveMessage" => self.receive_message(input),
-            // An older receipt handle deletes nothing, as SQS's.
             "DeleteMessage" => {
                 let name = self.queue_of(input)?;
-                let receipt = receipt(input.get("ReceiptHandle"))?;
-                self.lock().queue(&name).messages.retain(|message| !message.receipt_matches(&receipt));
+                self.delete(&name, &receipt(input.get("ReceiptHandle"))?);
                 Ok(json!({}))
             }
             "DeleteMessageBatch" => {
                 let name = self.queue_of(input)?;
                 batch(input, |entry| {
-                    let receipt = receipt(entry.get("ReceiptHandle"))?;
-                    self.lock().queue(&name).messages.retain(|message| !message.receipt_matches(&receipt));
+                    self.delete(&name, &receipt(entry.get("ReceiptHandle"))?);
                     Ok(())
                 })
             }
@@ -1058,23 +1056,49 @@ impl Queues {
         let max = usize::try_from(integer(input, "MaxNumberOfMessages", 1, 10, 1)?).unwrap_or(1);
         let visibility = integer(input, "VisibilityTimeout", 0, 43_200, settings.visibility_timeout)?;
         let wait = integer(input, "WaitTimeSeconds", 0, 20, settings.receive_wait_seconds)?;
-        let deadline = Instant::now() + Duration::from_secs(u64::try_from(wait).unwrap_or(0));
-        let mut state = self.lock();
-        let received = loop {
-            let received = state.receive(&name, max, visibility, self.now(), &self.arn(""));
-            let left = deadline.saturating_duration_since(Instant::now());
-            if !received.is_empty() || left.is_zero() {
-                break received;
-            }
-            state = self.news.wait_timeout(state, left.min(POLL)).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
-        };
-        drop(state);
+        let received =
+            self.receive_waiting(&name, max, visibility, Duration::from_secs(u64::try_from(wait).unwrap_or(0)));
         let system_names: Vec<Value> =
             [list(input.get("AttributeNames")), list(input.get("MessageSystemAttributeNames"))].concat();
         let attribute_names = list(input.get("MessageAttributeNames"));
         let messages: Vec<Value> =
             received.iter().map(|message| answered_message(message, &system_names, attribute_names)).collect();
         Ok(if messages.is_empty() { json!({}) } else { json!({ "Messages": messages }) })
+    }
+
+    /// Up to `max` messages received from the queue, as [`State::receive`] receives them; when there is none, waiting
+    /// up to `wait` for one, woken as one is kept.
+    fn receive_waiting(&self, name: &str, max: usize, visibility: i64, wait: Duration) -> Vec<Message> {
+        let deadline = Instant::now() + wait;
+        let mut state = self.lock();
+        loop {
+            let received = state.receive(name, max, visibility, self.now(), &self.arn(""));
+            let left = deadline.saturating_duration_since(Instant::now());
+            if !received.is_empty() || left.is_zero() {
+                return received;
+            }
+            state = self.news.wait_timeout(state, left.min(POLL)).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+    }
+
+    /// Up to `max` of the queue's messages, as an event source mapping receives them: hidden for the queue's visibility
+    /// timeout, each as its record in SQS's event; when there is none, waiting up to `wait` for one.
+    pub fn receive_records(&self, name: &str, max: usize, wait: Duration) -> Vec<Value> {
+        let visibility = self.lock().queues[name].settings.visibility_timeout;
+        let received = self.receive_waiting(name, max, visibility, wait);
+        received.iter().map(|message| sqs_event::record(message, &self.arn(name), &self.region)).collect()
+    }
+
+    /// The message a receipt handle names deleted, when it is that receive's: an older handle deletes nothing, as SQS's.
+    fn delete(&self, name: &str, receipt: &Receipt) {
+        self.lock().queue(name).messages.retain(|message| !message.receipt_matches(receipt));
+    }
+
+    /// The messages an event source mapping's call handled, deleted by their records' receipt handles.
+    pub fn delete_received<'a>(&self, name: &str, handles: impl IntoIterator<Item = &'a str>) {
+        for receipt in handles.into_iter().filter_map(parse_receipt) {
+            self.delete(name, &receipt);
+        }
     }
 
     /// A received message's visibility changed, from now, while it is hidden still.
@@ -1294,24 +1318,34 @@ pub mod tests {
             let mut state = self.lock();
             let retention = state.queues[name].settings.retention_seconds;
             for held in holds {
-                let row: u64 = held["id"].as_str().unwrap().parse().unwrap();
-                state.next_row = state.next_row.max(row + 1);
-                let sent_at = millis(held["sentAt"].as_str().unwrap());
-                let attributes = check_attributes(held["meta"].get("messageAttributes"), "messageAttributes").unwrap();
-                state.queue(name).messages.push(Message {
-                    row,
-                    message_id: held["messageId"].as_str().unwrap().to_owned(),
-                    body: held["body"].as_str().unwrap().to_owned(),
-                    attributes,
-                    trace_header: None,
-                    sender_id: held["meta"]["senderId"].as_str().unwrap_or_default().to_owned(),
-                    sent_at,
-                    visible_at: held.get("visibleAt").and_then(Value::as_str).map_or(sent_at, millis),
-                    expires_at: sent_at + retention * 1000,
-                    receive_count: held["receiveCount"].as_u64().unwrap(),
-                    first_received_at: held.get("firstReceivedAt").and_then(Value::as_str).map(millis),
-                });
+                let message = held_message(held, retention);
+                state.next_row = state.next_row.max(message.row + 1);
+                state.queue(name).messages.push(message);
             }
+        }
+    }
+
+    /// A message as a table of the backend's writes one held: its row's `id`, `messageId`, `body`, `meta` (its sender,
+    /// its attributes, its trace header), when it was sent, received first and is visible, by default when it was
+    /// sent, and its receives; kept for `retention` seconds.
+    pub(in crate::local) fn held_message(held: &Value, retention: i64) -> Message {
+        let sent_at = millis(held["sentAt"].as_str().unwrap());
+        let meta = &held["meta"];
+        Message {
+            row: held["id"].as_str().unwrap().parse().unwrap(),
+            message_id: held["messageId"].as_str().unwrap().to_owned(),
+            body: held["body"].as_str().unwrap().to_owned(),
+            attributes: check_attributes(meta.get("messageAttributes"), "messageAttributes").unwrap(),
+            trace_header: meta
+                .pointer("/systemAttributes/AWSTraceHeader/StringValue")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            sender_id: meta["senderId"].as_str().unwrap_or_default().to_owned(),
+            sent_at,
+            visible_at: held.get("visibleAt").and_then(Value::as_str).map_or(sent_at, millis),
+            expires_at: sent_at + retention * 1000,
+            receive_count: held["receiveCount"].as_u64().unwrap(),
+            first_received_at: held.get("firstReceivedAt").and_then(Value::as_str).map(millis),
         }
     }
 

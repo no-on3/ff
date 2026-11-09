@@ -28,7 +28,7 @@ printf '{"api": "%s"}\n' "$(ff url show shop-api --output json | jq -r .url.func
 ff sites deploy shop-site site
 ```
 
-On this machine, `ff local start` runs it in Docker as FF runs it, once its libraries are installed, as `sam build` installs them for `sam local`; its secrets come from `.env.local`, which git leaves out, as it does `.ff/`, where `ff local` keeps its logs and key. `shop-api` answers at its URL, its CORS the template's, the schedule runs on time, or now with `ff local run`, and the queue of new orders is kept there, answering SQS at the same port. Nothing reads the queue for `shop-receipts` there yet, and the buckets and the mail don't run there yet, so a new order goes without its receipt:
+On this machine, `ff local start` runs it in Docker as FF runs it, once its libraries are installed, as `sam build` installs them for `sam local`; its secrets come from `.env.local`, which git leaves out, as it does `.ff/`, where `ff local` keeps its logs and key. `shop-api` answers at its URL, its CORS the template's, the schedule runs on time, or now with `ff local run`, and the queue of new orders is kept there, answering SQS at the same port, where `shop-receipts` reads it in batches as on FF. The buckets and the mail don't run there yet, so a new order goes without its receipt: `shop-receipts` names its message as failed, and it comes back each 30 s, the queue's visibility timeout, until the start stops:
 
 ```bash
 npm ci --omit=dev

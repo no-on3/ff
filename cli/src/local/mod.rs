@@ -3,7 +3,8 @@
 //! privileges), its memory and CPU, and the variables the backend gives a function's pod; started,
 //! its code loaded, called and its log followed the same way by each of `ff local`'s commands.
 //! [`images`] finds its runtime's image, [`http`] serves HTTP on this machine, [`url`] serves a
-//! function as its URL would, [`schedules`] runs a template's schedules, and [`sqs`] keeps its queues.
+//! function as its URL would, [`schedules`] runs a template's schedules, [`sqs`] keeps its queues, and [`mappings`]
+//! reads them for the functions whose SQS events name them.
 
 pub mod events;
 pub mod front_door;
@@ -11,9 +12,11 @@ pub mod http;
 pub mod images;
 pub mod instances;
 pub mod key;
+pub mod mappings;
 pub mod schedule_expression;
 pub mod schedules;
 pub mod sqs;
+pub mod sqs_event;
 pub mod url;
 
 use std::io::{BufRead, BufReader, Read, Write};

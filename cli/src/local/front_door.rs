@@ -25,6 +25,7 @@ use super::events::{self, Attempts, End, Outcome, RetryPolicy, Settlement};
 use super::http::{Answers, PAYLOAD_LIMIT, Request, Response, percent_decode, request_id};
 use super::instances::{Called, Instances, Runner};
 use super::key::Key;
+use super::mappings::LocalMapping;
 use super::schedule_expression::{Millis, iso};
 use super::schedules::{self, LocalSchedule};
 use super::sqs::{self, Outgoing, Queues};
@@ -267,6 +268,8 @@ pub struct Settings {
     pub on_failure: Option<String>,
     pub url: Option<FunctionUrl>,
     pub schedules: Vec<LocalSchedule>,
+    /// The queues it reads, its SQS events.
+    pub mappings: Vec<LocalMapping>,
 }
 
 /// The front door to the template's app.
@@ -684,7 +687,7 @@ impl<R: Runner> FrontDoor<R> {
 
     /// One attempt of an asynchronous call: how it ended, and its answer as a record gives it; none when the function
     /// is gone.
-    fn attempt(&self, name: &str, event: &Value, request_id: &str) -> Option<(Outcome, events::Response)> {
+    pub(super) fn attempt(&self, name: &str, event: &Value, request_id: &str) -> Option<(Outcome, events::Response)> {
         let failed = |error_type: &str, message: &str| events::Response {
             status: 200,
             function_error: true,

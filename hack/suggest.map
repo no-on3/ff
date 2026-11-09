@@ -13,7 +13,7 @@ docs/*                                  static
 
 # The backend, a module at a time where its suites' sections are its own; L5 tries every route, so it runs whole.
 BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted,local_queues aws-tools
-BE/src/event-sources/*                  static unit db l4:mappings l5 cli:event_sources aws-tools
+BE/src/event-sources/*                  static unit db l4:mappings l5 cli:event_sources,local_queues aws-tools
 BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted aws-tools
 BE/src/object-store/*                   static unit db l4:buckets,buckets_room,notifications,sites l5 cli:buckets,sites
 BE/src/databases/*                      static unit db l4:databases,databases_sampled l5 cli:databases,databases_used

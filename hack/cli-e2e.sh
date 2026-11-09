@@ -2162,7 +2162,7 @@ check "what ff local keeps stays out of git in an app whose .gitignore doesn't n
 section_def local_apps section_local_apps backend budget=45
 
 section_local_queues() {
-section "ff local start's queues: SQS at the front door, the AWS CLI's cases of L4, a function's sends, and its failures' records"
+section "ff local start's queues: SQS at the front door, the AWS CLI's cases of L4, a function's sends, its failures' records, and a function reading one"
 local app="$work/queues" port starter key_id url
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
 # sqs_cli <args...>: the AWS CLI's sqs commands with the local key's file alone, the front door their endpoint.
@@ -2178,7 +2178,7 @@ received() {
   shift
   sqs_cli receive-message --queue-url "$url/$queue" --attribute-names All --message-attribute-names All "$@"
 }
-rm -rf "$app" && mkdir -p "$app/sender" "$app/failing"
+rm -rf "$app" && mkdir -p "$app/sender" "$app/failing" "$app/reader"
 cat >"$app/template.yaml" <<'YAML'
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
@@ -2214,9 +2214,31 @@ Resources:
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt Dead.Arn
         maxReceiveCount: 2
+  Reader:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: reader/
+      Timeout: 3
+      Events:
+        Work:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Jobs.Arn
+            MaximumBatchingWindowInSeconds: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
   Dead:
     Type: AWS::SQS::Queue
   Records:
+    Type: AWS::SQS::Queue
+  Jobs:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 3
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt JobsDead.Arn
+        maxReceiveCount: 2
+  JobsDead:
     Type: AWS::SQS::Queue
 YAML
 # A function that sends to its queue as an SDK would, with no setting: the endpoint, the region and the key FF gives
@@ -2253,6 +2275,21 @@ def handler(event, context):
         return json.load(answer)
 PY
 printf 'def handler(event, context):\n    raise RuntimeError("no luck")\n' >"$app/failing/app.py"
+# A function reading its queue in batches, as the small app's receipts do: each batch and record logged, a message
+# whose body is "fail" named in its answer, so that it alone comes back.
+cat >"$app/reader/app.py" <<'PY'
+import json
+
+
+def handler(event, context):
+    print(f"batch of {len(event['Records'])}", flush=True)
+    failures = []
+    for record in event["Records"]:
+        print("record " + json.dumps(record, sort_keys=True), flush=True)
+        if record["body"] == "fail":
+            failures.append({"itemIdentifier": record["messageId"]})
+    return {"batchItemFailures": failures}
+PY
 
 port="$(free_port)"
 url="http://127.0.0.1:$port/000000000000"
@@ -2268,7 +2305,7 @@ check "the start lists the template's queues, their URLs and a redrive policy" "
   "$(grep -F "Its queues, SQS's at http://127.0.0.1:$port, kept while it runs:" "$work/queues.out" >/dev/null && echo true || echo false) \
 $(grep -E "^  Orders +$url/Orders, to Dead after 2 receives$" "$work/queues.out" >/dev/null && echo true || echo false) \
 $(grep -E "^  Records +$url/Records$" "$work/queues.out" >/dev/null && echo true || echo false)"
-check "the AWS CLI lists them and finds one's URL, with the local key" "$url/Dead $url/Orders $url/Records $url/Orders" \
+check "the AWS CLI lists them and finds one's URL, with the local key" "$url/Dead $url/Jobs $url/JobsDead $url/Orders $url/Records $url/Orders" \
   "$(sqs_cli list-queues | jq -r '.QueueUrls | join(" ")') $(sqs_cli get-queue-url --queue-name Orders | jq -r .QueueUrl)"
 sqs_cli send-message --queue-url "$url/Orders" --message-body 'Ahlan from the CLI' \
   --message-attributes '{"source": {"DataType": "String", "StringValue": "aws-cli"}}' >"$work/sent.json"
@@ -2317,6 +2354,33 @@ check "an asynchronous call that failed: its record in its OnFailure queue, sent
 check "  ... and its event in its dead-letter queue, with its request ID, the status and the error, as Lambda sends it" \
   '1 200 no luck true' \
   "$(jq -r '.Messages[0] | "\(.Body | fromjson | .n) \(.MessageAttributes.ErrorCode.StringValue) \(.MessageAttributes.ErrorMessage.StringValue) \(.MessageAttributes.RequestID.StringValue | test("^[0-9a-f-]{36}$"))"' "$work/dead.json")"
+check "the start lists a function's SQS event: its queue, its batches and window, its failures reported" "true true" \
+  "$(grep -F "Its SQS events, each reading its queue while it runs, as FF's event source mappings:" "$work/queues.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  Reader/Work +Jobs: batches of 10 within 1 s, ReportBatchItemFailures$' "$work/queues.out" >/dev/null && echo true || echo false)"
+cat >"$work/jobs.json" <<'JSON'
+[
+  {"Id": "one", "MessageBody": "ok-1", "MessageAttributes": {"source": {"DataType": "String", "StringValue": "aws-cli"}},
+   "MessageSystemAttributes": {"AWSTraceHeader": {"DataType": "String", "StringValue": "Root=1-5759e988-bd862e3fe1be46a994272793"}}},
+  {"Id": "two", "MessageBody": "fail"},
+  {"Id": "three", "MessageBody": "ok-2"}
+]
+JSON
+sqs_cli send-message-batch --queue-url "$url/Jobs" --entries "file://$work/jobs.json" >/dev/null
+# Its message named as failed comes back after the queue's 3 s, fails again, and goes to JobsDead at the next receive.
+received JobsDead --wait-time-seconds 20 >"$work/jobs-dead.json"
+records() { sed -n 's/^.*record //p' "$app/.ff/local/logs/Reader.log"; }
+check "a function's SQS event reads its queue: the three messages in one batch, as Lambda's SQS event gives them" \
+  "batch of 3|ok-1 fail ok-2|aws:sqs arn:aws:sqs:tn-tunis-1:000000000000:Jobs tn-tunis-1 1|aws-cli String Root=1-5759e988-bd862e3fe1be46a994272793 true" \
+  "$(grep -m1 -o 'batch of [0-9]*' "$app/.ff/local/logs/Reader.log")|$(records | head -3 | jq -r .body | paste -sd' ')|\
+$(records | head -1 | jq -r '"\(.eventSource) \(.eventSourceARN) \(.awsRegion) \(.attributes.ApproximateReceiveCount)"')|\
+$(records | head -1 | jq -r --arg key "$key_id" '"\(.messageAttributes.source.stringValue) \(.messageAttributes.source.dataType) \(.attributes.AWSTraceHeader) \(.attributes.SenderId == $key)"')"
+check "  ... the message its answer names comes back after the visibility timeout, alone, the others deleted" \
+  "fail 2|0 0" \
+  "$(records | sed -n 4p | jq -r '"\(.body) \(.attributes.ApproximateReceiveCount)"')|\
+$(sqs_cli get-queue-attributes --queue-url "$url/Jobs" --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+  | jq -r '.Attributes | "\(.ApproximateNumberOfMessages) \(.ApproximateNumberOfMessagesNotVisible)"')"
+check "  ... and, received as often as the queue's redrive policy allows, goes to its dead-letter queue" "fail 4" \
+  "$(jq -r '.Messages[0].Body' "$work/jobs-dead.json") $(records | wc -l | tr -d ' ')"
 kill -INT "$starter"
 wait "$starter" 2>/dev/null || true
 check "Ctrl-C removes their containers" 0 "$(leftover)"
