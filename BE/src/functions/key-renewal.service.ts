@@ -108,7 +108,8 @@ export class FunctionKeyRenewal implements OnModuleInit, OnModuleDestroy {
         return;
       }
       await this.orchestrator.renewEnvironment(workload);
-      await this.orchestrator.waitUntilReady(workload, readyTimeoutMs(this.config));
+      // The pods it replaces answer as the new ones do, their old key working until it is revoked, below.
+      await this.orchestrator.waitUntilReady(workload, readyTimeoutMs(this.config), { replacedMayAnswer: true });
       rolled++;
     }
     report.rolled += rolled;

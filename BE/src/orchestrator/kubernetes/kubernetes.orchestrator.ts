@@ -20,6 +20,7 @@ import {
   K8sObject,
   DATA_DB_CA_SECRET,
   RUNTIME_PORT,
+  STOP_DELAY_SECONDS,
   TENANT_LIMITS_NAME,
   TENANT_NETWORK_POLICY_NAME,
   TENANT_QUOTA_NAME,
@@ -89,6 +90,7 @@ interface Service extends K8sObject {
 }
 
 interface Pod extends Listed {
+  metadata: Listed['metadata'] & { deletionTimestamp?: string };
   status?: {
     phase?: string;
     containerStatuses?: Array<{
@@ -180,6 +182,11 @@ export class KubernetesOrchestrator implements Orchestrator {
     private readonly loadCheckIntervalMs = 3000,
     /** How long a call the function never got keeps being tried, from its first refusal (post()). */
     private readonly refusedRetryMs = 5000,
+    /**
+     * How long a pod told to stop may still answer, from when the backend sees it told: the time it goes on answering,
+     * and a second for the kubelet, which runs the pod's stop, to learn of it.
+     */
+    private readonly stopAnsweringMs = (STOP_DELAY_SECONDS + 1) * 1000,
   ) {
     this.logStore = new LogStore(settings.invokeMode, api);
   }
@@ -455,10 +462,25 @@ export class KubernetesOrchestrator implements Orchestrator {
     return key;
   }
 
-  async waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void> {
+  async waitUntilReady(fn: FunctionWorkload, timeoutMs: number, { replacedMayAnswer = false } = {}): Promise<void> {
+    const ns = this.namespaceOf(fn);
     const deployment = await this.waitFor(fn, timeoutMs, isRolledOut);
+    if (!replacedMayAnswer) await this.waitWhileStoppingPodsAnswer(fn, ns);
     // $LATEST's two Secrets are its own: a version's rollout leaves them, and its Secret is the one it reads.
-    if (fn.version === undefined) await this.collectEnvironments(fn, this.namespaceOf(fn), deployment);
+    if (fn.version === undefined) await this.collectEnvironments(fn, ns, deployment);
+  }
+
+  /**
+   * A rollout is complete once its old pods are told to stop, and each goes on answering for a few seconds more with
+   * what it ran, the code and the variables before the update (STOP_DELAY_SECONDS); then its runtime refuses what
+   * still reaches it, saying the call never ran, and post() takes the call to another pod. Those seconds are waited
+   * out, counted from now, as the pods were told before the rollout was seen complete: every call after an update
+   * then runs what the update made, as on AWS Lambda.
+   */
+  private async waitWhileStoppingPodsAnswer(fn: FunctionWorkload, ns: string): Promise<void> {
+    const pods = await this.podsOf(fn, ns);
+    const answering = pods.some((pod) => pod.metadata.deletionTimestamp !== undefined && pod.status?.phase === 'Running');
+    if (answering) await sleep(this.stopAnsweringMs);
   }
 
   /** For a cold start: one ready instance is enough to serve the call. */

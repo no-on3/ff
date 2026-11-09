@@ -643,6 +643,51 @@ describe('KubernetesOrchestrator', () => {
       await expect(orchestrator.waitUntilReady(fn, 100)).resolves.toBeUndefined();
     });
 
+    describe('the pods it replaced, which go on answering for a few seconds once told to stop', () => {
+      const podsPath = `/api/v1/namespaces/${ns}/pods`;
+      const pod = (name: string, phase: string, toldToStop: boolean) => ({
+        metadata: { name, creationTimestamp: '2026-11-09T10:00:00Z', ...(toldToStop ? { deletionTimestamp: '2026-11-09T10:01:00Z' } : {}) },
+        status: { phase },
+      });
+      /** An orchestrator that takes a pod told to stop as answering for `stopAnsweringMs` from when it sees it told. */
+      const stoppingIn = (stopAnsweringMs: number) => new KubernetesOrchestrator(settings(), api, 5, 3000, 5000, stopAnsweringMs);
+
+      it('waits until one told to stop no longer answers: a call after an update runs what it made', async () => {
+        orchestrator = stoppingIn(200);
+        api.objects.set(deploymentPath, rolledOut(1));
+        api.lists.set(podsPath, [pod('fn-new', 'Running', false), pod('fn-old', 'Running', true)]);
+
+        const started = Date.now();
+        await orchestrator.waitUntilReady(fn, 100);
+
+        expect(Date.now() - started).toBeGreaterThanOrEqual(190);
+        expect(api.listed).toEqual([{ path: podsPath, selector: `ff.dev/function-id=${fn.id}` }]);
+      });
+
+      it("doesn't wait when a call can't tell them from the new ones, as at a key's renewal", async () => {
+        orchestrator = stoppingIn(60_000);
+        api.objects.set(deploymentPath, rolledOut(1));
+        api.lists.set(podsPath, [pod('fn-new', 'Running', false), pod('fn-old', 'Running', true)]);
+
+        const started = Date.now();
+        await orchestrator.waitUntilReady(fn, 100, { replacedMayAnswer: true });
+
+        expect(Date.now() - started).toBeLessThan(1_000);
+        expect(api.listed).toEqual([]);
+      });
+
+      it("doesn't wait when none was told to stop, nor for one whose runtime ended or never started", async () => {
+        orchestrator = stoppingIn(60_000);
+        api.objects.set(deploymentPath, rolledOut(1));
+        api.lists.set(podsPath, [pod('fn-new', 'Running', false), pod('fn-ended', 'Succeeded', true), pod('fn-unstarted', 'Pending', true)]);
+
+        const started = Date.now();
+        await orchestrator.waitUntilReady(fn, 100);
+
+        expect(Date.now() - started).toBeLessThan(1_000);
+      });
+    });
+
     const crashLooping = () => {
       api.objects.set(deploymentPath, { ...rolledOut(1), status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, availableReplicas: 0 } });
       api.lists.set(`/api/v1/namespaces/${ns}/pods`, [

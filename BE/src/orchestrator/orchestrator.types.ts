@@ -191,9 +191,11 @@ export interface Orchestrator {
   deleteLogs(accountId: string): Promise<void>;
   /**
    * Resolve once the rollout is complete: every desired instance runs the
-   * current version and can serve. Reject with diagnostics on timeout.
+   * current version and can serve, and no instance it replaced still answers,
+   * unless `replacedMayAnswer`: for a rollout whose instances differ by nothing
+   * a call can tell. Reject with diagnostics on timeout.
    */
-  waitUntilReady(fn: FunctionWorkload, timeoutMs: number): Promise<void>;
+  waitUntilReady(fn: FunctionWorkload, timeoutMs: number, options?: { replacedMayAnswer?: boolean }): Promise<void>;
   /**
    * Write the workload's environment where its pods don't read it, and roll its Deployment, $LATEST's or the version
    * `fn.version` names, onto it, its code and its instances as they are: each pod replaced by one of the new
