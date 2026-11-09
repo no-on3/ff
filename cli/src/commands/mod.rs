@@ -1,6 +1,7 @@
 //! One file per command.
 
 mod account;
+mod api_keys;
 mod async_config;
 mod bucket_notifications;
 mod buckets;
@@ -304,6 +305,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),
+        Command::ApiKeys(command) => api_keys::run(command, context),
         Command::Usage { aws: true, months, without, .. } => account::aws_estimate(months, &without, context),
         // Clap takes a flag's default as given, so it can't say these two need --aws.
         Command::Usage { months, without, .. } if months.is_some() || !without.is_empty() => {

@@ -57,6 +57,23 @@ pub fn settings(config: &str, credentials: &str) -> TempDir {
     dir
 }
 
+/// The realm's issuer, when the scripted server answers as the API and as its realm.
+pub fn issuer(url: &str) -> String {
+    format!("{url}/realms/ff")
+}
+
+/// A profile calling `url`, with a login whose access token ends at `expires_at`, and maybe an API key.
+pub fn logged_in(url: &str, expires_at: &str, key: bool) -> TempDir {
+    let key = if key { format!("token = \"{KEY}\"\n") } else { String::new() };
+    settings(
+        &format!("[profiles.default]\nendpoint = \"{url}\"\n"),
+        &format!(
+            "[profiles.default]\n{key}issuer = \"{}\"\naccess_token = \"old-access\"\nrefresh_token = \"old-refresh\"\nexpires_at = \"{expires_at}\"\n",
+            issuer(url)
+        ),
+    )
+}
+
 /// A profile that calls `url` with the test key.
 pub fn with_key(url: &str) -> TempDir {
     settings(

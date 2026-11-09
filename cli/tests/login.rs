@@ -3,13 +3,9 @@
 
 mod common;
 
-use common::{Bound, KEY, Reply, Server, ff, settings, unreachable_url};
+use common::{Bound, KEY, Reply, Server, ff, issuer, logged_in, settings, unreachable_url};
 use predicates::prelude::*;
 use serde_json::{Value, json};
-
-fn issuer(url: &str) -> String {
-    format!("{url}/realms/ff")
-}
 
 /// What the API says of its login.
 fn place(url: &str) -> Reply {
@@ -63,18 +59,6 @@ fn user_me() -> Value {
         "accounts": [{ "id": "123456789012", "name": "Acme", "status": "active", "role": "owner",
                        "plan": { "id": "beta", "name": "Beta", "limits": {} } }]
     })
-}
-
-/// A profile calling `url`, with a login whose access token ended at `expires_at`, and maybe an API key.
-fn logged_in(url: &str, expires_at: &str, key: bool) -> tempfile::TempDir {
-    let key = if key { format!("token = \"{KEY}\"\n") } else { String::new() };
-    settings(
-        &format!("[profiles.default]\nendpoint = \"{url}\"\n"),
-        &format!(
-            "[profiles.default]\n{key}issuer = \"{}\"\naccess_token = \"old-access\"\nrefresh_token = \"old-refresh\"\nexpires_at = \"{expires_at}\"\n",
-            issuer(url)
-        ),
-    )
 }
 
 fn credentials(dir: &tempfile::TempDir) -> String {

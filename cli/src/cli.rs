@@ -307,6 +307,11 @@ pub enum Command {
     /// Show the current account: its status, the role in it, its plan's limits, its internet access
     Account,
 
+    /// The account's API keys, for a script or a CI to call FF with: each with its scopes, made and revoked by an
+    /// owner's login, never by a key
+    #[command(subcommand)]
+    ApiKeys(ApiKeysCommand),
+
     /// Show a month's usage per function, with its estimated cost; with --aws, the last months at AWS's prices
     Usage {
         /// The month, YYYY-MM, by the UTC calendar [default: this month]
@@ -1173,6 +1178,63 @@ pub enum KeysCommand {
         yes: bool,
     },
 }
+
+#[derive(Subcommand)]
+pub enum ApiKeysCommand {
+    /// List the account's API keys, newest first: each one's scopes, whether it works, when it was last used; never
+    /// the key itself
+    List,
+
+    /// Make an API key: the key printed this once, for FF_TOKEN or `ff config set-token` where it is used
+    Create {
+        /// What it is for, e.g. "CI deploys": 1 to 100 characters
+        #[arg(long)]
+        name: String,
+
+        /// What it may do, within its creator's role; a list, or again for each
+        #[arg(long = "scopes", value_delimiter = ',', value_name = "SCOPE,...", required = true,
+              value_parser = clap::builder::PossibleValuesParser::new(API_KEY_SCOPES))]
+        scopes: Vec<String>,
+
+        /// When it stops working: in a while, as 90d, 12h or 2w, or at a time, as 2027-01-31T00:00:00Z [default: never]
+        #[arg(long, value_name = "WHEN")]
+        expires: Option<String>,
+    },
+
+    /// Revoke an API key: whatever uses it is refused at once
+    Revoke {
+        /// The key ID, 12 hex characters, or the name of the one working key of that name
+        key: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+/// What an API key may do, as the API names it.
+pub const API_KEY_SCOPES: [&str; 20] = [
+    "functions:read",
+    "functions:write",
+    "functions:invoke",
+    "logs:read",
+    "metrics:read",
+    "alarms:read",
+    "alarms:write",
+    "usage:read",
+    "databases:read",
+    "databases:write",
+    "storage:read",
+    "storage:write",
+    "queues:read",
+    "queues:write",
+    "caches:read",
+    "caches:write",
+    "email:read",
+    "email:write",
+    "stacks:read",
+    "stacks:write",
+];
 
 #[derive(Args)]
 pub struct NewKeyArgs {

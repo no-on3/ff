@@ -92,6 +92,8 @@ One Rust binary that deploys, invokes and reads FF's functions, through FF's API
 | `ff login` | Log in with the browser, by OAuth's device flow: the address and the code printed, the browser opened when there is one (`--no-browser` not to); the login kept for the profile and renewed as it is used. `--replace` removes the profile's API key, which ff would use first |
 | `ff logout` | Revoke the login where it was made, then remove its tokens from the profile; `--no-revoke` removes them alone, when the login's server can't be reached |
 | `ff whoami` | Who the token is, an API key (its name, ID and scopes) or a user (their accounts, and which one acts), and the account it acts for: `GET /me`. The first check of a new key |
+| `ff api-keys create --name <name> --scopes <scope,...> [--expires 90d\|<time>]` | Make an API key for a script or a CI, with the scopes it needs, from `functions:read` to `stacks:write` (`--help` lists them); it never does more than its creator's role allows. `--expires` in a while (`90d`, `12h`, `2w`) or at a time (`2027-01-31T00:00:00Z`), else never. The key is printed this once, last, and in its `key` field with `--output json`: `POST /api-keys` |
+| `ff api-keys list`, `ff api-keys revoke <id or name> [--yes]` | The account's API keys, newest first: each one's scopes, whether it works (active, revoked or expired), its expiry, when it was last used, never the key; revoking one, by its ID or the name of the one working key so named, refuses it at once. Only an owner's login manages them: with an API key, ff says so and calls nothing, since the API would refuse it |
 | `ff config set <key> <value>` | Set one of the profile's settings: `endpoint`, `account`, `dev_account` or `allow_http` |
 | `ff config unset <key>` | Remove one of them, or the profile's `token` |
 | `ff config show` | The settings in effect, each with where it comes from; the token masked, `ffk_<key ID>_…`, as the console lists keys |
@@ -113,9 +115,11 @@ ff whoami                                       # Salma <salma@ff.example>, then
 
 `ff login` asks the API where its login is (`GET /login`), then runs OAuth's device flow (RFC 8628) against that realm's `ff-cli` client, with the scope `offline_access`: the login lasts while it is used, rather than ending with the realm's session after 30 minutes unused. Each command renews the access token first when it ends within a minute; a renewal refused says to log in again. `ff logout` revokes the login at the realm (RFC 7009) before removing it, since a copy of its token would otherwise go on working.
 
-For a script or a CI, an owner of the account makes an API key in the console's API keys page, with the scopes it needs, and the key is shown once. Then:
+For a script or a CI, an owner of the account makes an API key with the scopes it needs, by `ff api-keys create` or in the console's API keys page, and the key is shown once; where it is used, `ff config set-token` saves it, or `FF_TOKEN` holds it:
 
 ```bash
+ff api-keys create --name "CI deploys" --expires 90d \
+  --scopes functions:read,functions:write,functions:invoke   # as an owner, logged in: the key, printed once
 ff config set-token                             # paste the key: it isn't shown, nor kept in the shell's history
 ff whoami                                       # API key "laptop" (ffk_1a2b3c4d5e6f_…) on account 123456789012 …
 ```

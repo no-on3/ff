@@ -104,8 +104,8 @@ pub fn require_identity(settings: &Settings) -> Result<(), Error> {
         Kind::Failed,
         format!(
             "There is no token to call {} with: `ff login` logs you in with your browser. For a script or a CI, an \
-             owner of the account makes an API key in the console's API keys page, with the scopes it needs; then \
-             `ff config set-token` saves it without showing it, or FF_TOKEN holds it. For a development stack \
+             owner of the account makes an API key with the scopes it needs, by `ff api-keys create` or in the \
+             console's API keys page; then `ff config set-token` saves it without showing it, or FF_TOKEN holds it. For a development stack \
              (FF_AUTH_MODE=dev), name the account to act as instead: `ff config set dev_account <12 digits>`",
             settings.endpoint.value
         ),
