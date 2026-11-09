@@ -54,7 +54,8 @@ pub fn settings(config: &str, credentials: &str) -> TempDir {
 }
 
 /// Makes a file its owner's alone, as ff makes its credentials: mode 0600 on Unix; on Windows, an access list of its
-/// own for the user running the tests, inherited from no folder.
+/// own for the user running the tests, inherited from no folder, and without the entries for the system and its
+/// administrators that a file made in some folders holds of its own (GitHub's Windows runners' temporary folder).
 pub fn owner_alone(path: &Path) {
     #[cfg(unix)]
     {
@@ -63,10 +64,12 @@ pub fn owner_alone(path: &Path) {
     }
     #[cfg(windows)]
     {
+        // The system and the administrators by their SIDs, which no language renames.
         let made = std::process::Command::new("icacls")
             .arg(path)
             .args(["/inheritance:r", "/grant:r"])
             .arg(format!("{}:F", windows_user()))
+            .args(["/remove", "*S-1-5-18", "*S-1-5-32-544"])
             .output()
             .unwrap();
         assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stdout));
