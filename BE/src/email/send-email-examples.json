@@ -1,0 +1,73 @@
+{
+  "about": "A message as SES v2's SendEmail takes it, as FF reads and makes it: the table the backend's L1 (email-send.spec.ts) and ff local's mail read for their tests, so that both read a request alike and make the same message of it. `addresses` are lists as a header or the API writes them, each address in lower case, null for one that is no address; `senders`, a sender's one address, null for none or more than one; `headers`, a request's own header and why it can't be the message's, null when it can; `raw`, a raw message's sender and recipients as its header names them, and the message without its Bcc. `composed` is simple content made into a message, as a reader shows it: each header field's value unfolded, its encoded words decoded, `{id}` the message's ID and `{host}` the SES endpoint's; the fields it hasn't; its type, and each part's type and body, decoded. `written` is how the backend's nodemailer writes a field, which ff local needn't: the backend's alone.",
+  "addresses": [
+    { "title": "a name with a comma in quotes, an address alone, and words that are no address", "list": "\"Ana, Shop\" <Orders@Shop.TN>, b@c.tn, not an address", "addresses": ["orders@shop.tn", "b@c.tn", null] }
+  ],
+  "senders": [
+    { "title": "a name and its address, in lower case", "text": "Boutique Ana <Orders@Shop.Example.TN>", "sender": "orders@shop.example.tn" },
+    { "title": "two addresses", "text": "a@b.tn, c@d.tn", "sender": null },
+    { "title": "no address", "text": "nobody", "sender": null }
+  ],
+  "headers": [
+    { "title": "a header of the sender's", "name": "X-Campaign", "value": "autumn", "problem": null },
+    { "title": "a list's way out", "name": "List-Unsubscribe", "value": "<https://shop.example.tn/unsubscribe>", "problem": null },
+    { "title": "the sender", "name": "From", "value": "someone@else.tn", "problem": "From is a header SES writes itself" },
+    { "title": "a signature", "name": "DKIM-Signature", "value": "v=1", "problem": "DKIM-Signature is a header SES writes itself" },
+    { "title": "a value that would add a header", "name": "X-Bad", "value": "one\r\nBcc: spy@example.tn", "problem": "X-Bad's value is one line of 870 characters at most" },
+    { "title": "a name with a space", "name": "Bad Name", "value": "x", "problem": "\"Bad Name\" is not a header's name" }
+  ],
+  "raw": [
+    {
+      "title": "recipients folded over two lines, a Bcc folded with a tab, and a body line that looks like one",
+      "message": "From: Ana <orders@shop.example.tn>\r\nTo: a@example.tn,\r\n b@example.tn\r\nBcc: hidden@example.tn,\r\n\tother@example.tn\r\nSubject: Hi\r\n\r\nBcc: in the body stays\r\n",
+      "parties": { "from": "Ana <orders@shop.example.tn>", "to": ["a@example.tn", "b@example.tn"], "cc": [], "bcc": ["hidden@example.tn", "other@example.tn"] },
+      "withoutBcc": "From: Ana <orders@shop.example.tn>\r\nTo: a@example.tn,\r\n b@example.tn\r\nSubject: Hi\r\n\r\nBcc: in the body stays\r\n"
+    },
+    {
+      "title": "a Bcc as the header's last field",
+      "message": "From: a@b.tn\r\nBcc: c@d.tn\r\n\r\nbody",
+      "parties": { "from": "a@b.tn", "to": [], "cc": [], "bcc": ["c@d.tn"] },
+      "withoutBcc": "From: a@b.tn\r\n\r\nbody"
+    },
+    {
+      "title": "no Bcc: the message as it came",
+      "message": "From: a@b.tn\r\n\r\nbody",
+      "parties": { "from": "a@b.tn", "to": [], "cc": [], "bcc": [] },
+      "withoutBcc": "From: a@b.tn\r\n\r\nbody"
+    }
+  ],
+  "composed": [
+    {
+      "title": "a subject in another alphabet, both bodies as alternatives, the request's own header, and no Bcc",
+      "content": {
+        "from": "Boutique Ana <orders@shop.example.tn>",
+        "to": ["client@example.tn"],
+        "cc": ["copy@example.tn"],
+        "replyTo": ["help@shop.example.tn"],
+        "subject": "Votre reçu n° 42",
+        "text": "Merci",
+        "html": "<p>Merci</p>",
+        "headers": [{ "name": "X-Order", "value": "42" }]
+      },
+      "at": "2026-10-30T08:00:00Z",
+      "fields": {
+        "from": "Boutique Ana <orders@shop.example.tn>",
+        "to": "client@example.tn",
+        "cc": "copy@example.tn",
+        "reply-to": "help@shop.example.tn",
+        "subject": "Votre reçu n° 42",
+        "message-id": "<{id}@{host}>",
+        "date": "Fri, 30 Oct 2026 08:00:00 +0000",
+        "mime-version": "1.0",
+        "x-order": "42"
+      },
+      "absent": ["bcc"],
+      "type": "multipart/alternative",
+      "parts": [
+        { "type": "text/plain", "body": "Merci" },
+        { "type": "text/html", "body": "<p>Merci</p>" }
+      ],
+      "written": { "subject": "=?UTF-8?Q?Votre_re=C3=A7u_n=C2=B0_42?=" }
+    }
+  ]
+}
