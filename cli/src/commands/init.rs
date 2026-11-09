@@ -277,6 +277,37 @@ const IMAGE_RESIZE: App = App {
     bucket: Some("-images-"),
 };
 
+/// Orders paid through a payment provider, Konnect, and its notifications received right: each kept as it came, the
+/// payment asked of the provider itself, each order paid once.
+const WEBHOOK: App = App {
+    files: template_files!(
+        "webhook",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/create-order.json",
+            "events/notification.json",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
+    ),
+    about: "orders paid through Konnect: each notification kept, the payment asked of Konnect, each order paid once",
+    what: "a payment provider's webhook",
+    parts: &["payments"],
+    then: "its libraries installed, ff local start template.yaml --with postgres here; ff deploy template.yaml, ff db \
+           create and ff secrets set on FF; sam deploy on AWS",
+    bucket: None,
+};
+
 /// The application a template is, if it is one.
 fn app(template: Template) -> Option<&'static App> {
     match template {
@@ -285,6 +316,7 @@ fn app(template: Template) -> Option<&'static App> {
         Template::QueueWorker => Some(&QUEUE_WORKER),
         Template::SiteWithApi => Some(&SITE_WITH_API),
         Template::ImageResize => Some(&IMAGE_RESIZE),
+        Template::Webhook => Some(&WEBHOOK),
         Template::Function | Template::Terraform | Template::Sam => None,
     }
 }
@@ -301,7 +333,8 @@ fn about(template: Template) -> &'static str {
         | Template::CronJob
         | Template::QueueWorker
         | Template::SiteWithApi
-        | Template::ImageResize => app(template).map(|app| app.about).unwrap_or_default(),
+        | Template::ImageResize
+        | Template::Webhook => app(template).map(|app| app.about).unwrap_or_default(),
     }
 }
 
@@ -626,6 +659,7 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
         Template::QueueWorker => create_app(&folder, name, runtime, &QUEUE_WORKER)?,
         Template::SiteWithApi => create_app(&folder, name, runtime, &SITE_WITH_API)?,
         Template::ImageResize => create_app(&folder, name, runtime, &IMAGE_RESIZE)?,
+        Template::Webhook => create_app(&folder, name, runtime, &WEBHOOK)?,
     };
     let created = Created {
         name: name.to_owned(),
@@ -636,7 +670,12 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
         key_command: (template == Template::Terraform).then(|| terraform_key_command(name)),
     };
     context.out.result(&created, || match template {
-        Template::RestApi | Template::CronJob | Template::QueueWorker | Template::SiteWithApi | Template::ImageResize => {
+        Template::RestApi
+        | Template::CronJob
+        | Template::QueueWorker
+        | Template::SiteWithApi
+        | Template::ImageResize
+        | Template::Webhook => {
             let app = app(template).expect("an application's template");
             format!(
                 "created {}/, {}: template.yaml, its code in src/ with its tests in tests/, its events in events/, \
@@ -697,6 +736,7 @@ mod tests {
             ("sam", SAM),
             ("site-with-api", SITE_WITH_API.files),
             ("terraform", TERRAFORM),
+            ("webhook", WEBHOOK.files),
         ];
         let mut folders: Vec<String> = std::fs::read_dir(&root)
             .unwrap()
@@ -1187,6 +1227,63 @@ mod tests {
                 refused.message
             );
         }
+    }
+
+    #[test]
+    fn a_webhook_is_one_function_at_its_url_given_konnect_s_settings_its_two_secrets_out_of_the_template() {
+        for (runtime, library) in [(Runtime::Nodejs, "\"pg\": \"8.23.1\""), (Runtime::Python, "psycopg[binary]==3.3.6")]
+        {
+            let (dir, paths, planned) = written_and_planned(&WEBHOOK, "Shop-2", runtime, &[]);
+            for path in ["events/create-order.json", "events/notification.json", ".gitignore"] {
+                assert!(paths.contains(&path.to_owned()), "{path}: {paths:?}");
+            }
+            let folder = dir.path().join("Shop-2");
+            let code = std::fs::read_dir(folder.join("src")).unwrap().map(|entry| entry.unwrap().path());
+            let libraries: String = code.map(|path| std::fs::read_to_string(path).unwrap()).collect();
+            assert!(libraries.contains(library));
+            let readme = std::fs::read_to_string(folder.join("README.md")).unwrap();
+            for line in [
+                "ff db create shop-2 --secret-for Shop-2-payments",
+                "ff secrets set Shop-2-payments KONNECT_API_KEY",
+                "http://shop-2-payments.fn.localhost:3700/orders",
+            ] {
+                assert!(readme.contains(line), "{line}");
+            }
+
+            let [function] = &planned.functions[..] else { panic!("one function") };
+            assert_eq!(
+                (function.name.as_str(), function.handler.as_str(), function.memory, function.timeout),
+                ("Shop-2-payments", "app.handler", 256, 15)
+            );
+            let url = function.url.as_ref().unwrap();
+            assert_eq!((url.auth_type.as_str(), url.cors.is_none()), ("NONE", true));
+            // Konnect's sandbox until a deploy says otherwise; the key and the database are secrets, never variables.
+            let environment: Vec<(&str, &str)> =
+                function.environment.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+            assert_eq!(
+                environment,
+                [
+                    ("KONNECT_API_URL", "https://api.sandbox.konnect.network/api/v2"),
+                    ("KONNECT_WALLET_ID", ""),
+                    ("RETURN_URL", "")
+                ]
+            );
+        }
+        let (_dir, _paths, planned) = written_and_planned(
+            &WEBHOOK,
+            "shop",
+            Runtime::Python,
+            &[("KonnectWalletId", "5f7a209aeb3f76490ac4a3d1"), ("ReturnUrl", "https://shop.example.tn/paid")],
+        );
+        let environment = &planned.functions[0].environment;
+        assert_eq!(
+            (
+                environment.get("KONNECT_WALLET_ID").map(String::as_str),
+                environment.get("RETURN_URL").map(String::as_str)
+            ),
+            (Some("5f7a209aeb3f76490ac4a3d1"), Some("https://shop.example.tn/paid"))
+        );
+        assert_eq!(WEBHOOK.name_most(), 55);
     }
 
     #[test]

@@ -20,7 +20,9 @@
 # each run here as its README says, its schedule by hand and a failed run tried three times; ff init's queue worker,
 # the Node.js one deployed, a job done and one dead-lettered after three tries, each the same here; ff init's site with
 # an API, the Node.js one deployed, its page by ff sites deploy and signed from its origin, each here with --site;
-# ff init's image resizer, both deployed with --container and an image's thumbnail made, each the same here;
+# ff init's image resizer, both deployed with --container and an image's thumbnail made, each the same here; ff
+# init's webhook, the Node.js one deployed as its README says, Konnect out of reach: no order made, a notification
+# kept and left, an order's left pending; each the same here with --with postgres;
 # folders deployed as packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
@@ -138,12 +140,14 @@ at() {
 }
 # local_started <listing> <its stderr> <ff local start's args...>: ff local start in the background, its pid in
 # $starter, until it says how to stop it: 120 s at most, as a first start with --with pulls its images, and less if it
-# ends.
+# ends. Its pid is kept in a file until local_stopped, so that one a stopped section left running is stopped.
 local_started() {
   local listing="$1" errors="$2" _
   shift 2
+  local_left_stopped
   "$ff_bin" local start "$@" >"$listing" 2>"$errors" &
   starter=$!
+  echo "$starter" >"$work/local-start.pid"
   for _ in $(seq 1 240); do
     grep -F "Ctrl-C stops" "$listing" >/dev/null 2>&1 && return 0
     kill -0 "$starter" 2>/dev/null || break
@@ -156,7 +160,22 @@ local_started() {
 local_stopped() {
   kill -INT "$starter"
   wait "$starter" 2>/dev/null || true
+  rm -f "$work/local-start.pid"
 }
+# local_left_stopped: Ctrl-C to an ff local start a section that stopped before its local_stopped left running, its
+# containers removed with it, waited for 30 s at most; at the next start and at the suite's end.
+local_left_stopped() {
+  local pid _
+  pid="$(cat "$work/local-start.pid" 2>/dev/null || true)"
+  rm -f "$work/local-start.pid"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 0
+  kill -INT "$pid"
+  for _ in $(seq 1 60); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.5
+  done
+}
+on_exit local_left_stopped
 # local_aws <project> <port> <aws args...>: the AWS CLI with the local key's file of ff local's project alone, none of
 # this machine's settings, the front door at the port the endpoint of each service.
 local_aws() {
@@ -167,6 +186,8 @@ local_aws() {
     AWS_ENDPOINT_URL_SESV2="$door" "${aws_cli[@]}" "$@"
 }
 
+# json_lines: the JSON objects of log lines, whatever comes before each, as each runtime writes a line differently.
+json_lines() { sed -n 's/^[^{]*\({.*}\)$/\1/p'; }
 # template_files <folder>: the files ff init wrote there, sorted, on one line.
 template_files() { (cd "$1" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | paste -sd' '); }
 # git_sees <folder>: the files git takes of the folder made a repository, what its .gitignore leaves in, on one line.
@@ -174,11 +195,12 @@ git_sees() {
   git -C "$1" init -q
   git -C "$1" status --porcelain --untracked-files=all | sed 's/^?? //' | LC_ALL=C sort | paste -sd' '
 }
-# readme_here <folder>: a template's README's commands before its ff local start, as written, which install its
-# libraries and run its tests: their exit, then how many tests passed.
+# readme_here <folder>: a template's README's commands before its ff local start, as written, from its block's first
+# line, after what the section says before it, which install its libraries and run its tests: their exit, then how many
+# tests passed.
 readme_here() {
   local status=0
-  (cd "$1" && bash -e -o pipefail -c "$(sed -n '/^## Here$/,/^ff local start/p' README.md | sed '1,3d;$d')") \
+  (cd "$1" && bash -e -o pipefail -c "$(sed -n '/^## Here$/,/^ff local start/p' README.md | sed '1,/^```bash$/d;$d')") \
     >"$work/here.out" 2>&1 || status=$?
   echo "$status $(sed -nE 's/^(# |ℹ )pass ([0-9]+)$/\2/p; s/^Ran ([0-9]+) tests? in .*/\1/p' "$work/here.out")"
 }
@@ -1049,8 +1071,6 @@ declare -A written=(
   [nodejs]=".gitignore README.md events/batch.json events/post-job.json samconfig.toml src/api.mjs src/package-lock.json src/package.json src/worker.mjs template.yaml tests/api.test.mjs tests/worker.test.mjs"
   [python]=".gitignore README.md events/batch.json events/post-job.json samconfig.toml src/api.py src/requirements.txt src/worker.py template.yaml tests/__init__.py tests/test_api.py tests/test_worker.py"
 )
-# json_lines: the JSON objects of log lines, whatever comes before each, as each runtime writes a line differently.
-json_lines() { sed -n 's/^[^{]*\({.*}\)$/\1/p'; }
 for runtime in python nodejs; do
   (cd "$work" && rm -rf "cli-jobs-$runtime" && "$ff_bin" init "cli-jobs-$runtime" --runtime "$runtime" --template queue-worker >"$work/out" 2>"$work/err")
   check "ff init --template queue-worker makes cli-jobs-$runtime's template, code, tests, events and README, and nothing else" \
@@ -1334,6 +1354,108 @@ $(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/$bucket/thumbna
 done
 }
 section_def template_image_resize section_template_image_resize backend budget=300
+
+section_template_webhook() {
+section "ff init --template webhook: orders paid through Konnect, its notifications received right; the Node.js one deployed on FF as its README says, its database ff db's and Konnect's key a secret; then each runtime's run here as its README says, with ff local start --with postgres; Konnect out of reach in both, as its answers come with its stand-in"
+local runtime app url db_conn made base port starter id
+declare -A written=(
+  [nodejs]=".gitignore README.md events/create-order.json events/notification.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/create-order.json events/notification.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+# logged <jq filter> <command...>: what the filter takes from the JSON lines of the log the command prints, waited for
+# 20 s at most, as a call's line can come a moment after its answer.
+logged() {
+  local filter="$1" found="" _
+  shift
+  for _ in $(seq 1 40); do
+    found="$("$@" 2>/dev/null | json_lines | jq -rR "fromjson? | $filter" 2>/dev/null || true)"
+    [ -n "$found" ] && break
+    sleep 0.5
+  done
+  echo "$found"
+}
+for runtime in nodejs python; do
+  (cd "$work" && rm -rf "cli-pay-$runtime" && "$ff_bin" init "cli-pay-$runtime" --runtime "$runtime" --template webhook >"$work/out" 2>"$work/err")
+  check "ff init --template webhook makes cli-pay-$runtime's template, code, tests, events and README, and nothing else" "${written[$runtime]}" \
+    "$(template_files "$work/cli-pay-$runtime")"
+done
+
+# On FF, the Node.js one as its README says, its commands as written: its wallet's placeholder given, and Konnect's
+# address a port of the function's own where nothing listens, so that nothing leaves the cluster; Konnect's key on
+# stdin, as the prompt takes it. A payment Konnect makes and confirms is tried against its stand-in.
+app="$work/cli-pay-nodejs"
+made="$(readme_after "$app" '^## On FF$' "s|<your wallet's ID>|suite-wallet KonnectApiUrl=http://127.0.0.1:9|" <<<'suite-key')"
+db_conn="$(grep -m1 -E '^postgres(ql)?://' "$work/after.out" || true)"
+url="$("$ff_bin" url show cli-pay-nodejs-payments --output json | jq -r .url.functionUrl)"
+check "the Node.js one's README on FF: ff deploy, ff db create, ff secrets set, then its curl, which Konnect out of reach makes 502, no order kept" \
+  "0 true Konnect made no payment: try again 0" \
+  "$made $([[ $db_conn == postgres* && $url == http* ]] && echo true || echo false) $(tail -1 "$work/after.out" | jq -r .message) \
+$(data_db_psql "$db_conn" 'select count(*) from orders')"
+check "  ... and its log, in ff logs, says why" "true" \
+  "$(logged 'select(.unpaid) | .why | startswith("no payment made: Konnect didn\u0027t answer: ")' "$ff_bin" logs cli-pay-nodejs-payments)"
+check "  ... a notification no order has: the same 200 Received, kept as it came, left, and Konnect not asked" \
+  "200 Received konnect|forged-0001|payment_ref=forged-0001|suite/1 no order has this payment" \
+  "$(at "${url}webhooks/konnect?payment_ref=forged-0001" -A suite/1) \
+$(data_db_psql "$db_conn" 'select provider, payment_ref, query, user_agent from notifications') \
+$(logged 'select(.left == "forged-0001") | .why' "$ff_bin" logs cli-pay-nodejs-payments)"
+id=6f1c2a7e-0b8d-4c5e-9a3f-2d4b6c8e0f11
+data_db_psql "$db_conn" "insert into orders (id, amount, currency, description, payment_ref)
+  values ('$id', 12500, 'TND', '2 jars of harissa', 'suite-ref-1')" >/dev/null
+check "  ... an order's notification, Konnect not answering: the same 200, the order left pending, its log saying why" \
+  "200 Received pending true" \
+  "$(at "${url}webhooks/konnect?payment_ref=suite-ref-1") $(data_db_psql "$db_conn" "select status from orders where id = '$id'") \
+$(logged 'select(.left == "suite-ref-1") | .why | startswith("Konnect didn\u0027t answer: ")' "$ff_bin" logs cli-pay-nodejs-payments)"
+check "  ... GET /orders/<id> pending still; a notification without its reference 400, an order it hasn't 404, a method its route lacks 405 with Allow" \
+  "200 pending 400 A notification names its payment: ?payment_ref=<its reference> 404 405 POST" \
+  "$(at "${url}orders/$id" | sed 's/ .*//') $(jq -r .status "$work/at.body") $(at "${url}webhooks/konnect" | sed 's/ .*//') \
+$(jq -r .message "$work/at.body") $(at "${url}orders/00000000-0000-4000-8000-000000000000" | sed 's/ .*//') $(at "${url}orders" -X PUT | sed 's/ .*//') \
+$(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+in_folder "$app" delete-stack --yes
+made="$(code) $(out | paste -sd' ')"
+ff db delete cli-pay-nodejs --yes
+check "ff delete-stack deletes its function with its URL, ff db delete its database, as its README says" \
+  "0 deleted the function cli-pay-nodejs-payments (Payments) deleted the stack cli-pay-nodejs 0 deleted the database cli-pay-nodejs, with its data" \
+  "$made $(code) $(out)"
+
+# Here, each runtime as its README says: its commands before ff local start install its library and run its tests;
+# Konnect's key in .env.local; ff local start --with postgres, Konnect out of reach as on FF; then its curl.
+for runtime in python nodejs; do
+  app="$work/cli-pay-$runtime"
+  check "cli-pay-$runtime's README: its commands install its library and run its 13 tests, which pass" "0 13" "$(readme_here "$app")"
+  printf 'KONNECT_API_KEY=suite-key\n' >"$app/.env.local"
+  port="$(free_port)"
+  base="http://cli-pay-$runtime-payments.fn.localhost:$port"
+  local_started "$work/pay.out" "$work/pay.err" "$app/template.yaml" --port "$port" --with postgres \
+    --parameter-overrides KonnectWalletId=suite-wallet KonnectApiUrl=http://127.0.0.1:9
+  check "  ... ff local start --with postgres runs it at the address its README names, a PostgreSQL beside it" "true true" \
+    "$(grep -E "^  cli-pay-$runtime-payments +$runtime +256 MB, 15 s  $base/$" "$work/pay.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  postgres  postgresql://' "$work/pay.out" >/dev/null && echo true || echo false)"
+  check "  ... its README's curl: 502, Konnect out of reach, no order kept, its log saying why" \
+    "0 Konnect made no payment: try again 0 true" \
+    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g") $(jq -r .message "$work/after.out") \
+$(local_psql "$work/pay.out" 'select count(*) from orders') \
+$(logged 'select(.unpaid) | .why | startswith("no payment made: Konnect didn\u0027t answer: ")' cat "$app/.ff/local/logs/cli-pay-$runtime-payments.log")"
+  check "  ... a notification no order has: 200 Received, kept as it came, left" \
+    "200 Received konnect|forged-0001|payment_ref=forged-0001|suite/1 no order has this payment" \
+    "$(at "$base/webhooks/konnect?payment_ref=forged-0001" -A suite/1) \
+$(local_psql "$work/pay.out" 'select provider, payment_ref, query, user_agent from notifications') \
+$(logged 'select(.left == "forged-0001") | .why' cat "$app/.ff/local/logs/cli-pay-$runtime-payments.log")"
+  local_psql "$work/pay.out" "insert into orders (id, amount, currency, description, payment_ref)
+    values ('$id', 12500, 'TND', '2 jars of harissa', 'suite-ref-1')" >/dev/null
+  check "  ... an order's notification, Konnect not answering: 200, the order left pending, GET /orders/<id> pending still" \
+    "200 Received pending true 200 pending" \
+    "$(at "$base/webhooks/konnect?payment_ref=suite-ref-1") $(local_psql "$work/pay.out" "select status from orders where id = '$id'") \
+$(logged 'select(.left == "suite-ref-1") | .why | startswith("Konnect didn\u0027t answer: ")' cat "$app/.ff/local/logs/cli-pay-$runtime-payments.log") \
+$(at "$base/orders/$id" | sed 's/ .*//') $(jq -r .status "$work/at.body")"
+  local_stopped
+  ff local reset "$app" --data --yes
+  check "  ... Ctrl-C leaving no container, ff local reset --data its database's volume gone" "0 0 0" \
+    "$(code) $(leftover) $(docker volume ls --quiet --filter "label=ff.local.project=$(cd "$app" && pwd -P)" | wc -l | tr -d ' ')"
+  check "  ... and its .gitignore leaves out what its README's commands installed, ff local kept and .env.local: git sees ff init's files alone" \
+    "${written[$runtime]}" "$(git_sees "$app")"
+done
+}
+section_def template_webhook section_template_webhook backend budget=150
 
 section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"

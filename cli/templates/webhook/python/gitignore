@@ -1,0 +1,9 @@
+.aws-sam/
+__pycache__/
+# The libraries pip installs beside the code for ff local start, each a folder in src/: ff deploy and sam build
+# install their own. A package of yours in src/ needs a line of its own here, !src/<package>/.
+src/*/
+# ff's own: ff local's logs and key, ff package's zips.
+.ff/
+# The secrets ff local start gives the functions, KEY=value lines: never committed.
+.env.local

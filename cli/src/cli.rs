@@ -588,6 +588,7 @@ pub enum Template {
     QueueWorker,
     SiteWithApi,
     ImageResize,
+    Webhook,
 }
 
 impl Template {
@@ -601,6 +602,7 @@ impl Template {
             Template::QueueWorker => "queue-worker",
             Template::SiteWithApi => "site-with-api",
             Template::ImageResize => "image-resize",
+            Template::Webhook => "webhook",
         }
     }
 }

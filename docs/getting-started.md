@@ -477,6 +477,7 @@ ff init daily --template cron-job --runtime nodejs  # a job on a schedule, its b
 ff init jobs --template queue-worker --runtime python  # a URL taking jobs into a queue, its worker, a dead-letter queue
 ff init guests --template site-with-api --runtime nodejs  # a page on a bucket's site, its API at a URL, a guestbook
 ff init photos --template image-resize --runtime python  # an image put in a bucket makes its thumbnail beside it
+ff init shop --template webhook --runtime nodejs  # orders paid through Konnect, its notifications received right
 ff init --list                                    # the templates, each with what it makes
 ff deploy ./orders                                # a folder: packaged with its libraries, uploaded when new
 ff package ./orders                               # the same zip, for AWS Lambda too: ./orders/.ff/orders.zip
@@ -1165,6 +1166,28 @@ ff delete-stack shop --yes                    # the stack, with what it made, as
 **A function's name** is its `FunctionName`, else the one the stack's last deploy gave it, else one made CloudFormation's way, the stack's name, the logical ID and 12 random letters and digits, within Lambda's 64 characters. A function of that name in no stack, or in another, is refused: `ff deploy` doesn't take it over.
 
 **Every problem first,** in one refusal that changes nothing: the template's, each at its line; its parameters'; a value that can't be known before the deploy, such as a function's URL in a variable; a variable with the name of one of the function's secrets, which stay with `ff secrets`, out of the template; a handler the code hasn't; a schedule's expression FF's parser wouldn't take; a queue or a function the account hasn't and the template doesn't make; two notifications of a bucket that could both take one event; a queue or a bucket of the template's name that the account has outside the stack. When the template no longer has what the stack's last deploy made, `ff deploy` then asks before deleting it, and a script says `--yes`. The template's buckets are made or changed first, with their sites, then its queues, each dead-letter queue before the queues that use it; then each function is created or updated with what changed, as `ff deploy` does one, then its instances, its alias, its URL, its asynchronous calls' settings, its schedules and the queues it reads; then each bucket's notifications; what the template no longer has is deleted last, the buckets after the functions and the queues after them, as CloudFormation cleans up, a bucket with files stopping the deploy there, saying how to empty it. The stack is saved as the deploy goes: one stopped halfway leaves what it made in the stack, and the next updates it. `ff get` names a function's stack, and the console says it on the function's page, since a change made elsewhere the next deploy undoes. `--output json` gives each bucket's, queue's and function's action and changes, each site's address, each function's version and URL, what was deleted, and the outputs.
+
+### Templates
+
+`ff init <name> --template <template> --runtime nodejs|python` writes an app to start from, the same in Node.js and in Python; `ff init --list` names them, each with what it makes. Each is a SAM template inside FF's subset, so that the same folder runs here with `ff local start`, on FF with `ff deploy` and on AWS with `sam deploy`, its code unchanged:
+
+| Template | What it makes | What of SAM it uses |
+|---|---|---|
+| `sam` | `sam init`'s hello world, as FF takes it | One function and its URL |
+| `rest-api` | A REST API at a function's URL, its items in PostgreSQL | A URL with CORS for one origin, a parameter |
+| `cron-job` | A job each morning, reporting what its bucket got the day before | A `Schedule` event, a bucket, a queue of its failed runs by `EventInvokeConfig` |
+| `queue-worker` | A URL taking jobs into a queue, a worker reading it in batches | An `SQS` event, a dead-letter queue by `RedrivePolicy`, a parameter |
+| `site-with-api` | A page on a bucket's site, its API at a function's URL, a guestbook | A URL open to any page, a bucket for its entries, a bucket that is a site |
+| `image-resize` | An image put in a bucket makes a WebP thumbnail beside it | An `S3` event filtered by prefix, `sharp` and Pillow, native |
+| `webhook` | Orders paid through Konnect, its notifications received right | A URL, three parameters, two secrets out of the template |
+
+Each folder has the same shape: `template.yaml`; `src/`, the functions' code, its libraries pinned; `tests/`, outside `src/` so that they aren't deployed, with stand-ins for the database, the buckets, the queues or Konnect, run with `node --test` or `python3 -m unittest` and nothing else running; `events/`, the events the functions get, for `ff invoke --data @events/…` and `sam local invoke --event`; `samconfig.toml`, which names the stack; a `.gitignore`; and a README whose three sections, "Here", "On FF" and "On AWS", give the commands for each place. [SAM templates on FF](sam-templates.md) lists them with what of the subset each uses.
+
+- **Their libraries here** are installed for Linux, as Lambda's and FF's runtimes are: `npm ci --os=linux --cpu=x64 --libc=glibc` in Node.js, whatever this machine is, so that `ff local start` loads them in its containers. `image-resize`'s `sharp` and Pillow are native: `ff deploy --container` builds them in the runtime's image and `samconfig.toml`'s `use_container` has `sam build` do the same; on macOS and Windows that needs Docker Desktop.
+- **A database and a key are secrets on FF,** never in the template: `ff db create <name> --secret-for <function>` sets `DATABASE_URL`, and `ff secrets set <function> KONNECT_API_KEY` Konnect's key. Here they come from `--with postgres` and `.env.local`; on AWS they are parameters CloudFormation doesn't show back, as each README shows.
+- **`webhook` receives a payment provider's notification as it should be received:** each one kept as it came, the payment asked of Konnect itself, never the notification's or the browser's word, and each order paid once, by its reference. Its README says why each rule is there.
+
+The `ff` suite's `template_*` sections deploy each of the six on FF, call it and delete its stack, and run each here as its README says.
 
 ### Moving to AWS: ff export
 
