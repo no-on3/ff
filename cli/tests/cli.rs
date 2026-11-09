@@ -36,18 +36,23 @@ fn version_names_the_commit_it_was_built_from() {
 }
 
 #[test]
-fn version_says_the_platform_when_verbose() {
-    ff().args(["version", "--verbose"]).assert().success().stdout(predicate::str::contains("\nbuilt for "));
+fn version_says_the_platform_and_the_release_key_when_verbose() {
+    ff().args(["version", "--verbose"]).assert().success().stdout(predicate::str::contains("\nbuilt for ")).stdout(
+        predicate::str::is_match(
+            r"\nrelease key ([0-9A-F]{16}|none, in this build: it checks for no newer version)\n$",
+        )
+        .unwrap(),
+    );
 }
 
 #[test]
-fn version_as_json_is_one_document_with_its_three_fields() {
+fn version_as_json_is_one_document_with_its_four_fields() {
     let output = ff().args(["--output", "json", "version"]).output().unwrap();
     assert!(output.status.success());
 
     let document: serde_json::Value = serde_json::from_slice(&output.stdout).expect("one JSON document");
     let fields: Vec<&str> = document.as_object().unwrap().keys().map(String::as_str).collect();
-    assert_eq!(fields, ["commit", "target", "version"]);
+    assert_eq!(fields, ["commit", "releaseKey", "target", "version"]);
     assert_eq!(document["version"], env!("CARGO_PKG_VERSION"));
 }
 

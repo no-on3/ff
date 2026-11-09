@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [developer tools plan](../dev-tools-plan.md)'s D2 and its choices 3 and 4, confirmed on 2026-11-08 (the [decision log](../decisions.md)'s 72 and 73); the builds and the signatures measured by M-01's spikes the same day; the hash written by hand, your choice on 2026-11-09 (84) |
 | **Date** | 2026-11-09 |
-| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's parts 1, the builds and Windows, 2, the release job, and 3, the downloads site and the install scripts (below) |
+| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's parts 1, the builds and Windows, 2, the release job, 3, the downloads site and the install scripts, and 4, the update notice (below) |
 | **Related** | [ADR 0002](0002-cli.md) (the `ff` command); [ADR 0011](0011-static-sites.md) (the sites that serve the downloads); the spikes, [`hack/spikes/cross-build`](../../hack/spikes/cross-build/README.md) and [`hack/spikes/minisign`](../../hack/spikes/minisign/README.md) |
 
 ## Context
@@ -117,6 +117,17 @@ A checksum that differs is refused, with nothing installed. GitHub's releases an
 ### 6. The update notice
 
 Once a day at most, after a command that reached the API, `ff` reads `latest.json` and verifies it. When a newer version exists, it says so on stderr, with the one line that installs it. `FF_NO_UPDATE_CHECK=1` and `ff config set update_check false` turn it off, and `--output json` and `--quiet` never show it.
+
+### As built (M-03, part 4): the update notice
+
+- **The verifier is the spike's, in `cli/src/minisign/`,** its tests and fixtures with it. The spike compared its BLAKE2b with the crate's, which `ff` doesn't have: those tests compare with Python's `hashlib` instead, at the edges of BLAKE2b's 128-byte blocks, beside RFC 7693's vectors.
+- **After a command that reached the API and succeeded,** not one the API refused: a failure's message stays the last thing said.
+- **What the last check found** is kept in `update-check.json`, in `ff`'s folder of settings: when it ran, the signing time of the `latest.json` it verified, and the version it named. Where there is no folder, there is no check, as in a CI given `FF_TOKEN` alone, rather than a check at every command. A clock gone back before the last check makes one due.
+- **The signing time** is read from minisign's default trusted comment, which must name `latest.json`: a build's signature, made by the same key and served beside it, isn't taken for the manifest's.
+- **Both downloads take 4 s at most together,** 64 KB each at most; whatever fails is said with `--verbose` and asked again a day later.
+- **The site and the key are built in:** the key from `cli/release/minisign.pub`, the site from `FF_BUILD_DOWNLOADS_URL`, which the release job gives the five builds from the repository's `FF_DOWNLOADS_URL`. A name of its own at build time, so that the address a developer gives `ff` at run time is never built into a test build. `FF_DOWNLOADS_URL` at run time points it at another copy of the site, as it does the install scripts. A build without either never checks. The tests' key comes from `FF_TEST_RELEASE_KEY`, which a release build ignores.
+- **`ff version --verbose`** prints the ID of the key it trusts (`releaseKey` with `--output json`), to compare with the downloads page's.
+- **The line that installs it** is the system's: `install.sh` on Linux and macOS, `install.ps1` on Windows.
 
 ### 7. The runtime images
 

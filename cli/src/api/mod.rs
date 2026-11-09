@@ -5,4 +5,4 @@ mod error;
 pub mod events;
 pub mod types;
 
-pub use client::{Call, Client, agent_config};
+pub use client::{Call, Client, agent_config, reached};

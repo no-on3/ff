@@ -50,6 +50,19 @@ impl Output {
         let _ = writeln!(io::stderr().lock(), "{label} {text}");
     }
 
+    /// Something worth knowing that isn't the command's result, on stderr: a newer version out.
+    pub fn notice(&self, text: &str) {
+        let label = if self.color { "\x1b[1;36mnotice:\x1b[0m" } else { "notice:" };
+        let _ = writeln!(io::stderr().lock(), "{label} {text}");
+    }
+
+    /// What `--verbose` adds on stderr: what went wrong where nothing fails for it.
+    pub fn detail(&self, text: &str) {
+        if self.verbose {
+            let _ = writeln!(io::stderr().lock(), "{text}");
+        }
+    }
+
     /// The error, on stderr. Nothing more can be done if stderr itself fails.
     pub fn error(&self, error: &Error) {
         let text = match self.format {

@@ -55,14 +55,14 @@ fn set(context: &Context, key: ConfigKey, value: &str) -> Result<(), Error> {
             file.set(&profile, key.name(), value);
             serde_json::Value::from(value)
         }
-        ConfigKey::AllowHttp => {
-            let allowed = match value {
+        ConfigKey::AllowHttp | ConfigKey::UpdateCheck => {
+            let on = match value {
                 "true" => true,
                 "false" => false,
-                _ => return Err(Error::usage(format!("allow_http is true or false: {value}"))),
+                _ => return Err(Error::usage(format!("{} is true or false: {value}", key.name()))),
             };
-            file.set(&profile, "allow_http", allowed);
-            serde_json::Value::from(allowed)
+            file.set(&profile, key.name(), on);
+            serde_json::Value::from(on)
         }
         ConfigKey::Token => {
             return Err(Error::usage(
@@ -114,6 +114,7 @@ struct Show {
     dev_account: Option<Shown<String>>,
     token: Option<Shown<String>>,
     allow_http: Shown<bool>,
+    update_check: Shown<bool>,
     config_file: String,
     credentials_file: String,
 }
@@ -127,6 +128,7 @@ fn show(context: &Context) -> Result<(), Error> {
         dev_account: shown(&settings.dev_account, String::clone),
         token: shown(&settings.token, Token::masked),
         allow_http: Shown { value: settings.allow_http.value, source: settings.allow_http.source },
+        update_check: Shown { value: settings.update_check.value, source: settings.update_check.source },
         config_file: settings.files.config().display().to_string(),
         credentials_file: settings.files.credentials().display().to_string(),
     };
@@ -142,6 +144,7 @@ fn show(context: &Context) -> Result<(), Error> {
             line("dev_account", show.dev_account.as_ref().map(|shown| (shown.value.clone(), shown.source))),
             line("token", show.token.as_ref().map(|shown| (shown.value.clone(), shown.source))),
             line("allow_http", Some((show.allow_http.value.to_string(), show.allow_http.source))),
+            line("update_check", Some((show.update_check.value.to_string(), show.update_check.source))),
             format!("{:<12} {}", "files", show.config_file),
             format!("{:<12} {}", "", show.credentials_file),
         ]

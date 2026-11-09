@@ -2,6 +2,8 @@
 
 How `ff` will check minisign's signatures itself: on its update notice's manifest (`latest.json`), and on the images' archives it loads. The measurements behind ADR 0018 (`ff`'s releases); the [developer tools plan](../../../docs/dev-tools-plan.md)'s D2, its task list's M-01, part 5.
 
+The verifier is `ff`'s own now, in [`cli/src/minisign/`](../../../cli/src/minisign/), with its BLAKE2b written by hand, its tests and a copy of the fixtures (M-03, part 4). This folder keeps the spike as it ran, the crate's comparison included.
+
 ```bash
 hack/spikes/minisign/run.sh              # about a minute the first time: the crate's builds, minisign's release
 FIXTURES=1 hack/spikes/minisign/run.sh   # the fixtures made again, with new keys

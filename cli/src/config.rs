@@ -356,6 +356,9 @@ pub struct Settings {
     /// The profile's login, when its token is the one in effect: no FF_TOKEN, and no API key in the profile.
     pub login: Option<Login>,
     pub allow_http: Setting<bool>,
+    /// Whether ff says when a newer version is out: `FF_NO_UPDATE_CHECK` turns it off, else the profile's
+    /// `update_check`, else on.
+    pub update_check: Setting<bool>,
     pub files: Files,
     /// What the files' owner should fix, printed before the command's output.
     pub warnings: Vec<String>,
@@ -373,6 +376,7 @@ impl Settings {
             token: None,
             login: None,
             allow_http: Setting { value: false, source: Source::Default },
+            update_check: Setting { value: true, source: Source::Default },
             files: Files { dir: PathBuf::from("/tmp/ff") },
             warnings: Vec::new(),
         }
@@ -454,6 +458,14 @@ pub fn resolve(
         }
     };
     endpoint.value.check_tls(allow_http.value).map_err(|problem| Error::new(Kind::Failed, problem))?;
+    let update_check = if env("FF_NO_UPDATE_CHECK").is_some_and(|value| !value.is_empty()) {
+        Setting { value: false, source: Source::Environment("FF_NO_UPDATE_CHECK") }
+    } else {
+        match config.boolean(name, "update_check")? {
+            Some(value) => Setting { value, source: Source::ConfigFile },
+            None => Setting { value: true, source: Source::Default },
+        }
+    };
 
     let account = account_setting(
         first(
@@ -493,7 +505,7 @@ pub fn resolve(
         },
     };
 
-    Ok(Settings { profile, endpoint, account, dev_account, token, login, allow_http, files, warnings })
+    Ok(Settings { profile, endpoint, account, dev_account, token, login, allow_http, update_check, files, warnings })
 }
 
 /// The settings in effect for this process: its flags, its environment, its files.

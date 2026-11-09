@@ -3,9 +3,10 @@
 # key, whose secret half and password are the job's two secrets, with latest.json, signed too, naming the version, the
 # commit and each file's SHA-256 (hack/release.sh); then the downloads site made of them (hack/downloads-site.sh) and
 # deployed by the Linux build itself with `ff sites deploy`, to a bucket of FF's own; GitHub's release holds a copy.
-# The site's place is the repository's variables FF_DOWNLOADS_URL (its address), FF_DOWNLOADS_ENDPOINT (the API that
-# serves it) and FF_DOWNLOADS_BUCKET, and its secret FF_DOWNLOADS_KEY, an API key of an account that holds that bucket
-# alone, with the scopes storage:read and storage:write. Actions pinned as ci.yml's are.
+# The site's place is the repository's variables FF_DOWNLOADS_URL (its address, built into the five for the update
+# notice), FF_DOWNLOADS_ENDPOINT (the API that serves it) and FF_DOWNLOADS_BUCKET, and its secret FF_DOWNLOADS_KEY, an
+# API key of an account that holds that bucket alone, with the scopes storage:read and storage:write. Actions pinned as
+# ci.yml's are.
 name: release
 
 on:
@@ -49,6 +50,8 @@ jobs:
   builds:
     needs: tag
     uses: ./.github/workflows/cli-builds.yml
+    with:
+      downloads-url: ${{ vars.FF_DOWNLOADS_URL }}
 
   release:
     needs: builds

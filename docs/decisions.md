@@ -10,8 +10,7 @@
 The minisign spike (M-01's part 5) found that `ff` has everything it needs to verify minisign's signatures except BLAKE2b, the hash minisign signs. The plan's D2 named the `blake2` crate for it; the spike's README recommended a BLAKE2b written from RFC 7693. Asked which ADR 0018 should choose, you answered the same day.
 
 **84. `ff`'s BLAKE2b is written from RFC 7693, not the `blake2` crate.** ✅ Your answer: as recommended. It adds no crate to pin at a release two weeks old or to watch in the nightly's advisories, for a hash that never changes; the crate's 8 crates, three of them from RustCrypto's newest generation, buy 0.07 s on an archive of 256 MB. Its tests are RFC 7693's vectors, openssl's digest of 256 MB and minisign's real release.
-- **Changed already:** [ADR 0018](adr/0018-ff-releases.md) records it; the [developer tools plan](dev-tools-plan.md)'s D2 and its task list's M-03, part 2, say it.
-- **Still to change:** M-03's part 2 moves the spike's verifier into `ff`.
+- **Changed already:** [ADR 0018](adr/0018-ff-releases.md) records it; the [developer tools plan](dev-tools-plan.md)'s D2 and its task list's M-03, part 2, say it; the spike's verifier is `ff`'s, in `cli/src/minisign/`, with the update notice, its first use (M-03's part 4).
 
 ## 2026-11-08: the developer tools started, their fourteen choices as recommended
 
@@ -25,10 +24,12 @@ You said: "read docs/dev-tools-tasks.md and start working on it". The list is th
 - **Still to change:** M-02, the first task after the spikes.
 
 **72. `ff`'s downloads and the runtime images live on FF itself:** a site on a bucket of FF's own at `get.<domain>`, with GitHub's releases and `ghcr.io` as copies (the CLI plan's question 3; the step-6 plan's 7). ✅ Your answer: as recommended. No new service, reachable when GitHub isn't, and FF serves itself as it serves its customers.
-- **Still to change:** M-03's part 3 and M-04's part 1; `ghcr.io`'s packages made public by you (the questions at the end).
+- **Changed already:** the site made and deployed by the release job, with its install scripts (M-03's part 3, `4d4a337`).
+- **Still to change:** M-04's part 1; the site's account, bucket and address set up by you, and `ghcr.io`'s packages made public (the questions at the end).
 
 **73. `ff` for Windows and macOS now,** cross-compiled on Linux where M-01's spike allows and on a macOS runner otherwise, signed with minisign; Apple's notarization later (the CLI plan's question 5; the step-6 plan's 8). ✅ Your answer: as recommended. Many developers here work on Windows, and Apple's program is paid by card, every year.
-- **Still to change:** M-01's part 1, then M-03; the signing key made by you (the questions at the end).
+- **Changed already:** M-01's part 1 found the way; the five builds, each tested on its own system (M-03's part 1, `858b959`), signed by the release job (part 2, `ce927a1`).
+- **Still to change:** the signing key made by you (the questions at the end).
 
 **74. `ff local` inside `ff`, in Rust:** one binary, one process, the services a subset that the backend's own fixtures prove, after M-01's spike measures it against the backend's front-door modules in a container. ✅ Your answer: as recommended. The whole backend in Docker is the on-premises edition's work, a plan of its own.
 - **Still to change:** M-01's part 3 and ADR 0017; M-05 to M-07.

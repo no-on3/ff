@@ -7,6 +7,11 @@ name: cli-builds
 
 on:
   workflow_call:
+    inputs:
+      downloads-url:
+        description: The downloads site built into the five for the update notice; none, they never check.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -22,6 +27,7 @@ jobs:
       - run: for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu; do hack/build-cli.sh "$target"; done
         env:
           CARGO_BUILD_JOBS: 4 # the runner's processors, which it runs alone
+          FF_BUILD_DOWNLOADS_URL: ${{ inputs.downloads-url }} # the builds' alone, not the tests' build
       - run: hack/cli-smoke.sh cli/target/dist/ff-linux-x86_64
       - run: hack/install-tools.sh minisign && hack/test-install.sh cli/target/dist
       - run: cargo test --locked
@@ -42,6 +48,7 @@ jobs:
       - run: for target in aarch64-apple-darwin x86_64-apple-darwin; do hack/build-cli.sh "$target"; done
         env:
           CARGO_BUILD_JOBS: 3 # the runner's processors, which it runs alone
+          FF_BUILD_DOWNLOADS_URL: ${{ inputs.downloads-url }} # the builds' alone, not the tests' build
       - run: hack/cli-smoke.sh cli/target/dist/ff-macos-arm64
       - run: hack/install-tools.sh minisign && hack/test-install.sh cli/target/dist
       - run: cargo test --locked

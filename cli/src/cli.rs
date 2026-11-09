@@ -1783,7 +1783,7 @@ pub enum ScheduleCommand {
 pub enum ConfigCommand {
     /// Set one of the profile's settings
     Set {
-        /// endpoint (the API's address), account (for a login with several), dev_account (the account a development stack acts as) or allow_http (true for plain http to a development stack)
+        /// endpoint (the API's address), account (for a login with several), dev_account (the account a development stack acts as), allow_http (true for plain http to a development stack) or update_check (false for no notice of a newer ff)
         key: ConfigKey,
         value: String,
     },
@@ -1805,6 +1805,7 @@ pub enum ConfigKey {
     Account,
     DevAccount,
     AllowHttp,
+    UpdateCheck,
     Token,
 }
 
@@ -1816,6 +1817,7 @@ impl ConfigKey {
             ConfigKey::Account => "account",
             ConfigKey::DevAccount => "dev_account",
             ConfigKey::AllowHttp => "allow_http",
+            ConfigKey::UpdateCheck => "update_check",
             ConfigKey::Token => "token",
         }
     }

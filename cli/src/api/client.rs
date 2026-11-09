@@ -2,6 +2,7 @@
 //! and timeouts fit for each call.
 
 use std::io::{BufReader, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -126,6 +127,14 @@ pub fn agent_config() -> ConfigBuilder<AgentScope> {
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .user_agent(format!("ff-cli/{}", env!("CARGO_PKG_VERSION")))
         .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
+}
+
+/// Whether a call of this process had an answer from the API, of any status: the update notice follows such a command
+/// alone, so that a command that never left the machine never calls the downloads site either.
+static REACHED: AtomicBool = AtomicBool::new(false);
+
+pub fn reached() -> bool {
+    REACHED.load(Ordering::Relaxed)
 }
 
 pub struct Client {
@@ -273,7 +282,9 @@ impl Client {
             }
             None => request.send_empty(),
         };
-        sent.map_err(|error| self.transport_error(error, call.timeout))
+        let response = sent.map_err(|error| self.transport_error(error, call.timeout))?;
+        REACHED.store(true, Ordering::Relaxed);
+        Ok(response)
     }
 
     fn read_body(&self, response: &mut Response<ureq::Body>) -> Result<Vec<u8>, Error> {

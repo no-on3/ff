@@ -94,11 +94,11 @@ One Rust binary that deploys, invokes and reads FF's functions, through FF's API
 | `ff whoami` | Who the token is, an API key (its name, ID and scopes) or a user (their accounts, and which one acts), and the account it acts for: `GET /me`. The first check of a new key |
 | `ff api-keys create --name <name> --scopes <scope,...> [--expires 90d\|<time>]` | Make an API key for a script or a CI, with the scopes it needs, from `functions:read` to `stacks:write` (`--help` lists them); it never does more than its creator's role allows. `--expires` in a while (`90d`, `12h`, `2w`) or at a time (`2027-01-31T00:00:00Z`), else never. The key is printed this once, last, and in its `key` field with `--output json`: `POST /api-keys` |
 | `ff api-keys list`, `ff api-keys revoke <id or name> [--yes]` | The account's API keys, newest first: each one's scopes, whether it works (active, revoked or expired), its expiry, when it was last used, never the key; revoking one, by its ID or the name of the one working key so named, refuses it at once. Only an owner's login manages them: with an API key, ff says so and calls nothing, since the API would refuse it |
-| `ff config set <key> <value>` | Set one of the profile's settings: `endpoint`, `account`, `dev_account` or `allow_http` |
+| `ff config set <key> <value>` | Set one of the profile's settings: `endpoint`, `account`, `dev_account`, `allow_http` or `update_check` |
 | `ff config unset <key>` | Remove one of them, or the profile's `token` |
 | `ff config show` | The settings in effect, each with where it comes from; the token masked, `ffk_<key ID>_…`, as the console lists keys |
 | `ff config set-token` | Save an API key for the profile, read from a prompt that doesn't show it, or from stdin (`ff config set-token < key.txt`) |
-| `ff version` | The version, and the commit it was built from; with `--verbose`, the platform it was built for |
+| `ff version` | The version, and the commit it was built from; with `--verbose`, the platform it was built for and the ID of the release key it trusts, which the downloads page shows (`releaseKey` with `--output json`, null in a build without the key) |
 | `ff completion <shell>` | A completion script for `bash`, `zsh`, `fish`, `elvish` or `powershell` |
 
 Every command takes `--output text|json` (one JSON document per command, for scripts: a function's code is left out, its size given), `--quiet` (no progress or notes on stderr), `--verbose` and `--no-color` (`NO_COLOR` in the environment says the same), and the connection's flags below. Functions are named as on AWS Lambda: 1 to 64 letters, digits, hyphens or underscores, which `ff deploy` checks before sending anything.
@@ -149,6 +149,7 @@ dev_account = "123456789012"     # a development stack (FF_AUTH_MODE=dev) acts a
 | The token | none: a flag would stay in the shell's history | `FF_TOKEN` | `token`, in `credentials.toml`, else the login's `access_token` |
 | The account a development stack acts as | | | `dev_account` |
 | Plain http to another machine | `--allow-http` | | `allow_http` |
+| The update notice (below) | | `FF_NO_UPDATE_CHECK`, set to anything, turns it off | `update_check`, else true |
 
 **Plain `http://`** sends the token in clear, so ff uses it only to this machine (`localhost`, `127.0.0.1`, `[::1]`), unless `--allow-http` or `allow_http = true` says otherwise, for a development stack elsewhere.
 
@@ -195,7 +196,26 @@ An error goes to stderr: `error: <message>`, the API's own when it refused, and 
 
 ## Install
 
-`hack/build-cli.sh [<target>]`, from the repository's root, builds `ff` for one of five systems into `cli/target/dist/`, its SHA-256 beside it:
+From the downloads site, once FF publishes releases there (the getting-started guide's "A release of `ff`"), its address in place of `get.<domain>`:
+
+```bash
+curl -fsSL https://get.<domain>/install.sh | sh                  # Linux and macOS, into ~/.local/bin
+curl -fsSL https://get.<domain>/install.sh | sh -s -- --prefix /usr/local
+irm https://get.<domain>/install.ps1 | iex                       # Windows, in PowerShell, into ~\.local\bin
+& ([scriptblock]::Create((irm https://get.<domain>/install.ps1))) -Prefix C:\Tools\ff
+```
+
+Each script picks the build for the system and the processor, checks its SHA-256 against the site's `latest.json`, and both signatures against the release's public key when [minisign](https://jedisct1.github.io/minisign/) is on the machine, then installs it through a temporary name and says what to add to `PATH`; a check that fails installs nothing. The site's page gives the key's ID, which `ff version --verbose` prints too. Running the script again installs the newest release over the one there.
+
+**The update notice.** Once a day at most, after a command that reached the API and succeeded, ff reads the site's `latest.json` and its signature, verifies it against the release's public key built into it, and when a newer version is out says so on stderr, with this system's line that installs it:
+
+```text
+notice: ff 0.2.0 is out, and this one is 0.1.0: curl -fsSL https://get.<domain>/install.sh | sh
+```
+
+A `latest.json` signed before the last one ff verified is ignored, by the signing time its signature holds, so that an old copy served again can't hide a release; and so is a signature of another file, such as a build's. The check waits 4 s at most and never fails the command; `--verbose` says what went wrong. It is off with `FF_NO_UPDATE_CHECK` or `ff config set update_check false`, never shown with `--output json` or `--quiet`, and off where ff keeps no folder of settings, as in a CI given `FF_TOKEN` alone, since the last check's time is kept there, in `update-check.json`. `FF_DOWNLOADS_URL` points it, and the install scripts, at another copy of the site. A release's build has the site's address built in; a build from source has none, so it checks only where `FF_DOWNLOADS_URL` names a site.
+
+**From source,** `hack/build-cli.sh [<target>]`, from the repository's root, builds `ff` for one of five systems into `cli/target/dist/`, its SHA-256 beside it:
 
 | Target | The file |
 |---|---|
@@ -207,7 +227,7 @@ An error goes to stderr: `error: <message>`, the API's own when it refused, and 
 
 Linux's and Windows's build anywhere with zig as the C compiler and the linker, through cargo-zigbuild, both pinned and installed by `hack/install-tools.sh zig cargo-zigbuild`, which the script runs; macOS's only on a Mac, whose link needs Apple's SDK. `--container` builds the first in the Rust image instead, with musl's own compiler, as the development server does. Copy the file as `ff` (`ff.exe`) anywhere on the `PATH`; it needs nothing else, and `ff version` names the commit it was built from.
 
-A release signs the five and publishes them on the downloads site with two install scripts, [`release/install.sh`](release/install.sh) for Linux and macOS and [`release/install.ps1`](release/install.ps1) for Windows, which the site serves with its address and the release's public key put in. Each checks the build's SHA-256 against the site's `latest.json`, and both signatures when `minisign` is on the machine, then installs into `~/.local/bin` (`--prefix`, `-Prefix`); a check that fails installs nothing. The getting-started guide's "A release of `ff`" says how a release is made.
+A release signs the five and publishes them on the downloads site with the two install scripts, [`release/install.sh`](release/install.sh) and [`release/install.ps1`](release/install.ps1), which the site serves with its address and the release's public key put in; the five are built with the site's address (`FF_BUILD_DOWNLOADS_URL`) and the public key, `release/minisign.pub` once the signing key is made, for the update notice. The getting-started guide's "A release of `ff`" says how a release is made.
 
 ## Build and test
 

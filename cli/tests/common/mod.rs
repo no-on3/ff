@@ -16,7 +16,7 @@ use tempfile::TempDir;
 pub const KEY: &str = "ffk_0123456789ab_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_aBcDe";
 
 /// `ff` with its settings in `dir`, and none of the environment's: no token, endpoint, account,
-/// profile or proxy.
+/// profile or proxy, and none of the update notice's settings, so that it never shows but where a test asks for it.
 pub fn ff(dir: &TempDir) -> Command {
     let mut command = Command::cargo_bin("ff").expect("the ff binary is built");
     command.env("FF_CONFIG_DIR", dir.path());
@@ -26,6 +26,9 @@ pub fn ff(dir: &TempDir) -> Command {
         "FF_ACCOUNT",
         "FF_PROFILE",
         "NO_COLOR",
+        "FF_DOWNLOADS_URL",
+        "FF_TEST_RELEASE_KEY",
+        "FF_NO_UPDATE_CHECK",
         "ALL_PROXY",
         "all_proxy",
         "HTTPS_PROXY",

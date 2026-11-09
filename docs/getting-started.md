@@ -480,6 +480,16 @@ ff usage --aws                                    # the last three months at AWS
 ff metrics hello --since 6h                       # its invocations, errors, durations, a row a minute
 ```
 
+**Installing `ff`.** Here it is built from the checkout, as above. Elsewhere, once FF publishes releases ("A release of `ff`", below), it installs from the downloads site: the script picks the build for the system and the processor, checks its SHA-256 against the site's `latest.json` and, when [minisign](https://jedisct1.github.io/minisign/) is on the machine, its signature against the release's key, and installs nothing when a check fails.
+
+```bash
+curl -fsSL https://get.<domain>/install.sh | sh   # Linux and macOS, into ~/.local/bin; sh -s -- --prefix <folder> elsewhere
+irm https://get.<domain>/install.ps1 | iex        # Windows, in PowerShell
+ff version --verbose                              # … release key <ID>: the downloads page's, the same
+```
+
+The release key's ID is on the downloads page, and `ff version --verbose` prints the one the build trusts; the first release writes it here too. Once a day at most, after a command that reached the API, a release's `ff` says on stderr when a newer one is out, with the line that installs it; `FF_NO_UPDATE_CHECK=1` or `ff config set update_check false` turns it off ([`cli/README.md`](../cli/README.md)'s "Install").
+
 **Logging in.** On an FF with logins, name the API, then log in with your browser: `ff login` asks the API where its login is, prints an address and the code it shows, opens the browser when there is one, and waits while you sign in and approve this device. The login lasts while `ff` is used, renewed by each command, and `ff logout` revokes it where it was made, so that a copy of its token stops working too. With several accounts, `ff` lists them with your role in each and stops until one is named, by `--account` or `ff config set account <ID>`. A script or a CI calls with an API key instead, which an owner makes with the scopes it needs: `functions:read`, `functions:write`, `functions:invoke`, `logs:read`; `usage:read` for `ff usage` and `ff balance`, `metrics:read` for `ff metrics`. The key is printed once; the CI's `FF_TOKEN` holds it, or `ff config set-token` saves it without showing it, and it comes before a login. A development backend started with `FF_AUTH_MODE=oidc` logs in at the local Keycloak the same way, as a user the console's sign-up made.
 
 ```bash
@@ -1709,7 +1719,7 @@ Your copy and GitHub's secret are the only two. A new key means every `ff` insta
 The downloads site is yours to set up too, once: an FF account of its own whose one bucket holds the site, served at `get.<domain>` by a certificate browsers trust (`ff sites domains add`), and an API key of that account with the scopes `storage:read` and `storage:write` alone:
 
 ```bash
-gh variable set FF_DOWNLOADS_URL --body https://get.<domain>          # the site's address, in the install lines
+gh variable set FF_DOWNLOADS_URL --body https://get.<domain>          # the site's address: the install lines, the update notice
 gh variable set FF_DOWNLOADS_ENDPOINT --body https://api.<domain>     # the API ff sites deploy calls
 gh variable set FF_DOWNLOADS_BUCKET --body <bucket>
 gh secret set FF_DOWNLOADS_KEY                                         # asks for the key
