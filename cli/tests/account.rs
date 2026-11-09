@@ -49,6 +49,58 @@ fn account_says_its_plan_and_whether_its_functions_reach_the_internet() {
         .stdout(predicate::str::contains("internet     its functions may reach the internet"));
 }
 
+/// A user's login with two accounts, each with its role.
+fn me_of_two() -> Value {
+    let mut me = me(false);
+    me["key"] = Value::Null;
+    me["user"] = json!({ "id": "u1", "email": "ada@example.com", "name": "Ada" });
+    let mut second = me["accounts"][0].clone();
+    second["id"] = json!("222222222222");
+    second["name"] = json!("Side project");
+    second["role"] = json!("owner");
+    me["accounts"].as_array_mut().unwrap().push(second);
+    me
+}
+
+#[test]
+fn a_login_with_several_accounts_and_none_named_is_shown_them_and_the_command_stops() {
+    let refused = json!({ "statusCode": 400, "message": "This user belongs to several accounts: name one in the X-FF-Account header", "error": "Bad Request" });
+    let api = Server::start(vec![Reply::json(400, refused), Reply::json(200, me_of_two())]);
+
+    ff(&with_key(&api.url)).arg("list").assert().code(3).stderr(predicate::str::contains(
+        "Your login has several accounts: name the one to act for with --account, FF_ACCOUNT or `ff config set account <ID>`\n  \
+         account 123456789012 \"Acme\" (active, plan Beta), as developer\n  \
+         account 222222222222 \"Side project\" (active, plan Beta), as owner",
+    ));
+    let asked: Vec<_> = api.requests().iter().map(|request| format!("{} {}", request.method, request.path)).collect();
+    assert_eq!(asked, ["GET /functions", "GET /me"], "the accounts asked after the refusal, and nothing else");
+}
+
+#[test]
+fn an_account_named_that_the_login_doesnt_belong_to_is_said_so() {
+    let refused = json!({ "statusCode": 404, "message": "Account 333333333333 not found", "error": "Not Found" });
+    let api = Server::start(vec![Reply::json(404, refused)]);
+
+    ff(&with_key(&api.url)).args(["--account", "333333333333", "list"]).assert().code(3).stderr(
+        predicate::str::contains(
+            "You don't belong to account 333333333333 (from --account): `ff accounts` lists yours",
+        ),
+    );
+    assert_eq!(api.requests()[0].header("x-ff-account"), Some("333333333333"));
+}
+
+#[test]
+fn a_function_not_found_in_the_account_named_is_still_said_as_the_api_says_it() {
+    let refused = json!({ "statusCode": 404, "message": "Function hello not found" });
+    let api = Server::start(vec![Reply::json(404, refused)]);
+
+    ff(&with_key(&api.url))
+        .args(["--account", "333333333333", "get", "hello"])
+        .assert()
+        .code(3)
+        .stderr(predicate::str::contains("Function hello not found"));
+}
+
 fn usage() -> Value {
     let amounts = |requests: u64| json!({ "requests": requests, "billedMs": 25_150, "gbSeconds": "3.14375", "throttled": 1, "platformErrors": 0, "lost": 0 });
     let mut hello = amounts(12);

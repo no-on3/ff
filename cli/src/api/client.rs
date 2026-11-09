@@ -14,8 +14,9 @@ use ureq::typestate::AgentScope;
 
 use super::error::{api_error, retry_after};
 use super::events::Events;
+use super::types::Me;
 use crate::auth::{self, Token};
-use crate::config::{Endpoint, Settings};
+use crate::config::{Endpoint, Setting, Settings};
 use crate::error::{Error, Kind};
 use crate::login;
 
@@ -25,6 +26,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest a read waits on a 429's Retry-After before trying once more.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+/// How the API refuses a user's token with several accounts and none named, before the route (its accounts
+/// service's words).
+const SEVERAL_ACCOUNTS: &str = "This user belongs to several accounts";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -129,6 +133,8 @@ pub struct Client {
     endpoint: Endpoint,
     headers: Vec<(&'static str, String)>,
     api_key: bool,
+    /// The account named, and where it was named.
+    account: Option<Setting<String>>,
 }
 
 impl Client {
@@ -148,6 +154,7 @@ impl Client {
             endpoint: settings.endpoint.value.clone(),
             headers: auth::identity_headers(settings, token),
             api_key: token.is_some_and(Token::is_api_key),
+            account: settings.account.clone(),
         }
     }
 
@@ -180,7 +187,7 @@ impl Client {
             let request_id =
                 response.headers().get("x-ff-request-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
             let body = self.read_body(&mut response)?;
-            return Err(api_error(status, &String::from_utf8_lossy(&body), request_id, self.api_key));
+            return Err(self.refusal(status, &body, request_id));
         }
         Ok(Events::new(BufReader::new(response.into_body().into_reader())))
     }
@@ -219,9 +226,27 @@ impl Client {
             response.headers().get("x-ff-request-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
         let body = self.read_body(&mut response)?;
         if !(200..300).contains(&status) {
-            return Err(api_error(status, &String::from_utf8_lossy(&body), request_id, self.api_key));
+            return Err(self.refusal(status, &body, request_id));
         }
         Ok((status, body))
+    }
+
+    /// The API's refusal as ff's error. A login with several accounts and none named is refused before the route:
+    /// its accounts are listed then, from `GET /me`, so that one can be named. An account named that the login
+    /// doesn't belong to is answered as one that doesn't exist, and said so.
+    fn refusal(&self, status: u16, body: &[u8], request_id: Option<String>) -> Error {
+        let mut error = api_error(status, &String::from_utf8_lossy(body), request_id, self.api_key);
+        if status == 400 && error.message.starts_with(SEVERAL_ACCOUNTS) {
+            if let Ok(me) = self.json::<Me>(&Call::get("/me")) {
+                error.message = auth::several_accounts(&me.accounts);
+            }
+        } else if let Some(account) = &self.account
+            && status == 404
+            && error.message == format!("Account {} not found", account.value)
+        {
+            error.message = auth::not_a_member(account);
+        }
+        error
     }
 
     fn send(&self, call: &Call) -> Result<Response<ureq::Body>, Error> {

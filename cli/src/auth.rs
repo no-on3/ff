@@ -3,7 +3,8 @@
 
 use std::fmt;
 
-use crate::config::Settings;
+use crate::api::types::MeAccount;
+use crate::config::{Setting, Settings};
 use crate::error::{Error, Kind};
 
 /// A bearer token. Never printed whole, not even in debug output.
@@ -76,6 +77,22 @@ pub fn identity_headers(settings: &Settings, token: Option<&Token>) -> Vec<(&'st
         headers.push(("x-ff-dev-account", account.value.clone()));
     }
     headers
+}
+
+/// What a login with several accounts and none named is told: how to name one, then each of them.
+pub fn several_accounts(accounts: &[MeAccount]) -> String {
+    let mut text = "Your login has several accounts: name the one to act for with --account, FF_ACCOUNT or \
+                    `ff config set account <ID>`"
+        .to_owned();
+    for account in accounts {
+        text.push_str(&format!("\n  {}, as {}", account.line(), account.role));
+    }
+    text
+}
+
+/// What a login is told of an account named that it doesn't belong to.
+pub fn not_a_member(account: &Setting<String>) -> String {
+    format!("You don't belong to account {} (from {}): `ff accounts` lists yours", account.value, account.source)
 }
 
 /// Before any call: a token, or for a development stack, the account to act as.

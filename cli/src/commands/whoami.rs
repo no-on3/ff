@@ -22,14 +22,10 @@ pub(super) fn ask(client: &Client) -> Result<(serde_json::Value, Me), Error> {
     Ok((answer, me))
 }
 
-fn account_line(account: &Account) -> String {
-    format!("account {} \"{}\" ({}, plan {})", account.id, account.name, account.status, account.plan.name)
-}
-
 pub(super) fn text(me: &Me, settings: &Settings) -> String {
     let api = format!("API: {}", settings.endpoint.value);
     if let Some(key) = &me.key {
-        let account = me.accounts.first().map(account_line).unwrap_or_default();
+        let account = me.accounts.first().map(Account::line).unwrap_or_default();
         let role = me.accounts.first().map(|account| account.role.as_str()).unwrap_or("?");
         return format!(
             "API key \"{}\" (ffk_{}_…) on {account}\nscopes: {}, within its creator's role: {role}\n{api}",
@@ -39,7 +35,7 @@ pub(super) fn text(me: &Me, settings: &Settings) -> String {
         );
     }
     let Some(user) = &me.user else {
-        let account = me.accounts.first().map(account_line).unwrap_or_default();
+        let account = me.accounts.first().map(Account::line).unwrap_or_default();
         return format!("Development mode, as the owner of {account}\n{api}");
     };
     let who = match &user.name {
@@ -50,7 +46,7 @@ pub(super) fn text(me: &Me, settings: &Settings) -> String {
     let mut lines = vec![who];
     for account in &me.accounts {
         let chosen = current == Some(account.id.as_str()) || (current.is_none() && me.accounts.len() == 1);
-        lines.push(format!("{} {}, as {}", if chosen { "*" } else { " " }, account_line(account), account.role));
+        lines.push(format!("{} {}, as {}", if chosen { "*" } else { " " }, account.line(), account.role));
     }
     if current.is_none() && me.accounts.len() > 1 {
         lines.push("Several accounts: name one with --account, FF_ACCOUNT or `ff config set account <ID>`".to_owned());

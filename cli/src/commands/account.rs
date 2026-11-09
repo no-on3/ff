@@ -10,6 +10,7 @@ use super::Context;
 use super::estimate::{self, AwsEstimate};
 use crate::api::types::{Me, MeAccount, function_named};
 use crate::api::{Call, Client};
+use crate::auth;
 use crate::cli::Format;
 use crate::config::Settings;
 use crate::error::{Error, Kind};
@@ -23,23 +24,16 @@ pub(super) fn me(client: &Client) -> Result<Me, Error> {
 /// the only one the token reaches, as an API key's.
 pub fn current<'a>(me: &'a Me, settings: &Settings) -> Result<&'a MeAccount, Error> {
     if let Some(named) = &settings.account {
-        return me.accounts.iter().find(|account| account.id == named.value).ok_or_else(|| {
-            Error::new(
-                Kind::Failed,
-                format!(
-                    "You don't belong to account {} (from {}): `ff accounts` lists yours",
-                    named.value, named.source
-                ),
-            )
-        });
+        return me
+            .accounts
+            .iter()
+            .find(|account| account.id == named.value)
+            .ok_or_else(|| Error::new(Kind::Failed, auth::not_a_member(named)));
     }
     match me.accounts.as_slice() {
         [only] => Ok(only),
         [] => Err(Error::new(Kind::Failed, "This login has no account yet: make one in the console")),
-        _ => Err(Error::new(
-            Kind::Failed,
-            "This login has several accounts: name one with --account, FF_ACCOUNT or `ff config set account <ID>`; `ff accounts` lists them",
-        )),
+        _ => Err(Error::new(Kind::Failed, auth::several_accounts(&me.accounts))),
     }
 }
 
@@ -643,7 +637,7 @@ mod tests {
             current(&me(&["111111111111", "222222222222"]), &settings(None))
                 .unwrap_err()
                 .message
-                .starts_with("This login has several accounts")
+                .starts_with("Your login has several accounts: name the one to act for with --account")
         );
         assert_eq!(
             current(&me(&["111111111111"]), &settings(Some("333333333333"))).unwrap_err().message,

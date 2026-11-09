@@ -258,6 +258,13 @@ pub struct MeAccount {
     pub aws: Option<AwsEndpoints>,
 }
 
+impl MeAccount {
+    /// `account <ID> "<name>" (<status>, plan <plan>)`, as ff names an account to people.
+    pub fn line(&self) -> String {
+        format!("account {} \"{}\" ({}, plan {})", self.id, self.name, self.status, self.plan.name)
+    }
+}
+
 /// FF's region and the endpoints AWS's tools reach the account's buckets, queues, mail and functions at, as
 /// `GET /me` gives them with each account; each but S3's empty where FF has none.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

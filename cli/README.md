@@ -150,6 +150,8 @@ dev_account = "123456789012"     # a development stack (FF_AUTH_MODE=dev) acts a
 
 **An API key comes before a login,** in `FF_TOKEN` or the profile, so that a key given to a CI keeps working whatever a login says; `ff login` on a profile that holds a key says so, and replaces it only with `--replace`.
 
+**A login with several accounts names the one to act for:** `--account`, `FF_ACCOUNT` or `ff config set account <ID>`, sent as `X-FF-Account`. With one account, the API chooses it. With several and none named, the API refuses the call before doing anything, and ff lists them, as `ff whoami` does, with the role in each, and stops. An account named that the login doesn't belong to is said so. An API key acts on its own account only.
+
 **Without a token**, nor a development account, ff says to log in, or how to get a key, and calls nothing.
 
 ## Running functions on this machine
