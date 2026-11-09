@@ -113,6 +113,11 @@ pub fn variables(assignments: &[String]) -> Result<Variables, Error> {
 
 /// A value from a prompt that doesn't show it, in a terminal, else the first line of stdin.
 fn read_value(name: &str) -> Result<String, Error> {
+    if crate::stdin::held() {
+        return Err(Error::usage(format!(
+            "{name} has no value: under ff mcp, whose stdin is its protocol, a value is given as {name}=<value>"
+        )));
+    }
     if io::stdin().is_terminal() {
         return rpassword::prompt_password(format!("{name} (not shown as you type it): "))
             .map_err(|error| Error::new(Kind::Failed, format!("Couldn't read the value: {error}")));

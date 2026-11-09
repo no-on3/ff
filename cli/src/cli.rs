@@ -373,8 +373,14 @@ pub enum Command {
 
     /// Serve ff's commands to an AI coding agent as the Model Context Protocol's tools, on stdin and stdout: the
     /// functions, their logs, calls and metrics, usage, balance, the cost on AWS, queues, buckets, databases, caches
-    /// and doctor, each run with this profile's login or key and answered with its JSON document
-    Mcp,
+    /// and doctor, each run with this profile's login or key and answered with its JSON document; with
+    /// --allow-write, deploy, invoke, env set, publish, alias set, queues send and sites deploy too
+    Mcp {
+        /// Run the tools that change the account, which are refused without it; still none that deletes, nor keys,
+        /// secrets or the login
+        #[arg(long)]
+        allow_write: bool,
+    },
 }
 
 #[derive(Args)]
@@ -524,8 +530,8 @@ pub enum AliasCommand {
         /// The alias's name: letters, digits, - and _, not digits alone
         alias: String,
 
-        /// The version its calls go to: its number, or $LATEST (latest), the function as it is. Its own name, as clap
-        /// keeps `version` for --version
+        /// The version its calls go to: its number, or $LATEST (latest), the function as it is
+        // Its id is its own, as clap keeps `version` for --version.
         #[arg(id = "to", value_name = "VERSION")]
         version: String,
 

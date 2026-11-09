@@ -154,6 +154,12 @@ fn show(context: &Context) -> Result<(), Error> {
 
 /// The key from a prompt that doesn't echo it in a terminal, else the first line of stdin.
 fn read_key() -> Result<String, Error> {
+    if crate::stdin::held() {
+        return Err(Error::usage(
+            "The key comes from a prompt or stdin, and ff mcp's stdin is its protocol: \
+             the developer runs ff config set-token in a terminal",
+        ));
+    }
     if io::stdin().is_terminal() {
         return rpassword::prompt_password("API key (not shown as you type or paste it): ")
             .map_err(|error| Error::new(Kind::Failed, format!("Couldn't read the key: {error}")));

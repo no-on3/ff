@@ -24,17 +24,48 @@ pub struct Tool {
     options: &'static [&'static str],
     /// The key a list, or a log's lines, goes under, as the protocol's structured content is an object.
     many: &'static str,
+    effect: Effect,
 }
 
+/// What a tool's command does to the account, which its annotations tell the client; all but a read need
+/// `--allow-write`.
+#[derive(Clone, Copy, PartialEq)]
+enum Effect {
+    Reads,
+    /// A version, a message: called twice, it adds twice.
+    Adds,
+    /// Code, variables, an alias, a site's files: called twice, the same as once.
+    Replaces,
+    /// A function's call, which may do anything.
+    Runs,
+}
+
+use Effect::{Adds, Reads, Replaces, Runs};
+
 const TOOLS: &[Tool] = &[
-    Tool { name: "ff_list_functions", title: "Functions", command: &["list"], options: &[], many: "functions" },
-    Tool { name: "ff_get_function", title: "A function", command: &["get"], options: &["name"], many: "function" },
+    Tool {
+        name: "ff_list_functions",
+        title: "Functions",
+        command: &["list"],
+        options: &[],
+        many: "functions",
+        effect: Reads,
+    },
+    Tool {
+        name: "ff_get_function",
+        title: "A function",
+        command: &["get"],
+        options: &["name"],
+        many: "function",
+        effect: Reads,
+    },
     Tool {
         name: "ff_logs",
         title: "A function's logs",
         command: &["logs"],
         options: &["name", "tail", "since", "start", "end", "grep", "request_id", "all"],
         many: "lines",
+        effect: Reads,
     },
     Tool {
         name: "ff_history",
@@ -42,6 +73,7 @@ const TOOLS: &[Tool] = &[
         command: &["history"],
         options: &["name", "limit"],
         many: "invocations",
+        effect: Reads,
     },
     Tool {
         name: "ff_metrics",
@@ -49,42 +81,181 @@ const TOOLS: &[Tool] = &[
         command: &["metrics"],
         options: &["name", "period", "since"],
         many: "periods",
+        effect: Reads,
     },
-    Tool { name: "ff_usage", title: "Usage", command: &["usage"], options: &["month"], many: "functions" },
-    Tool { name: "ff_balance", title: "Balance", command: &["balance"], options: &[], many: "balance" },
+    Tool {
+        name: "ff_usage",
+        title: "Usage",
+        command: &["usage"],
+        options: &["month"],
+        many: "functions",
+        effect: Reads,
+    },
+    Tool { name: "ff_balance", title: "Balance", command: &["balance"], options: &[], many: "balance", effect: Reads },
     Tool {
         name: "ff_estimate",
         title: "The cost on AWS",
         command: &["usage", "--aws"],
         options: &["months", "without"],
         many: "months",
+        effect: Reads,
     },
-    Tool { name: "ff_list_queues", title: "Queues", command: &["queues", "list"], options: &[], many: "queues" },
-    Tool { name: "ff_get_queue", title: "A queue", command: &["queues", "get"], options: &["name"], many: "queue" },
-    Tool { name: "ff_list_buckets", title: "Buckets", command: &["buckets", "list"], options: &[], many: "buckets" },
-    Tool { name: "ff_get_bucket", title: "A bucket", command: &["buckets", "get"], options: &["name"], many: "bucket" },
-    Tool { name: "ff_list_databases", title: "Databases", command: &["db", "list"], options: &[], many: "databases" },
+    Tool {
+        name: "ff_list_queues",
+        title: "Queues",
+        command: &["queues", "list"],
+        options: &[],
+        many: "queues",
+        effect: Reads,
+    },
+    Tool {
+        name: "ff_get_queue",
+        title: "A queue",
+        command: &["queues", "get"],
+        options: &["name"],
+        many: "queue",
+        effect: Reads,
+    },
+    Tool {
+        name: "ff_list_buckets",
+        title: "Buckets",
+        command: &["buckets", "list"],
+        options: &[],
+        many: "buckets",
+        effect: Reads,
+    },
+    Tool {
+        name: "ff_get_bucket",
+        title: "A bucket",
+        command: &["buckets", "get"],
+        options: &["name"],
+        many: "bucket",
+        effect: Reads,
+    },
+    Tool {
+        name: "ff_list_databases",
+        title: "Databases",
+        command: &["db", "list"],
+        options: &[],
+        many: "databases",
+        effect: Reads,
+    },
     Tool {
         name: "ff_get_database",
         title: "A database",
         command: &["db", "get"],
         options: &["name"],
         many: "database",
+        effect: Reads,
     },
-    Tool { name: "ff_list_caches", title: "Caches", command: &["caches", "list"], options: &[], many: "caches" },
-    Tool { name: "ff_get_cache", title: "A cache", command: &["caches", "get"], options: &["name"], many: "cache" },
+    Tool {
+        name: "ff_list_caches",
+        title: "Caches",
+        command: &["caches", "list"],
+        options: &[],
+        many: "caches",
+        effect: Reads,
+    },
+    Tool {
+        name: "ff_get_cache",
+        title: "A cache",
+        command: &["caches", "get"],
+        options: &["name"],
+        many: "cache",
+        effect: Reads,
+    },
     Tool {
         name: "ff_doctor",
         title: "Doctor",
         command: &["doctor"],
         options: &["path", "strict", "deployed", "parameter_overrides"],
         many: "findings",
+        effect: Reads,
+    },
+    // The tools that change the account. `ff deploy`'s --yes isn't among its options, as it deletes what a template
+    // no longer has without asking: without it, the command asks, which an agent can't answer, and stops.
+    Tool {
+        name: "ff_deploy",
+        title: "Deploy",
+        command: &["deploy"],
+        options: &[
+            "path",
+            "name",
+            "runtime",
+            "handler",
+            "container",
+            "no_build",
+            "memory",
+            "timeout",
+            "min_instances",
+            "max_instances",
+            "env",
+            "publish",
+            "alias",
+            "stack_name",
+            "parameter_overrides",
+        ],
+        many: "functions",
+        effect: Replaces,
+    },
+    Tool {
+        name: "ff_invoke",
+        title: "Invoke",
+        command: &["invoke"],
+        options: &["name", "data", "http", "asynchronous", "dry_run", "headers"],
+        many: "answer",
+        effect: Runs,
+    },
+    Tool {
+        name: "ff_set_env",
+        title: "Set variables",
+        command: &["env", "set"],
+        options: &["name", "variables"],
+        many: "variables",
+        effect: Replaces,
+    },
+    Tool {
+        name: "ff_publish",
+        title: "Publish a version",
+        command: &["publish"],
+        options: &["name", "description"],
+        many: "version",
+        effect: Adds,
+    },
+    Tool {
+        name: "ff_set_alias",
+        title: "Set an alias",
+        command: &["alias", "set"],
+        options: &["function", "alias", "to", "also", "description"],
+        many: "alias",
+        effect: Replaces,
+    },
+    Tool {
+        name: "ff_send_to_queue",
+        title: "Send a message",
+        command: &["queues", "send"],
+        options: &["name", "body", "delay", "attributes"],
+        many: "message",
+        effect: Adds,
+    },
+    Tool {
+        name: "ff_deploy_site",
+        title: "Deploy a site",
+        command: &["sites", "deploy"],
+        options: &["bucket", "folder", "spa", "no_spa", "index_document", "error_document", "keep"],
+        many: "files",
+        effect: Replaces,
     },
 ];
 
 /// The tool of that name.
 pub fn named(name: &str) -> Option<&'static Tool> {
     TOOLS.iter().find(|tool| tool.name == name)
+}
+
+/// The tools that change the account, which `--allow-write` runs.
+pub fn writing() -> Vec<&'static str> {
+    TOOLS.iter().filter(|tool| tool.effect != Reads).map(|tool| tool.name).collect()
 }
 
 /// Each tool as `tools/list` gives it, from ff itself: no API, so that a client starts before any login, offline.
@@ -113,15 +284,32 @@ fn definition(tool: &Tool, cli: &Spec) -> Value {
         "title": tool.title,
         "description": description(tool, command),
         "inputSchema": input,
-        "annotations": { "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": true },
+        "annotations": annotations(tool.effect),
     })
+}
+
+/// What the protocol's hints say of a tool: whether it changes anything, replaces what was there, and does the same
+/// when called again; each reaches the account, a world outside the agent's.
+fn annotations(effect: Effect) -> Value {
+    let (read_only, destructive, idempotent) = match effect {
+        Reads => (true, false, true),
+        Adds => (false, false, false),
+        Replaces => (false, true, true),
+        Runs => (false, true, false),
+    };
+    json!({ "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": true })
 }
 
 /// The command a tool runs, as clap knows it.
 fn spec<'a>(tool: &Tool, cli: &'a Spec) -> &'a Spec {
-    tool.command.iter().filter(|word| !word.starts_with('-')).fold(cli, |command, word| {
+    words(tool).fold(cli, |command, word| {
         command.find_subcommand(word).unwrap_or_else(|| panic!("{} runs ff {word}, which ff hasn't", tool.name))
     })
+}
+
+/// The command's words, without the flags the tool always gives.
+fn words(tool: &Tool) -> impl Iterator<Item = &'static str> {
+    tool.command.iter().copied().filter(|word| !word.starts_with('-'))
 }
 
 fn option<'a>(command: &'a Spec, id: &str) -> &'a Arg {
@@ -196,14 +384,19 @@ fn shape(arg: &Arg) -> Shape {
         return Shape::Texts;
     }
     let parsed = arg.get_value_parser().type_id();
-    if [TypeId::of::<u32>(), TypeId::of::<u64>(), TypeId::of::<usize>(), TypeId::of::<i64>()]
-        .iter()
-        .any(|t| parsed == *t)
-    {
+    let whole =
+        [TypeId::of::<u8>(), TypeId::of::<u16>(), TypeId::of::<u32>(), TypeId::of::<u64>(), TypeId::of::<usize>()];
+    if whole.iter().chain(&[TypeId::of::<i32>(), TypeId::of::<i64>()]).any(|t| parsed == *t) {
         Shape::Integer
     } else {
         Shape::Text
     }
+}
+
+/// How many values an option takes each time it is given, when it takes more than one: `--http GET /orders`.
+fn fixed_count(arg: &Arg) -> Option<usize> {
+    let range = arg.get_num_args()?;
+    (range.min_values() == range.max_values() && range.max_values() > 1).then(|| range.max_values())
 }
 
 /// An option's JSON schema: its type, its help, its default, the values it takes.
@@ -217,6 +410,9 @@ fn schema(tool: &Tool, arg: &Arg) -> Value {
     };
     if let Some(help) = option_help(tool, arg) {
         schema["description"] = json!(help);
+    }
+    if let Some(count) = fixed_count(arg) {
+        (schema["minItems"], schema["maxItems"]) = (json!(count), json!(count));
     }
     let values: Vec<String> = arg.get_possible_values().iter().map(|value| value.get_name().to_owned()).collect();
     match shape {
@@ -241,7 +437,15 @@ fn schema(tool: &Tool, arg: &Arg) -> Value {
 }
 
 /// The tool's answer to a call: the command run with the arguments given, or why they can't be.
-pub fn call(tool: &Tool, arguments: &Map<String, Value>, context: &Context) -> Value {
+pub fn call(tool: &Tool, arguments: &Map<String, Value>, allow_write: bool, context: &Context) -> Value {
+    if tool.effect != Reads && !allow_write {
+        let why = format!(
+            "{} changes the account, and ff mcp runs such a tool only when started with --allow-write: the developer \
+             adds it to ff mcp's line in the agent's settings",
+            tool.name
+        );
+        return answered(None, Vec::new(), Some(Error::usage(why)));
+    }
     let cli = Cli::command();
     let typed = match command_line(tool, spec(tool, &cli), arguments) {
         Ok(typed) => typed,
@@ -259,8 +463,8 @@ pub fn call(tool: &Tool, arguments: &Map<String, Value>, context: &Context) -> V
     answered(document(&buffer.text(), tool.many), buffer.warnings(), outcome.err())
 }
 
-/// The command as typed: `ff`, its words, each option given, then `--` and the values that aren't options', so that
-/// a value is never read as a flag.
+/// The command as typed: `ff`, its words, each option given, then `--` and the values that aren't options', in
+/// clap's order, so that a value is never read as a flag.
 fn command_line(tool: &Tool, command: &Spec, arguments: &Map<String, Value>) -> Result<Vec<String>, String> {
     let names: Vec<String> = tool.options.iter().map(|id| argument_name(id)).collect();
     if let Some(unknown) = arguments.keys().find(|key| !names.contains(key)) {
@@ -270,7 +474,7 @@ fn command_line(tool: &Tool, command: &Spec, arguments: &Map<String, Value>) -> 
         });
     }
     let mut typed: Vec<String> = ["ff"].iter().chain(tool.command).map(|word| word.to_string()).collect();
-    let mut values = Vec::new();
+    let mut positionals = Vec::new();
     for (id, name) in tool.options.iter().zip(&names) {
         let arg = option(command, id);
         let Some(value) = arguments.get(name).filter(|value| !value.is_null()) else { continue };
@@ -286,18 +490,26 @@ fn command_line(tool: &Tool, command: &Spec, arguments: &Map<String, Value>) -> 
             Shape::Texts => {
                 let texts =
                     value.as_array().and_then(|items| items.iter().map(Value::as_str).collect::<Option<Vec<_>>>());
-                texts.ok_or_else(|| wrong("a list of texts"))?.into_iter().map(str::to_owned).collect()
+                let texts: Vec<String> =
+                    texts.ok_or_else(|| wrong("a list of texts"))?.into_iter().map(str::to_owned).collect();
+                match fixed_count(arg) {
+                    _ if texts.is_empty() => continue,
+                    Some(count) if texts.len() != count => return Err(wrong(&format!("a list of {count} texts"))),
+                    _ => texts,
+                }
             }
         };
-        match arg.get_long() {
-            Some(long) if given.is_empty() => typed.push(format!("--{long}")),
-            Some(long) => typed.extend(given.iter().map(|value| format!("--{long}={value}"))),
-            None => values.extend(given),
+        match (arg.get_long(), fixed_count(arg)) {
+            (Some(long), _) if given.is_empty() => typed.push(format!("--{long}")),
+            (Some(long), Some(_)) => typed.extend([format!("--{long}")].into_iter().chain(given)),
+            (Some(long), None) => typed.extend(given.iter().map(|value| format!("--{long}={value}"))),
+            (None, _) => positionals.push((arg.get_index().unwrap_or(usize::MAX), given)),
         }
     }
-    if !values.is_empty() {
+    positionals.sort_by_key(|(index, _)| *index);
+    if !positionals.is_empty() {
         typed.push("--".to_owned());
-        typed.extend(values);
+        typed.extend(positionals.into_iter().flat_map(|(_, values)| values));
     }
     Ok(typed)
 }
@@ -400,6 +612,147 @@ mod tests {
             typed("ff_doctor", json!({ "parameterOverrides": "Stage=prod" })).unwrap_err(),
             "ff_doctor's parameterOverrides is a list of texts"
         );
+    }
+
+    #[test]
+    fn an_option_of_two_values_is_typed_once_with_both_and_the_values_go_in_clap_s_order_whatever_the_arguments_order()
+    {
+        assert_eq!(
+            typed(
+                "ff_invoke",
+                json!({ "name": "orders", "http": ["GET", "/orders?status=new"], "headers": ["Accept: text/html"] })
+            )
+            .unwrap(),
+            ["ff", "invoke", "--http", "GET", "/orders?status=new", "--header=Accept: text/html", "--", "orders"]
+        );
+        assert_eq!(
+            typed("ff_set_alias", json!({ "to": "3", "alias": "live", "function": "orders", "also": ["4", "10%"] }))
+                .unwrap(),
+            ["ff", "alias", "set", "--also", "4", "10%", "--", "orders", "live", "3"]
+        );
+        assert_eq!(
+            typed("ff_set_env", json!({ "variables": ["A=1", "B=2"], "name": "orders" })).unwrap(),
+            ["ff", "env", "set", "--", "orders", "A=1", "B=2"]
+        );
+        assert_eq!(
+            typed("ff_invoke", json!({ "name": "orders", "http": ["GET"] })).unwrap_err(),
+            "ff_invoke's http is a list of 2 texts"
+        );
+        assert_eq!(
+            typed("ff_deploy", json!({ "path": "app.py", "env": [] })).unwrap(),
+            ["ff", "deploy", "--", "app.py"],
+            "an empty list gives nothing"
+        );
+    }
+
+    /// The commands without a tool for now: each could have one, a read or a change. Those that never may are
+    /// `never_a_tool`'s.
+    const WITHOUT_A_TOOL_YET: &[&str] = &[
+        "init",
+        "package",
+        "scale",
+        "versions",
+        "alias list",
+        "local invoke",
+        "local start",
+        "local run",
+        "local mail",
+        "env list",
+        "url show",
+        "url enable",
+        "url disable",
+        "domains list",
+        "domains add",
+        "domains verify",
+        "schedule list",
+        "schedule set",
+        "schedule enable",
+        "schedule disable",
+        "async-config",
+        "db create",
+        "caches create",
+        "email identities",
+        "email add",
+        "email get",
+        "email verify",
+        "email account",
+        "email send",
+        "email messages",
+        "email suppressions",
+        "email suppress",
+        "buckets create",
+        "buckets notify",
+        "buckets notifications",
+        "sites get",
+        "sites metrics",
+        "sites domains list",
+        "sites domains add",
+        "sites domains verify",
+        "queues create",
+        "queues metrics",
+        "queues set",
+        "queues receive",
+        "event-sources add",
+        "event-sources list",
+        "event-sources get",
+        "event-sources update",
+        "export",
+        "whoami",
+        "accounts",
+        "account",
+        "version",
+        "completion",
+        "mcp",
+    ];
+
+    /// Why a command never gets a tool, whatever `--allow-write` says: an agent doesn't delete, hold a key or a
+    /// secret, or log in as the developer.
+    fn never_a_tool(words: &[&str]) -> Option<&'static str> {
+        match words {
+            [
+                ..,
+                "delete" | "delete-stack" | "delete-message" | "remove" | "unset" | "revoke" | "purge" | "reset"
+                | "unsuppress",
+            ] => Some("it deletes"),
+            ["keys" | "api-keys", ..] | ["buckets", "keys", ..] => Some("it makes or lists keys"),
+            ["secrets", ..] | ["db" | "caches", "password"] => Some("it sets or shows a secret"),
+            ["login" | "logout"] | ["config", ..] => Some("it is the developer's login, or ff's settings"),
+            _ => None,
+        }
+    }
+
+    /// Each command ff runs, as its words: the commands without subcommands.
+    fn commands(spec: &Spec, words: Vec<String>, found: &mut Vec<String>) {
+        if spec.get_subcommands().next().is_none() {
+            return found.push(words.join(" "));
+        }
+        for sub in spec.get_subcommands() {
+            commands(sub, words.iter().cloned().chain([sub.get_name().to_owned()]).collect(), found);
+        }
+    }
+
+    #[test]
+    fn every_command_has_a_tool_or_is_said_to_have_none_and_none_that_deletes_or_holds_a_key_a_secret_or_the_login_has()
+    {
+        let mut all = Vec::new();
+        commands(&Cli::command(), Vec::new(), &mut all);
+        let tooled: Vec<String> = TOOLS.iter().map(|tool| words(tool).collect::<Vec<_>>().join(" ")).collect();
+        for command in &all {
+            let words: Vec<&str> = command.split(' ').collect();
+            match never_a_tool(&words) {
+                Some(why) => assert!(!tooled.contains(command), "ff {command} has a tool, which it mustn't: {why}"),
+                None => assert!(
+                    tooled.contains(command) || WITHOUT_A_TOOL_YET.contains(&command.as_str()),
+                    "ff {command} has no tool and isn't among those without one: give it one, or say why not"
+                ),
+            }
+        }
+        for command in WITHOUT_A_TOOL_YET {
+            assert!(all.iter().any(|known| known == command), "ff {command} isn't a command");
+            assert!(!tooled.iter().any(|known| known == command), "ff {command} has a tool");
+        }
+        assert!(all.len() > 100, "{all:?}");
+        assert!(TOOLS.iter().all(|tool| !tool.options.contains(&"yes")), "no tool deletes without asking");
     }
 
     #[test]

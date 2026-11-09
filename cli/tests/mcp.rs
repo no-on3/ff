@@ -1,5 +1,6 @@
 //! `ff mcp` over a pipe, as an AI coding agent runs it, against a scripted API: the tools listed without the API,
-//! and each call the command run with the profile's key, answered with the command's document or its error.
+//! each call the command run with the profile's key, answered with the command's document or its error, and the
+//! tools that change the account run only with --allow-write.
 
 mod common;
 
@@ -21,13 +22,19 @@ fn call(id: u32, tool: &str, arguments: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": { "name": tool, "arguments": arguments } })
 }
 
-/// The messages written to `ff mcp`'s stdin, its stdin then closed, and each line it answered on stdout.
-fn session(dir: &TempDir, flags: &[&str], messages: &[Value]) -> Vec<Value> {
+/// The messages written to the stdin of `ff <before> mcp <after>`, its stdin then closed, and each line it answered
+/// on stdout.
+fn session(dir: &TempDir, before: &[&str], after: &[&str], messages: &[Value]) -> Vec<Value> {
     let input: String = messages.iter().map(|message| format!("{message}\n")).collect();
-    let output = ff(dir).args(flags).arg("mcp").write_stdin(input).output().unwrap();
+    let output = ff(dir).args(before).arg("mcp").args(after).write_stdin(input).output().unwrap();
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let answers = String::from_utf8(output.stdout).unwrap();
     answers.lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+fn error_message(answer: &Value) -> &str {
+    assert_eq!(answer["result"]["isError"], true, "{answer}");
+    answer["result"]["structuredContent"]["error"]["message"].as_str().unwrap()
 }
 
 #[test]
@@ -44,6 +51,7 @@ fn a_session_lists_the_tools_without_the_api_then_calls_each_with_the_profile_s_
     let answers = session(
         &with_key(&api.url),
         &["--account", "222222222222"],
+        &[],
         &[
             initialize,
             json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
@@ -62,10 +70,8 @@ fn a_session_lists_the_tools_without_the_api_then_calls_each_with_the_profile_s_
     assert_eq!(listed["isError"], false);
     assert_eq!(listed["structuredContent"]["functions"][0]["name"], "hello");
     assert_eq!(listed["structuredContent"]["functions"][0].get("code"), None);
-    assert_eq!(
-        serde_json::from_str::<Value>(listed["content"][0]["text"].as_str().unwrap()).unwrap(),
-        listed["structuredContent"]
-    );
+    let text: Value = serde_json::from_str(listed["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(text, listed["structuredContent"]);
 
     let logs = &answers[3]["result"]["structuredContent"];
     assert_eq!(logs, &json!({ "lines": [line(1, "START"), notice, line(3, "greeting Tunis")] }));
@@ -85,18 +91,67 @@ fn a_failed_command_is_the_tool_s_error_its_message_and_exit_code_and_the_sessio
     let answers = session(
         &with_key(&api.url),
         &[],
+        &[],
         &[
             call(1, "ff_get_function", json!({ "name": "nope" })),
             json!({ "jsonrpc": "2.0", "id": 2, "method": "ping" }),
         ],
     );
 
-    let failed = &answers[0]["result"];
-    assert_eq!(failed["isError"], true);
     assert_eq!(
-        failed["structuredContent"]["error"],
+        answers[0]["result"]["structuredContent"]["error"],
         json!({ "message": "There is no function named \"nope\" in the account: `ff list` shows its functions",
                 "exitCode": 3, "status": null, "requestId": null })
     );
+    assert_eq!(
+        error_message(&answers[0]),
+        "There is no function named \"nope\" in the account: `ff list` shows its functions"
+    );
     assert_eq!(answers[1], json!({ "jsonrpc": "2.0", "id": 2, "result": {} }));
+}
+
+#[test]
+fn a_write_is_refused_without_allow_write_and_runs_with_it_never_reading_stdin_which_is_the_protocol_s() {
+    let api = Server::start(vec![]);
+    let refused = session(&with_key(&api.url), &[], &[], &[call(1, "ff_publish", json!({ "name": "hello" }))]);
+    assert!(
+        error_message(&refused[0]).starts_with(
+            "ff_publish changes the account, and ff mcp runs such a tool only when started with --allow-write"
+        ),
+        "{}",
+        refused[0]
+    );
+    assert!(api.requests().is_empty(), "the command didn't run");
+
+    let version = json!({ "functionId": "f1", "functionArn": "arn:aws:lambda:tn-tunis-1:000000000001:function:hello:1",
+                          "version": "1", "description": "The first shop", "runtime": "python", "handler": "hello.handler",
+                          "packageType": "Zip", "codeSha256": "n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=", "codeSize": 120,
+                          "memory": 128, "timeout": 5, "eventFormat": "wrapped", "awsEndpoints": [], "revisionId": "v-1",
+                          "createdAt": "2026-11-01T08:00:00.000Z" });
+    let api = Server::start(vec![
+        Reply::json(200, json!([function()])),
+        Reply::json(200, function()),
+        Reply::json(200, json!([function()])),
+        Reply::json(200, json!([])),
+        Reply::json(201, version.clone()),
+    ]);
+    let answers = session(
+        &with_key(&api.url),
+        &[],
+        &["--allow-write"],
+        &[
+            call(1, "ff_set_env", json!({ "name": "hello", "variables": ["TOKEN"] })),
+            call(2, "ff_publish", json!({ "name": "hello", "description": "The first shop" })),
+        ],
+    );
+
+    assert_eq!(
+        error_message(&answers[0]),
+        "TOKEN has no value: under ff mcp, whose stdin is its protocol, a value is given as TOKEN=<value>"
+    );
+    assert_eq!(answers[1]["result"]["isError"], false, "{}", answers[1]);
+    assert_eq!(answers[1]["result"]["structuredContent"], json!({ "version": version, "new": true }));
+    let requests = api.requests();
+    assert_eq!(requests.len(), 5, "ff env set read the function, then asked for no change");
+    assert_eq!((requests[4].method.as_str(), requests[4].path.as_str()), ("POST", "/functions/f1/versions"));
 }

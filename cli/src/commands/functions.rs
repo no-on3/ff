@@ -167,6 +167,12 @@ pub fn confirmed(command: &str, question: &str, yes: bool) -> Result<bool, Error
     if yes {
         return Ok(true);
     }
+    if crate::stdin::held() {
+        return Err(Error::usage(format!(
+            "{command} asks first, \"{question}\", and under ff mcp, whose stdin is its protocol, no one can answer: \
+             the developer runs it in a terminal"
+        )));
+    }
     if !io::stdin().is_terminal() {
         return Err(Error::usage(format!("{command} asks first, and there is no terminal to ask in: say --yes")));
     }
@@ -198,5 +204,18 @@ mod tests {
     fn instances_say_whether_any_keep_running() {
         assert_eq!(instances(0, 3, true), "0 to 3, to zero when idle");
         assert_eq!(instances(2, 5, false), "2 to 5, 2 kept running");
+    }
+
+    #[test]
+    fn a_question_isn_t_asked_while_ff_mcp_holds_stdin_and_yes_still_goes_on() {
+        let _held = crate::stdin::hold();
+        let refused = confirmed("ff deploy", "Delete Orders, which the template no longer has?", false).unwrap_err();
+        assert_eq!(
+            refused.message,
+            "ff deploy asks first, \"Delete Orders, which the template no longer has?\", and under ff mcp, whose stdin \
+             is its protocol, no one can answer: the developer runs it in a terminal"
+        );
+        assert_eq!(refused.exit_code(), 2);
+        assert!(confirmed("ff deploy", "Delete Orders?", true).unwrap());
     }
 }

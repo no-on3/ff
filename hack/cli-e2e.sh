@@ -642,6 +642,36 @@ done
 }
 section_def init section_init backend budget=35
 
+section_mcp() {
+section "ff mcp: an AI coding agent's tools, over a pipe"
+printf 'def handler(event, context):\n    return {"greeting": "Ahlan " + event.get("name", "world")}\n' >"$work/mcp-hello.py"
+# The client: each message a line of ff mcp's stdin, which then ends; each answer read from stdout by its ID.
+mcp_call() { jq -nc --argjson id "$1" --arg name "$2" --argjson arguments "$3" \
+  '{jsonrpc: "2.0", id: $id, method: "tools/call", params: {name: $name, arguments: $arguments}}'; }
+mcp_answer() { out | jq -r --argjson id "$1" "select(.id == \$id) | $2"; }
+deploy_hello="$(mcp_call 3 ff_deploy "$(jq -nc --arg path "$work/mcp-hello.py" '{path: $path, name: "cli-mcp"}')")"
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli-e2e","version":"1"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  "$deploy_hello" "$(mcp_call 4 ff_list_functions '{}')" | ff mcp
+check "the handshake at its version, its 24 tools listed, a deploy refused without --allow-write, the list read" \
+  "0 2025-11-25 24 true ff_deploy changes the account false false" \
+  "$(code) $(mcp_answer 1 .result.protocolVersion) $(mcp_answer 2 '.result.tools | length') $(mcp_answer 3 .result.isError) \
+$(mcp_answer 3 .result.structuredContent.error.message | cut -d, -f1) $(mcp_answer 4 .result.isError) \
+$(mcp_answer 4 '.result.structuredContent.functions | any(.name == "cli-mcp")')"
+printf '%s\n' "$deploy_hello" "$(mcp_call 4 ff_invoke '{"name": "cli-mcp", "data": "{\"name\": \"agent\"}"}')" \
+  "$(mcp_call 5 ff_get_function '{"name": "cli-mcp"}')" "$(mcp_call 6 ff_set_env '{"name": "cli-mcp", "variables": ["TOKEN"]}')" \
+  | ff mcp --allow-write
+check "with --allow-write, the deploy runs, then the call, and a read of the function" "0 created Ahlan agent ACTIVE" \
+  "$(code) $(mcp_answer 3 .result.structuredContent.action) $(mcp_answer 4 .result.structuredContent.output.greeting) \
+$(mcp_answer 5 .result.structuredContent.status)"
+check "and a value ff env set would read from stdin is refused: stdin is the protocol's" \
+  "true TOKEN has no value: under ff mcp, whose stdin is its protocol, a value is given as TOKEN=<value>" \
+  "$(mcp_answer 6 .result.isError) $(mcp_answer 6 .result.structuredContent.error.message)"
+ff delete cli-mcp --yes
+}
+section_def mcp section_mcp backend budget=30
+
 section_stacks() {
 section "SAM templates as stacks: ff init --template sam deployed and called at its URL, sam init's own refused, a stack deployed with a second function, events, queues and a bucket's site and notifications, then without them, ff delete-stack"
 (cd "$work" && rm -rf cli-sam && "$ff_bin" init cli-sam --runtime nodejs --template sam >"$work/out" 2>"$work/err")

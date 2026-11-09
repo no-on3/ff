@@ -24,6 +24,7 @@ mod s3;
 mod sam;
 mod sigv4;
 mod site_files;
+mod stdin;
 mod table;
 mod update;
 

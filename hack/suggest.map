@@ -64,8 +64,8 @@ cli/src/md5.rs                          static unit cli:sites,local_queues,local
 cli/src/sigv4.rs                        static unit cli:sites,local_template,local_queues,local_buckets,local_mail
 cli/src/dates.rs                        static unit cli:local_template,local_queues,local_buckets,local_mail
 cli/src/site_files.rs                   static unit cli:sites,local_buckets,local_apps
-cli/src/mcp/*                           static unit
-cli/tests/mcp.rs                        static unit
+cli/src/mcp/*                           static unit cli:mcp
+cli/tests/mcp.rs                        static unit cli:mcp
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.

@@ -355,6 +355,6 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Config(command) => config::run(command, context),
         Command::Version => version::run(context.out),
         Command::Completion { shell } => completion::run(shell, context.out),
-        Command::Mcp => crate::mcp::serve(io::stdin().lock(), io::stdout(), context),
+        Command::Mcp { allow_write } => crate::mcp::serve(io::stdin().lock(), io::stdout(), allow_write, context),
     }
 }
