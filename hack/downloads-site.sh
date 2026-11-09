@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # The downloads site's folder, made from a release's folder as hack/release.sh leaves it: the builds latest.json names,
 # each with its signature; SHA256SUMS; latest.json and its signature; the public key; the install scripts, with the
-# site's address and the public key put in; the runtime images' archives under images/, each with its signature; and a
-# page saying how to install, with the key's ID. Refused, with no folder made, when a file latest.json names or a
+# site's address and the public key put in; the runtime images' archives under images/, each with its signature; the
+# CI examples under ci/, as examples/ci/ has them; and a page saying how to install, with the key's ID. Refused, with no folder made, when a file latest.json names or a
 # signature is missing.
 #   hack/downloads-site.sh <release folder> <site folder> <the site's address>
 #   FF_RELEASE_PUBLIC_KEY   another public key file than cli/release/minisign.pub, as the tests' throwaway one
@@ -48,6 +48,8 @@ for archive in ${archives[@]+"${archives[@]}"}; do
 done
 cp "$release/latest.json" "$release/latest.json.minisig" "$release/SHA256SUMS" "$site/"
 cp "$public_key" "$site/minisign.pub"
+mkdir "$site/ci"
+cp "$repo/examples/ci/github-actions.yml" "$repo/examples/ci/gitlab-ci.yml" "$site/ci/"
 for script in install.sh install.ps1; do
   text="$(<"$repo/cli/release/$script")"
   # The replacements as they are: without bash 5.2's & (the text matched), and unquoted, as macOS's bash, 3.2, would
@@ -83,6 +85,9 @@ cat >"$site/index.html" <<EOF
 public key, <a href="minisign.pub">minisign.pub</a>, whose ID is <code>$key_id</code>:</p>
 <pre>$key</pre>
 <p>A new key would mean installing <code>ff</code> again with these scripts, which this page would say.</p>
+<p>In a CI: <a href="ci/github-actions.yml">a GitHub Actions job</a> and <a href="ci/gitlab-ci.yml">a GitLab CI one</a>, each
+installing <code>ff</code> from here and deploying a repository's <code>template.yaml</code> with an API key in
+<code>FF_TOKEN</code>.</p>
 <p>The builds: $(for file in "${files[@]}"; do printf '<a href="%s">%s</a> ' "$file" "$file"; done)and their
 <a href="SHA256SUMS">SHA256SUMS</a>, each with its signature beside it (<code>.minisig</code>).</p>
 $(if [ "${#archives[@]}" -gt 0 ]; then

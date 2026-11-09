@@ -148,8 +148,10 @@ gitleaks_history() {
     --config /repo/.gitleaks.toml --gitleaks-ignore-path /repo/.gitleaksignore --redact --no-banner --log-level warn
 }
 
-workflow_lints() { # the CI server's workflow, its run: steps shellchecked
-  docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color=false
+workflow_lints() { # the CI server's workflow, its run: steps shellchecked; and the GitHub Actions example customers copy
+  docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color=false &&
+    docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color=false \
+      examples/ci/github-actions.yml
 }
 
 # Under pipefail, grep -q's exit at its first match fails a writer that is still writing, and a match reads as none:

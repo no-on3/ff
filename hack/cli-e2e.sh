@@ -98,6 +98,35 @@ in_folder() { local folder=$1; shift; (cd "$folder" && ff "$@"); }
 # sql <statement>: run on FF's database, its answer dropped.
 sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
 
+# release_site <folder> <bucket>: a release of ff as the release job makes it, on a site FF serves as the downloads
+# site, http://<bucket>.site.localhost:<port>: this machine's build the suite's ff, the other four stand-ins, signed by
+# hack/release.sh with a throwaway key (<folder>/release.pub) and made a site by hack/downloads-site.sh, then put on
+# the bucket by ff sites deploy. FF_RUNTIME_IMAGES, when set, names runtime images' archives already in <folder>/dist.
+release_site() {
+  local folder=$1 bucket=$2 binary processor version
+  local minisign="${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/minisign"
+  version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$FF_REPO_ROOT/cli/Cargo.toml" | head -1)"
+  case "$(uname -m)" in x86_64 | amd64) processor=x86_64 ;; *) processor=arm64 ;; esac
+  source "$FF_REPO_ROOT/hack/lib/ff-builds.sh"
+  mkdir -p "$folder/dist"
+  for binary in "${FF_BUILDS[@]}"; do
+    if [ "$binary" = "ff-linux-$processor" ]; then
+      cp "$ff_bin" "$folder/dist/$binary"
+    else
+      printf 'stand-in for %s\n' "$binary" >"$folder/dist/$binary"
+    fi
+    (cd "$folder/dist" && sha256sum "$binary" >"$binary.sha256")
+  done
+  "$minisign" -G -W -p "$folder/release.pub" -s "$folder/release.key" >/dev/null 2>&1
+  FF_RELEASE_KEY="$(cat "$folder/release.key")" FF_RELEASE_PUBLIC_KEY="$folder/release.pub" \
+    "$FF_REPO_ROOT/hack/release.sh" "$folder/dist" "ff-v$version" 0123456789ab >>"$folder/made.out"
+  FF_RELEASE_PUBLIC_KEY="$folder/release.pub" "$FF_REPO_ROOT/hack/downloads-site.sh" "$folder/dist" "$folder/site" \
+    "$(site_of "$bucket")" >>"$folder/made.out"
+  "$ff_bin" buckets create "$bucket" >>"$folder/made.out" 2>&1
+  "$ff_bin" sites deploy "$bucket" "$folder/site" >>"$folder/made.out" 2>&1
+}
+site_of() { echo "http://$1.site.localhost:$website_port"; }
+
 section_stack() {
 section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
 e2e_within_one_month 12
@@ -1633,12 +1662,14 @@ section_def account section_account failures budget=5
 
 section_login() {
 section "ff login against the development realm, the user's part done as a browser does it; the account, an API key, the logout"
-# The realm, and a backend that takes its tokens, beside the development one and on its database.
+# The realm, and a backend that takes its tokens, beside the development one and on its database. The function URLs
+# it gives are the development one's, whose front serves every account's (the CI examples' section calls one).
 e2e_up "Keycloak" keycloak
 keycloak="http://localhost:$FF_KEYCLOAK_PORT"
 api_oidc="http://127.0.0.1:$(free_port)"
 e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
-  FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api
+  FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
+  FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
 # A customer as the console's sign-up leaves one: one of this run's own, since a kept stack keeps the realm's users.
 email="cli-e2e-$account_a@ff.test" password=cli-e2e-password-1
 check "the realm has a customer to log in as" 201 "$(keycloak_user "$email" "$password" Cli)"
@@ -1718,6 +1749,13 @@ check "ff api-keys revoke finds the key by its name and revokes it" "0 Revoked t
 FF_TOKEN="$key" ff whoami --profile login
 check "the key is refused from then on" "3 error: The API key was revoked: save another key with \`ff config set-token\`" \
   "$(code) $(err | head -1)"
+# The CI examples' keys (section ci), made while the login lasts, as an owner makes a CI's: a deploy's scopes, and a
+# reader's, which a deploy lacks.
+ff api-keys create --profile login --name "cli ci" --scopes stacks:read,stacks:write,functions:read,functions:write \
+  --expires 1d --output json
+ci_key="$(out | jq -r .key)"
+ff api-keys create --profile login --name "cli ci reader" --scopes functions:read --expires 1d --output json
+ci_reader_key="$(out | jq -r .key)"
 
 # The renewal: the access token's end moved to the past, as five minutes on would leave it.
 access="$(sed -n 's/^access_token = "\(.*\)"$/\1/p' "$credentials")"
@@ -1798,12 +1836,12 @@ section_def local section_local backend budget=45
 section_local_images() {
 section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"
 # The release job's steps with this machine's Python image, which hack/runtime-images.sh pushes to the dev registry
-# rather than GitHub's: hack/release.sh signs its archive with a throwaway key, beside stand-in builds;
-# hack/downloads-site.sh and ff sites deploy put it on a site FF serves. ff then runs with that release's settings, as
-# a test build takes them.
-local images="$work/images" minisign="${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/minisign" version binary
-local registry="127.0.0.1:$FF_REGISTRY_PORT/cli-e2e" site="http://cli-images.site.localhost:$website_port"
+# rather than GitHub's, its archive signed with the release and put on a site FF serves (release_site). ff then runs
+# with that release's settings, as a test build takes them.
+local images="$work/images" minisign="${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/minisign" version
+local registry="127.0.0.1:$FF_REGISTRY_PORT/cli-e2e" site
 local manifest tagged by_digest archive digest key other_key
+site="$(site_of cli-images)"
 version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$FF_REPO_ROOT/cli/Cargo.toml" | head -1)"
 rm -rf "$images" && mkdir -p "$images/dist"
 "$FF_REPO_ROOT/hack/runtime-images.sh" "$registry" "$version" "$images/dist" --from-local --runtime python >"$images/made.out"
@@ -1812,23 +1850,12 @@ tagged="$(jq -r '.python.image + ":" + .python.tag' <<<"$manifest")"
 by_digest="$(jq -r '.python.image + "@" + .python.digest' <<<"$manifest")"
 archive="$(jq -r .python.archive <<<"$manifest")"
 digest="$(jq -r .python.digest <<<"$manifest")"
-source "$FF_REPO_ROOT/hack/lib/ff-builds.sh"
-for binary in "${FF_BUILDS[@]}"; do
-  printf 'stand-in for %s\n' "$binary" >"$images/dist/$binary"
-  (cd "$images/dist" && sha256sum "$binary" >"$binary.sha256")
-done
-"$minisign" -G -W -p "$images/release.pub" -s "$images/release.key" >/dev/null 2>&1
+FF_RUNTIME_IMAGES="$manifest" release_site "$images" cli-images
 "$minisign" -G -W -p "$images/other.pub" -s "$images/other.key" >/dev/null 2>&1
 key="$(sed -n 2p "$images/release.pub")"
 other_key="$(sed -n 2p "$images/other.pub")"
-FF_RELEASE_KEY="$(cat "$images/release.key")" FF_RELEASE_PUBLIC_KEY="$images/release.pub" FF_RUNTIME_IMAGES="$manifest" \
-  "$FF_REPO_ROOT/hack/release.sh" "$images/dist" "ff-v$version" 0123456789ab >>"$images/made.out"
-FF_RELEASE_PUBLIC_KEY="$images/release.pub" "$FF_REPO_ROOT/hack/downloads-site.sh" "$images/dist" "$images/site" "$site" \
-  >>"$images/made.out"
-ff buckets create cli-images
-ff sites deploy cli-images "$images/site"
-check "the release's image pushed, its archive signed and on the site FF serves" "0 true" \
-  "$(code) $(curl -fsS -o /dev/null "$site/$archive.minisig" && echo true || echo false)"
+check "the release's image pushed, its archive signed and on the site FF serves" "true" \
+  "$(curl -fsS -o /dev/null "$site/$archive.minisig" && echo true || echo false)"
 
 # pinned [<manifest>] [<key>]: ff local invoke as the release's build runs it, examples/hello.py its function.
 pinned() {
@@ -1868,6 +1895,94 @@ docker rmi "$tagged" >/dev/null 2>&1 || true
 curl -fsS -o /dev/null -X DELETE "http://127.0.0.1:$FF_REGISTRY_PORT/v2/cli-e2e/ff-runtime-python/manifests/$digest" || true
 }
 section_def local_images section_local_images backend budget=60
+
+section_ci() {
+section "ff in a customer's CI: the examples' own steps, as GitHub Actions and GitLab CI run them, deploying a SAM app"
+# Each example's steps, read from its file, run in a checkout of a customer's application (ff init --template sam's)
+# with the settings it names: the downloads site of a release made here, which FF serves; the key the login section
+# made with a deploy's scopes; the API that takes it. A home of their own, where install.sh puts ff, as a runner's.
+# GitHub's steps run as its runner runs them, with bash, its PATH and summary files; GitLab's job as one script in sh,
+# its image's packages this machine's, minisign among them, so that install.sh checks the signatures there.
+local ci="$work/ci" site extra code steps
+site="$(site_of cli-ci-downloads)"
+rm -rf "$ci" && mkdir -p "$ci/github" "$ci/bin"
+release_site "$ci/release" cli-ci-downloads
+(cd "$ci" && "$ff_bin" init cli-ci --runtime nodejs --template sam >/dev/null 2>&1)
+cp "${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/minisign" "$ci/bin/"
+# The deploy job's run: blocks, each a script of its own, in order.
+steps="$(awk -v out="$ci/github" '
+  /^        run: \|$/ { n++; block = 1; next }
+  block && /^          / { sub(/^          /, ""); print > (out "/step-" n ".sh"); next }
+  { block = 0 }
+  END { print n + 0 }' "$FF_REPO_ROOT/examples/ci/github-actions.yml")"
+check "the downloads site serves both examples as examples/ci/ has them" "true true" \
+  "$(curl -fsS "$site/ci/github-actions.yml" | cmp -s - "$FF_REPO_ROOT/examples/ci/github-actions.yml" && echo true || echo false) \
+$(curl -fsS "$site/ci/gitlab-ci.yml" | cmp -s - "$FF_REPO_ROOT/examples/ci/gitlab-ci.yml" && echo true || echo false)"
+check "the GitHub example's job takes FF_ENDPOINT, FF_DOWNLOADS_URL and FF_TOKEN, and runs two steps after the checkout" \
+  "FF_ENDPOINT FF_DOWNLOADS_URL FF_TOKEN 2" \
+  "$(awk '/^    env:$/ { env = 1; next } env && /^      [A-Z_]+:/ { sub(/:.*/, ""); sub(/^ +/, ""); print; next } { env = 0 }' \
+    "$FF_REPO_ROOT/examples/ci/github-actions.yml" | paste -sd' ') $steps"
+# github_job <key>: the steps in a fresh checkout and home, each with bash -eo pipefail as the runner runs it, the
+# folders a step adds to GITHUB_PATH before PATH from the next step on; to the first that fails. The output in
+# $ci/job.out, the exit code in $ci/job.code.
+github_job() {
+  local step=0
+  code=0
+  rm -rf "$ci/home" "$ci/app" && mkdir "$ci/home" && cp -r "$ci/cli-ci" "$ci/app"
+  : >"$ci/github_path" && : >"$ci/summary.md" && : >"$ci/job.out"
+  while [ "$step" -lt "$steps" ] && [ "$code" -eq 0 ]; do
+    step=$((step + 1))
+    extra="$(tac "$ci/github_path" | paste -sd:)"
+    (cd "$ci/app" && env -i HOME="$ci/home" PATH="${extra:+$extra:}$PATH" GITHUB_PATH="$ci/github_path" \
+      GITHUB_STEP_SUMMARY="$ci/summary.md" FF_ENDPOINT="$api_oidc" FF_DOWNLOADS_URL="$site" FF_TOKEN="$1" \
+      bash --noprofile --norc -eo pipefail "$ci/github/step-$step.sh") >>"$ci/job.out" 2>&1 || code=$?
+  done
+  echo "$code" >"$ci/job.code"
+}
+job() { cat "$ci/job.out"; }
+said_in_job() { job | grep -E "$1" >/dev/null && echo true || echo false; }
+github_job "$ci_key"
+check "GitHub's: ff installed from the downloads site into the runner's home, its SHA-256 checked, the app deployed" \
+  "0 true true" \
+  "$(cat "$ci/job.code") $(said_in_job "^ff [0-9.]+ installed as $ci/home/.local/bin/ff: its SHA-256 is latest.json's") \
+$(said_in_job '^created HelloWorldFunction: ')"
+url="$(sed -n 's/^- HelloWorldApi: //p' "$ci/summary.md")"
+check "  ... its URL in the job's summary, where the app answers" "true hello world" \
+  "$(grep -Fx '### Deployed to FF' "$ci/summary.md" >/dev/null && echo true || echo false) $(curl -s "${url%/}/hello" | jq -r .message)"
+github_job "$ci_reader_key"
+check "  ... and with a key that lacks a deploy's scopes, the job fails with ff's code, 6, the account's message its error" \
+  "6 true" "$(cat "$ci/job.code") $(said_in_job '^::error title=FF refused the account \(exit 6\)::This API key lacks the scope ')"
+
+# GitLab's: before_script's and script's lines, one script as the runner joins them, the image's apk line aside.
+awk '
+  /^  (before_script|script):$/ { list = 1; next }
+  list && /^    - \|$/ { block = 1; next }
+  list && block && /^      / { sub(/^      /, ""); print; next }
+  list && /^    - / { block = 0; sub(/^    - /, ""); print; next }
+  { list = 0; block = 0 }' "$FF_REPO_ROOT/examples/ci/gitlab-ci.yml" >"$ci/gitlab-job.sh"
+check "the GitLab example's job installs curl, jq and minisign in its image, then installs ff and deploys" \
+  "apk add --no-cache curl jq minisign" "$(grep '^apk ' "$ci/gitlab-job.sh")"
+grep -v '^apk ' "$ci/gitlab-job.sh" >"$ci/gitlab.sh"
+# gitlab_job <key>: its script with sh -e, in a fresh checkout and home.
+gitlab_job() {
+  code=0
+  rm -rf "$ci/home" "$ci/app" && mkdir "$ci/home" && cp -r "$ci/cli-ci" "$ci/app"
+  (cd "$ci/app" && env -i HOME="$ci/home" PATH="$ci/bin:$PATH" FF_ENDPOINT="$api_oidc" FF_DOWNLOADS_URL="$site" \
+    FF_TOKEN="$1" sh -e "$ci/gitlab.sh") >"$ci/job.out" 2>&1 || code=$?
+  echo "$code" >"$ci/job.code"
+}
+gitlab_job "$ci_key"
+check "GitLab's: ff installed, its signatures checked with minisign, the app deployed again, unchanged, its URL said" \
+  "0 true true true" \
+  "$(cat "$ci/job.code") $(said_in_job "^ff [0-9.]+ installed as $ci/home/.local/bin/ff: its SHA-256 is latest.json's, and their signatures are the release key's") \
+$(said_in_job '^unchanged HelloWorldFunction: ') $(said_in_job "^HelloWorldApi: ${url%/}")"
+gitlab_job "$ci_reader_key"
+check "  ... and refused with a reader's key, its last line the account's message" "6 true" \
+  "$(cat "$ci/job.code") $(job | tail -1 | grep -E '^FF refused the account \(exit 6\): This API key lacks the scope ' >/dev/null && echo true || echo false)"
+in_folder "$ci/cli-ci" delete-stack --yes
+check "the app's stack deleted after" 0 "$(code)"
+}
+section_def ci section_ci login budget=60
 
 sections_run
 checks_done cli-e2e

@@ -194,6 +194,8 @@ A read the plan's rate refused (429) is tried once more after its `Retry-After`,
 
 An error goes to stderr: `error: <message>`, the API's own when it refused, and its request ID on the next line when there is one; with `--output json`, `{"error": {"message", "exitCode", "status", "requestId"}}`, the API's status and request ID null when the API gave none.
 
+In a CI, [`examples/ci/`](../examples/ci/) has a GitHub Actions job and a GitLab CI one that install `ff` from the downloads site and deploy a `template.yaml` with a key in `FF_TOKEN`, failing with `ff`'s code and message (the getting-started guide's "`ff` in your CI").
+
 ## Install
 
 From the downloads site, once FF publishes releases there (the getting-started guide's "A release of `ff`"), its address in place of `get.<domain>`:

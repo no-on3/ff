@@ -503,6 +503,18 @@ ff logout                                         # the login revoked, its token
 
 A script reads `--output json`, and the exit codes: 4 a deploy that never became ready, 5 a call that failed, 6 the account refusing (credit, scopes, the plan's rate). [`cli/README.md`](../cli/README.md) has every command, setting and code; `hack/build-cli.sh [<target>]` builds it for Linux, Windows or, on a Mac, macOS, with its SHA-256.
 
+**`ff` in your CI.** [`examples/ci/`](../examples/ci/), which the downloads site serves under `ci/` too, holds a job for GitHub Actions (`github-actions.yml`, for `.github/workflows/`) and one for GitLab CI (`gitlab-ci.yml`, as `.gitlab-ci.yml`), each deploying a repository's `template.yaml` at each push to its main branch. Each installs `ff` from the downloads site, its SHA-256 checked (and its signature where minisign is, as GitLab's job installs it), then runs `ff deploy template.yaml --yes --output json` with three settings: `FF_ENDPOINT`, the API; `FF_DOWNLOADS_URL`, the site; `FF_TOKEN`, a secret, an API key an owner makes for it with a deploy's scopes. The job fails with `ff`'s exit code and its message as the job's error, so that a 6, the account refusing, reads as such rather than as the application's fault; GitHub's job lists the stack's outputs, its functions' URLs among them, in its summary. The `ff` suite's `ci` section runs both jobs' own lines against the development stack, a release of `ff` on a site FF serves, with a deploy's key and then with a reader's, which is refused.
+
+```bash
+ff api-keys create --name github --expires 90d --scopes stacks:read,stacks:write,functions:read,functions:write
+gh secret set FF_TOKEN                                        # in the application's repository: asks for the key
+gh variable set FF_ENDPOINT --body https://api.<domain>
+gh variable set FF_DOWNLOADS_URL --body https://get.<domain>
+curl -fsSL --create-dirs -o .github/workflows/deploy-to-ff.yml https://get.<domain>/ci/github-actions.yml
+```
+
+A template with buckets or queues needs `storage:read` and `storage:write`, or `queues:read` and `queues:write`, beside them.
+
 ### A database
 
 An account's functions keep their data in PostgreSQL databases that FF gives, as AWS RDS gives instances ([ADR 0008](adr/0008-customer-databases.md)): PostgreSQL 18, on a server of customers' databases apart from FF's own, a database and its user each, both named `ff_` and 24 random hexadecimal characters, which say nothing of whose it is; your name for it is the account's. TLS only. The plan sets how many, their storage and their sessions: one database on beta, 1,024 MB, 10 sessions at once. In development, setup's step 10 starts the server.
