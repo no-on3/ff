@@ -339,6 +339,7 @@ dependencies = [
  "tempfile",
  "toml_edit",
  "ureq",
+ "windows-sys 0.61.2",
  "yaml-rust2",
 ]
 

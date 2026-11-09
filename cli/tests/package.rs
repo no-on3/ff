@@ -110,7 +110,7 @@ fn package_writes_the_same_zip_twice_into_ffs_own_folder_and_says_what_it_holds(
         .arg(&root)
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"^packaged .*orders as .*orders/\.ff/orders\.zip: nodejs, 2 files, \d+ bytes \(\d+ bytes unpacked\)\nhandler: index.handler\nSHA-256: [A-Za-z0-9+/]{43}=\n$").unwrap())
+        .stdout(predicate::str::is_match(r"^packaged .*orders as .*orders[/\\]\.ff[/\\]orders\.zip: nodejs, 2 files, \d+ bytes \(\d+ bytes unpacked\)\nhandler: index.handler\nSHA-256: [A-Za-z0-9+/]{43}=\n$").unwrap())
         .stderr(predicate::str::contains("warning: not packaged: .env, which usually hold secrets: `ff secrets set` gives a function its secrets"));
 
     let zip = std::fs::read(root.join(".ff/orders.zip")).unwrap();
@@ -175,7 +175,8 @@ fn package_refuses_what_it_cant_package_before_writing() {
 }
 
 /// A folder of stand-ins for npm and python3 that log how and where they ran to
-/// `$FF_TEST_LOG`, and make what npm and pip would; and the PATH that finds them first.
+/// `$FF_TEST_LOG`, and make what npm and pip would; and the PATH that finds them first. Shell
+/// scripts, which Windows doesn't run: the tests that use them are Unix's.
 #[cfg(unix)]
 fn tools() -> (tempfile::TempDir, String) {
     use std::os::unix::fs::PermissionsExt;

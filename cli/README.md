@@ -124,7 +124,7 @@ ff config set-token                             # paste the key: it isn't shown,
 ff whoami                                       # API key "laptop" (ffk_1a2b3c4d5e6f_…) on account 123456789012 …
 ```
 
-The settings are kept in `config.toml`, the tokens in `credentials.toml` next to it, readable by its owner only (ff warns when others may read it). Both are in `~/.config/ff/` on Linux, `~/Library/Application Support/ff/` on macOS, `%APPDATA%\ff\` on Windows, or in the folder `FF_CONFIG_DIR` names. Each holds profiles:
+The settings are kept in `config.toml`, the tokens in `credentials.toml` next to it, readable by its owner only: its mode, 0600, on Linux and macOS, and on Windows an access list of its own, for its owner alone and inherited from no folder. ff warns when others may read it, with the command that makes it its owner's again. Both are in `~/.config/ff/` on Linux, `~/Library/Application Support/ff/` on macOS, `%APPDATA%\ff\` on Windows, or in the folder `FF_CONFIG_DIR` names. Each holds profiles:
 
 ```toml
 [profiles.default]
@@ -168,8 +168,8 @@ dev_account = "123456789012"     # a development stack (FF_AUTH_MODE=dev) acts a
 
 - **Built in a copy of the folder,** never in it, in the system's temporary folder: for Node.js, `npm ci` (`npm install` without a lockfile), the `build` script when `package.json` has one, then `npm prune --omit=dev`, so that the build's tools aren't packaged; for Python, pip installs `requirements.txt`, or `pyproject.toml`'s `[project] dependencies`, at the package's root, as wheels for the runtimes' platform whatever this machine is: Linux x86_64, glibc 2.28 or older, CPython 3.13 (`--platform manylinux_2_28_x86_64 --only-binary=:all:`), which FF's runtimes (glibc 2.41) and AWS Lambda's run. npm 11.19 and later run no install script of a dependency that `package.json`'s `allowScripts` doesn't allow; ff shows npm's output only when a step fails, so it says which scripts npm skipped, and `npm install-scripts approve <package>` in the folder allows one.
 - **`--container`** runs the same steps in Docker, in the runtime's base image (`node:24-trixie-slim`, `python:3.13-slim`) for `linux/amd64`, as this user, as `sam build --use-container` does: for npm's libraries with native code on another system than Linux x86_64, which ff warns about, and for a Python library published as source alone, which pip there builds. **`--no-build`** installs nothing: the folder as it is, its `node_modules` included.
-- **Left out:** version control (`.git`, `.hg`, `.svn`), `__pycache__`, `.DS_Store`, ff's own `.ff/`, `.env` and `.env.*` files, which usually hold secrets and which a warning names (`ff secrets set` gives a function its secrets), the folder's own `node_modules` when npm installs them again, and what `.ffignore` names, in `.gitignore`'s syntax without `!` (a name at any depth, a path from the folder with a `/`, a trailing `/` for folders, `*`, `?` and `**`): what the build reads stays in its copy, and only the zip leaves it out. A link to a file inside the folder is packaged as that file; a link to a folder, out of it or to nothing is left out, and a warning says how many.
-- **The same zip each time** for the same files (the plan's D5): entries in the order of their names, dated 1980-01-01, `0644`, or `0755` for a file this machine marks executable, deflated when that makes them smaller. A deploy compares its SHA-256 with the function's: an unchanged folder sends nothing.
+- **Left out:** version control (`.git`, `.hg`, `.svn`), `__pycache__`, `.DS_Store`, ff's own `.ff/`, `.env` and `.env.*` files, which usually hold secrets and which a warning names (`ff secrets set` gives a function its secrets), the folder's own `node_modules` when npm installs them again, and what `.ffignore` names, in `.gitignore`'s syntax without `!` (a name at any depth, a path from the folder with a `/`, a trailing `/` for folders, `*`, `?` and `**`): what the build reads stays in its copy, and only the zip leaves it out. A link to a file inside the folder is packaged as that file; a link to a folder, out of it or to nothing is left out, and a warning says how many. Windows's links the same.
+- **The same zip each time** for the same files (the plan's D5): entries in the order of their names, dated 1980-01-01, `0644`, or `0755` for a file this machine marks executable, or on Windows, which has no such mark, for a script (`#!`) or a Linux program (ELF's mark), deflated when that makes them smaller. A deploy compares its SHA-256 with the function's: an unchanged folder sends nothing.
 
 `ff package` writes `.ff/.gitignore` with the folder it makes, so that git doesn't keep the zips.
 
@@ -195,7 +195,17 @@ An error goes to stderr: `error: <message>`, the API's own when it refused, and 
 
 ## Install
 
-`hack/build-cli.sh`, from the repository's root, makes the static Linux binary for x86_64, `cli/target/dist/ff-linux-x86_64`, and its SHA-256 beside it: here, when the musl target and `musl-gcc` are installed, else inside the Rust image (`--container` asks for it). Copy it as `ff` anywhere on the `PATH`; it needs nothing else, and `ff version` names the commit it was built from. Releases for other systems, signed, come with the CLI plan's C-41.
+`hack/build-cli.sh [<target>]`, from the repository's root, builds `ff` for one of five systems into `cli/target/dist/`, its SHA-256 beside it:
+
+| Target | The file |
+|---|---|
+| `x86_64-unknown-linux-musl`, the default | `ff-linux-x86_64`, static |
+| `aarch64-unknown-linux-musl` | `ff-linux-arm64`, static |
+| `x86_64-pc-windows-gnu` | `ff-windows-x86_64.exe` |
+| `aarch64-apple-darwin`, on a Mac | `ff-macos-arm64` |
+| `x86_64-apple-darwin`, on a Mac | `ff-macos-x86_64` |
+
+Linux's and Windows's build anywhere with zig as the C compiler and the linker, through cargo-zigbuild, both pinned and installed by `hack/install-tools.sh zig cargo-zigbuild`, which the script runs; macOS's only on a Mac, whose link needs Apple's SDK. `--container` builds the first in the Rust image instead, with musl's own compiler, as the development server does. Copy the file as `ff` (`ff.exe`) anywhere on the `PATH`; it needs nothing else, and `ff version` names the commit it was built from. Signed releases come with the developer tools plan's M-03.
 
 ## Build and test
 

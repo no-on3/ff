@@ -13,6 +13,8 @@ mod local_url;
 mod login;
 mod md5;
 mod output;
+#[cfg(windows)]
+mod owner_only;
 mod package;
 mod progress;
 mod s3;

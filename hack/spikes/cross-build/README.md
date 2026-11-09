@@ -2,24 +2,25 @@
 
 How `ff`'s releases will be built for the five systems customers run it on: Linux on x86_64 and arm64, Windows on x86_64, macOS on x86_64 and arm64. The measurements behind ADR 0018 (`ff`'s releases); the [developer tools plan](../../../docs/dev-tools-plan.md)'s D2, its task list's M-01, part 1, for M-03 to build on.
 
+**Since M-03's part 1,** what it found is built for good: `hack/build-cli.sh <target>` builds each, zig and cargo-zigbuild pinned in `hack/install-tools.sh`; `hack/cli-smoke.sh`, this spike's `smoke.sh` moved, runs a binary on its system; `ci.yml`'s `cli-builds` jobs replaced its `cross` ones. `run.sh` installs its tools from there too.
+
 ```bash
 hack/spikes/cross-build/run.sh                 # on Linux: 15 to 25 minutes the first time, the tools, the targets, five builds
 TARGETS="x86_64-pc-windows-gnu" hack/spikes/cross-build/run.sh    # some of them
 hack/spikes/cross-build/macos.sh               # on macOS, with Xcode's command line tools: both macOS builds
-hack/spikes/cross-build/smoke.sh <ff binary>   # on the system the binary is for
-gh workflow run ci.yml --ref <branch> -f jobs=cross   # all of it on GitHub's runners, about 12 minutes
+hack/cli-smoke.sh <ff binary>                  # on the system the binary is for (this spike's smoke.sh, moved)
 ```
 
-`run.sh` needs Rust (rustup, with the toolchain `cli/` pins), curl and xz. It installs minisign through `hack/install-tools.sh minisign`, and zig and cargo-zigbuild into `hack/.spikes/cross-build/`, where the builds, their logs, zig's caches and the results go too (`results.md`, `results-macos.md`). Nothing lands in the home folder but Rust's targets, which rustup keeps with the toolchain.
+`run.sh` needs Rust (rustup, with the toolchain `cli/` pins), curl and xz. It installs zig and cargo-zigbuild through `hack/install-tools.sh zig cargo-zigbuild` (into `hack/.zig/` and `hack/bin/`); the builds, their logs, zig's caches and the results go into `hack/.spikes/cross-build/` (`results.md`, `results-macos.md`). Nothing lands in the home folder but Rust's targets, which rustup keeps with the toolchain.
 
 ## What it does
 
-- **The tools, pinned and checked:** zig 0.17.0, its archive's minisign signature checked against zig's key and its SHA-256 against the one copied here; cargo-zigbuild 0.24.0, its SHA-256 against its release's checksum file. A checksum that differs stops the run with nothing installed.
+- **The tools, pinned and checked:** zig 0.17.0, its archive's minisign signature checked against zig's key and its SHA-256 against the one copied there; cargo-zigbuild 0.24.0, its SHA-256 against its release's checksum file. A checksum that differs stops the run with nothing installed.
 - **The builds,** one at a time, each `cargo zigbuild --release --locked --target <target>` in `cli/`, with the release profile `ff` ships (`lto`, one codegen unit, `strip`) and the commit compiled in. zig is the C compiler and the linker for every target, ring's C and assembly included; nothing else is installed: no musl-gcc, no MinGW. For each: whether it built, the time, the size, what the file is, and the first errors when it failed.
 - **The Linux build checked here:** static, and `ff version` names the commit.
 - **macOS on macOS** (`macos.sh`): both of macOS's targets built on one machine, an arm64 one, with Rust's own toolchain and Apple's linker; the one for that machine's processor run.
-- **Each binary run on its own system** (`smoke.sh`): what a customer's first minutes do without an FF to reach. `ff version`; `ff init` makes a function's folder; `ff package` zips it, a script that starts with `#!` at 0755 and the rest at 0644, as Lambda wants them; `ff config set` saves a setting, the file its owner's alone (on Windows, `icacls` says who may read it); `ff completion` prints a script for bash, or for PowerShell on Windows. Its settings in a folder of its own, never the machine's.
-- **On GitHub's runners** (`ci.yml`'s `cross` jobs, only in a run started by hand that names them): the Linux and Windows builds on an x86_64 Linux runner, the macOS ones on an arm64 macOS runner; then on a Windows runner, an Intel and an arm64 macOS runner and an arm64 Linux runner, the binary for that system run by `smoke.sh`, and `ff`'s tests (`cargo test --locked`) run with that system's own toolchain.
+- **Each binary run on its own system** (`smoke.sh`, now `hack/cli-smoke.sh`, which checks the same on Windows since M-03 gave it its counterparts): what a customer's first minutes do without an FF to reach. `ff version`; `ff init` makes a function's folder; `ff package` zips it, a script that starts with `#!` at 0755 and the rest at 0644, as Lambda wants them; `ff config set` saves a setting, the file its owner's alone (on Windows, `icacls` says who may read it); `ff completion` prints a script for bash, or for PowerShell on Windows. Its settings in a folder of its own, never the machine's.
+- **On GitHub's runners** (`ci.yml`'s `cross` jobs, only in a run started by hand that named them, until M-03 made them its `cli-builds` jobs): the Linux and Windows builds on an x86_64 Linux runner, the macOS ones on an arm64 macOS runner; then on a Windows runner, an Intel and an arm64 macOS runner and an arm64 Linux runner, the binary for that system run by `smoke.sh`, and `ff`'s tests (`cargo test --locked`) run with that system's own toolchain.
 
 ## What it found
 

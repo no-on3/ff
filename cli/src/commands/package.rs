@@ -125,6 +125,13 @@ mod tests {
         std::fs::create_dir(dir.path().join("orders-api")).unwrap();
 
         assert_eq!(folder_name(&dir.path().join("orders-api/.")).unwrap(), "orders-api");
-        assert_eq!(folder_name(&dir.path().join("orders-api/sub/..")).map_err(|error| error.kind), Err(Kind::Usage));
+        // Unix reads the disk for `..`, and finds no `sub`; Windows takes `..` by its text, before the disk, and finds
+        // the folder meant.
+        let through_a_missing_folder = folder_name(&dir.path().join("orders-api/sub/..")).map_err(|error| error.kind);
+        if cfg!(windows) {
+            assert_eq!(through_a_missing_folder, Ok("orders-api".to_owned()));
+        } else {
+            assert_eq!(through_a_missing_folder, Err(Kind::Usage));
+        }
     }
 }

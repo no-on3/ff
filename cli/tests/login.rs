@@ -124,12 +124,7 @@ fn a_login_shows_where_to_approve_it_waits_keeps_the_tokens_and_says_who_logged_
     assert!(kept.starts_with(&format!(
         "[profiles.default]\nissuer = \"{url}/realms/ff\"\naccess_token = \"user-access\"\nrefresh_token = \"user-refresh\"\nexpires_at = \"20"
     )));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(dir.path().join("credentials.toml")).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-    }
+    common::assert_owner_alone(&dir.path().join("credentials.toml"));
 }
 
 #[test]

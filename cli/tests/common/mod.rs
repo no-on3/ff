@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -47,14 +48,66 @@ pub fn settings(config: &str, credentials: &str) -> TempDir {
     }
     if !credentials.is_empty() {
         std::fs::write(dir.path().join("credentials.toml"), credentials).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir.path().join("credentials.toml"), std::fs::Permissions::from_mode(0o600))
-                .unwrap();
-        }
+        owner_alone(&dir.path().join("credentials.toml"));
     }
     dir
+}
+
+/// Makes a file its owner's alone, as ff makes its credentials: mode 0600 on Unix; on Windows, an access list of its
+/// own for the user running the tests, inherited from no folder.
+pub fn owner_alone(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let made = std::process::Command::new("icacls")
+            .arg(path)
+            .args(["/inheritance:r", "/grant:r"])
+            .arg(format!("{}:F", windows_user()))
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stdout));
+    }
+}
+
+/// That only its owner may read the file, as its system says: its mode on Unix; on Windows its access list, which
+/// must hold the user running the tests alone, inherited from no folder.
+pub fn assert_owner_alone(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600, "{}", path.display());
+    }
+    #[cfg(windows)]
+    {
+        let (entries, user) = (access_list(path), windows_user());
+        assert!(
+            entries.len() == 1 && entries[0].eq_ignore_ascii_case(&format!("{user}:(F)")),
+            "{entries:?}, the user being {user}"
+        );
+    }
+}
+
+/// The user running the tests as icacls names it, `DOMAIN\name`.
+#[cfg(windows)]
+pub fn windows_user() -> String {
+    let variable = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("Windows sets {name}"));
+    format!("{}\\{}", variable("USERDOMAIN"), variable("USERNAME"))
+}
+
+/// A file's access list as icacls lists it: an entry a line, `DOMAIN\name:(rights)`, `(I)` marking an inherited one.
+#[cfg(windows)]
+pub fn access_list(path: &Path) -> Vec<String> {
+    let listed = std::process::Command::new("icacls").arg(path).output().unwrap();
+    let text = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let shown = path.display().to_string();
+    text.lines()
+        .take_while(|line| !line.trim().is_empty())
+        .map(|line| line.strip_prefix(shown.as_str()).unwrap_or(line).trim().to_owned())
+        .collect()
 }
 
 /// The realm's issuer, when the scripted server answers as the API and as its realm.

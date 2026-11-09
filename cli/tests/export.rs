@@ -136,11 +136,9 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
     let out = tempfile::TempDir::new().unwrap();
     let folder = out.path().join("to-aws");
 
-    ff(&dir)
-        .args(["export", folder.to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("MIGRATION.md"));
+    let wrote = ff(&dir).args(["export", folder.to_str().unwrap()]).assert().success().get_output().stdout.clone();
+    let wrote = String::from_utf8(wrote).unwrap();
+    assert!(wrote.contains("MIGRATION.md"), "{wrote}");
 
     let paths: Vec<String> = api.requests().iter().map(|request| request.path.clone()).collect();
     assert_eq!(
@@ -225,6 +223,8 @@ fn an_export_reads_the_account_and_writes_the_template_the_code_and_the_runbook(
         use std::os::unix::fs::PermissionsExt;
         assert_ne!(std::fs::metadata(folder.join("data/s3-sync.sh")).unwrap().permissions().mode() & 0o111, 0);
     }
+    // Windows has no mode to mark it with: ff says how Git marks it.
+    assert_eq!(wrote.contains("`git add --chmod=+x data/s3-sync.sh`"), cfg!(windows), "{wrote}");
     assert!(!folder.join("data/elasticache.md").exists(), "a page for what the account has alone");
     let estimate = read("cost-estimate.md");
     for line in [

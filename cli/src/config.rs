@@ -294,7 +294,8 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
-#[cfg(not(unix))]
+/// On Windows, a folder like any other: the credentials file has an access list of its own.
+#[cfg(windows)]
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
@@ -305,9 +306,14 @@ fn new_file(path: &Path, private: bool) -> io::Result<fs::File> {
     fs::OpenOptions::new().write(true).create(true).truncate(true).mode(if private { 0o600 } else { 0o644 }).open(path)
 }
 
-#[cfg(not(unix))]
-fn new_file(path: &Path, _private: bool) -> io::Result<fs::File> {
-    fs::File::create(path)
+/// On Windows, a private file gets an access list of its own, for its owner alone, before anything is written in it.
+#[cfg(windows)]
+fn new_file(path: &Path, private: bool) -> io::Result<fs::File> {
+    let file = fs::File::create(path)?;
+    if private {
+        crate::owner_only::restrict(path)?;
+    }
+    Ok(file)
 }
 
 /// A warning when others than its owner may read the credentials, as ssh gives for a key.
@@ -325,9 +331,18 @@ fn exposed(path: &Path) -> Option<String> {
     })
 }
 
-#[cfg(not(unix))]
-fn exposed(_path: &Path) -> Option<String> {
-    None
+/// On Windows, as OpenSSH warns for a key: others than its owner, the system and the administrators in its access list.
+#[cfg(windows)]
+fn exposed(path: &Path) -> Option<String> {
+    let others = crate::owner_only::other_readers(path).ok().filter(|others| !others.is_empty())?;
+    let you = crate::owner_only::user_name().ok()?;
+    Some(format!(
+        "{} can be read by others than you ({}): icacls \"{}\" /inheritance:r /grant:r \"{you}:F\" /remove {}",
+        path.display(),
+        others.join(", "),
+        path.display(),
+        others.iter().map(|other| format!("\"{other}\"")).collect::<Vec<_>>().join(" ")
+    ))
 }
 
 /// The settings in effect, each with where it comes from.

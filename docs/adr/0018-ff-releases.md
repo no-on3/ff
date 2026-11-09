@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [developer tools plan](../dev-tools-plan.md)'s D2 and its choices 3 and 4, confirmed on 2026-11-08 (the [decision log](../decisions.md)'s 72 and 73); the builds and the signatures measured by M-01's spikes the same day; the hash written by hand, your choice on 2026-11-09 (84) |
 | **Date** | 2026-11-09 |
-| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43 |
+| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's part 1, the builds and Windows (below) |
 | **Related** | [ADR 0002](0002-cli.md) (the `ff` command); [ADR 0011](0011-static-sites.md) (the sites that serve the downloads); the spikes, [`hack/spikes/cross-build`](../../hack/spikes/cross-build/README.md) and [`hack/spikes/minisign`](../../hack/spikes/minisign/README.md) |
 
 ## Context
@@ -58,6 +58,15 @@ At each release, and by hand:
   - the exported script's mode.
 - **`.gitattributes`** keeps LF in every clone (`* text=auto eol=lf`), so a checkout on Windows passes the tests.
 - **The two path tests** are made to hold on Windows: one takes either separator, and the other runs on Unix alone.
+
+### As built (M-03, part 1): the builds and Windows
+
+- **`hack/build-cli.sh [<target>]`** builds one of the five into `cli/target/dist/`, with its SHA-256: `ff-linux-x86_64` (the default), `ff-linux-arm64`, `ff-windows-x86_64.exe`, `ff-macos-arm64`, `ff-macos-x86_64`. Linux's and Windows's go through `cargo zigbuild`, which `hack/install-tools.sh zig cargo-zigbuild` installs: zig 0.17.0 into `hack/.zig/`, its minisign signature checked against zig's key at each install and its SHA-256 against its index's; cargo-zigbuild 0.24.0 against its release's checksum. macOS's are refused anywhere but on a Mac, saying why. `--container` keeps the Alpine image for the development server's x86_64 build; the build with musl-gcc installed is gone, as zig builds the same anywhere.
+- **`ci.yml`'s `cli-builds` jobs,** in a run started by hand (`jobs=cli-builds`): the three from Linux and both macOS ones, each runner testing what it built for; then Windows, the Intel Mac and arm64 Linux run their binary (`hack/cli-smoke.sh`, the spike's `smoke.sh`) and `ff`'s tests, Windows's checkout made as Git makes it there, `.gitattributes` keeping LF. The release job of part 2 adds the tag.
+- **The credentials on Windows:** the file gets an access list of its own before anything is written in it, Windows's own calls through `windows-sys`, the version the lock held already: its user, with everything, and nobody else, inherited from no folder. ff warns, as on Unix, when others may read it, the system and the administrators aside as OpenSSH sets them aside, with the `icacls` command that makes it its owner's again.
+- **A package's modes on Windows:** 0755 for what starts with `#!` and, beyond the decision's word, for a Linux program, ELF's mark, as a build in a container installs (esbuild's, Prisma's engines), which Lambda would refuse to run at 0644.
+- **The links, not refused:** Rust reads Windows's links as Unix's, so a package follows a link to a file inside the folder and leaves the others out, with the same warning, on both; the test that proves it runs on Windows too. Refusing them, as §2 said, would have refused what works.
+- **The exported script:** Windows has no mark for a program, so `ff export` says there how Git gives `data/s3-sync.sh` one when the folder is committed (`git add --chmod=+x`).
 
 ### 3. A release
 

@@ -299,85 +299,78 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # The ff command built for Linux and Windows on Linux, and for macOS on macOS, which Linux can't link
-  # (hack/spikes/cross-build/), then each build run on its own system, and ff's tests run there with that system's own
-  # toolchain: the developer tools' spike, which only a run started by hand that names it runs (jobs=cross), its
-  # findings in its README.
-  cross-build:
-    if: ${{ github.event_name == 'workflow_dispatch' && contains(format(',{0},', inputs.jobs), ',cross,') }}
+  # The ff command's five builds (hack/build-cli.sh): Linux's two and Windows's on Linux with zig, macOS's two on an
+  # arm64 Mac, as their link needs Apple's SDK; each binary run on its own system (hack/cli-smoke.sh), and ff's tests
+  # run there with that system's own toolchain. In a run started by hand that names them (jobs=cli-builds); ff's
+  # releases build with them.
+  cli-builds:
+    if: ${{ github.event_name == 'workflow_dispatch' && contains(format(',{0},', inputs.jobs), ',cli-builds,') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: hack/spikes/cross-build/run.sh
+      - run: hack/install-tools.sh zig cargo-zigbuild
+      - run: for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu; do hack/build-cli.sh "$target"; done
         env:
-          TARGETS: x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-pc-windows-gnu
           CARGO_BUILD_JOBS: 4 # the runner's processors, which it runs alone
+      - run: hack/cli-smoke.sh cli/target/dist/ff-linux-x86_64
+      - run: cargo test --locked
+        working-directory: cli
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always() # the builds, the results and each build's log, a failed one's too
         timeout-minutes: 5
         with:
-          name: cross-builds
-          path: |
-            hack/.spikes/cross-build/dist/
-            hack/.spikes/cross-build/results.md
-            hack/.spikes/cross-build/logs/
+          name: cli-builds
+          path: cli/target/dist/
           retention-days: 7
-          if-no-files-found: ignore
 
-  cross-build-macos:
-    if: ${{ github.event_name == 'workflow_dispatch' && contains(format(',{0},', inputs.jobs), ',cross,') }}
+  cli-builds-macos:
+    if: ${{ github.event_name == 'workflow_dispatch' && contains(format(',{0},', inputs.jobs), ',cli-builds,') }}
     runs-on: macos-15 # arm64, building for both processors
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: hack/spikes/cross-build/macos.sh
+      - run: for target in aarch64-apple-darwin x86_64-apple-darwin; do hack/build-cli.sh "$target"; done
         env:
           CARGO_BUILD_JOBS: 3 # the runner's processors, which it runs alone
+      - run: hack/cli-smoke.sh cli/target/dist/ff-macos-arm64
+      - run: cargo test --locked
+        working-directory: cli
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always()
         timeout-minutes: 5
         with:
-          name: cross-builds-macos
-          path: |
-            hack/.spikes/cross-build/dist/
-            hack/.spikes/cross-build/results-macos.md
-            hack/.spikes/cross-build/logs/
+          name: cli-builds-macos
+          path: cli/target/dist/
           retention-days: 7
-          if-no-files-found: ignore
 
-  cross-run:
-    needs: [cross-build, cross-build-macos]
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && contains(format(',{0},', inputs.jobs), ',cross,') }}
-    name: cross ${{ matrix.system }}
+  # The builds no build job runs: each on its own system, with ff's tests, in a checkout as the system's Git makes one
+  # (Windows's with CRLF but where .gitattributes says LF).
+  cli-systems:
+    needs: [cli-builds, cli-builds-macos]
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && contains(format(',{0},', inputs.jobs), ',cli-builds,') }}
+    name: cli ${{ matrix.system }}
     strategy:
       fail-fast: false # every system's results
       matrix:
         include:
-          - { system: windows-x86_64, runner: windows-2025, binary: ff-x86_64-pc-windows-gnu.exe }
-          - { system: macos-arm64, runner: macos-15, binary: ff-aarch64-apple-darwin }
-          - { system: macos-x86_64, runner: macos-15-intel, binary: ff-x86_64-apple-darwin }
-          - { system: linux-arm64, runner: ubuntu-24.04-arm, binary: ff-aarch64-unknown-linux-musl }
+          - { system: windows-x86_64, runner: windows-2025, binary: ff-windows-x86_64.exe }
+          - { system: macos-x86_64, runner: macos-15-intel, binary: ff-macos-x86_64 }
+          - { system: linux-arm64, runner: ubuntu-24.04-arm, binary: ff-linux-arm64 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
       run:
         shell: bash # Git's bash on Windows
     steps:
-      # Windows' Git checks text out with CRLF line endings, which ff's tests, comparing files they embed with what they
-      # expect, read as changes: the files as the repository holds them, to see what else differs on Windows.
-      - if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: cross-builds*
+          pattern: cli-builds*
           merge-multiple: true
-          path: cross-builds
+          path: dist
       # Both steps run whatever the other's outcome, and the last fails the job if either failed.
       - id: binary
         continue-on-error: true
-        run: hack/spikes/cross-build/smoke.sh "cross-builds/dist/${{ matrix.binary }}"
+        run: hack/cli-smoke.sh "dist/${{ matrix.binary }}"
       - id: tests
         continue-on-error: true
         working-directory: cli

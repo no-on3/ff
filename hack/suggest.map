@@ -103,3 +103,4 @@ docker-compose.yml                      static db l4 l5 cli aws-tools
 .gitleaksignore                         static
 .gitleaks.toml                           static
 .gitignore                              static
+.gitattributes                          static

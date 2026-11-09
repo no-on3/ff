@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# The ff command, built for another system, run on that system: what a customer's first minutes do without an FF to
-# reach. Its version, a function's folder made and packaged (the zip's modes as Lambda wants them: 0644, and 0755 for
-# a script), a setting saved, a key saved where its owner alone may read it, a completion script. What ff does today:
-# where a system differs, the check says what it gives there. Its settings in a folder of its own (FF_CONFIG_DIR),
-# never the machine's. ci.yml's cross jobs run it on Windows, macOS and Linux on arm64.
-#   hack/spikes/cross-build/smoke.sh <ff binary>
+# The ff command, built for a system, run on that system: what a customer's first minutes do without an FF to reach.
+# Its version; a function's folder made and packaged, the zip's modes as Lambda wants them (0755 for a script, 0644
+# for the rest), on Windows too, which marks no file as a program; a setting saved; a key saved where its owner alone
+# may read it, as its mode says, or on Windows its access list; a completion script. Its settings in a folder of its
+# own (FF_CONFIG_DIR), never the machine's. ci.yml's cli-builds jobs run it on each system ff is built for.
+#   hack/cli-smoke.sh <ff binary>
 set -euo pipefail
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo/hack/lib/checks.sh"
 ff="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 chmod +x "$ff" 2>/dev/null || true
@@ -24,7 +24,7 @@ check "ff version runs" 0 "$status"
 
 (cd "$scratch" && "$ff" init hello --runtime python >/dev/null 2>&1) && status=0 || status=$?
 check "ff init makes a function's folder" "0 true" "$status $([ -f "$scratch/hello/function.py" ] && echo true || echo false)"
-# A script, executable as a Unix system marks it: ff keeps a file's executable bit in the zip, which Windows hasn't.
+# A script, marked as a program where the system has such a mark; ff knows it on Windows by its #!.
 printf '#!/bin/sh\necho hello\n' >"$scratch/hello/run.sh"
 chmod +x "$scratch/hello/run.sh"
 (cd "$scratch" && "$ff" package hello --runtime python --zip hello.zip >/dev/null 2>&1) && status=0 || status=$?
@@ -38,11 +38,7 @@ for entry in zipfile.ZipFile(sys.argv[1]).infolist():
 EOF
 )"
   echo "$modes" | sed 's/^/    /'
-  if $windows; then
-    check "the script is 0644 on Windows, which has no executable bit for ff to read" "run.sh 0o644" "$(grep '^run.sh ' <<<"$modes" || true)"
-  else
-    check "the script is 0755" "run.sh 0o755" "$(grep '^run.sh ' <<<"$modes" || true)"
-  fi
+  check "the script is 0755" "run.sh 0o755" "$(grep '^run.sh ' <<<"$modes" || true)"
   check "the rest are 0644" "" "$(grep -v '^run.sh ' <<<"$modes" | grep -v ' 0o644$' || true)"
 fi
 
@@ -55,8 +51,12 @@ key="ffk_0123456789ab_$(printf 'a%.0s' $(seq 43))"
 credentials="$FF_CONFIG_DIR/credentials.toml"
 check "ff config set-token saves the key" "0 true" "$status $(grep "$key" "$credentials" >/dev/null 2>&1 && echo true || echo false)"
 if $windows; then
-  # Who may read it, as its permissions say: ff gives it none of its own on Windows.
-  icacls "$(cygpath -w "$credentials")" 2>&1 | sed 's/^/    /' || true
+  # Its access list as icacls lists it, the file's name left out: the user alone, with everything, nothing inherited.
+  listed="$(icacls "$(cygpath -w "$credentials")" | tr -d '\r' | sed '/^$/,$d; s/^.*credentials\.toml //; s/^ *//')"
+  echo "$listed" | sed 's/^/    /'
+  # The user as icacls names it, DOMAIN\name: Git's bash has a whoami of its own, which names the user alone.
+  check "the credentials file is its owner's alone" "$(tr '[:upper:]' '[:lower:]' <<<"$USERDOMAIN\\$USERNAME"):(f)" \
+    "$(tr '[:upper:]' '[:lower:]' <<<"$listed")"
 else
   mode="$(stat -c %a "$credentials" 2>/dev/null || stat -f %Lp "$credentials")"
   check "the credentials file is its owner's alone" 600 "$mode"
@@ -64,4 +64,4 @@ fi
 shell=bash
 ! $windows || shell=powershell
 check "ff completion $shell prints a script" true "$("$ff" completion "$shell" 2>/dev/null | grep -i 'ff' >/dev/null && echo true || echo false)"
-checks_done cross-build-smoke
+checks_done cli-smoke

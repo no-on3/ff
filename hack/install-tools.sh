@@ -7,8 +7,8 @@
 # OpenTofu and Terraform's CLI into hack/bin, Terraform's AWS and archive providers,
 # for both, into hack/.terraform/mirror (a directory the CLIs install providers from,
 # in place of a registry), and the SAM CLI into hack/.sam, cfn-lint inside it; and
-# minisign, which checks the signatures of ff's releases. Each pinned to a release
-# at least two weeks old when chosen. Idempotent: tools
+# minisign, which checks the signatures of ff's releases; zig, into hack/.zig/ (git-ignored), and cargo-zigbuild, which build
+# ff for Linux and Windows. Each pinned to a release at least two weeks old when chosen. Idempotent: tools
 # already at the pinned version are left alone, and so is a Rust at least as
 # recent where there is no rustup to pin it with. Nothing is installed system-wide.
 # FF_TOOLS_BIN and FF_SAM_DIR put the binaries and the SAM CLI elsewhere, as the nightly's newest tools go into a
@@ -16,6 +16,7 @@
 #   hack/install-tools.sh [kubectl] [k3d] [rust]     (all three without an argument)
 #   hack/install-tools.sh tofu terraform aws-provider archive-provider sam, or aws for the five
 #   hack/install-tools.sh minisign
+#   hack/install-tools.sh zig cargo-zigbuild
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -35,6 +36,18 @@ declare -A SAM_SHA256S=(
   [1.169.0-linux-amd64]=3e921832e9fb39a6563380afc9855eac6dab163238ef3b2bec4a5ba223e4be8b
   [1.169.0-linux-arm64]=a11352c4288a32cd75bb21eb9eb2cd7f23eb59384aa1224497e8de9862290d33
 )
+# zig, the C compiler and the linker of ff's builds for Linux and Windows (hack/build-cli.sh), each archive signed with
+# its project's key, ZIG_KEY, as ziglang.org/download gives it: the signature is checked at each install, and the
+# SHA-256s copied here are its index's for the version pinned. Another version or system needs ZIG_SHA256, the same
+# way. It goes into hack/.zig, a version a folder, hack/bin/zig leading to it.
+ZIG_VERSION="${ZIG_VERSION:-0.17.0}"
+ZIG_KEY=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
+declare -A ZIG_SHA256S=(
+  [0.17.0-x86_64-linux]=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
+  [0.17.0-aarch64-linux]=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
+)
+# cargo-zigbuild, cargo's builds with zig as their C compiler and linker; its release publishes each file's checksum.
+CARGO_ZIGBUILD_VERSION="${CARGO_ZIGBUILD_VERSION:-0.24.0}"
 # minisign publishes no checksum file, only each file's signature by its author's key,
 # RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3, as its README gives it: the SHA-256s copied here are those of
 # the files whose signatures were checked against that key when the version was pinned. Another version needs
@@ -283,13 +296,60 @@ install_minisign() {
   echo "installed minisign $MINISIGN_VERSION (sha256 verified)"
 }
 
+# zig, its signature checked with minisign's, then its checksum.
+install_zig() {
+  if [ -x "$bin_dir/zig" ] && [ "$("$bin_dir/zig" version 2>/dev/null)" = "$ZIG_VERSION" ]; then
+    echo "zig $ZIG_VERSION already installed"
+    return
+  fi
+  local system processor
+  system="$([ "$os" = linux ] && echo linux || echo macos)"
+  processor="$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)"
+  local expected="${ZIG_SHA256:-${ZIG_SHA256S[$ZIG_VERSION-$processor-$system]:-}}"
+  [ -n "$expected" ] || { echo "no checksum for zig $ZIG_VERSION on $processor $system: give ZIG_SHA256, from its index" >&2; return 1; }
+  install_minisign >/dev/null
+  local asset="zig-$processor-$system-$ZIG_VERSION.tar.xz" zig_dir="$repo_root/hack/.zig/$ZIG_VERSION"
+  curl -fsSL --retry 3 -o "$tmp/$asset" "https://ziglang.org/download/$ZIG_VERSION/$asset"
+  curl -fsSL --retry 3 -o "$tmp/$asset.minisig" "https://ziglang.org/download/$ZIG_VERSION/$asset.minisig"
+  "$bin_dir/minisign" -Vqm "$tmp/$asset" -P "$ZIG_KEY" >/dev/null ||
+    { echo "zig's $asset isn't signed by zig's key: nothing installed" >&2; exit 1; }
+  verify "$tmp/$asset" "$expected"
+  rm -rf "$zig_dir" && mkdir -p "$zig_dir"
+  tar -xJf "$tmp/$asset" -C "$zig_dir" --strip-components=1
+  ln -sfn "$zig_dir/zig" "$bin_dir/zig"
+  echo "installed zig $ZIG_VERSION in hack/.zig (signature and sha256 verified)"
+}
+
+install_cargo_zigbuild() {
+  if [ -x "$bin_dir/cargo-zigbuild" ] &&
+    [ "$("$bin_dir/cargo-zigbuild" --version 2>/dev/null)" = "cargo-zigbuild $CARGO_ZIGBUILD_VERSION" ]; then
+    echo "cargo-zigbuild $CARGO_ZIGBUILD_VERSION already installed"
+    return
+  fi
+  local triple
+  case "$os-$arch" in
+    linux-amd64) triple=x86_64-unknown-linux-musl ;;
+    linux-arm64) triple=aarch64-unknown-linux-gnu ;;
+    darwin-amd64) triple=x86_64-apple-darwin ;;
+    darwin-arm64) triple=aarch64-apple-darwin ;;
+  esac
+  local base="https://github.com/rust-cross/cargo-zigbuild/releases/download/v$CARGO_ZIGBUILD_VERSION"
+  local asset="cargo-zigbuild-$triple.tar.xz"
+  curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+  verify "$tmp/$asset" "$(published_sha256 "$base/$asset.sha256" "$asset")"
+  tar -xJf "$tmp/$asset" -C "$tmp" "cargo-zigbuild-$triple/cargo-zigbuild"
+  install -m 0755 "$tmp/cargo-zigbuild-$triple/cargo-zigbuild" "$bin_dir/cargo-zigbuild"
+  echo "installed cargo-zigbuild $CARGO_ZIGBUILD_VERSION (sha256 verified)"
+}
+
 [ $# -gt 0 ] || set -- kubectl k3d rust
 for tool in "$@"; do
   case "$tool" in
-    kubectl | k3d | rust | tofu | terraform | sam | minisign) "install_$tool" ;;
+    kubectl | k3d | rust | tofu | terraform | sam | minisign | zig) "install_$tool" ;;
     aws-provider) install_aws_provider ;;
     archive-provider) install_archive_provider ;;
     aws) install_tofu; install_terraform; install_aws_provider; install_archive_provider; install_sam ;;
-    *) echo "unknown tool $tool: kubectl, k3d, rust, tofu, terraform, aws-provider, archive-provider, sam, aws for those five, or minisign" >&2; exit 2 ;;
+    cargo-zigbuild) install_cargo_zigbuild ;;
+    *) echo "unknown tool $tool: kubectl, k3d, rust, tofu, terraform, aws-provider, archive-provider, sam, aws for those five, minisign, zig or cargo-zigbuild" >&2; exit 2 ;;
   esac
 done
