@@ -1,11 +1,17 @@
 //! Asynchronous calls, as FF makes them (`BE/src/functions/async-invoke.ts`): after each attempt, the event's end or
 //! its next attempt, a function's failure retried after a minute, then two, a throttle or a call that couldn't be made
-//! after 1, 2, 4… seconds up to five minutes, none past the event's age; and the record its destination is sent, as
-//! Lambda sends one. Its tests are the backend's, their numbers the same.
+//! after 1, 2, 4… seconds up to five minutes, none past the event's age; the record its destination is sent, and the
+//! attributes beside a failed event in a dead-letter queue, as Lambda sends them. Its tests are the backend's, their
+//! numbers the same.
 
 use std::time::SystemTime;
 
 use serde_json::{Value, json};
+
+use super::sqs::{Attribute, Attributes};
+
+/// The most of an error's message that Lambda puts beside an event in its dead-letter queue: a kilobyte.
+const DEAD_LETTER_ERROR_BYTES: usize = 1024;
 
 /// Lambda's waits before an event's retries, after its function failed: a minute, then two.
 const RETRY_DELAYS_SECONDS: [u64; 2] = [60, 120];
@@ -153,6 +159,26 @@ pub fn invocation_record(call: &Call, end: End, response: Option<&Response>, tim
     record
 }
 
+/// What Lambda puts beside an event it sends to a dead-letter queue, as SQS's message attributes: its request ID, and
+/// the last attempt's status (ErrorCode) and the start of its error (ErrorMessage), the error's type when its message
+/// is empty, as SQS takes no empty value.
+pub fn dead_letter_attributes(request_id: &str, response: &Response) -> Attributes {
+    let text = |name: &str| response.payload[name].as_str().filter(|text| !text.is_empty());
+    let message = text("errorMessage").or_else(|| text("errorType")).unwrap_or("Error");
+    let mut end = 0;
+    for (at, character) in message.char_indices() {
+        if at + character.len_utf8() > DEAD_LETTER_ERROR_BYTES {
+            break;
+        }
+        end = at + character.len_utf8();
+    }
+    Attributes::from([
+        ("RequestID".to_owned(), Attribute::string("String", request_id)),
+        ("ErrorCode".to_owned(), Attribute::string("Number", &response.status.to_string())),
+        ("ErrorMessage".to_owned(), Attribute::string("String", &message[..end])),
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -284,5 +310,23 @@ mod tests {
             record["requestContext"]["functionArn"],
             "arn:aws:lambda:tn-tunis-1:000000000001:function:orders:live"
         );
+    }
+
+    #[test]
+    fn a_dead_letter_carries_the_request_id_the_status_and_the_errors_first_kilobyte_cut_between_characters() {
+        let answered =
+            |status, payload| dead_letter_attributes("req-1", &Response { status, function_error: true, payload });
+        let message = |status, payload| answered(status, payload)["ErrorMessage"].string.clone().unwrap();
+        let long = format!("{}é", "x".repeat(1023));
+
+        let attributes = answered(200, json!({ "errorType": "Error", "errorMessage": long }));
+
+        assert_eq!(attributes["RequestID"], Attribute::string("String", "req-1"));
+        assert_eq!(attributes["ErrorCode"], Attribute::string("Number", "200"));
+        assert_eq!(attributes["ErrorMessage"], Attribute::string("String", &"x".repeat(1023)));
+        let throttled = json!({ "errorType": "TooManyRequestsException", "errorMessage": "Rate exceeded" });
+        assert_eq!(message(429, throttled), "Rate exceeded");
+        assert_eq!(message(200, json!({ "errorType": "TypeError", "errorMessage": "" })), "TypeError");
+        assert_eq!(message(500, Value::Null), "Error");
     }
 }

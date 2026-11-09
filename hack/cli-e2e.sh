@@ -49,7 +49,9 @@
 # answering on its port until Ctrl-C, no container left behind; a template's app behind its front door, each function
 # started at its first call, its variables resolved there and its secrets from .env.local, one calling another through
 # the front door, started again when its code changes and stopped when idle; ff init's SAM application and the small app
-# on it, called at their URLs, the small app's nightly run by hand and retried; then a release's runtime image, made, signed and put on
+# on it, called at their URLs, the small app's nightly run by hand and retried; a template's queues there, the AWS
+# CLI's SQS cases against them, a function sending to one, a failed call's record and dead letter in them; then a
+# release's runtime image, made, signed and put on
 # a site of FF's as the release job does, ff pinned to it: pulled by its digest from the dev registry, else its archive
 # loaded from the site, verified, once, and refused when signed by another key or changed.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
@@ -2158,6 +2160,168 @@ check "what ff local keeps stays out of git in an app whose .gitignore doesn't n
   "$([ -e "$shop/.ff/local/credentials" ] && echo true || echo false) $(git -C "$shop" status --porcelain --untracked-files=normal | grep -c '^?? \.ff/' || true)"
 }
 section_def local_apps section_local_apps backend budget=45
+
+section_local_queues() {
+section "ff local start's queues: SQS at the front door, the AWS CLI's cases of L4, a function's sends, and its failures' records"
+local app="$work/queues" port starter key_id url
+leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
+# sqs_cli <args...>: the AWS CLI's sqs commands with the local key's file alone, the front door their endpoint.
+sqs_cli() {
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
+    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_SQS="http://127.0.0.1:$port" "${aws_cli[@]}" sqs "$@" --output json
+}
+# refused <args...>: an sqs command's error, by the code the AWS CLI names.
+refused() { sqs_cli "$@" >/dev/null 2>"$work/sqs.err" && echo accepted || grep -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/sqs.err" | head -1; }
+# received <queue> [args...]: the messages a queue answers a receive, all their attributes asked; nothing for none.
+received() {
+  local queue="$1"
+  shift
+  sqs_cli receive-message --queue-url "$url/$queue" --attribute-names All --message-attribute-names All "$@"
+}
+rm -rf "$app" && mkdir -p "$app/sender" "$app/failing"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Runtime: python3.13
+    Handler: app.handler
+    Timeout: 10
+Resources:
+  Sender:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: sender/
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref Orders
+  Failing:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: failing/
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt Dead.Arn
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt Records.Arn
+  Orders:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt Dead.Arn
+        maxReceiveCount: 2
+  Dead:
+    Type: AWS::SQS::Queue
+  Records:
+    Type: AWS::SQS::Queue
+YAML
+# A function that sends to its queue as an SDK would, with no setting: the endpoint, the region and the key FF gives
+# it, its request signed by hand, as the runtime images have no SDK.
+cat >"$app/sender/app.py" <<'PY'
+import datetime
+import hashlib
+import hmac
+import json
+import os
+import urllib.request
+
+
+def handler(event, context):
+    endpoint, region = os.environ["AWS_ENDPOINT_URL_SQS"], os.environ["AWS_REGION"]
+    body = json.dumps({"QueueUrl": os.environ["QUEUE_URL"], "MessageBody": event["body"]})
+    now = datetime.datetime.now(datetime.timezone.utc)
+    amz_date, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+    headers = {"content-type": "application/x-amz-json-1.0", "host": endpoint.split("://")[1], "x-amz-date": amz_date,
+               "x-amz-target": "AmazonSQS.SendMessage"}
+    names = ";".join(sorted(headers))
+    lines = [f"{name}:{headers[name]}" for name in sorted(headers)]
+    canonical = "\n".join(["POST", "/", "", *lines, "", names, hashlib.sha256(body.encode()).hexdigest()])
+    scope = f"{day}/{region}/sqs/aws4_request"
+    to_sign = "\n".join(["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(canonical.encode()).hexdigest()])
+    key = ("AWS4" + os.environ["AWS_SECRET_ACCESS_KEY"]).encode()
+    for part in (day, region, "sqs", "aws4_request"):
+        key = hmac.new(key, part.encode(), hashlib.sha256).digest()
+    signature = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
+    headers["authorization"] = (f"AWS4-HMAC-SHA256 Credential={os.environ['AWS_ACCESS_KEY_ID']}/{scope}, "
+                                f"SignedHeaders={names}, Signature={signature}")
+    request = urllib.request.Request(endpoint + "/", data=body.encode(), headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=10) as answer:
+        return json.load(answer)
+PY
+printf 'def handler(event, context):\n    raise RuntimeError("no luck")\n' >"$app/failing/app.py"
+
+port="$(free_port)"
+url="http://127.0.0.1:$port/000000000000"
+FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z "$ff_bin" local start "$app/template.yaml" --port "$port" \
+  >"$work/queues.out" 2>"$work/queues.err" &
+starter=$!
+for _ in $(seq 1 60); do
+  grep -F "Ctrl-C stops them" "$work/queues.out" >/dev/null 2>&1 && break
+  sleep 0.5
+done
+grep -F "Ctrl-C stops them" "$work/queues.out" >/dev/null || fail "ff local start said nothing in 30 s: $(cat "$work/queues.err")"
+check "the start lists the template's queues, their URLs and a redrive policy" "true true true" \
+  "$(grep -F "Its queues, SQS's at http://127.0.0.1:$port, kept while it runs:" "$work/queues.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  Orders +$url/Orders, to Dead after 2 receives$" "$work/queues.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  Records +$url/Records$" "$work/queues.out" >/dev/null && echo true || echo false)"
+check "the AWS CLI lists them and finds one's URL, with the local key" "$url/Dead $url/Orders $url/Records $url/Orders" \
+  "$(sqs_cli list-queues | jq -r '.QueueUrls | join(" ")') $(sqs_cli get-queue-url --queue-name Orders | jq -r .QueueUrl)"
+sqs_cli send-message --queue-url "$url/Orders" --message-body 'Ahlan from the CLI' \
+  --message-attributes '{"source": {"DataType": "String", "StringValue": "aws-cli"}}' >"$work/sent.json"
+received Orders --wait-time-seconds 2 >"$work/received.json"
+key_id="$(sed -n 's/^aws_access_key_id = //p' "$app/.ff/local/credentials")"
+check "  ... sends a message with an attribute, the sums it checks right, and receives it back, sent by the key" \
+  "Ahlan from the CLI aws-cli 1 true" \
+  "$(jq -r '.Messages[0] | "\(.Body) \(.MessageAttributes.source.StringValue) \(.Attributes.ApproximateReceiveCount)"' "$work/received.json") \
+$([ "$(jq -r '.Messages[0].Attributes.SenderId' "$work/received.json")" = "$key_id" ] && echo true || echo false)"
+sqs_cli delete-message --queue-url "$url/Orders" --receipt-handle "$(jq -r '.Messages[0].ReceiptHandle' "$work/received.json")"
+check "  ... deletes it, the queue empty after" "0 0" \
+  "$(sqs_cli get-queue-attributes --queue-url "$url/Orders" --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+  | jq -r '.Attributes | "\(.ApproximateNumberOfMessages) \(.ApproximateNumberOfMessagesNotVisible)"')"
+check "  ... a queue that isn't there, by its query code" "An error occurred (AWS.SimpleQueueService.NonExistentQueue)" \
+  "$(refused get-queue-url --queue-name nowhere)"
+check "  ... and one ff local doesn't make, as the template makes them" "An error occurred (AWS.SimpleQueueService.UnsupportedOperation)" \
+  "$(refused create-queue --queue-name more)"
+check "  ... sends a batch, each entry answered" "a,b" \
+  "$(sqs_cli send-message-batch --queue-url "$url/Records" --entries Id=a,MessageBody=one Id=b,MessageBody=two | jq -r '[.Successful[].Id] | sort | join(",")')"
+sqs_cli purge-queue --queue-url "$url/Records"
+check "  ... and purges a queue" 0 \
+  "$(sqs_cli get-queue-attributes --queue-url "$url/Records" --attribute-names ApproximateNumberOfMessages | jq -r .Attributes.ApproximateNumberOfMessages)"
+sqs_cli send-message --queue-url "$url/Orders" --message-body poison >/dev/null
+received Orders --visibility-timeout 0 >/dev/null
+received Orders --visibility-timeout 0 >/dev/null
+check "a message received as often as its queue's redrive policy allows goes to its dead-letter queue" "0 poison 1" \
+  "$(received Orders | jq -s 'map(.Messages | length) | add // 0') \
+$(received Dead --visibility-timeout 0 | jq -r '.Messages[0] | "\(.Body) \(.Attributes.ApproximateReceiveCount)"')"
+AWS_ACCESS_KEY_ID=AKFFNOTTHELOCALKEY00 AWS_SECRET_ACCESS_KEY=not-the-secret AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+  AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_SQS="http://127.0.0.1:$port" "${aws_cli[@]}" sqs list-queues >/dev/null 2>"$work/sqs.err" || true
+check "a request signed with another key is refused in SQS's words, the key said on stderr" "true true" \
+  "$(grep -F 'An error occurred (InvalidClientTokenId) when calling the ListQueues operation: The security token included in the request is invalid.' "$work/sqs.err" >/dev/null && echo true || echo false) \
+$(grep -F "A request signed with AKFFNOTTHELOCALKEY00, not the local key $key_id" "$work/queues.err" >/dev/null && echo true || echo false)"
+sqs_cli purge-queue --queue-url "$url/Dead"
+curl -s -o "$work/sender.json" -X POST "http://127.0.0.1:$port/2015-03-31/functions/Sender/invocations" -d '{"body": "from a function"}'
+check "a function sends to its queue with no setting, through the endpoint, the region and the key it is given" \
+  "true from a function true" \
+  "$(jq -r 'has("MessageId")' "$work/sender.json") \
+$(received Orders --wait-time-seconds 2 | jq -r --arg key "$key_id" '.Messages[0] | "\(.Body) \(.Attributes.SenderId == $key)"')"
+curl -s -o /dev/null -X POST -H 'X-Amz-Invocation-Type: Event' "http://127.0.0.1:$port/2015-03-31/functions/Failing/invocations" -d '{"n": 1}'
+received Records --wait-time-seconds 20 >"$work/record.json"
+received Dead --wait-time-seconds 20 >"$work/dead.json"
+check "an asynchronous call that failed: its record in its OnFailure queue, sent by the function" \
+  "RetriesExhausted 1 arn:aws:lambda:tn-tunis-1:000000000000:function:Failing" \
+  "$(jq -r '.Messages[0] | (.Body | fromjson | "\(.requestContext.condition) \(.requestPayload.n)") + " " + .Attributes.SenderId' "$work/record.json")"
+check "  ... and its event in its dead-letter queue, with its request ID, the status and the error, as Lambda sends it" \
+  '1 200 no luck true' \
+  "$(jq -r '.Messages[0] | "\(.Body | fromjson | .n) \(.MessageAttributes.ErrorCode.StringValue) \(.MessageAttributes.ErrorMessage.StringValue) \(.MessageAttributes.RequestID.StringValue | test("^[0-9a-f-]{36}$"))"' "$work/dead.json")"
+kill -INT "$starter"
+wait "$starter" 2>/dev/null || true
+check "Ctrl-C removes their containers" 0 "$(leftover)"
+}
+section_def local_queues section_local_queues backend budget=45
 
 section_local_images() {
 section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"

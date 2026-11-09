@@ -45,6 +45,11 @@ pub trait Answers: Send + Sync + 'static {
     /// The response to a request that couldn't be read: over the payload's limit, or not HTTP; its line and its
     /// headers, when they were read.
     fn unreadable(&self, too_large: bool, head: Option<&Request>) -> Response;
+
+    /// The most a request's body may hold, by its line and its headers: the payload's limit, unless a service's is less.
+    fn limit(&self, _head: &Request) -> usize {
+        PAYLOAD_LIMIT
+    }
 }
 
 /// A random UUID, version 4, for each request's ID.
@@ -88,7 +93,7 @@ pub fn percent_decode(text: &str) -> String {
 #[cfg(test)]
 pub fn read_request(stream: &mut impl BufRead) -> io::Result<Option<Request>> {
     let Some(mut request) = read_head(stream)? else { return Ok(None) };
-    read_body(stream, &mut request)?;
+    read_body(stream, &mut request, PAYLOAD_LIMIT)?;
     Ok(Some(request))
 }
 
@@ -121,16 +126,16 @@ fn read_head(stream: &mut impl BufRead) -> io::Result<Option<Request>> {
     Ok(Some(request))
 }
 
-/// Reads a request's body, by its length or its chunks, up to the payload's limit.
-fn read_body(stream: &mut impl BufRead, request: &mut Request) -> io::Result<()> {
+/// Reads a request's body, by its length or its chunks, up to `limit` bytes.
+fn read_body(stream: &mut impl BufRead, request: &mut Request, limit: usize) -> io::Result<()> {
     if request.header("transfer-encoding").is_some_and(|encoding| encoding.eq_ignore_ascii_case("chunked")) {
         loop {
             let mut size = String::new();
             stream.read_line(&mut size)?;
             let size = usize::from_str_radix(size.trim().split(';').next().unwrap_or("0"), 16)
                 .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-            if request.body.len() + size > PAYLOAD_LIMIT {
-                return Err(io::Error::new(io::ErrorKind::FileTooLarge, "over 6 MB"));
+            if request.body.len() + size > limit {
+                return Err(io::Error::new(io::ErrorKind::FileTooLarge, "over the limit"));
             }
             let mut chunk = vec![0; size + 2];
             stream.read_exact(&mut chunk)?;
@@ -140,8 +145,8 @@ fn read_body(stream: &mut impl BufRead, request: &mut Request) -> io::Result<()>
             request.body.extend_from_slice(&chunk[..size]);
         }
     } else if let Some(length) = request.header("content-length").and_then(|length| length.parse::<usize>().ok()) {
-        if length > PAYLOAD_LIMIT {
-            return Err(io::Error::new(io::ErrorKind::FileTooLarge, "over 6 MB"));
+        if length > limit {
+            return Err(io::Error::new(io::ErrorKind::FileTooLarge, "over the limit"));
         }
         request.body = vec![0; length];
         stream.read_exact(&mut request.body)?;
@@ -200,7 +205,8 @@ pub fn serve(listener: TcpListener, answers: Arc<dyn Answers>) {
                         return;
                     }
                 };
-                let response = match read_body(&mut reader, &mut request) {
+                let limit = answers.limit(&request);
+                let response = match read_body(&mut reader, &mut request, limit) {
                     Ok(()) => answers.answer(&request, &request_id, &source_ip),
                     Err(error) => answers.unreadable(error.kind() == io::ErrorKind::FileTooLarge, Some(&request)),
                 };

@@ -9,7 +9,9 @@
 //! as the backend answers it for `$LATEST`. Each function's URL is at `http://<function>.fn.localhost:<port>`, served
 //! as FF's gateway serves one (`BE/src/function-urls/function-url.gateway.ts`), its CORS applied, and one that takes
 //! the account's credentials refused without the local key's signature. A function's schedules run as asynchronous
-//! calls, on time ([`super::schedules`]) or now, when `ff local run` asks.
+//! calls, on time ([`super::schedules`]) or now, when `ff local run` asks. SQS's JSON protocol, at `/` or by its
+//! `X-Amz-Target`, is answered by the template's queues ([`super::sqs`]), its signature checked as Lambda's is; an
+//! asynchronous call's record and its dead letter go to them as FF sends both.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,10 +27,11 @@ use super::instances::{Called, Instances, Runner};
 use super::key::Key;
 use super::schedule_expression::{Millis, iso};
 use super::schedules::{self, LocalSchedule};
+use super::sqs::{self, Outgoing, Queues};
 use super::url::{self, Caller, Cors, Ran, UrlRequest};
 use super::{Asks, Code};
 use crate::error::{Error, Kind};
-use crate::sigv4::{Problem, SignedRequest, check_authorization, read_authorization, sha256_hex};
+use crate::sigv4::{Problem, SignedRequest, Words, check_authorization, read_authorization, sha256_hex, words};
 
 /// What Lambda takes of an `Event` invocation's payload: 1 MB.
 const ASYNC_PAYLOAD_LIMIT: usize = 1024 * 1024;
@@ -76,46 +79,9 @@ fn unrecognized_client() -> Response {
     refusal(403, "UnrecognizedClientException", INVALID_TOKEN)
 }
 
-/// What is wrong with a signature, as the backend says it (`serviceWords`, `BE/src/common/signature-v4.ts`): a key
-/// it doesn't know; a signature incomplete, and why; or not the key's, and why, when it isn't the service's own words.
-enum Words {
-    Token,
-    Incomplete(String),
-    Mismatch(Option<String>),
-}
-
-fn signature_words(problem: Problem) -> Words {
-    let incomplete = |message: &str| Words::Incomplete(message.to_owned());
-    let mismatch = |message: String| Words::Mismatch(Some(message));
-    match problem {
-        Problem::Token => Words::Token,
-        Problem::Algorithm => {
-            incomplete("The authorization mechanism you have provided is not supported. Please use AWS4-HMAC-SHA256.")
-        }
-        Problem::Parts => {
-            incomplete("Authorization header requires Credential, SignedHeaders and Signature parameters.")
-        }
-        Problem::Credential { .. } => {
-            incomplete(&format!("The Credential is not <access key ID>/<date>/<region>/{SERVICE}/aws4_request."))
-        }
-        Problem::Service { .. } => mismatch(format!("Credential should be scoped to correct service: '{SERVICE}'.")),
-        Problem::NoDate => {
-            incomplete("Authorization header requires existence of either a X-Amz-Date or a Date header.")
-        }
-        Problem::Date { amz_date } | Problem::OtherDay { amz_date, .. } => {
-            incomplete(&format!("The date \"{amz_date}\" is not YYYYMMDDTHHMMSSZ, or not the credential's."))
-        }
-        Problem::Skewed { amz_date } => {
-            mismatch(format!("Signature expired: {amz_date} is more than 15 minutes from the request's arrival."))
-        }
-        Problem::Unsigned { .. } => mismatch("'Host' must be a 'SignedHeader' in the AWS Authorization.".to_owned()),
-        Problem::Mismatch => Words::Mismatch(None),
-    }
-}
-
 /// A signature's problem in Lambda's words.
 fn signature_refusal(problem: Problem) -> Response {
-    match signature_words(problem) {
+    match words(problem, SERVICE) {
         Words::Token => unrecognized_client(),
         Words::Incomplete(message) => refusal(400, "IncompleteSignatureException", &message),
         Words::Mismatch(message) => {
@@ -131,7 +97,7 @@ fn forbidden(message: &str) -> Response {
 
 /// A signature's problem in the words of a function's URL: each a 403, as the gateway says them.
 fn url_signature_refusal(problem: Problem) -> Response {
-    match signature_words(problem) {
+    match words(problem, SERVICE) {
         Words::Token => forbidden(INVALID_TOKEN),
         Words::Incomplete(message) => forbidden(&message),
         Words::Mismatch(message) => forbidden(message.as_deref().unwrap_or(URL_SIGNATURE_MISMATCH)),
@@ -320,6 +286,8 @@ pub struct FrontDoor<R: Runner> {
     pub say: Arc<dyn Fn(&str) + Send + Sync>,
     /// How far the schedules' clock is ahead of this machine's: none, but in the `ff` suite's builds.
     pub clock_offset: Millis,
+    /// The template's queues.
+    pub queues: Arc<Queues>,
 }
 
 impl<R: Runner> Clone for FrontDoor<R> {
@@ -334,6 +302,7 @@ impl<R: Runner> Clone for FrontDoor<R> {
             second: self.second,
             say: Arc::clone(&self.say),
             clock_offset: self.clock_offset,
+            queues: Arc::clone(&self.queues),
         }
     }
 }
@@ -752,8 +721,8 @@ impl<R: Runner> FrontDoor<R> {
     }
 
     /// The call's record to the destination its function names for how it ended, and its event, failed, to the
-    /// function's dead-letter queue, as FF sends both: a function's an asynchronous call here, a queue's said, as ff
-    /// local runs no queue yet.
+    /// function's dead-letter queue, as FF sends both: a function's an asynchronous call, a queue's a message from the
+    /// function; one that can't be sent said.
     fn hand_over(&self, call: &events::Call, end: End, response: &events::Response, settings: &Settings) {
         let (name, id) = (call.function_arn.rsplit(':').next().unwrap_or_default(), call.request_id);
         let destination = if end == End::Succeeded { &settings.on_success } else { &settings.on_failure };
@@ -761,9 +730,18 @@ impl<R: Runner> FrontDoor<R> {
             let record = events::invocation_record(call, end, Some(response), SystemTime::now());
             let target = named(destination, None);
             if destination.starts_with("arn:aws:sqs:") {
-                (self.say)(&format!(
-                    "{name}: the asynchronous call {id}'s record, for {destination}, which ff local doesn't run yet: {record}"
-                ));
+                let message = Outgoing {
+                    body: record.to_string(),
+                    attributes: sqs::Attributes::new(),
+                    trace_header: None,
+                    sender_id: call.function_arn.to_owned(),
+                    delay_seconds: None,
+                };
+                if let Err(why) = self.queues.send_as_ff(destination, message) {
+                    (self.say)(&format!(
+                        "{name}: the asynchronous call {id}'s record was not delivered to its destination {destination}: {why}"
+                    ));
+                }
             } else if self.has(&target) && self.runs_as(&target) {
                 self.send(target.name, record, &request_id(), target.qualifier);
             } else {
@@ -773,10 +751,18 @@ impl<R: Runner> FrontDoor<R> {
             }
         }
         if let Some(queue) = settings.dead_letter.as_ref().filter(|_| end != End::Succeeded) {
-            (self.say)(&format!(
-                "{name}: the asynchronous call {id}'s event, for its dead-letter queue {queue}, which ff local doesn't run yet: {}",
-                call.request_payload
-            ));
+            let message = Outgoing {
+                body: call.request_payload.to_string(),
+                attributes: events::dead_letter_attributes(id, response),
+                trace_header: None,
+                sender_id: call.function_arn.to_owned(),
+                delay_seconds: None,
+            };
+            if let Err(why) = self.queues.send_as_ff(queue, message) {
+                (self.say)(&format!(
+                    "{name}: the asynchronous call {id}'s event was not sent to its dead-letter queue {queue}: {why}"
+                ));
+            }
         }
     }
 
@@ -839,10 +825,27 @@ impl<R: Runner> FrontDoor<R> {
     }
 }
 
+impl<R: Runner> FrontDoor<R> {
+    /// Whether a request is SQS's, not a function URL's.
+    fn is_sqs(&self, head: &Request) -> bool {
+        self.url_of(head).is_none() && sqs::is_sqs(head)
+    }
+
+    /// A request in SQS's JSON protocol, answered by the queues, their URLs under the address it reached: this
+    /// machine's, or the one the functions reach it at.
+    fn sqs(&self, request: &Request) -> Response {
+        let endpoint = format!("http://{}", request.header("host").unwrap_or("127.0.0.1"));
+        self.queues.answer(request, &self.key, &endpoint, |key_id| self.not_the_local_key(key_id))
+    }
+}
+
 impl<R: Runner> Answers for FrontDoor<R> {
     fn answer(&self, request: &Request, request_id: &str, source_ip: &str) -> Response {
         if let Some(found) = self.url_of(request) {
             return self.url(found, request, request_id, source_ip);
+        }
+        if sqs::is_sqs(request) {
+            return self.sqs(request);
         }
         let (path, query) = request.target.split_once('?').unwrap_or((request.target.as_str(), ""));
         if let Err(refused) = self.signed(request, path, query) {
@@ -864,7 +867,7 @@ impl<R: Runner> Answers for FrontDoor<R> {
                 400,
                 "UnknownOperationException",
                 &format!(
-                    "ff local doesn't offer {method} {path}: its front door answers Lambda's Invoke, POST /2015-03-31/functions/<name>/invocations, GetFunctionConfiguration, GET /2015-03-31/functions/<name>/configuration, and ff local run's POST /ff-local/schedules/[<function>/]<schedule>"
+                    "ff local doesn't offer {method} {path}: its front door answers Lambda's Invoke, POST /2015-03-31/functions/<name>/invocations, GetFunctionConfiguration, GET /2015-03-31/functions/<name>/configuration, SQS's JSON protocol, POST / with X-Amz-Target AmazonSQS.<operation>, and ff local run's POST /ff-local/schedules/[<function>/]<schedule>"
                 ),
             )),
         };
@@ -881,6 +884,9 @@ impl<R: Runner> Answers for FrontDoor<R> {
                 None => refused,
             };
         }
+        if head.is_some_and(sqs::is_sqs) {
+            return sqs::unreadable(too_large);
+        }
         match too_large {
             true => refusal(
                 413,
@@ -889,6 +895,10 @@ impl<R: Runner> Answers for FrontDoor<R> {
             ),
             false => refusal(400, "InvalidRequestContentException", "The request couldn't be read as HTTP."),
         }
+    }
+
+    fn limit(&self, head: &Request) -> usize {
+        if self.is_sqs(head) { sqs::MAX_BODY_BYTES } else { PAYLOAD_LIMIT }
     }
 }
 
@@ -900,6 +910,7 @@ mod tests {
     use serde::Deserialize;
 
     use super::super::instances::stand::{Stand, function, instances_of};
+    use super::super::sqs::QueueSettings;
     use super::super::{Answer, LocalFunction};
     use super::*;
     use crate::sigv4::{Credentials, Signable, amz_date, authorization};
@@ -923,7 +934,7 @@ mod tests {
     }
 
     /// The functions on the stand-in, behind a front door, each with its alias `live` and what `adjust` gives it, an
-    /// asynchronous call's second a millisecond.
+    /// asynchronous call's second a millisecond; and the queues `orders`, `Done` and `Dead`.
     fn door_with(functions: Vec<LocalFunction>, adjust: impl Fn(&str, &mut Settings)) -> Door {
         let said = Arc::new(Mutex::new(Vec::new()));
         let settings = functions
@@ -946,6 +957,12 @@ mod tests {
             second: Duration::from_millis(1),
             say: Arc::new(move |line| say_to.lock().unwrap().push(line.to_owned())),
             clock_offset: 0,
+            queues: Arc::new(Queues::new(
+                REGION,
+                ACCOUNT,
+                ["orders", "Done", "Dead"].map(|name| (name.to_owned(), QueueSettings::default())),
+                Arc::new(|| schedules::now_ms(0)),
+            )),
         };
         Door { door, said, stand }
     }
@@ -1006,6 +1023,19 @@ mod tests {
 
         fn said(&self) -> Vec<String> {
             self.said.lock().unwrap().clone()
+        }
+
+        /// The messages a queue holds, received with all their attributes and left visible.
+        fn received_from(&self, queue: &str) -> Value {
+            let input = json!({
+                "QueueUrl": format!("http://127.0.0.1:3700/{ACCOUNT}/{queue}"),
+                "MaxNumberOfMessages": 10,
+                "VisibilityTimeout": 0,
+                "AttributeNames": ["All"],
+                "MessageAttributeNames": ["All"],
+            });
+            let caller = sqs::Caller { key_id: &self.door.key.id, endpoint: "http://127.0.0.1:3700" };
+            self.door.queues.run("ReceiveMessage", &input, &caller).unwrap()["Messages"].clone()
         }
 
         /// What was said of asynchronous calls.
@@ -1130,19 +1160,25 @@ mod tests {
 
         door.invoke("Orders", &[("X-Amz-Invocation-Type", "Event")], r#"{"throw":true}"#);
 
-        let dead_letter = format!(
-            "Orders: the asynchronous call a-request's event, for its dead-letter queue {dead}, which ff local doesn't run yet: {{\"throw\":true}}"
-        );
-        assert!(door.until(|door| door.said().contains(&dead_letter)), "said: {:?}", door.said());
         let failed = "Orders: the asynchronous call a-request failed: Error: thrown";
+        let dropped = format!("{failed}; dropped after 3 attempts: its retries are used");
+        assert!(door.until(|door| door.said().contains(&dropped)), "said: {:?}", door.said());
+        assert!(door.until(|door| door.received_from("Dead").is_array()), "the event in its dead-letter queue");
+        let dead_letters = door.received_from("Dead");
         assert_eq!(
             door.said_of_events(),
-            [
-                format!("{failed}; tried again in 60 s"),
-                format!("{failed}; tried again in 120 s"),
-                format!("{failed}; dropped after 3 attempts: its retries are used"),
-                dead_letter,
-            ]
+            [format!("{failed}; tried again in 60 s"), format!("{failed}; tried again in 120 s"), dropped]
+        );
+        assert_eq!(dead_letters.as_array().unwrap().len(), 1);
+        assert_eq!(dead_letters[0]["Body"], r#"{"throw":true}"#);
+        assert_eq!(dead_letters[0]["Attributes"]["SenderId"], "arn:aws:lambda:tn-tunis-1:000000000000:function:Orders");
+        assert_eq!(
+            dead_letters[0]["MessageAttributes"],
+            json!({
+                "ErrorCode": { "DataType": "Number", "StringValue": "200" },
+                "ErrorMessage": { "DataType": "String", "StringValue": "thrown" },
+                "RequestID": { "DataType": "String", "StringValue": "a-request" },
+            })
         );
         assert!(door.until(|door| door.stand.received.lock().unwrap().len() == 4), "three attempts, then the record");
         let record = door.stand.received.lock().unwrap()[3].0.clone();
@@ -1166,21 +1202,42 @@ mod tests {
 
         door.said.lock().unwrap().clear();
         door.invoke("Orders:live", &[("X-Amz-Invocation-Type", "Event")], r#"{"order":7}"#);
-        let to_queue =
-            format!("Orders: the asynchronous call a-request's record, for {done}, which ff local doesn't run yet: ");
-        assert!(
-            door.until(|door| door.said_of_events().iter().any(|line| line.starts_with(&to_queue))),
-            "{:?}",
-            door.said()
-        );
-        let record: Value = serde_json::from_str(&door.said_of_events()[0][to_queue.len()..]).unwrap();
+        assert!(door.until(|door| door.received_from("Done").is_array()), "the record in its destination");
+        let records = door.received_from("Done");
+        assert_eq!(records[0]["Attributes"]["SenderId"], "arn:aws:lambda:tn-tunis-1:000000000000:function:Orders");
+        let record: Value = serde_json::from_str(records[0]["Body"].as_str().unwrap()).unwrap();
         assert_eq!(record["requestContext"]["condition"], "Success");
         assert_eq!(
             record["requestContext"]["functionArn"],
             "arn:aws:lambda:tn-tunis-1:000000000000:function:Orders:live"
         );
         assert_eq!(record["responsePayload"], json!({ "order": 7 }));
-        assert_eq!(door.said_of_events().len(), 1, "no dead letter for a call that succeeded");
+        assert_eq!(door.said_of_events(), Vec::<String>::new(), "nothing said of a call that succeeded");
+        assert_eq!(
+            door.received_from("Dead").as_array().map(Vec::len),
+            Some(1),
+            "no dead letter for a call that succeeded"
+        );
+    }
+
+    #[test]
+    fn a_record_or_a_dead_letter_that_cant_be_sent_to_its_queue_is_said() {
+        let gone = "arn:aws:sqs:tn-tunis-1:000000000000:Gone";
+        let door = door_with(vec![function("Orders", "app.handler")], |_, settings| {
+            settings.on_failure = Some(gone.into());
+            settings.dead_letter = Some(gone.into());
+            settings.retries.maximum_retry_attempts = 0;
+        });
+
+        door.invoke("Orders", &[("X-Amz-Invocation-Type", "Event")], r#"{"throw":true}"#);
+
+        let not_sent = format!(
+            "Orders: the asynchronous call a-request's event was not sent to its dead-letter queue {gone}: {gone} is no queue here"
+        );
+        assert!(door.until(|door| door.said().contains(&not_sent)), "said: {:?}", door.said());
+        assert!(door.said().contains(&format!(
+            "Orders: the asynchronous call a-request's record was not delivered to its destination {gone}: {gone} is no queue here"
+        )));
     }
 
     #[test]
@@ -1611,12 +1668,13 @@ mod tests {
             [&event["requestContext"]["accountId"], &event["requestContext"]["http"]["sourceIp"]],
             ["anonymous", "127.0.0.1"]
         );
-        // A function without a URL, or none at all, is the gateway's 404; another host, Lambda's API.
+        // A function without a URL, or none at all, is the gateway's 404; another host, Lambda's API, and SQS's at /.
         for host in ["plain.fn.localhost:3700", "nothing.fn.localhost", "a.orders.fn.localhost"] {
             assert_eq!(message_of(&get(host, "/")), (404, "Not Found".to_owned()), "{host}");
         }
-        assert_eq!(refused(&get("fn.localhost", "/")).1, "UnknownOperationException");
-        assert_eq!(refused(&get("127.0.0.1:3700", "/")).1, "UnknownOperationException");
+        assert_eq!(refused(&get("fn.localhost", "/items")).1, "UnknownOperationException");
+        assert_eq!(refused(&get("127.0.0.1:3700", "/items")).1, "UnknownOperationException");
+        assert_eq!(body_of(&get("127.0.0.1:3700", "/"))["__type"], "com.amazonaws.sqs#UnsupportedOperation");
         assert_eq!(door.stand.received.lock().unwrap().len(), 1, "only the URL's function was called");
     }
 
@@ -1676,23 +1734,157 @@ mod tests {
     fn a_request_too_large_for_a_url_is_refused_in_its_words_with_its_cors() {
         let cors = Cors { allow_origins: Some(vec!["https://app.example.tn".into()]), ..Cors::default() };
         let door = door_with_url(FunctionUrl { iam: false, cors: Some(cors) });
-        let head = |host: &str| Request {
+        let head = |host: &str, target: &str| Request {
             method: "POST".into(),
-            target: "/".into(),
+            target: target.into(),
             protocol: "HTTP/1.1".into(),
             headers: vec![("Host".into(), host.into()), ("Origin".into(), "https://app.example.tn".into())],
             body: Vec::new(),
         };
+        let unreadable = |host: &str, target: &str| door.door.unreadable(true, Some(&head(host, target)));
+        let invoke = "/2015-03-31/functions/orders/invocations";
 
-        let refused_here = door.door.unreadable(true, Some(&head("orders.fn.localhost:3700")));
+        let refused_here = unreadable("orders.fn.localhost:3700", "/");
         assert_eq!(message_of(&refused_here), (413, "Request Entity Too Large".to_owned()));
         assert_eq!(header(&refused_here, "access-control-allow-origin"), Some("https://app.example.tn"));
-        assert_eq!(message_of(&door.door.unreadable(true, Some(&head("none.fn.localhost")))).0, 404);
-        assert_eq!(
-            refused(&door.door.unreadable(true, Some(&head("127.0.0.1:3700")))).1,
-            "RequestEntityTooLargeException"
-        );
+        assert_eq!(door.door.limit(&head("orders.fn.localhost:3700", "/")), PAYLOAD_LIMIT, "a URL's, not SQS's");
+        assert_eq!(message_of(&unreadable("none.fn.localhost", "/")).0, 404);
+        assert_eq!(refused(&unreadable("127.0.0.1:3700", invoke)).1, "RequestEntityTooLargeException");
+        assert_eq!(door.door.limit(&head("127.0.0.1:3700", invoke)), PAYLOAD_LIMIT);
         assert_eq!(refused(&door.door.unreadable(false, None)).1, "InvalidRequestContentException");
+    }
+
+    /// A request on the wire to SQS's endpoint, as the table writes one.
+    fn sqs_request(request: &Value, headers: Vec<(String, String)>) -> Request {
+        let given = request["headers"].as_object().into_iter().flatten();
+        let mut headers = headers;
+        headers.extend(given.map(|(name, value)| (name.clone(), value.as_str().unwrap().to_owned())));
+        Request {
+            method: request["method"].as_str().unwrap().into(),
+            target: "/".into(),
+            protocol: "HTTP/1.1".into(),
+            headers,
+            body: request["body"].as_str().unwrap_or_default().as_bytes().to_vec(),
+        }
+    }
+
+    /// Each case of the table's requests on the wire: an operation signed with the local key, another key, or the
+    /// key with another secret, refused with SQS's two names for it; or a request as it is sent, and its answer, its
+    /// headers as the server sends them; a body too large refused before it is read. A request without a signature,
+    /// which FF refuses, is taken here, as the local key's.
+    #[test]
+    fn sqs_on_the_wire_answers_the_backends_cases_as_its_front_door_does() {
+        let door = door();
+        let table = sqs::tests::table();
+        let mut checked = 0;
+        for (group, cases) in table["frontDoor"].as_object().unwrap() {
+            for case in cases.as_array().unwrap() {
+                let title = format!("{group}: {}", case["title"].as_str().unwrap());
+                let local = key();
+                let signer = match case["key"].as_str() {
+                    None => local.clone(),
+                    Some("another") => Key { id: "AKFFZZZZZZZZZZZZZZZZ".into(), ..local.clone() },
+                    Some("anotherSecret") => Key { secret: "b".repeat(40), ..local.clone() },
+                    Some(other) => panic!("{title}: no key {other}"),
+                };
+                let (request, wanted) = match case.get("operation") {
+                    Some(operation) => {
+                        let body = sqs::tests::filled(&case["input"], sqs::tests::ENDPOINT, &local.id).to_string();
+                        let now = amz_date(SystemTime::now());
+                        let headers = signed_to("127.0.0.1:3700", "POST", &signer, "/", body.as_bytes(), &now, "sqs");
+                        let wire = json!({
+                            "method": "POST",
+                            "headers": {
+                                "content-type": "application/x-amz-json-1.0",
+                                "x-amz-target": format!("AmazonSQS.{}", operation.as_str().unwrap()),
+                            },
+                            "body": body,
+                        });
+                        (sqs_request(&wire, headers), case["refused"].clone())
+                    }
+                    None => (
+                        sqs_request(&case["request"], vec![("Host".into(), "127.0.0.1:3700".into())]),
+                        case["answer"].clone(),
+                    ),
+                };
+                if group == "unsigned" {
+                    let taken = door.door.answer(&request, "a-request", "127.0.0.1");
+                    assert_eq!(
+                        (taken.status, body_of(&taken)["QueueUrls"].as_array().map(Vec::len)),
+                        (200, Some(3)),
+                        "{title}"
+                    );
+                    checked += 1;
+                    continue;
+                }
+                let response = if group == "tooLarge" {
+                    assert_eq!(door.door.limit(&request), 3 * 1024 * 1024, "{title}");
+                    door.door.unreadable(true, Some(&request))
+                } else {
+                    door.door.answer(&request, "a-request", "127.0.0.1")
+                };
+
+                let (status, headers, body) = as_sent(&response, "POST");
+                let body: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    (
+                        status,
+                        body["__type"].clone(),
+                        headers.get("x-amzn-query-error").cloned(),
+                        body["message"].clone()
+                    ),
+                    (
+                        u16::try_from(wanted["status"].as_u64().unwrap()).unwrap(),
+                        json!(format!("com.amazonaws.sqs#{}", wanted["type"].as_str().unwrap())),
+                        Some(wanted["queryError"].as_str().unwrap().to_owned()),
+                        wanted["message"].clone()
+                    ),
+                    "{title}"
+                );
+                for (name, value) in wanted["headers"].as_object().into_iter().flatten() {
+                    assert_eq!(headers.get(name).map(String::as_str), value.as_str(), "{title}: {name}");
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 7, "every case of the table");
+        let other_key = "A request signed with AKFFZZZZZZZZZZZZZZZZ, not the local key AKFFLOCALKEY0000TEST: .ff/local/credentials holds it";
+        assert_eq!(door.said(), [other_key], "the other key said here alone");
+        assert_eq!(door.stand.starts.load(Ordering::SeqCst), 0, "SQS starts no function");
+    }
+
+    #[test]
+    fn sqs_answers_a_signed_request_its_queues_urls_under_the_address_it_reached() {
+        let door = door();
+        let local = key();
+        let send = |host: &str, operation: &str, input: Value| {
+            let body = input.to_string();
+            let now = amz_date(SystemTime::now());
+            let headers = signed_to(host, "POST", &local, "/", body.as_bytes(), &now, "sqs");
+            let wire = json!({
+                "method": "POST",
+                "headers": { "content-type": "application/x-amz-json-1.0", "x-amz-target": format!("AmazonSQS.{operation}") },
+                "body": body,
+            });
+            let response = door.door.answer(&sqs_request(&wire, headers), "a-request", "127.0.0.1");
+            (response.status, body_of(&response))
+        };
+
+        let from_here = send("127.0.0.1:3700", "GetQueueUrl", json!({ "QueueName": "orders" }));
+        let from_a_function = send("host.docker.internal:3700", "GetQueueUrl", json!({ "QueueName": "orders" }));
+        let queue_url = format!("http://host.docker.internal:3700/{ACCOUNT}/orders");
+        let sent = send("127.0.0.1:3700", "SendMessage", json!({ "QueueUrl": queue_url, "MessageBody": "an order" }));
+        let received = send(
+            "host.docker.internal:3700",
+            "ReceiveMessage",
+            json!({ "QueueUrl": queue_url, "AttributeNames": ["SenderId"] }),
+        );
+
+        assert_eq!(from_here, (200, json!({ "QueueUrl": format!("http://127.0.0.1:3700/{ACCOUNT}/orders") })));
+        assert_eq!(from_a_function, (200, json!({ "QueueUrl": queue_url })));
+        assert_eq!(sent.1["MD5OfMessageBody"], crate::md5::hex(b"an order"));
+        assert_eq!(received.1["Messages"][0]["MessageId"], sent.1["MessageId"]);
+        assert_eq!(received.1["Messages"][0]["Attributes"]["SenderId"], local.id, "sent by the key that signed");
     }
 
     /// `Cleaner`, with a schedule `Nightly`; and `Reporter`, with one too, and `Weekly`, which has its own input.

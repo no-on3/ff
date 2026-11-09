@@ -386,6 +386,45 @@ pub fn match_signature(
     Err(Problem::Mismatch)
 }
 
+/// What is wrong with a signature, as the backend says it to each service's callers (`serviceWords`,
+/// `BE/src/common/signature-v4.ts`): a key it doesn't know; a signature incomplete, and why; or not the key's, and why,
+/// when it isn't the service's own words.
+pub enum Words {
+    Token,
+    Incomplete(String),
+    Mismatch(Option<String>),
+}
+
+/// A signature's problem in the backend's words to a caller of `service`, which a credential must be scoped to.
+pub fn words(problem: Problem, service: &str) -> Words {
+    let incomplete = |message: &str| Words::Incomplete(message.to_owned());
+    let mismatch = |message: String| Words::Mismatch(Some(message));
+    match problem {
+        Problem::Token => Words::Token,
+        Problem::Algorithm => {
+            incomplete("The authorization mechanism you have provided is not supported. Please use AWS4-HMAC-SHA256.")
+        }
+        Problem::Parts => {
+            incomplete("Authorization header requires Credential, SignedHeaders and Signature parameters.")
+        }
+        Problem::Credential { .. } => {
+            incomplete(&format!("The Credential is not <access key ID>/<date>/<region>/{service}/aws4_request."))
+        }
+        Problem::Service { .. } => mismatch(format!("Credential should be scoped to correct service: '{service}'.")),
+        Problem::NoDate => {
+            incomplete("Authorization header requires existence of either a X-Amz-Date or a Date header.")
+        }
+        Problem::Date { amz_date } | Problem::OtherDay { amz_date, .. } => {
+            incomplete(&format!("The date \"{amz_date}\" is not YYYYMMDDTHHMMSSZ, or not the credential's."))
+        }
+        Problem::Skewed { amz_date } => {
+            mismatch(format!("Signature expired: {amz_date} is more than 15 minutes from the request's arrival."))
+        }
+        Problem::Unsigned { .. } => mismatch("'Host' must be a 'SignedHeader' in the AWS Authorization.".to_owned()),
+        Problem::Mismatch => Words::Mismatch(None),
+    }
+}
+
 /// An Authorization header's signature checked as every service but S3 checks it: the time, the host signed, then
 /// the signature over the request and the SHA-256 of its body.
 pub fn check_authorization(

@@ -12,7 +12,7 @@ docs/*                                  static
 *.md                                    static
 
 # The backend, a module at a time where its suites' sections are its own; L5 tries every route, so it runs whole.
-BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted aws-tools
+BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted,local_queues aws-tools
 BE/src/event-sources/*                  static unit db l4:mappings l5 cli:event_sources aws-tools
 BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted aws-tools
 BE/src/object-store/*                   static unit db l4:buckets,buckets_room,notifications,sites l5 cli:buckets,sites
@@ -51,10 +51,11 @@ runtimes/*                              static unit security l3 l4 l5 cli aws-to
 cli/src/commands/init.rs                static unit cli:init,local_apps aws-tools
 cli/release/*                           static unit cli:downloads
 cli/src/local/images.rs                 static unit cli:local,local_images
-cli/src/local/*                         static unit cli:local,local_template,local_apps
-cli/src/commands/local*                 static unit cli:local,local_template,local_apps
+cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues
+cli/src/commands/local*                 static unit cli:local,local_template,local_apps,local_queues
 cli/src/s3.rs                           static unit cli:sites
-cli/src/sigv4.rs                        static unit cli:sites,local_template
+cli/src/md5.rs                          static unit cli:sites,local_queues
+cli/src/sigv4.rs                        static unit cli:sites,local_template,local_queues
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.

@@ -1,5 +1,6 @@
-//! MD5 (RFC 1321), for one use: a file's digest as S3 gives it in the ETag of an object uploaded
-//! in one piece, so that `ff sites deploy` sends only the files that changed. Never for security.
+//! MD5 (RFC 1321), for two uses: a file's digest as S3 gives it in the ETag of an object uploaded
+//! in one piece, so that `ff sites deploy` sends only the files that changed; and the sums SQS answers
+//! of a message's body and attributes, which AWS's SDKs check. Never for security.
 
 const SHIFTS: [u32; 64] = [
     7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,

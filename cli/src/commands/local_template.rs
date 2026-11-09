@@ -5,7 +5,8 @@
 //! names them; their variables the template's, its `Ref`s and `GetAtt`s resolved to what they are here, with the
 //! variables FF gives a pod pointed at the front door, and the secrets file's. The functions sign with the local key,
 //! which the front door checks a signed request against: made at the first start, printed at each, and kept in
-//! `.ff/local/credentials`. `ff local reset` empties what it keeps.
+//! `.ff/local/credentials`. Its queues answer SQS at the front door, kept in memory while it runs. `ff local reset`
+//! empties what it keeps.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, TcpListener};
@@ -31,6 +32,7 @@ use crate::local::instances::{Docker, Instances};
 use crate::local::key::Key;
 use crate::local::schedule_expression::{Expression, InvalidExpression, Millis, iso};
 use crate::local::schedules::{self, LocalSchedule, Timetable};
+use crate::local::sqs::{QueueSettings, Queues};
 use crate::local::{self, Code, LocalFunction, http, images, url};
 use crate::output::Output;
 use crate::package::ignore::{self, FF_FOLDER};
@@ -505,6 +507,20 @@ struct StartedSchedule {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StartedQueue {
+    logical_id: String,
+    name: String,
+    /// Its URL from this machine; its functions reach it at host.docker.internal.
+    url: String,
+    /// The queue its redrive policy moves a message to, and after how many receives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dead_letter_queue: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_receive_count: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StartedKey {
     access_key_id: String,
     secret_access_key: String,
@@ -520,6 +536,7 @@ struct Started {
     key: StartedKey,
     functions: Vec<StartedFunction>,
     schedules: Vec<StartedSchedule>,
+    queues: Vec<StartedQueue>,
     logs: String,
 }
 
@@ -595,6 +612,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     let to_say = Arc::clone(&say);
     let docker = Docker { images: runtime_images, logs: logs.clone(), echo: !quiet };
     let instances = Arc::new(Instances::new(docker, functions.clone(), idle, move |line| to_say(line)));
+    let queues = planned.queues.iter().map(|queue| (queue.name.clone(), QueueSettings::of(&queue.attributes)));
     let door = FrontDoor {
         instances: Arc::clone(&instances),
         region: REGION.to_owned(),
@@ -605,6 +623,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
         second: async_second(),
         say,
         clock_offset: clock_offset(),
+        queues: Arc::new(Queues::new(REGION, ACCOUNT, queues, Arc::new(|| schedules::now_ms(0)))),
     };
     let front_door: Arc<dyn http::Answers> = Arc::new(door.clone());
     http::serve(listener, Arc::clone(&front_door));
@@ -678,6 +697,17 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
             })
             .collect(),
         schedules: started_schedules,
+        queues: planned
+            .queues
+            .iter()
+            .map(|queue| StartedQueue {
+                logical_id: queue.id.clone(),
+                name: queue.name.clone(),
+                url: format!("{endpoint}/{ACCOUNT}/{}", queue.name),
+                dead_letter_queue: queue.dead_letter().map(str::to_owned),
+                max_receive_count: queue.attributes.pointer("/redrivePolicy/maxReceiveCount").and_then(Value::as_u64),
+            })
+            .collect(),
         logs: logs.display().to_string(),
     };
     context.out.result(&started, || {
@@ -710,6 +740,17 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 };
                 let named = format!("{}/{}", schedule.function, schedule.name);
                 format!("  {named:width$}  {}  {next}", schedule.expression)
+            }));
+        }
+        if !started.queues.is_empty() {
+            lines.push(format!("Its queues, SQS's at {endpoint}, kept while it runs:"));
+            let width = started.queues.iter().map(|queue| queue.name.len()).max().unwrap_or(0);
+            lines.extend(started.queues.iter().map(|queue| {
+                let line = format!("  {:width$}  {}", queue.name, queue.url);
+                match (&queue.dead_letter_queue, queue.max_receive_count) {
+                    (Some(dead), Some(count)) => format!("{line}, to {dead} after {count} receives"),
+                    _ => line,
+                }
             }));
         }
         lines.push(format!(
