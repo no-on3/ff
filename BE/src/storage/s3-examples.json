@@ -1,0 +1,209 @@
+{
+  "about": "S3 as FF's front door answers it: the table the backend's L1 (s3-requests.spec.ts, s3-signature.spec.ts, xml.spec.ts, front-door.spec.ts) and ff local's S3 read for their tests, so that both answer alike. `addresses` holds requests' hosts and paths, by FF's S3 host `host`, and the bucket and key each names: `style`, `bucket`, and `rawKey`, still encoded. `operations` holds requests, by `method`, what they are `on` (the service, the bucket `photos`, or its object `a.jpg`, path-style), their `query` and `headers`, and the operation each is, `is`: S3's name, how S3 bills it (`tier1`, `tier2` or `free`), and `writes` when a read-only key may not; `NotImplemented` for what the front door doesn't serve. `signatures` holds AWS's documented examples of Signature Version 4 for S3, made with `key` and `secret` at `at` for `host`: each request with its headers in order and its `signature`, which the header `Authorization` carries with the headers' names sorted, or a presigned URL's `query`; then requests changed from them, each with its answer, `accepted`, `none` when no signature is read, or the refusal's status and code. `documents` holds the front door's own XML, as S3 writes it. `frontDoor` holds requests on the wire, to the account `{account}`'s buckets `buckets` in `{region}`, signed at the test's time with the account's key, or `unknownKey`, or with `anotherSecret`; each with its answer: its status, the headers it must have, and its document, or its refusal's code, message and resource. A body of `repeat` and `times` is that text that many times. What only FF has (keys' reach, plans, credit, counts, the store's names, the audit log, an unsigned request refused) stays in the specs' TypeScript.",
+  "host": "s3.ffunc.cloud",
+  "addresses": {
+    "virtualHosted": [
+      {"host": "photos.s3.ffunc.cloud", "path": "/2026/a%20b.jpg", "address": {"style": "virtual-hosted", "bucket": "photos", "rawKey": "2026/a%20b.jpg"}},
+      {"host": "Photos.S3.ffunc.cloud:443", "path": "/", "address": {"style": "virtual-hosted", "bucket": "photos", "rawKey": ""}}
+    ],
+    "pathStyle": [
+      {"host": "s3.ffunc.cloud", "path": "/photos/2026/a%20b.jpg", "address": {"style": "path", "bucket": "photos", "rawKey": "2026/a%20b.jpg"}},
+      {"host": "10.43.0.12:3002", "path": "/photos", "address": {"style": "path", "bucket": "photos", "rawKey": ""}},
+      {"host": "s3.ffunc.cloud", "path": "/", "address": {"style": "path", "bucket": "", "rawKey": ""}},
+      {"host": "s3.ffunc.cloud", "path": "/photos//double", "address": {"style": "path", "bucket": "photos", "rawKey": "/double"}}
+    ],
+    "deeperHost": [
+      {"host": "a.b.s3.ffunc.cloud", "path": "/photos/x", "address": {"style": "path", "bucket": "photos", "rawKey": "x"}}
+    ]
+  },
+  "operations": {
+    "bucketMadeAndDeleted": [
+      {"method": "PUT", "on": "bucket", "query": "", "is": "CreateBucket tier1 writes"},
+      {"method": "PUT", "on": "bucket", "query": "x-id=CreateBucket", "is": "CreateBucket tier1 writes"},
+      {"method": "DELETE", "on": "bucket", "query": "", "is": "DeleteBucket free writes"},
+      {"method": "PUT", "on": "bucket", "query": "cors", "is": "NotImplemented tier2"}
+    ],
+    "tags": [
+      {"method": "GET", "on": "bucket", "query": "tagging", "is": "GetBucketTagging tier2"},
+      {"method": "PUT", "on": "bucket", "query": "tagging", "is": "PutBucketTagging tier1 writes"},
+      {"method": "DELETE", "on": "bucket", "query": "tagging", "is": "DeleteBucketTagging free writes"},
+      {"method": "GET", "on": "bucket", "query": "tagging&policy", "is": "NotImplemented tier2"}
+    ],
+    "policyAndPublicAccessBlock": [
+      {"method": "GET", "on": "bucket", "query": "policy&x-id=GetBucketPolicy", "is": "GetBucketPolicy tier2"},
+      {"method": "PUT", "on": "bucket", "query": "policy", "is": "PutBucketPolicy tier1 writes"},
+      {"method": "DELETE", "on": "bucket", "query": "policy", "is": "DeleteBucketPolicy free writes"},
+      {"method": "POST", "on": "bucket", "query": "policy", "is": "NotImplemented tier2"},
+      {"method": "PUT", "on": "object", "query": "policy", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "publicAccessBlock&x-id=GetPublicAccessBlock", "is": "GetPublicAccessBlock tier2"},
+      {"method": "PUT", "on": "bucket", "query": "publicAccessBlock", "is": "PutPublicAccessBlock tier1 writes"},
+      {"method": "DELETE", "on": "bucket", "query": "publicAccessBlock", "is": "DeletePublicAccessBlock free writes"},
+      {"method": "POST", "on": "bucket", "query": "publicAccessBlock", "is": "NotImplemented tier2"},
+      {"method": "PUT", "on": "object", "query": "publicAccessBlock", "is": "NotImplemented tier2"},
+      {"method": "DELETE", "on": "bucket", "query": "notification", "is": "NotImplemented tier2"}
+    ],
+    "unsetSettings": [
+      {"method": "GET", "on": "bucket", "query": "acl&x-id=GetBucketAcl", "is": "GetBucketAcl tier2"},
+      {"method": "PUT", "on": "bucket", "query": "acl", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "cors&x-id=GetBucketCors", "is": "GetBucketCors tier2"},
+      {"method": "PUT", "on": "bucket", "query": "cors", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "versioning&x-id=GetBucketVersioning", "is": "GetBucketVersioning tier2"},
+      {"method": "PUT", "on": "bucket", "query": "versioning", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "accelerate&x-id=GetBucketAccelerateConfiguration", "is": "GetBucketAccelerateConfiguration tier2"},
+      {"method": "PUT", "on": "bucket", "query": "accelerate", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "requestPayment&x-id=GetBucketRequestPayment", "is": "GetBucketRequestPayment tier2"},
+      {"method": "PUT", "on": "bucket", "query": "requestPayment", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "logging&x-id=GetBucketLogging", "is": "GetBucketLogging tier2"},
+      {"method": "PUT", "on": "bucket", "query": "logging", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "lifecycle&x-id=GetBucketLifecycleConfiguration", "is": "GetBucketLifecycleConfiguration tier2"},
+      {"method": "PUT", "on": "bucket", "query": "lifecycle", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "replication&x-id=GetBucketReplication", "is": "GetBucketReplication tier2"},
+      {"method": "PUT", "on": "bucket", "query": "replication", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "encryption&x-id=GetBucketEncryption", "is": "GetBucketEncryption tier2"},
+      {"method": "PUT", "on": "bucket", "query": "encryption", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "object-lock&x-id=GetObjectLockConfiguration", "is": "GetObjectLockConfiguration tier2"},
+      {"method": "PUT", "on": "bucket", "query": "object-lock", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "ownershipControls&x-id=GetBucketOwnershipControls", "is": "GetBucketOwnershipControls tier2"},
+      {"method": "PUT", "on": "bucket", "query": "ownershipControls", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "object", "query": "acl", "is": "NotImplemented tier2"}
+    ],
+    "bucketReads": [
+      {"method": "GET", "on": "service", "query": "", "is": "ListBuckets tier1"},
+      {"method": "GET", "on": "bucket", "query": "list-type=2&prefix=2026%2F&delimiter=%2F&max-keys=100&x-id=ListObjectsV2", "is": "ListObjectsV2 tier1"},
+      {"method": "GET", "on": "bucket", "query": "", "is": "ListObjects tier1"},
+      {"method": "GET", "on": "bucket", "query": "marker=a", "is": "ListObjects tier1"},
+      {"method": "GET", "on": "bucket", "query": "location", "is": "GetBucketLocation tier2"},
+      {"method": "GET", "on": "bucket", "query": "uploads&prefix=a", "is": "ListMultipartUploads tier1"},
+      {"method": "HEAD", "on": "bucket", "query": "", "is": "HeadBucket tier2"},
+      {"method": "POST", "on": "bucket", "query": "delete&x-id=DeleteObjects", "is": "DeleteObjects free writes"}
+    ],
+    "website": [
+      {"method": "PUT", "on": "bucket", "query": "website", "is": "PutBucketWebsite tier1 writes"},
+      {"method": "GET", "on": "bucket", "query": "website", "is": "GetBucketWebsite tier2"},
+      {"method": "DELETE", "on": "bucket", "query": "website", "is": "DeleteBucketWebsite free writes"},
+      {"method": "GET", "on": "bucket", "query": "website&policy", "is": "NotImplemented tier2"}
+    ],
+    "objects": [
+      {"method": "PUT", "on": "object", "query": "x-id=PutObject", "is": "PutObject tier1 writes"},
+      {"method": "PUT", "on": "object", "query": "", "headers": {"x-amz-copy-source": "/photos/b.jpg"}, "is": "CopyObject tier1 writes"},
+      {"method": "GET", "on": "object", "query": "response-content-type=image%2Fjpeg&x-id=GetObject", "is": "GetObject tier2"},
+      {"method": "HEAD", "on": "object", "query": "", "is": "HeadObject tier2"},
+      {"method": "DELETE", "on": "object", "query": "", "is": "DeleteObject free writes"},
+      {"method": "POST", "on": "object", "query": "uploads", "is": "CreateMultipartUpload tier1 writes"},
+      {"method": "PUT", "on": "object", "query": "partNumber=1&uploadId=u1", "is": "UploadPart tier1 writes"},
+      {"method": "PUT", "on": "object", "query": "partNumber=2&uploadId=u1", "headers": {"x-amz-copy-source": "/photos/b.jpg"}, "is": "UploadPartCopy tier1 writes"},
+      {"method": "GET", "on": "object", "query": "uploadId=u1&max-parts=10", "is": "ListParts tier1"},
+      {"method": "POST", "on": "object", "query": "uploadId=u1", "is": "CompleteMultipartUpload tier1 writes"},
+      {"method": "DELETE", "on": "object", "query": "uploadId=u1", "is": "AbortMultipartUpload free writes"}
+    ],
+    "presigned": [
+      {"method": "PUT", "on": "object", "query": "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=c&X-Amz-Date=d&X-Amz-Expires=60&X-Amz-SignedHeaders=host&X-Amz-Signature=s&x-amz-checksum-crc32=AAAAAA%3D%3D&x-amz-sdk-checksum-algorithm=CRC32&x-id=PutObject", "is": "PutObject tier1 writes"},
+      {"method": "GET", "on": "object", "query": "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=c&X-Amz-Date=d&X-Amz-Expires=60&X-Amz-SignedHeaders=host&X-Amz-Signature=s&x-amz-checksum-mode=ENABLED&x-id=GetObject", "is": "GetObject tier2"}
+    ],
+    "notImplemented": [
+      {"method": "GET", "on": "bucket", "query": "policyStatus", "is": "NotImplemented tier2"},
+      {"method": "PUT", "on": "bucket", "query": "cors", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "versions", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "bucket", "query": "list-type=2&acl", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "object", "query": "tagging", "is": "NotImplemented tier2"},
+      {"method": "PUT", "on": "object", "query": "tagging", "is": "NotImplemented tier2"},
+      {"method": "GET", "on": "object", "query": "versionId=3", "is": "NotImplemented tier2"},
+      {"method": "PUT", "on": "object", "query": "partNumber=1", "is": "NotImplemented tier2"},
+      {"method": "POST", "on": "object", "query": "restore", "is": "NotImplemented tier2"},
+      {"method": "PATCH", "on": "object", "query": "", "is": "NotImplemented tier2"},
+      {"method": "PUT", "on": "service", "query": "", "is": "NotImplemented tier2"}
+    ]
+  },
+  "signatures": {
+    "key": "AKIAIOSFODNN7EXAMPLE",
+    "secret": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "at": "2013-05-24T00:00:00Z",
+    "host": "examplebucket.s3.amazonaws.com",
+    "examples": {
+      "getObject": {"title": "GET Object: a range, the empty body signed", "method": "GET", "target": "/test.txt", "headers": [["Host", "examplebucket.s3.amazonaws.com"], ["Range", "bytes=0-9"], ["x-amz-content-sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"], ["x-amz-date", "20130524T000000Z"]], "signature": "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41", "scope": "20130524/us-east-1/s3/aws4_request"},
+      "putObject": {"title": "PUT Object: a \"$\" in the key, which the canonical path encodes, and the Date header signed", "method": "PUT", "target": "/test$file.text", "headers": [["Host", "examplebucket.s3.amazonaws.com"], ["Date", "Fri, 24 May 2013 00:00:00 GMT"], ["x-amz-date", "20130524T000000Z"], ["x-amz-storage-class", "REDUCED_REDUNDANCY"], ["x-amz-content-sha256", "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072"]], "signature": "98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd"},
+      "lifecycle": {"title": "GET Bucket lifecycle: a query parameter without a value", "method": "GET", "target": "/?lifecycle", "headers": [["Host", "examplebucket.s3.amazonaws.com"], ["x-amz-date", "20130524T000000Z"], ["x-amz-content-sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]], "signature": "fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543"},
+      "listObjects": {"title": "GET Bucket, its objects listed: two parameters, sorted", "method": "GET", "target": "/?max-keys=2&prefix=J", "headers": [["Host", "examplebucket.s3.amazonaws.com"], ["x-amz-date", "20130524T000000Z"], ["x-amz-content-sha256", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"]], "signature": "34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"}
+    },
+    "presignedGet": {"title": "a presigned GET, for a day", "method": "GET", "target": "/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404", "headers": [["Host", "examplebucket.s3.amazonaws.com"]], "read": {"kind": "presigned", "accessKeyId": "AKIAIOSFODNN7EXAMPLE", "region": "us-east-1", "expires": 86400, "payload": "UNSIGNED-PAYLOAD"}, "answers": [{"at": "2013-05-24T23:59:59Z", "answer": "accepted"}, {"at": "2013-05-25T00:00:01Z", "answer": "403 AccessDenied"}, {"at": "2013-05-23T23:00:00Z", "answer": "403 AccessDenied"}]},
+    "changed": {
+      "mismatched": [
+        {"title": "another secret", "example": "getObject", "secret": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEYx", "answer": "403 SignatureDoesNotMatch"},
+        {"title": "a header changed", "example": "getObject", "header": ["Range", "bytes=0-99"], "answer": "403 SignatureDoesNotMatch"},
+        {"title": "the path changed", "example": "getObject", "target": "/test.txu", "answer": "403 SignatureDoesNotMatch"}
+      ],
+      "skewed": [
+        {"title": "15 minutes later", "example": "getObject", "at": "2013-05-24T00:15:00Z", "answer": "accepted"},
+        {"title": "a second more", "example": "getObject", "at": "2013-05-24T00:15:01Z", "answer": "403 RequestTimeTooSkewed"},
+        {"title": "more than 15 minutes earlier", "example": "getObject", "at": "2013-05-23T23:44:59Z", "answer": "403 RequestTimeTooSkewed"}
+      ],
+      "unsigned": [
+        {"title": "the host not signed", "example": "getObject", "signedHeaders": ["range", "x-amz-content-sha256", "x-amz-date"], "answer": "400 AuthorizationHeaderMalformed"},
+        {"title": "the body's hash not signed", "example": "getObject", "signedHeaders": ["host", "range", "x-amz-date"], "answer": "400 AuthorizationHeaderMalformed"}
+      ]
+    },
+    "read": {
+      "malformed": [
+        {"title": "no signature", "headers": {"host": "examplebucket.s3.amazonaws.com"}, "answer": "none"},
+        {"title": "Signature Version 2", "headers": {"authorization": "AWS AKIAIOSFODNN7EXAMPLE:frJIUN8DYpKDtOLCwo//yllqDzg=", "x-amz-date": "20130524T000000Z", "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}, "answer": "400 InvalidRequest"},
+        {"title": "no signature in the header", "headers": {"authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,SignedHeaders=host", "x-amz-date": "20130524T000000Z", "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}, "answer": "400 AuthorizationHeaderMalformed"},
+        {"title": "another service's scope", "headers": {"authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s4/aws4_request,SignedHeaders=host,Signature=00", "x-amz-date": "20130524T000000Z", "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}, "answer": "400 AuthorizationHeaderMalformed"},
+        {"title": "a session token", "headers": {"authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,SignedHeaders=host,Signature=00", "x-amz-date": "20130524T000000Z", "x-amz-content-sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "x-amz-security-token": "token"}, "answer": "400 InvalidToken"},
+        {"title": "no body's hash", "headers": {"authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,SignedHeaders=host,Signature=00", "x-amz-date": "20130524T000000Z"}, "answer": "400 InvalidRequest"},
+        {"title": "signed both ways", "headers": {"authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,SignedHeaders=host,Signature=00"}, "query": {"X-Amz-Algorithm": "AWS4-HMAC-SHA256"}, "answer": "400 InvalidArgument"}
+      ],
+      "presigned": [
+        {"title": "every parameter", "headers": {"host": "examplebucket.s3.amazonaws.com"}, "query": {"X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", "X-Amz-Date": "20130524T000000Z", "X-Amz-Expires": "86400", "X-Amz-SignedHeaders": "host", "X-Amz-Signature": "00"}, "answer": "accepted"},
+        {"title": "no signature", "headers": {"host": "examplebucket.s3.amazonaws.com"}, "query": {"X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", "X-Amz-Date": "20130524T000000Z", "X-Amz-Expires": "86400", "X-Amz-SignedHeaders": "host", "X-Amz-Signature": ""}, "answer": "400 AuthorizationQueryParametersError"},
+        {"title": "longer than a week", "headers": {"host": "examplebucket.s3.amazonaws.com"}, "query": {"X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", "X-Amz-Date": "20130524T000000Z", "X-Amz-Expires": "604801", "X-Amz-SignedHeaders": "host", "X-Amz-Signature": "00"}, "answer": "400 AuthorizationQueryParametersError"},
+        {"title": "expiring at once", "headers": {"host": "examplebucket.s3.amazonaws.com"}, "query": {"X-Amz-Algorithm": "AWS4-HMAC-SHA256", "X-Amz-Credential": "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", "X-Amz-Date": "20130524T000000Z", "X-Amz-Expires": "0", "X-Amz-SignedHeaders": "host", "X-Amz-Signature": "00"}, "answer": "400 AuthorizationQueryParametersError"},
+        {"title": "another algorithm", "headers": {"host": "examplebucket.s3.amazonaws.com"}, "query": {"X-Amz-Algorithm": "AWS4-HMAC-SHA1", "X-Amz-Credential": "AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request", "X-Amz-Date": "20130524T000000Z", "X-Amz-Expires": "86400", "X-Amz-SignedHeaders": "host", "X-Amz-Signature": "00"}, "answer": "400 AuthorizationQueryParametersError"}
+      ]
+    }
+  },
+  "documents": {
+    "escaped": {"text": "a<b>&\"c'", "xml": "a&#60;b&#62;&#38;&#34;c&#39;"},
+    "error": {"status": 404, "code": "NoSuchBucket", "message": "The specified bucket does not exist", "resource": "/photos/a&b", "requestId": "REQ1", "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><Resource>/photos/a&#38;b</Resource><RequestId>REQ1</RequestId></Error>"},
+    "listBuckets": {"owner": "000000000001", "buckets": [{"name": "photos", "createdAt": "2026-10-23T06:00:00Z"}], "region": "tn-tunis-1", "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Owner><ID>000000000001</ID><DisplayName>000000000001</DisplayName></Owner><Buckets><Bucket><Name>photos</Name><CreationDate>2026-10-23T06:00:00.000Z</CreationDate><BucketRegion>tn-tunis-1</BucketRegion></Bucket></Buckets></ListAllMyBucketsResult>"},
+    "location": {"region": "tn-tunis-1", "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">tn-tunis-1</LocationConstraint>"}
+  },
+  "frontDoor": {
+    "buckets": [
+      {"name": "photos", "createdAt": "2026-10-23T06:00:00.000Z"},
+      {"name": "exports", "createdAt": "2026-10-23T06:00:00.000Z"}
+    ],
+    "ownAnswers": [
+      {"title": "ListBuckets: the account's buckets, the account their owner", "request": {"method": "GET", "path": "/", "query": ""}, "answer": {"status": 200, "headers": {"content-type": "application/xml"}, "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ListAllMyBucketsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Owner><ID>{account}</ID><DisplayName>{account}</DisplayName></Owner><Buckets><Bucket><Name>photos</Name><CreationDate>2026-10-23T06:00:00.000Z</CreationDate><BucketRegion>{region}</BucketRegion></Bucket><Bucket><Name>exports</Name><CreationDate>2026-10-23T06:00:00.000Z</CreationDate><BucketRegion>{region}</BucketRegion></Bucket></Buckets></ListAllMyBucketsResult>"}},
+      {"title": "GetBucketLocation: FF's region", "request": {"method": "GET", "path": "/photos", "query": "location"}, "answer": {"status": 200, "headers": {"content-type": "application/xml"}, "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<LocationConstraint xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{region}</LocationConstraint>"}},
+      {"title": "HeadBucket: its region", "request": {"method": "HEAD", "path": "/photos", "query": ""}, "answer": {"status": 200, "headers": {"x-amz-bucket-region": "{region}"}, "document": ""}}
+    ],
+    "unsetSettings": {
+      "none": [
+        {"request": {"method": "GET", "path": "/photos", "query": "cors"}, "refused": {"status": 404, "code": "NoSuchCORSConfiguration", "message": "The CORS configuration does not exist", "resource": "/photos"}},
+        {"request": {"method": "GET", "path": "/photos", "query": "lifecycle"}, "refused": {"status": 404, "code": "NoSuchLifecycleConfiguration", "message": "The lifecycle configuration does not exist", "resource": "/photos"}},
+        {"request": {"method": "GET", "path": "/photos", "query": "replication"}, "refused": {"status": 404, "code": "ReplicationConfigurationNotFoundError", "message": "The replication configuration was not found", "resource": "/photos"}},
+        {"request": {"method": "GET", "path": "/photos", "query": "encryption"}, "refused": {"status": 404, "code": "ServerSideEncryptionConfigurationNotFoundError", "message": "The server side encryption configuration was not found", "resource": "/photos"}},
+        {"request": {"method": "GET", "path": "/photos", "query": "object-lock"}, "refused": {"status": 404, "code": "ObjectLockConfigurationNotFoundError", "message": "Object Lock configuration does not exist for this bucket", "resource": "/photos"}}
+      ],
+      "asNew": [
+        {"request": {"method": "GET", "path": "/photos", "query": "versioning"}, "answer": {"status": 200, "headers": {"content-type": "application/xml"}, "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<VersioningConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>"}},
+        {"request": {"method": "GET", "path": "/photos", "query": "accelerate"}, "answer": {"status": 200, "headers": {"content-type": "application/xml"}, "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<AccelerateConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>"}},
+        {"request": {"method": "GET", "path": "/photos", "query": "logging"}, "answer": {"status": 200, "headers": {"content-type": "application/xml"}, "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<BucketLoggingStatus xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>"}},
+        {"request": {"method": "GET", "path": "/photos", "query": "requestPayment"}, "answer": {"status": 200, "headers": {"content-type": "application/xml"}, "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<RequestPaymentConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Payer>BucketOwner</Payer></RequestPaymentConfiguration>"}},
+        {"request": {"method": "GET", "path": "/photos", "query": "ownershipControls"}, "answer": {"status": 200, "headers": {"content-type": "application/xml"}, "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<OwnershipControls xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Rule><ObjectOwnership>BucketOwnerEnforced</ObjectOwnership></Rule></OwnershipControls>"}},
+        {"request": {"method": "GET", "path": "/photos", "query": "acl"}, "answer": {"status": 200, "headers": {"content-type": "application/xml"}, "document": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<AccessControlPolicy xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Owner><ID>{account}</ID><DisplayName>{account}</DisplayName></Owner><AccessControlList><Grant><Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"CanonicalUser\"><ID>{account}</ID><DisplayName>{account}</DisplayName></Grantee><Permission>FULL_CONTROL</Permission></Grant></AccessControlList></AccessControlPolicy>"}}
+      ]
+    },
+    "refusals": [
+      {"title": "a wrong secret", "request": {"method": "GET", "path": "/photos/range.txt", "query": ""}, "signedWith": "anotherSecret", "refused": {"status": 403, "code": "SignatureDoesNotMatch", "message": "The request signature we calculated does not match the signature you provided. Check your key and signing method.", "resource": "/photos/range.txt"}},
+      {"title": "an unknown key", "request": {"method": "GET", "path": "/photos/range.txt", "query": ""}, "signedWith": "unknownKey", "refused": {"status": 403, "code": "InvalidAccessKeyId", "message": "The AWS Access Key Id you provided does not exist in our records.", "resource": "/photos/range.txt"}},
+      {"title": "a bucket that is not there", "request": {"method": "GET", "path": "/nowhere/x", "query": ""}, "refused": {"status": 404, "code": "NoSuchBucket", "message": "The specified bucket does not exist", "resource": "/nowhere/x"}},
+      {"title": "what the front door doesn't serve: a bucket's CORS", "request": {"method": "PUT", "path": "/photos", "query": "cors", "headers": {"content-type": "application/xml"}, "body": "<CORSConfiguration><CORSRule><AllowedMethod>GET</AllowedMethod><AllowedOrigin>*</AllowedOrigin></CORSRule></CORSConfiguration>"}, "refused": {"status": 501, "code": "NotImplemented", "message": "A header you provided implies functionality that is not implemented", "resource": "/photos"}}
+    ],
+    "unknownKey": "AKFFZZZZZZZZZZZZZZZZ",
+    "checksums": [
+      {"title": "PutObject's CRC-32, given back with its type", "request": {"method": "PUT", "path": "/photos/2026/a%20b.txt", "query": "", "headers": {"content-type": "text/plain", "x-amz-checksum-crc32": "tcdgew=="}, "body": "Hello, Tunis"}, "answer": {"status": 200, "headers": {"x-amz-checksum-crc32": "tcdgew==", "x-amz-checksum-type": "FULL_OBJECT"}}},
+      {"title": "a CRC-32 that fails: BadDigest", "request": {"method": "PUT", "path": "/photos/checked.bin", "query": "", "headers": {"x-amz-checksum-crc32": "AAAAAA=="}, "body": {"repeat": "q", "times": 300000}}, "refused": {"status": 400, "code": "BadDigest", "message": "The CRC32 you specified did not match the calculated checksum.", "resource": "/photos/checked.bin"}}
+    ]
+  }
+}

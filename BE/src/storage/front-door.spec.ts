@@ -11,26 +11,18 @@ import {
   DeletePublicAccessBlockCommand,
   GetBucketAccelerateConfigurationCommand,
   GetBucketAclCommand,
-  GetBucketCorsCommand,
-  GetBucketEncryptionCommand,
-  GetBucketLifecycleConfigurationCommand,
-  GetBucketLocationCommand,
   GetBucketLoggingCommand,
   GetBucketNotificationConfigurationCommand,
   GetBucketOwnershipControlsCommand,
   GetBucketPolicyCommand,
-  GetBucketReplicationCommand,
   GetBucketRequestPaymentCommand,
   GetBucketTaggingCommand,
   GetBucketVersioningCommand,
   GetBucketWebsiteCommand,
-  GetObjectLockConfigurationCommand,
   GetObjectCommand,
   GetPublicAccessBlockCommand,
-  HeadBucketCommand,
   ListBucketsCommand,
   ListObjectsV2Command,
-  PutBucketCorsCommand,
   PutBucketNotificationConfigurationCommand,
   PutBucketPolicyCommand,
   PutBucketTaggingCommand,
@@ -41,8 +33,10 @@ import {
 } from '@aws-sdk/client-s3';
 import { BadRequestException, ConflictException, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { IncomingMessage, Server, ServerResponse, createServer, request as httpRequest } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { IncomingHttpHeaders, IncomingMessage, Server, ServerResponse, createServer, request as httpRequest } from 'node:http';
 import { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { text } from 'node:stream/consumers';
 import { AccountStatus } from '../accounts/entities/account.entity';
@@ -68,7 +62,32 @@ import { ActiveKey, EXPIRED, StorageDirectory } from './storage-directory.servic
 import { crc32Of, notedUses, useLine } from './test-fixtures';
 import { StorageRequestCountsService } from './storage-request-counts.service';
 import { WebsiteConfiguration } from './website';
+import { escapeXml } from './xml';
 
+/** A request on the wire, as the table writes it: its body a string, or a text so many times. */
+interface WireRequest {
+  method: string;
+  path: string;
+  query: string;
+  headers?: Record<string, string>;
+  body?: string | { repeat: string; times: number };
+}
+
+/** A request of the table's, signed with the key, or with another secret, or a key FF doesn't have; its answer, or its refusal. */
+interface WireCase {
+  title: string;
+  request: WireRequest;
+  signedWith?: 'anotherSecret' | 'unknownKey';
+  answer?: { status: number; headers?: Record<string, string>; document?: string };
+  refused?: { status: number; code: string; message: string; resource: string };
+}
+
+/** The front door's answers that ff local's S3 gives too, in the table both read; what only FF has stays here. */
+const { frontDoor: WIRE } = JSON.parse(readFileSync(join(__dirname, 's3-examples.json'), 'utf8')) as {
+  frontDoor: { unknownKey: string; ownAnswers: WireCase[]; unsetSettings: Record<string, WireCase[]>; refusals: WireCase[]; checksums: WireCase[] };
+};
+
+const REGION = 'tn-tunis-1';
 const STORE_KEY = 'storekey';
 const STORE_SECRET = 'store-secret';
 const KEY: ActiveKey = { id: 'AKFFAAAAAAAAAAAAAAAA', accountId: '000000000001', name: null, functionId: null, buckets: null, queues: null, functions: null, functionAccess: null, readOnly: false, secret: 'a'.repeat(40) };
@@ -256,7 +275,7 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     store = fakeStore(seen);
     const storePort = await listening(store);
     const config = new ConfigService({
-      storage: { base: 'http://s3.example.test:3002', region: 'tn-tunis-1' },
+      storage: { base: 'http://s3.example.test:3002', region: REGION },
       objectStore: { endPoint: '127.0.0.1', port: storePort, useSSL: false, accessKey: STORE_KEY, secretKey: STORE_SECRET },
     });
     frontDoor = new S3FrontDoor(config, directory, counts, plans, credit, throttler, notifications, bucketEvents, websites, keyUses, buckets, access);
@@ -379,32 +398,25 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
   });
 
   it("answers ListBuckets, GetBucketLocation and HeadBucket itself, from FF's own records", async () => {
-    const listed = await client().send(new ListBucketsCommand({}));
+    await answersAsTheTable(WIRE.ownAnswers);
     const narrow = await client(NARROW).send(new ListBucketsCommand({}));
     const queuesOnly = await client(QUEUES_ONLY).send(new ListBucketsCommand({}));
-    const location = await client().send(new GetBucketLocationCommand({ Bucket: 'photos' }));
-    const head = await client().send(new HeadBucketCommand({ Bucket: 'photos' }));
 
-    expect(listed.Buckets?.map((b) => b.Name)).toEqual(['photos', 'exports']);
     expect(narrow.Buckets?.map((b) => b.Name)).toEqual(['photos']);
     expect(queuesOnly.Buckets ?? []).toEqual([]);
-    expect(location.LocationConstraint).toBe('tn-tunis-1');
-    expect(head.$metadata.httpStatusCode).toBe(200);
     expect(seen).toEqual([]);
   });
 
   it("refuses, in S3's words, before the store hears of it: a wrong secret, an unknown key, one past its end, another account's bucket, a bucket the key doesn't reach, a write with a read-only key, none at all", async () => {
     const get = new GetObjectCommand({ Bucket: 'photos', Key: 'range.txt' });
 
-    expect(await refused(client(KEY, 'b'.repeat(40)).send(get))).toBe('403 SignatureDoesNotMatch');
-    expect(await refused(client({ ...KEY, id: 'AKFFZZZZZZZZZZZZZZZZ' }).send(get))).toBe('403 InvalidAccessKeyId');
+    // A wrong secret, an unknown key, a bucket that isn't there, what the front door doesn't serve.
+    await answersAsTheTable(WIRE.refusals);
     expect(await refused(client({ ...KEY, id: ENDED }).send(get))).toBe('400 ExpiredToken');
     expect(await refused(client().send(new GetObjectCommand({ Bucket: 'theirs', Key: 'x' })))).toBe('403 AccessDenied');
     expect(await refused(client(NARROW).send(new ListObjectsV2Command({ Bucket: 'exports' })))).toBe('403 AccessDenied');
     expect(await refused(client(QUEUES_ONLY).send(new ListObjectsV2Command({ Bucket: 'photos' })))).toBe('403 AccessDenied');
     expect(await refused(client(READ_ONLY).send(new PutObjectCommand({ Bucket: 'photos', Key: 'x', Body: 'x' })))).toBe('403 AccessDenied');
-    expect(await refused(client().send(new GetObjectCommand({ Bucket: 'nowhere', Key: 'x' })))).toBe('404 NoSuchBucket');
-    expect(await refused(client().send(new PutBucketCorsCommand({ Bucket: 'photos', CORSConfiguration: { CORSRules: [{ AllowedMethods: ['GET'], AllowedOrigins: ['*'] }] } })))).toBe('501 NotImplemented');
     const anonymous = await fetch(`${endpoint}/photos/range.txt`);
     expect([anonymous.status, await anonymous.text()]).toEqual([403, expect.stringContaining('<Code>AccessDenied</Code>')]);
     expect(seen).toEqual([]);
@@ -489,13 +501,20 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
     }
   });
 
-  /** A request signed with the key, an unsigned body declared, as any client may send one. */
-  const signedRequest = (headers: Record<string, string>, body: Buffer, onContinue?: () => void) =>
-    new Promise<{ status: number; body: string }>((resolve, reject) => {
-      const url = new URL(`${endpoint}/photos/checked.bin`);
-      const signed = signedForStore({ method: 'PUT', host: url.host, rawPath: url.pathname, rawQuery: '', headers }, { accessKeyId: KEY.id, secretAccessKey: KEY.secret, region: 'us-east-1' }, new Date());
-      const request = httpRequest(url, { method: 'PUT', headers: signed }, (response) => {
-        text(response).then((answer) => resolve({ status: response.statusCode ?? 0, body: answer }), reject);
+  /**
+   * The table's request, signed at this moment with the key, an unsigned body declared, as any client may send one; or
+   * with another secret, or a key FF doesn't have. Its answer as it came.
+   */
+  const onTheWire = (wire: WireRequest, signedWith?: WireCase['signedWith'], onContinue?: () => void) =>
+    new Promise<{ status: number; headers: IncomingHttpHeaders; body: string }>((resolve, reject) => {
+      const url = new URL(endpoint);
+      const body = typeof wire.body === 'object' ? Buffer.from(wire.body.repeat.repeat(wire.body.times)) : Buffer.from(wire.body ?? '');
+      const headers: Record<string, string> = { ...wire.headers, ...(wire.body !== undefined ? { 'content-length': String(body.length) } : {}) };
+      const credentials = { accessKeyId: signedWith === 'unknownKey' ? WIRE.unknownKey : KEY.id, secretAccessKey: signedWith === 'anotherSecret' ? 'b'.repeat(40) : KEY.secret, region: 'us-east-1' };
+      const signed = signedForStore({ method: wire.method, host: url.host, rawPath: wire.path, rawQuery: wire.query, headers }, credentials, new Date());
+      const target = `${wire.path}${wire.query ? `?${wire.query}` : ''}`;
+      const request = httpRequest({ host: url.hostname, port: url.port, path: target, method: wire.method, headers: signed }, (response) => {
+        text(response).then((answer) => resolve({ status: response.statusCode ?? 0, headers: response.headers, body: answer }), reject);
       });
       request.on('error', reject);
       if (headers.expect) {
@@ -508,29 +527,46 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
       }
     });
 
-  it('cuts a body whose checksum fails before its end: the store never has it whole, and the client gets BadDigest', async () => {
-    const body = Buffer.alloc(300_000, 'q');
+  /** Each of the table's cases on the wire, in order: its status, its headers and its document, or its refusal in S3's words. */
+  const answersAsTheTable = async (cases: WireCase[]) => {
+    expect(cases.length).toBeGreaterThan(0);
+    const fill = (text: string) => text.replaceAll('{account}', KEY.accountId).replaceAll('{region}', REGION);
+    for (const { title, request, signedWith, answer, refused: refusal } of cases) {
+      const got = await onTheWire(request, signedWith);
+      if (refusal) {
+        const field = (name: string) => new RegExp(`<${name}>([^<]*)</${name}>`).exec(got.body)?.[1];
+        expect([title, got.status, field('Code'), field('Message'), field('Resource')]).toEqual([title, refusal.status, refusal.code, escapeXml(refusal.message), escapeXml(refusal.resource)]);
+        continue;
+      }
+      const { status, headers = {}, document } = answer!;
+      expect([title, got.status, ...Object.keys(headers).map((name) => got.headers[name])]).toEqual([title, status, ...Object.values(headers).map(fill)]);
+      if (document !== undefined) expect([title, got.body]).toEqual([title, fill(document)]);
+    }
+  };
 
-    const answer = await signedRequest({ 'content-length': String(body.length), 'x-amz-checksum-crc32': 'AAAAAA==' }, body);
+  it("checks a body's checksum as S3 does: given back in PutObject's answer when it matches; one that fails cut before its end, the store never having it whole, and the client gets BadDigest", async () => {
+    await answersAsTheTable(WIRE.checksums);
 
-    expect(answer.status).toBe(400);
-    expect(answer.body).toContain('<Code>BadDigest</Code>');
     // The store sees its request closed a moment after the client has its answer: later on a busy machine.
-    for (const deadline = Date.now() + 5_000; seen.length === 0 && Date.now() < deadline; ) await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(seen.map((request) => [request.method, request.complete])).toEqual([['PUT', false]]);
+    for (const deadline = Date.now() + 5_000; seen.length < 2 && Date.now() < deadline; ) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen.map((request) => [request.method, request.complete])).toEqual([
+      ['PUT', true],
+      ['PUT', false],
+    ]);
   });
 
   it('lets a client that asks for "100 Continue" send its body only once it is let in', async () => {
     let continued = false;
     const body = Buffer.from('waited');
 
-    const ok = await signedRequest({ 'content-length': String(body.length), expect: '100-continue' }, body, () => (continued = true));
+    const waited: WireRequest = { method: 'PUT', path: '/photos/checked.bin', query: '', headers: { expect: '100-continue' }, body: body.toString() };
+    const ok = await onTheWire(waited, undefined, () => (continued = true));
     expect([ok.status, continued]).toEqual([200, true]);
 
     continued = false;
     keys.set(KEY.id, { ...KEY, readOnly: true });
     try {
-      const refusal = await signedRequest({ 'content-length': String(body.length), expect: '100-continue' }, body, () => (continued = true));
+      const refusal = await onTheWire(waited, undefined, () => (continued = true));
       expect([refusal.status, continued]).toEqual([403, false]);
     } finally {
       keys.set(KEY.id, KEY);
@@ -627,27 +663,17 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
 
   describe("a bucket's settings FF's buckets don't have, read as S3 answers a bucket without them", () => {
     it("answers that there is none: no CORS, lifecycle, replication, encryption or Object Lock of its own, in S3's errors", async () => {
-      const answers = await Promise.all([
-        refused(client().send(new GetBucketCorsCommand({ Bucket: 'photos' }))),
-        refused(client().send(new GetBucketLifecycleConfigurationCommand({ Bucket: 'photos' }))),
-        refused(client().send(new GetBucketReplicationCommand({ Bucket: 'photos' }))),
-        refused(client().send(new GetBucketEncryptionCommand({ Bucket: 'photos' }))),
-        refused(client().send(new GetObjectLockConfigurationCommand({ Bucket: 'photos' }))),
-      ]);
+      await answersAsTheTable(WIRE.unsetSettings.none);
 
-      expect(answers).toEqual([
-        '404 NoSuchCORSConfiguration',
-        '404 NoSuchLifecycleConfiguration',
-        '404 ReplicationConfigurationNotFoundError',
-        '404 ServerSideEncryptionConfigurationNotFoundError',
-        '404 ObjectLockConfigurationNotFoundError',
-      ]);
       // Each counted, as S3 bills a request it refuses, and the store never asked.
       expect(counted.map((request) => `${request.method} ${request.class} ${request.status}`)).toEqual(Array(5).fill('GET tier2 404'));
       expect(seen).toEqual([]);
     });
 
     it('answers the rest as S3 does for a new bucket: versioning, acceleration and logging never on, the owner paying, and owning every object without ACLs; a read-only key reads them', async () => {
+      await answersAsTheTable(WIRE.unsetSettings.asNew);
+      counted.length = 0;
+      // As AWS's SDK reads them.
       const reader = client(READ_ONLY);
       const versioning = await reader.send(new GetBucketVersioningCommand({ Bucket: 'photos' }));
       const accelerate = await reader.send(new GetBucketAccelerateConfigurationCommand({ Bucket: 'photos' }));

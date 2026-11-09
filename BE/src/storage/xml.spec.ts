@@ -1,25 +1,37 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { text } from 'node:stream/consumers';
-import { errorDocument, noSuchBucket } from './s3-error';
+import { S3Error, errorDocument, noSuchBucket } from './s3-error';
 import { escapeXml, listBucketsDocument, locationDocument, replacing } from './xml';
+
+/** The front door's own documents as S3 writes them, which ff local's S3 writes too. */
+const { documents } = JSON.parse(readFileSync(join(__dirname, 's3-examples.json'), 'utf8')) as {
+  documents: {
+    escaped: { text: string; xml: string };
+    error: { status: number; code: string; message: string; resource: string; requestId: string; document: string };
+    listBuckets: { owner: string; buckets: Array<{ name: string; createdAt: string }>; region: string; document: string };
+    location: { region: string; document: string };
+  };
+};
 
 describe("the front door's own XML", () => {
   it('escapes what would break the document', () => {
-    expect(escapeXml(`a<b>&"c'`)).toBe('a&#60;b&#62;&#38;&#34;c&#39;');
+    expect(escapeXml(documents.escaped.text)).toBe(documents.escaped.xml);
   });
 
   it("an error, in S3's document: its code, message, resource and request", () => {
-    expect(errorDocument(noSuchBucket(), 'REQ1', '/photos/a&b')).toBe(
-      '<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><Resource>/photos/a&#38;b</Resource><RequestId>REQ1</RequestId></Error>',
-    );
+    const { status, code, message, resource, requestId, document } = documents.error;
+
+    expect(errorDocument(new S3Error(status, code, message), requestId, resource)).toBe(document);
+    expect(noSuchBucket()).toMatchObject({ status, code, message });
   });
 
   it("ListBuckets' answer and GetBucketLocation's, as S3 writes them", () => {
-    expect(listBucketsDocument('000000000001', [{ name: 'photos', createdAt: new Date('2026-10-23T06:00:00Z') }], 'tn-tunis-1')).toBe(
-      '<?xml version="1.0" encoding="UTF-8"?>\n<ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Owner><ID>000000000001</ID><DisplayName>000000000001</DisplayName></Owner>' +
-        '<Buckets><Bucket><Name>photos</Name><CreationDate>2026-10-23T06:00:00.000Z</CreationDate><BucketRegion>tn-tunis-1</BucketRegion></Bucket></Buckets></ListAllMyBucketsResult>',
-    );
-    expect(locationDocument('tn-tunis-1')).toBe('<?xml version="1.0" encoding="UTF-8"?>\n<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/">tn-tunis-1</LocationConstraint>');
+    const { owner, buckets, region, document } = documents.listBuckets;
+
+    expect(listBucketsDocument(owner, buckets.map(({ name, createdAt }) => ({ name, createdAt: new Date(createdAt) })), region)).toBe(document);
+    expect(locationDocument(documents.location.region)).toBe(documents.location.document);
   });
 });
 

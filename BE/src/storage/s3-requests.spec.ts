@@ -1,136 +1,78 @@
-import { addressOf, operationOf } from './s3-requests';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { S3Address, addressOf, operationOf } from './s3-requests';
 
-const HOST = 's3.ffunc.cloud';
+interface AddressCase {
+  host: string;
+  path: string;
+  address: S3Address;
+}
+
+interface OperationCase {
+  method: string;
+  on: 'service' | 'bucket' | 'object';
+  query: string;
+  headers?: Record<string, string>;
+  /** S3's name, its class, and "writes" for an operation a read-only key may not make. */
+  is: string;
+}
+
+/** The table ff local's S3 reads too: requests' addresses, and the operations they are. */
+const table = JSON.parse(readFileSync(join(__dirname, 's3-examples.json'), 'utf8')) as {
+  host: string;
+  addresses: Record<string, AddressCase[]>;
+  operations: Record<string, OperationCase[]>;
+};
+
+/** Each case of the table's group, as the front door reads it. */
+function addressesOf(group: string): void {
+  const cases = table.addresses[group];
+  expect(cases.length).toBeGreaterThan(0);
+  for (const { host, path, address } of cases) expect([host, path, addressOf(host, path, table.host)]).toEqual([host, path, address]);
+}
+
+/** The bucket `photos`, path-style: the service itself, the bucket, or its object `a.jpg`. */
+const ADDRESSES: Record<OperationCase['on'], S3Address> = {
+  service: { style: 'path', bucket: '', rawKey: '' },
+  bucket: { style: 'path', bucket: 'photos', rawKey: '' },
+  object: { style: 'path', bucket: 'photos', rawKey: 'a.jpg' },
+};
+
+function operationsOf(group: string): void {
+  const cases = table.operations[group];
+  expect(cases.length).toBeGreaterThan(0);
+  for (const { method, on, query, headers = {}, is } of cases) {
+    const operation = operationOf(method, ADDRESSES[on], new URLSearchParams(query), headers);
+    expect(`${method} ${on} ${query}: ${operation.name} ${operation.class}${operation.writes ? ' writes' : ''}`).toBe(`${method} ${on} ${query}: ${is}`);
+  }
+}
 
 describe("a request's bucket and key", () => {
-  it('virtual-hosted, as the SDK for JavaScript addresses a host name', () => {
-    expect(addressOf('photos.s3.ffunc.cloud', '/2026/a%20b.jpg', HOST)).toEqual({ style: 'virtual-hosted', bucket: 'photos', rawKey: '2026/a%20b.jpg' });
-    expect(addressOf('Photos.S3.ffunc.cloud:443', '/', HOST)).toEqual({ style: 'virtual-hosted', bucket: 'photos', rawKey: '' });
-  });
+  it('virtual-hosted, as the SDK for JavaScript addresses a host name', () => addressesOf('virtualHosted'));
 
-  it('path-style, as boto3 and the CLI address any endpoint and every SDK an IP address', () => {
-    expect(addressOf('s3.ffunc.cloud', '/photos/2026/a%20b.jpg', HOST)).toEqual({ style: 'path', bucket: 'photos', rawKey: '2026/a%20b.jpg' });
-    expect(addressOf('10.43.0.12:3002', '/photos', HOST)).toEqual({ style: 'path', bucket: 'photos', rawKey: '' });
-    expect(addressOf('s3.ffunc.cloud', '/', HOST)).toEqual({ style: 'path', bucket: '', rawKey: '' });
-    expect(addressOf('s3.ffunc.cloud', '/photos//double', HOST).rawKey).toBe('/double');
-  });
+  it('path-style, as boto3 and the CLI address any endpoint and every SDK an IP address', () => addressesOf('pathStyle'));
 
-  it('a host two labels deeper is no bucket of FF\'s: path-style, so its path names the bucket', () => {
-    expect(addressOf('a.b.s3.ffunc.cloud', '/photos/x', HOST)).toEqual({ style: 'path', bucket: 'photos', rawKey: 'x' });
-  });
+  it("a host two labels deeper is no bucket of FF's: path-style, so its path names the bucket", () => addressesOf('deeperHost'));
 });
 
 describe('the operation a request is', () => {
-  const bucket = { style: 'path' as const, bucket: 'photos', rawKey: '' };
-  const object = { ...bucket, rawKey: 'a.jpg' };
-  const of = (method: string, address: typeof bucket, query = '', headers: Record<string, string> = {}) => {
-    const operation = operationOf(method, address, new URLSearchParams(query), headers);
-    return `${operation.name} ${operation.class}${operation.writes ? ' writes' : ''}`;
-  };
+  it('a bucket made, as S3 bills a PUT, and deleted for free, as a DELETE; with a parameter, another operation', () => operationsOf('bucketMadeAndDeleted'));
 
-  it('a bucket made, as S3 bills a PUT, and deleted for free, as a DELETE; with a parameter, another operation', () => {
-    expect(of('PUT', bucket)).toBe('CreateBucket tier1 writes');
-    expect(of('PUT', bucket, 'x-id=CreateBucket')).toBe('CreateBucket tier1 writes');
-    expect(of('DELETE', bucket)).toBe('DeleteBucket free writes');
-    expect(of('PUT', bucket, 'cors')).toBe('NotImplemented tier2');
-  });
+  it("the bucket's tags: read as a GET, replaced as a PUT, removed for free, as a DELETE", () => operationsOf('tags'));
 
-  it("the bucket's tags: read as a GET, replaced as a PUT, removed for free, as a DELETE", () => {
-    expect(of('GET', bucket, 'tagging')).toBe('GetBucketTagging tier2');
-    expect(of('PUT', bucket, 'tagging')).toBe('PutBucketTagging tier1 writes');
-    expect(of('DELETE', bucket, 'tagging')).toBe('DeleteBucketTagging free writes');
-    expect(of('GET', bucket, 'tagging&policy')).toBe('NotImplemented tier2');
-  });
+  it("the bucket's policy and public access block, kept as the tags are: read as a GET, set as a PUT, removed for free; with the object's key, NotImplemented", () =>
+    operationsOf('policyAndPublicAccessBlock'));
 
-  it("the bucket's policy and public access block, kept as the tags are: read as a GET, set as a PUT, removed for free; with the object's key, NotImplemented", () => {
-    for (const [parameter, name] of [
-      ['policy', 'BucketPolicy'],
-      ['publicAccessBlock', 'PublicAccessBlock'],
-    ]) {
-      expect(of('GET', bucket, `${parameter}&x-id=Get${name}`)).toBe(`Get${name} tier2`);
-      expect(of('PUT', bucket, parameter)).toBe(`Put${name} tier1 writes`);
-      expect(of('DELETE', bucket, parameter)).toBe(`Delete${name} free writes`);
-      expect(of('POST', bucket, parameter)).toBe('NotImplemented tier2');
-      expect(of('PUT', object, parameter)).toBe('NotImplemented tier2');
-    }
-    expect(of('DELETE', bucket, 'notification')).toBe('NotImplemented tier2');
-  });
+  it("the bucket's settings FF's buckets don't have, each read as a GET, which S3 answers for a bucket without it; set, NotImplemented", () => operationsOf('unsetSettings'));
 
-  it("the bucket's settings FF's buckets don't have, each read as a GET, which S3 answers for a bucket without it; set, NotImplemented", () => {
-    const reads = {
-      acl: 'GetBucketAcl',
-      cors: 'GetBucketCors',
-      versioning: 'GetBucketVersioning',
-      accelerate: 'GetBucketAccelerateConfiguration',
-      requestPayment: 'GetBucketRequestPayment',
-      logging: 'GetBucketLogging',
-      lifecycle: 'GetBucketLifecycleConfiguration',
-      replication: 'GetBucketReplication',
-      encryption: 'GetBucketEncryption',
-      'object-lock': 'GetObjectLockConfiguration',
-      ownershipControls: 'GetBucketOwnershipControls',
-    };
-    for (const [parameter, name] of Object.entries(reads)) {
-      expect(of('GET', bucket, `${parameter}&x-id=${name}`)).toBe(`${name} tier2`);
-      expect(of('PUT', bucket, parameter)).toBe('NotImplemented tier2');
-    }
-    expect(of('GET', object, 'acl')).toBe('NotImplemented tier2');
-  });
+  it("the bucket's: listings, its location, the bucket itself, a batch of deletes", () => operationsOf('bucketReads'));
 
-  it("the bucket's: listings, its location, the bucket itself, a batch of deletes", () => {
-    expect(of('GET', { ...bucket, bucket: '' })).toBe('ListBuckets tier1');
-    expect(of('GET', bucket, 'list-type=2&prefix=2026%2F&delimiter=%2F&max-keys=100&x-id=ListObjectsV2')).toBe('ListObjectsV2 tier1');
-    expect(of('GET', bucket)).toBe('ListObjects tier1');
-    expect(of('GET', bucket, 'marker=a')).toBe('ListObjects tier1');
-    expect(of('GET', bucket, 'location')).toBe('GetBucketLocation tier2');
-    expect(of('GET', bucket, 'uploads&prefix=a')).toBe('ListMultipartUploads tier1');
-    expect(of('HEAD', bucket)).toBe('HeadBucket tier2');
-    expect(of('POST', bucket, 'delete&x-id=DeleteObjects')).toBe('DeleteObjects free writes');
-  });
+  it("the bucket's website configuration: set and read as S3 bills a PUT and a GET, removed for free, as a DELETE", () => operationsOf('website'));
 
-  it("the bucket's website configuration: set and read as S3 bills a PUT and a GET, removed for free, as a DELETE", () => {
-    expect(of('PUT', bucket, 'website')).toBe('PutBucketWebsite tier1 writes');
-    expect(of('GET', bucket, 'website')).toBe('GetBucketWebsite tier2');
-    expect(of('DELETE', bucket, 'website')).toBe('DeleteBucketWebsite free writes');
-    expect(of('GET', bucket, 'website&policy')).toBe('NotImplemented tier2');
-  });
+  it("an object's: put, copy, get, head, delete, and a multipart upload's every step", () => operationsOf('objects'));
 
-  it("an object's: put, copy, get, head, delete, and a multipart upload's every step", () => {
-    expect(of('PUT', object, 'x-id=PutObject')).toBe('PutObject tier1 writes');
-    expect(of('PUT', object, '', { 'x-amz-copy-source': '/photos/b.jpg' })).toBe('CopyObject tier1 writes');
-    expect(of('GET', object, 'response-content-type=image%2Fjpeg&x-id=GetObject')).toBe('GetObject tier2');
-    expect(of('HEAD', object)).toBe('HeadObject tier2');
-    expect(of('DELETE', object)).toBe('DeleteObject free writes');
-    expect(of('POST', object, 'uploads')).toBe('CreateMultipartUpload tier1 writes');
-    expect(of('PUT', object, 'partNumber=1&uploadId=u1')).toBe('UploadPart tier1 writes');
-    expect(of('PUT', object, 'partNumber=2&uploadId=u1', { 'x-amz-copy-source': '/photos/b.jpg' })).toBe('UploadPartCopy tier1 writes');
-    expect(of('GET', object, 'uploadId=u1&max-parts=10')).toBe('ListParts tier1');
-    expect(of('POST', object, 'uploadId=u1')).toBe('CompleteMultipartUpload tier1 writes');
-    expect(of('DELETE', object, 'uploadId=u1')).toBe('AbortMultipartUpload free writes');
-  });
+  // Its GET asks for the object's checksum, its PUT signs the CRC-32 of nothing, and both name their payload.
+  it("a presigned URL's parameters, as the SDK for JavaScript's presigner writes them, are no operation's", () => operationsOf('presigned'));
 
-  it("a presigned URL's parameters, as the SDK for JavaScript's presigner writes them, are no operation's", () => {
-    // Its GET asks for the object's checksum, its PUT signs the CRC-32 of nothing, and both name their payload.
-    const presigned = 'X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD&X-Amz-Credential=c&X-Amz-Date=d&X-Amz-Expires=60&X-Amz-SignedHeaders=host&X-Amz-Signature=s';
-    expect(of('PUT', object, `${presigned}&x-amz-checksum-crc32=AAAAAA%3D%3D&x-amz-sdk-checksum-algorithm=CRC32&x-id=PutObject`)).toBe('PutObject tier1 writes');
-    expect(of('GET', object, `${presigned}&x-amz-checksum-mode=ENABLED&x-id=GetObject`)).toBe('GetObject tier2');
-  });
-
-  it("anything else answers NotImplemented: a bucket's CORS set, its policy's status, an object's tags, versions", () => {
-    for (const [method, address, query] of [
-      ['GET', bucket, 'policyStatus'],
-      ['PUT', bucket, 'cors'],
-      ['GET', bucket, 'versions'],
-      ['GET', bucket, 'list-type=2&acl'],
-      ['GET', object, 'tagging'],
-      ['PUT', object, 'tagging'],
-      ['GET', object, 'versionId=3'],
-      ['PUT', object, 'partNumber=1'],
-      ['POST', object, 'restore'],
-      ['PATCH', object, ''],
-      ['PUT', { ...bucket, bucket: '' }, ''],
-    ] as const) {
-      expect(`${method} ${query}: ${of(method, address, query)}`).toBe(`${method} ${query}: NotImplemented tier2`);
-    }
-  });
+  it("anything else answers NotImplemented: a bucket's CORS set, its policy's status, an object's tags, versions", () => operationsOf('notImplemented'));
 });
