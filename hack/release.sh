@@ -4,12 +4,14 @@
 # (<file>.minisig); SHA256SUMS listing the five; latest.json naming the version, the commit and each file's SHA-256,
 # signed too. Every signature is then verified against the public key ff trusts, cli/release/minisign.pub, so that a
 # secret key that isn't its other half fails here rather than at a customer's. The tag must be ff-v<version>,
-# cli/Cargo.toml's version. Nothing is signed when anything is missing or differs.
+# cli/Cargo.toml's version. The runtime images' archives the manifest names (hack/runtime-images.sh), under images/ in
+# the folder, are signed and listed too. Nothing is signed when anything is missing or differs.
 #   hack/release.sh <folder> <tag> <commit>
 #   hack/release.sh --check <tag>      before anything is built: the tag against cli/Cargo.toml, and the public key there
 #   FF_RELEASE_KEY            the secret key, its file's text, as GitHub's secret holds it; never printed
 #   FF_RELEASE_KEY_PASSWORD   its password, when it has one
 #   FF_RELEASE_PUBLIC_KEY     another public key file than cli/release/minisign.pub, as the tests' throwaway one
+#   FF_RUNTIME_IMAGES         the runtime images' manifest, which the release's builds hold: its archives signed too
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo/hack/lib/ff-builds.sh"
@@ -50,6 +52,17 @@ for binary in "${FF_BUILDS[@]}"; do
   [ "$(sha256 "$folder/$binary" | cut -d' ' -f1)" = "$(cut -d' ' -f1 "$folder/$binary.sha256")" ] ||
     refuse "$binary differs from its .sha256"
 done
+archives=() # the runtime images' archives, by their paths in the folder, as the site serves them
+if [ -n "${FF_RUNTIME_IMAGES:-}" ]; then
+  listed="$(jq -rb '.[].archive' <<<"$FF_RUNTIME_IMAGES" 2>/dev/null)" ||
+    refuse "FF_RUNTIME_IMAGES isn't the manifest hack/runtime-images.sh makes"
+  while IFS= read -r archive; do
+    case "$archive" in images/*/* | images/.* | */../*) refuse "FF_RUNTIME_IMAGES names $archive, not a file of images/" ;; esac
+    case "$archive" in images/?*.tar.gz) ;; *) refuse "FF_RUNTIME_IMAGES names $archive, not a file of images/" ;; esac
+    [ -f "$folder/$archive" ] || refuse "$archive, which FF_RUNTIME_IMAGES names, is missing from $folder"
+    archives+=("$archive")
+  done <<<"$listed"
+fi
 
 # The secret key in a file of its own, its owner's alone; what is made goes into a folder of its own, moved beside the
 # builds once every signature verifies; both removed however the script ends.
@@ -63,7 +76,7 @@ sign() { # <file> <its signature>: minisign's default trusted comment, which hol
     refuse "minisign couldn't sign $(basename "$1") with FF_RELEASE_KEY: a wrong password, or not a secret key"
 }
 
-(cd "$folder" && sha256 "${FF_BUILDS[@]}" >"$work/made/SHA256SUMS")
+(cd "$folder" && sha256 "${FF_BUILDS[@]}" ${archives[@]+"${archives[@]}"} >"$work/made/SHA256SUMS")
 files="{}" # jq -b: lines ending as Unix's on Windows too, whose jq ends them with CR LF
 for binary in "${FF_BUILDS[@]}"; do
   files="$(jq -bc --arg name "$binary" --arg sha "$(cut -d' ' -f1 "$folder/$binary.sha256")" '. + {($name): $sha}' <<<"$files")"
@@ -74,12 +87,26 @@ jq -bn --arg version "$version" --arg commit "$commit" --argjson files "$files" 
 for binary in "${FF_BUILDS[@]}"; do
   sign "$folder/$binary" "$work/made/$binary.minisig"
 done
+for archive in ${archives[@]+"${archives[@]}"}; do
+  mkdir -p "$work/made/images"
+  sign "$folder/$archive" "$work/made/$archive.minisig"
+done
 sign "$work/made/latest.json" "$work/made/latest.json.minisig"
 for binary in "${FF_BUILDS[@]}"; do
   "$minisign" -Vqm "$folder/$binary" -x "$work/made/$binary.minisig" -p "$public_key" >/dev/null 2>&1 ||
     refuse "$binary's signature doesn't verify against $public_key: FF_RELEASE_KEY isn't its secret half"
 done
+for archive in ${archives[@]+"${archives[@]}"}; do
+  "$minisign" -Vqm "$folder/$archive" -x "$work/made/$archive.minisig" -p "$public_key" >/dev/null 2>&1 ||
+    refuse "$archive's signature doesn't verify against $public_key: FF_RELEASE_KEY isn't its secret half"
+done
 "$minisign" -Vqm "$work/made/latest.json" -p "$public_key" >/dev/null 2>&1 ||
   refuse "latest.json's signature doesn't verify against $public_key: FF_RELEASE_KEY isn't its secret half"
+if [ -d "$work/made/images" ]; then # beside their archives, in the folder's images/
+  mv "$work/made/images/"* "$folder/images/"
+  rmdir "$work/made/images"
+fi
 mv "$work/made/"* "$folder/"
-echo "ff $version ($commit): ${#FF_BUILDS[@]} files and latest.json signed in $folder, each signature verified"
+said="${#FF_BUILDS[@]} files"
+[ "${#archives[@]}" -eq 0 ] || said="$said, ${#archives[@]} runtime images' archives"
+echo "ff $version ($commit): $said and latest.json signed in $folder, each signature verified"

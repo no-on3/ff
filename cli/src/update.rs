@@ -9,16 +9,15 @@
 //! the check's time is kept there. A build that knows no site or no key, as a development build, never checks.
 
 use std::fs;
-use std::io::Read;
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::agent_config;
 use crate::cli::Format;
 use crate::config::Settings;
-use crate::minisign::{self, PublicKey};
+use crate::downloads::Source;
+use crate::minisign;
 use crate::output::Output;
 
 const DAY: u64 = 24 * 60 * 60;
@@ -43,7 +42,7 @@ pub fn after_command(out: &Output, settings: &Settings) {
         return;
     }
     state.checked_at = now;
-    let found = source.latest(state.signed_at);
+    let found = latest(&source, state.signed_at);
     match &found {
         Ok(latest) => {
             state.signed_at = latest.signed_at;
@@ -66,78 +65,25 @@ pub fn after_command(out: &Output, settings: &Settings) {
     }
 }
 
-/// The ID of the release's public key built in, as minisign prints it: none in a build without it.
-pub fn release_key_id() -> Option<String> {
-    PublicKey::from_base64(env!("FF_BUILT_RELEASE_KEY")).ok().map(|key| key.id())
-}
-
-/// Where the newest release is said: the downloads site and the key that signs its `latest.json`.
-struct Source {
-    site: String,
-    key: PublicKey,
-}
-
-impl Source {
-    /// The site `FF_DOWNLOADS_URL` names, else the one the release's build was given (`FF_BUILD_DOWNLOADS_URL`); the
-    /// release's public key, built in from `cli/release/minisign.pub`, which a development build takes from
-    /// `FF_TEST_RELEASE_KEY` for the tests.
-    fn find(env: &dyn Fn(&str) -> Option<String>) -> Option<Source> {
-        let built = |value: &'static str| Some(value.to_owned()).filter(|value| !value.is_empty());
-        let tests_key = if cfg!(debug_assertions) { env("FF_TEST_RELEASE_KEY") } else { None };
-        Source::of(
-            env("FF_DOWNLOADS_URL").or_else(|| built(env!("FF_BUILT_DOWNLOADS_URL"))),
-            tests_key.or_else(|| built(env!("FF_BUILT_RELEASE_KEY"))),
-        )
+/// The site's `latest.json`, verified, and signed no earlier than `signed_at`: both downloads within `TIMEOUT`.
+fn latest(source: &Source, signed_at: u64) -> Result<Latest, String> {
+    let deadline = Instant::now() + TIMEOUT;
+    let fetch = |name: &str| source.fetch(name, LARGEST, deadline.saturating_duration_since(Instant::now()));
+    let manifest = fetch("latest.json")?;
+    let signature =
+        String::from_utf8(fetch("latest.json.minisig")?).map_err(|_| "latest.json.minisig isn't text".to_owned())?;
+    let comment = minisign::verify(&source.key, &signature, &manifest)
+        .map_err(|refusal| format!("latest.json's signature: {refusal}"))?;
+    let signed = signing_time(&comment).ok_or_else(|| format!("latest.json's trusted comment, {comment:?}"))?;
+    if signed < signed_at {
+        return Err(format!(
+            "latest.json was signed at {signed}, before the last one verified, at {signed_at}: an old one, ignored"
+        ));
     }
-
-    /// The site and the key, when both are known and the key is minisign's.
-    fn of(site: Option<String>, key: Option<String>) -> Option<Source> {
-        Some(Source { site: site?.trim_end_matches('/').to_owned(), key: PublicKey::from_base64(&key?).ok()? })
-    }
-
-    /// The site's `latest.json`, verified, and signed no earlier than `signed_at`.
-    fn latest(&self, signed_at: u64) -> Result<Latest, String> {
-        let agent: ureq::Agent = agent_config().timeout_global(Some(TIMEOUT)).build().into();
-        let download = |name: &str| -> Result<Vec<u8>, String> {
-            let url = format!("{}/{name}", self.site);
-            let mut response = agent.get(&url).call().map_err(|error| format!("{url}: {error}"))?;
-            if response.status() != 200 {
-                return Err(format!("{url} answered {}", response.status()));
-            }
-            let mut body = Vec::new();
-            response
-                .body_mut()
-                .as_reader()
-                .take(LARGEST)
-                .read_to_end(&mut body)
-                .map_err(|error| format!("{url}: {error}"))?;
-            Ok(body)
-        };
-        let manifest = download("latest.json")?;
-        let signature = String::from_utf8(download("latest.json.minisig")?)
-            .map_err(|_| "latest.json.minisig isn't text".to_owned())?;
-        let comment = minisign::verify(&self.key, &signature, &manifest)
-            .map_err(|refusal| format!("latest.json's signature: {refusal}"))?;
-        let signed = signing_time(&comment).ok_or_else(|| format!("latest.json's trusted comment, {comment:?}"))?;
-        if signed < signed_at {
-            return Err(format!(
-                "latest.json was signed at {signed}, before the last one verified, at {signed_at}: an old one, ignored"
-            ));
-        }
-        let version = serde_json::from_slice::<Manifest>(&manifest)
-            .map_err(|error| format!("latest.json isn't the manifest expected: {error}"))?
-            .version;
-        Ok(Latest { version, signed_at: signed })
-    }
-
-    /// The line that installs the newest release on this system.
-    fn install_line(&self) -> String {
-        if cfg!(windows) {
-            format!("irm {}/install.ps1 | iex", self.site)
-        } else {
-            format!("curl -fsSL {}/install.sh | sh", self.site)
-        }
-    }
+    let version = serde_json::from_slice::<Manifest>(&manifest)
+        .map_err(|error| format!("latest.json isn't the manifest expected: {error}"))?
+        .version;
+    Ok(Latest { version, signed_at: signed })
 }
 
 #[derive(Deserialize)]
@@ -154,11 +100,10 @@ struct Latest {
 /// The signing time minisign's default trusted comment holds, `timestamp:<seconds>\tfile:latest.json\thashed`, for
 /// a `latest.json` alone: another file's signature, served beside it, isn't taken.
 fn signing_time(comment: &str) -> Option<u64> {
-    let fields: Vec<&str> = comment.split('\t').collect();
-    if !fields.contains(&"file:latest.json") {
+    if !minisign::names_file(comment, "latest.json") {
         return None;
     }
-    fields.iter().find_map(|field| field.strip_prefix("timestamp:")).and_then(|time| time.parse().ok())
+    comment.split('\t').find_map(|field| field.strip_prefix("timestamp:")).and_then(|time| time.parse().ok())
 }
 
 /// Whether `latest`, `<major>.<minor>.<patch>`, is a newer version than `current`; nothing else is.
@@ -247,22 +192,5 @@ mod tests {
         assert_eq!(State::read(&path), state);
         fs::write(&path, "not JSON").unwrap();
         assert_eq!(State::read(&path), State::default());
-    }
-
-    #[test]
-    fn a_site_and_a_key_both_known_or_no_check() {
-        let key = || Some(include_str!("minisign/fixtures/release.pub").lines().nth(1).unwrap().to_owned());
-        let site = || Some("https://get.ff.example/".to_owned());
-        assert!(Source::of(None, key()).is_none());
-        assert!(Source::of(site(), None).is_none());
-        assert!(Source::of(site(), Some("not a key".into())).is_none());
-        let source = Source::of(site(), key()).unwrap();
-        assert_eq!(source.site, "https://get.ff.example");
-        let line = source.install_line();
-        if cfg!(windows) {
-            assert_eq!(line, "irm https://get.ff.example/install.ps1 | iex");
-        } else {
-            assert_eq!(line, "curl -fsSL https://get.ff.example/install.sh | sh");
-        }
     }
 }

@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use crate::cli::Runtime;
 use crate::error::{Error, Kind};
 
-/// The runtime images this CLI speaks the protocol of, unless the environment names others.
+/// The repository's runtime images, as `docker build` tags them from `runtimes/`: those a build without a release's
+/// manifest runs (`images`), the protocol this CLI speaks theirs.
 pub const NODEJS_IMAGE: &str = "ff-runtime-nodejs:24-v3";
 pub const PYTHON_IMAGE: &str = "ff-runtime-python:3.13-v3";
 /// The runtime's port inside its container.
@@ -51,15 +52,6 @@ impl Code {
         let extension = absolute.extension().and_then(|extension| extension.to_str()).unwrap_or("").to_owned();
         Ok(Code::File { path: absolute, extension })
     }
-}
-
-/// The image: `FF_RUNTIME_IMAGE_NODEJS` or `FF_RUNTIME_IMAGE_PYTHON`, else the protocol's own.
-pub fn image(runtime: Runtime, env: &dyn Fn(&str) -> Option<String>) -> String {
-    let (variable, default) = match runtime {
-        Runtime::Nodejs => ("FF_RUNTIME_IMAGE_NODEJS", NODEJS_IMAGE),
-        Runtime::Python => ("FF_RUNTIME_IMAGE_PYTHON", PYTHON_IMAGE),
-    };
-    env(variable).filter(|image| !image.is_empty()).unwrap_or_else(|| default.to_owned())
 }
 
 /// AWS Lambda's CPU for the memory, as the pods get it: 1 vCPU per 1,769 MB, 0.1 at least.
@@ -140,26 +132,17 @@ pub fn docker(args: &[String]) -> Result<Output, Error> {
     })
 }
 
-fn stderr_of(output: &Output) -> String {
+pub fn stderr_of(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).trim().to_owned()
 }
 
-/// Docker answers, and has the image.
-pub fn check_docker(image: &str) -> Result<(), Error> {
+/// Docker answers: the image is `images::ready`'s to find.
+pub fn check_docker() -> Result<(), Error> {
     let version = docker(&["version".into(), "--format".into(), "{{.Server.Version}}".into()])?;
     if !version.status.success() {
         return Err(Error::new(
             Kind::Failed,
             format!("Docker doesn't answer: {}. ff local runs a function in Docker: start it", stderr_of(&version)),
-        ));
-    }
-    let inspected = docker(&["image".into(), "inspect".into(), "--format".into(), "{{.Id}}".into(), image.into()])?;
-    if !inspected.status.success() {
-        return Err(Error::new(
-            Kind::Failed,
-            format!(
-                "The runtime image {image} isn't on this machine: build it from FF's repository (docker build -t {image} runtimes/<runtime>), or name another with FF_RUNTIME_IMAGE_NODEJS or FF_RUNTIME_IMAGE_PYTHON"
-            ),
         ));
     }
     Ok(())
@@ -368,16 +351,5 @@ mod tests {
     #[test]
     fn the_cpu_follows_the_memory_as_on_lambda() {
         assert_eq!([cpus(128), cpus(1024), cpus(1769), cpus(3008)], ["0.100", "0.579", "1.000", "1.701"]);
-    }
-
-    #[test]
-    fn the_image_is_the_protocols_unless_the_environment_names_another() {
-        let none = |_: &str| None;
-        let named =
-            |name: &str| (name == "FF_RUNTIME_IMAGE_NODEJS").then(|| "registry.ff.example/nodejs:24".to_owned());
-
-        assert_eq!(image(Runtime::Nodejs, &none), NODEJS_IMAGE);
-        assert_eq!(image(Runtime::Python, &none), PYTHON_IMAGE);
-        assert_eq!(image(Runtime::Nodejs, &named), "registry.ff.example/nodejs:24");
     }
 }

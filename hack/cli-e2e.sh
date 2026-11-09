@@ -46,7 +46,9 @@
 # of the device flow done with curl at the realm's pages, as a browser does it, the login kept and renewed, a user with
 # two accounts shown them, an API key made by ff api-keys and put before the login, then revoked, and ff logout
 # revoking the offline token at the realm; and ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
-# answering on its port until Ctrl-C, no container left behind.
+# answering on its port until Ctrl-C, no container left behind; then a release's runtime image, made, signed and put on
+# a site of FF's as the release job does, ff pinned to it: pulled by its digest from the dev registry, else its archive
+# loaded from the site, verified, once, and refused when signed by another key or changed.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
 # time) is started in its section and read a few sections on, in a section of its own (schedules_ran, databases_used,
 # buckets_used, sites_counted, queues_counted, small_app_exported), so that its minute passes while the sections between
@@ -1792,6 +1794,80 @@ wait "$starter" 2>/dev/null || true
 check "and Ctrl-C removes its container too" 0 "$(leftover)"
 }
 section_def local section_local backend budget=45
+
+section_local_images() {
+section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"
+# The release job's steps with this machine's Python image, which hack/runtime-images.sh pushes to the dev registry
+# rather than GitHub's: hack/release.sh signs its archive with a throwaway key, beside stand-in builds;
+# hack/downloads-site.sh and ff sites deploy put it on a site FF serves. ff then runs with that release's settings, as
+# a test build takes them.
+local images="$work/images" minisign="${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/minisign" version binary
+local registry="127.0.0.1:$FF_REGISTRY_PORT/cli-e2e" site="http://cli-images.site.localhost:$website_port"
+local manifest tagged by_digest archive digest key other_key
+version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$FF_REPO_ROOT/cli/Cargo.toml" | head -1)"
+rm -rf "$images" && mkdir -p "$images/dist"
+"$FF_REPO_ROOT/hack/runtime-images.sh" "$registry" "$version" "$images/dist" --from-local --runtime python >"$images/made.out"
+manifest="$(cat "$images/dist/runtime-images.json")"
+tagged="$(jq -r '.python.image + ":" + .python.tag' <<<"$manifest")"
+by_digest="$(jq -r '.python.image + "@" + .python.digest' <<<"$manifest")"
+archive="$(jq -r .python.archive <<<"$manifest")"
+digest="$(jq -r .python.digest <<<"$manifest")"
+source "$FF_REPO_ROOT/hack/lib/ff-builds.sh"
+for binary in "${FF_BUILDS[@]}"; do
+  printf 'stand-in for %s\n' "$binary" >"$images/dist/$binary"
+  (cd "$images/dist" && sha256sum "$binary" >"$binary.sha256")
+done
+"$minisign" -G -W -p "$images/release.pub" -s "$images/release.key" >/dev/null 2>&1
+"$minisign" -G -W -p "$images/other.pub" -s "$images/other.key" >/dev/null 2>&1
+key="$(sed -n 2p "$images/release.pub")"
+other_key="$(sed -n 2p "$images/other.pub")"
+FF_RELEASE_KEY="$(cat "$images/release.key")" FF_RELEASE_PUBLIC_KEY="$images/release.pub" FF_RUNTIME_IMAGES="$manifest" \
+  "$FF_REPO_ROOT/hack/release.sh" "$images/dist" "ff-v$version" 0123456789ab >>"$images/made.out"
+FF_RELEASE_PUBLIC_KEY="$images/release.pub" "$FF_REPO_ROOT/hack/downloads-site.sh" "$images/dist" "$images/site" "$site" \
+  >>"$images/made.out"
+ff buckets create cli-images
+ff sites deploy cli-images "$images/site"
+check "the release's image pushed, its archive signed and on the site FF serves" "0 true" \
+  "$(code) $(curl -fsS -o /dev/null "$site/$archive.minisig" && echo true || echo false)"
+
+# pinned [<manifest>] [<key>]: ff local invoke as the release's build runs it, examples/hello.py its function.
+pinned() {
+  FF_TEST_RUNTIME_IMAGES="${1:-$manifest}" FF_TEST_RELEASE_KEY="${2:-$key}" FF_DOWNLOADS_URL="$site" \
+    ff local invoke "$FF_REPO_ROOT/examples/hello.py" --data '{"name": "Pinned"}'
+}
+said() { err | grep -F "$1" >/dev/null && echo true || echo false; }
+here() { docker image inspect "$tagged" >/dev/null 2>&1 && echo true || echo false; }
+downloads_left() { find "${TMPDIR:-/tmp}" -maxdepth 1 -name "ff-*-${archive#images/}" 2>/dev/null | wc -l | tr -d ' '; }
+docker rmi "$tagged" >/dev/null
+pinned
+check "missing here, the release's image is pulled by its digest, tagged, and runs the function" "0 Hello Pinned true true" \
+  "$(code) $(out | sed '$d' | jq -r .message) $(said "pulling the runtime image $by_digest") $(here)"
+docker rmi "$tagged" >/dev/null
+unpullable="$(jq -c --arg digest "sha256:$(printf '0%.0s' $(seq 1 64))" '.python.digest = $digest' <<<"$manifest")"
+pinned "$unpullable"
+check "when Docker can't pull it, its archive is downloaded from the site, verified, loaded, and runs it" \
+  "0 Hello Pinned true true true true" \
+  "$(code) $(out | sed '$d' | jq -r .message) $(said "its archive instead, from $site/$archive") $(said "downloading $site/$archive") $(said "loading $tagged") $(here)"
+pinned "$unpullable"
+check "  ... once: the next run finds it here" "0 false false" \
+  "$(code) $(said "pulling") $(said "downloading")"
+docker rmi "$tagged" >/dev/null
+pinned "$unpullable" "$other_key"
+check "an archive another key signed is refused, and nothing loaded" \
+  "3 error: The runtime image's archive, $site/$archive: its signature: signed by another key than the one given; nothing was loaded false" \
+  "$(code) $(err | grep '^error:') $(here)"
+head -c 1048576 "$images/dist/$archive" >"$images/site/$archive"
+ff sites deploy cli-images "$images/site"
+pinned "$unpullable"
+check "  ... and a changed one too" \
+  "3 error: The runtime image's archive, $site/$archive: its signature: the signature doesn't match the file: it was changed, or another key signed it; nothing was loaded false" \
+  "$(code) $(err | grep '^error:') $(here)"
+check "the download is removed however it ends" 0 "$(downloads_left)"
+# What the dev registry and this machine hold of it, removed: the tag here, the image there.
+docker rmi "$tagged" >/dev/null 2>&1 || true
+curl -fsS -o /dev/null -X DELETE "http://127.0.0.1:$FF_REGISTRY_PORT/v2/cli-e2e/ff-runtime-python/manifests/$digest" || true
+}
+section_def local_images section_local_images backend budget=60
 
 sections_run
 checks_done cli-e2e

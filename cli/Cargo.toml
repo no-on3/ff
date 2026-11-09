@@ -53,8 +53,11 @@ codegen-units = 1
 strip = true
 
 # The ff suite's build (hack/cli-e2e.sh): release's, without the optimizations made across the whole program at link
-# time, which take most of a build after each commit (the commit is built in, so every commit builds ff again).
+# time, which take most of a build after each commit (the commit is built in, so every commit builds ff again). With
+# debug assertions, as a test build: it then takes the tests' release key and runtime images (FF_TEST_RELEASE_KEY,
+# FF_TEST_RUNTIME_IMAGES), as a release's build never does.
 [profile.e2e]
 inherits = "release"
 lto = false
 codegen-units = 16
+debug-assertions = true

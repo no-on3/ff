@@ -8,9 +8,13 @@
 //!   the key's ID, the 64-byte signature; `trusted comment: …`; base64 of the signature of the 64 bytes and the
 //!   comment's text.
 //!
-//! Windows's line ends read as Unix's, as a file saved through PowerShell has them.
+//! Windows's line ends read as Unix's, as a file saved through PowerShell has them. A large file, such as an image's
+//! archive, is hashed as it is read, with `Hasher`, and its digest verified with `verify_prehashed`.
 
 mod blake2b;
+
+/// BLAKE2b-512, the hash minisign signs: fed a piece at a time, for a file too large to hold whole.
+pub use blake2b::Blake2b512 as Hasher;
 
 use std::fmt;
 
@@ -115,16 +119,27 @@ impl Signature {
 
 /// A file's signature checked, as `minisign -Vm <file> -x <signature> -P <key>`: the trusted comment when it holds.
 pub fn verify(key: &PublicKey, signature: &str, data: &[u8]) -> Result<String, Refusal> {
+    verify_prehashed(key, signature, &blake2b::digest(data))
+}
+
+/// The same, given the file's BLAKE2b-512, as `Hasher` made it.
+pub fn verify_prehashed(key: &PublicKey, signature: &str, digest: &[u8; 64]) -> Result<String, Refusal> {
     let signature = Signature::parse(signature)?;
     if signature.key_id != key.id {
         return Err(Refusal::OtherKey);
     }
     let ed25519 = UnparsedPublicKey::new(&ED25519, &key.key);
-    ed25519.verify(&blake2b::digest(data), &signature.signature).map_err(|_| Refusal::BadSignature)?;
+    ed25519.verify(digest, &signature.signature).map_err(|_| Refusal::BadSignature)?;
     let mut signed = signature.signature.to_vec();
     signed.extend_from_slice(signature.trusted_comment.as_bytes());
     ed25519.verify(&signed, &signature.comment_signature).map_err(|_| Refusal::BadComment)?;
     Ok(signature.trusted_comment)
+}
+
+/// Whether a trusted comment as minisign writes it by default, `timestamp:<seconds>\tfile:<name>\thashed`, names the
+/// file: a signature of another file served in its place, made by the same key, is then refused.
+pub fn names_file(comment: &str, file: &str) -> bool {
+    comment.split('\t').any(|field| field.strip_prefix("file:") == Some(file))
 }
 
 #[cfg(test)]
@@ -212,6 +227,25 @@ mod tests {
         assert_eq!(PublicKey::from_base64("not base64!"), Err(Refusal::Malformed("public key")));
         let signature_line = SIGNATURE.lines().nth(1).unwrap();
         assert_eq!(PublicKey::from_base64(signature_line), Err(Refusal::Malformed("public key")));
+    }
+
+    #[test]
+    fn a_file_hashed_a_piece_at_a_time_verifies_as_a_whole() {
+        let mut hasher = Hasher::default();
+        for piece in MANIFEST.chunks(7) {
+            hasher.update(piece);
+        }
+        assert_eq!(verify_prehashed(&key(), SIGNATURE, &hasher.finalize()), verify(&key(), SIGNATURE, MANIFEST));
+        assert!(verify_prehashed(&key(), SIGNATURE, &blake2b::digest(b"another file")).is_err());
+    }
+
+    #[test]
+    fn the_trusted_comment_names_the_file_signed() {
+        let comment = verify(&key(), SIGNATURE, MANIFEST).unwrap();
+        assert!(names_file(&comment, "latest.json"));
+        assert!(!names_file(&comment, "latest"));
+        assert!(!names_file(&comment, "ff-linux-x86_64"));
+        assert!(!names_file("timestamp:1\tfile:latest.json.minisig\thashed", "latest.json"));
     }
 
     #[test]

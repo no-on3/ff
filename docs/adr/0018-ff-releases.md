@@ -4,7 +4,7 @@
 |---|---|
 | **Status** | Accepted: the [developer tools plan](../dev-tools-plan.md)'s D2 and its choices 3 and 4, confirmed on 2026-11-08 (the [decision log](../decisions.md)'s 72 and 73); the builds and the signatures measured by M-01's spikes the same day; the hash written by hand, your choice on 2026-11-09 (84) |
 | **Date** | 2026-11-09 |
-| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's parts 1, the builds and Windows, 2, the release job, 3, the downloads site and the install scripts, and 4, the update notice (below) |
+| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's parts 1, the builds and Windows, 2, the release job, 3, the downloads site and the install scripts, and 4, the update notice; M-04's part 1, the runtime images (below) |
 | **Related** | [ADR 0002](0002-cli.md) (the `ff` command); [ADR 0011](0011-static-sites.md) (the sites that serve the downloads); the spikes, [`hack/spikes/cross-build`](../../hack/spikes/cross-build/README.md) and [`hack/spikes/minisign`](../../hack/spikes/minisign/README.md) |
 
 ## Context
@@ -132,6 +132,18 @@ Once a day at most, after a command that reached the API, `ff` reads `latest.jso
 ### 7. The runtime images
 
 Each release pins its two images by digest in a manifest, in place of the two constants of `local.rs`. They are published to `ghcr.io` under FF's name, and as archives on the downloads site (`docker save`, zstd, signed). `ff local` pulls the digest, and when it can't, loads the archive, verified.
+
+### As built (M-04, part 1): the runtime images
+
+- **The release's own images,** built from `runtimes/` at each release for AWS Lambda's x86_64 (`linux/amd64`), which `ff package` builds for too, and tagged as the repository tags them with `-ff-<version>` after: `ghcr.io/<owner>/ff-runtime-python:3.13-v3-ff-0.1.0`. `hack/runtime-images.sh` builds them, pushes them with the run's own token, reads each digest the push recorded and saves each image as an archive. Its manifest, for each runtime the image, the tag, the digest and the archive's path on the site, is built into the five (`FF_BUILD_RUNTIME_IMAGES`), as the site's address is. The two constants of `local.rs` stay, as the tags of a build from the repository, which has no manifest.
+- **`ff local` runs the tag when the machine has it;** else it pulls the digest and gives it the tag; else, with a warning saying why the pull failed, it downloads the archive, hashing it as it is written, checks the signature with the release's key and that its trusted comment names the archive, and only then runs `docker load`, which gives the tag. The download goes to a file of its own in the system's temporary folder, removed however the command ends. A tag `ff` made is trusted afterwards, as the machine's Docker is its user's.
+- **gzip, not zstd:** every Docker engine's `load` reads gzip, where an older one may not read zstd; the archive is a little larger.
+- **The manifest is checked before Docker sees any of it:** each name made of a name's characters, the digest 64 lowercase hexadecimal digits, the archive a path of the site without `..`. A build whose manifest fails says so rather than hand Docker an option.
+- **`FF_RUNTIME_IMAGE_NODEJS` and `FF_RUNTIME_IMAGE_PYTHON`** still name an image, run as it is, never pulled. A missing one, or a missing repository tag, is said with the line that builds it.
+- **The tests' settings,** `FF_TEST_RUNTIME_IMAGES` and `FF_TEST_RELEASE_KEY`, are read by a build with debug assertions alone: `cargo test`'s, and now the `ff` suite's (`cli/Cargo.toml`'s `e2e` profile). A release build ignores them.
+- **The release job's `images` job** runs before the builds, which take its manifest. `hack/release.sh` signs the archives the manifest names, lists them in `SHA256SUMS`, and refuses a release where one is missing or isn't a file of `images/`. The site serves them under `images/`; GitHub's release holds a copy. The site holds the latest release's alone: an older `ff` pulls its own from `ghcr.io`, or finds it on the machine.
+- **`ghcr.io`'s packages** may be private when the first release pushes them: making them public is yours, once (the guide's "A release of `ff`"). Until then, a pull is refused and `ff local` loads the archive.
+- **`ff sites deploy` uploads each archive in one request,** as it uploads every file, held in memory: 43 MiB for Python's, 83 MiB for Node.js's, as measured.
 
 ## Consequences
 

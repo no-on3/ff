@@ -12,6 +12,10 @@ on:
         description: The downloads site built into the five for the update notice; none, they never check.
         type: string
         default: ''
+      runtime-images:
+        description: The release's runtime images, pinned by digest (hack/runtime-images.sh's manifest), built into the five for ff local; none, they run the repository's tags.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -28,6 +32,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 4 # the runner's processors, which it runs alone
           FF_BUILD_DOWNLOADS_URL: ${{ inputs.downloads-url }} # the builds' alone, not the tests' build
+          FF_BUILD_RUNTIME_IMAGES: ${{ inputs.runtime-images }}
       - run: hack/cli-smoke.sh cli/target/dist/ff-linux-x86_64
       - run: hack/install-tools.sh minisign && hack/test-install.sh cli/target/dist
       - run: cargo test --locked
@@ -49,6 +54,7 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 3 # the runner's processors, which it runs alone
           FF_BUILD_DOWNLOADS_URL: ${{ inputs.downloads-url }} # the builds' alone, not the tests' build
+          FF_BUILD_RUNTIME_IMAGES: ${{ inputs.runtime-images }}
       - run: hack/cli-smoke.sh cli/target/dist/ff-macos-arm64
       - run: hack/install-tools.sh minisign && hack/test-install.sh cli/target/dist
       - run: cargo test --locked

@@ -18,6 +18,7 @@ use super::deploy::{name_of, runtime_of};
 use super::invoke::input_of;
 use crate::cli::{Format, LocalArgs, Runtime};
 use crate::error::{Error, Kind};
+use crate::images;
 use crate::local::{self, Answer, Code, Container, LocalFunction, Readiness};
 use crate::local_url;
 use crate::progress::Progress;
@@ -120,8 +121,8 @@ fn started(function: &LocalFunction, image: &str, port: Option<u16>, context: &C
 pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context) -> Result<(), Error> {
     let function = local_function(args)?;
     let event = input_of(data)?.unwrap_or_else(|| json!({}));
-    let image = local::image(function.runtime, &|name| std::env::var(name).ok());
-    local::check_docker(&image)?;
+    local::check_docker()?;
+    let image = images::for_runtime(function.runtime, context.out)?;
     local::remove_on_interrupt();
 
     let container = started(&function, &image, None, context)?;
@@ -157,8 +158,8 @@ pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context
 
 pub fn start(args: &LocalArgs, port: Option<u16>, watch: bool, url: bool, context: &Context) -> Result<(), Error> {
     let function = local_function(args)?;
-    let image = local::image(function.runtime, &|name| std::env::var(name).ok());
-    local::check_docker(&image)?;
+    local::check_docker()?;
+    let image = images::for_runtime(function.runtime, context.out)?;
     local::remove_on_interrupt();
 
     // As its URL: a front on the port asked for, calling the container wherever it runs, a restart's too.

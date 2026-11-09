@@ -2,8 +2,9 @@
 # hack/release.sh with a throwaway key, made here with a password, in place of the release job's: five stand-in builds
 # signed and listed, each signature verifying against the public key, latest.json naming the version, the commit and
 # each file's SHA-256; and refused, with nothing signed, for a tag that isn't cli/Cargo.toml's version, a build missing
-# or differing from its checksum, a wrong password, and a secret key that isn't the public key's other half. The
-# password never in the output. In a few seconds.
+# or differing from its checksum, a wrong password, and a secret key that isn't the public key's other half. With the
+# runtime images' manifest, the archives it names signed and listed too, and refused when one is missing or isn't a
+# file of images/. The password never in the output. In a few seconds.
 #   hack/test-release.sh
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -56,6 +57,29 @@ check "latest.json: the version, the commit, each file's SHA-256" \
 check "SHA256SUMS lists the five, as sha256sum -c reads it" 5 \
   "$(cd "$work/dist" && sha256sum -c SHA256SUMS 2>/dev/null | grep -c ': OK$')"
 check "the password never printed" false "$(grep -F "$password" "$work/out" >/dev/null && echo true || echo false)"
+
+section "with the runtime images' archives"
+# A manifest as hack/runtime-images.sh writes it, its archives stand-ins.
+archive="images/ff-runtime-python-3.13-v3-ff-$version.tar.gz"
+manifest="$(jq -cn --arg archive "$archive" \
+  '{python: {image: "ghcr.io/ff/ff-runtime-python", tag: "3.13-v3-ff-0", digest: "sha256:\("0" * 64)", archive: $archive}}')"
+images() { builds && mkdir "$work/dist/images" && printf 'stand-in for an image\n' >"$work/dist/$archive"; }
+images
+check "the archive signed with the builds" \
+  "0 ff $version (0123456789ab): 5 files, 1 runtime images' archives and latest.json signed in $work/dist, each signature verified" \
+  "$(FF_RUNTIME_IMAGES="$manifest" release "ff-v$version") $(cat "$work/out")"
+check "  ... its signature beside it, verified by minisign, its trusted comment naming it" "true true" \
+  "$("$minisign" -Vqm "$work/dist/$archive" -p "$work/release.pub" >/dev/null 2>&1 && echo true || echo false) $(grep -E "^trusted comment: timestamp:[0-9]+	file:${archive#images/}	hashed\$" "$work/dist/$archive.minisig" >/dev/null && echo true || echo false)"
+check "  ... and listed in SHA256SUMS, by its path" 6 "$(cd "$work/dist" && sha256sum -c SHA256SUMS 2>/dev/null | grep -c ': OK$')"
+images
+rm "$work/dist/$archive"
+check "refused when an archive the manifest names is missing" \
+  "1 release refused: $archive, which FF_RUNTIME_IMAGES names, is missing from $work/dist; nothing signed 0" \
+  "$(FF_RUNTIME_IMAGES="$manifest" release "ff-v$version") $(cat "$work/out") $(signed)"
+images
+check "  ... or one outside images/" \
+  "1 release refused: FF_RUNTIME_IMAGES names images/../ff-linux-arm64, not a file of images/; nothing signed 0" \
+  "$(FF_RUNTIME_IMAGES='{"python": {"archive": "images/../ff-linux-arm64"}}' release "ff-v$version") $(cat "$work/out") $(signed)"
 
 section "refused, with nothing signed"
 builds

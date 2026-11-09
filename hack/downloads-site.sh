@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # The downloads site's folder, made from a release's folder as hack/release.sh leaves it: the builds latest.json names,
 # each with its signature; SHA256SUMS; latest.json and its signature; the public key; the install scripts, with the
-# site's address and the public key put in; and a page saying how to install, with the key's ID. Refused, with no
-# folder made, when a file latest.json names or a signature is missing.
+# site's address and the public key put in; the runtime images' archives under images/, each with its signature; and a
+# page saying how to install, with the key's ID. Refused, with no folder made, when a file latest.json names or a
+# signature is missing.
 #   hack/downloads-site.sh <release folder> <site folder> <the site's address>
 #   FF_RELEASE_PUBLIC_KEY   another public key file than cli/release/minisign.pub, as the tests' throwaway one
 set -euo pipefail
@@ -29,11 +30,21 @@ while IFS= read -r file; do files+=("$file"); done < <(jq -rb '.files | keys[]' 
 for file in "${files[@]}"; do
   [ -f "$release/$file" ] && [ -f "$release/$file.minisig" ] || refuse "$file or its signature is missing from $release"
 done
+archives=() # the runtime images' archives hack/release.sh signed, when the release has them
+for archive in "$release"/images/*.tar.gz; do
+  [ -f "$archive" ] || continue # the pattern itself, when there is none
+  [ -f "$archive.minisig" ] || refuse "images/$(basename "$archive")'s signature is missing from $release"
+  archives+=("images/$(basename "$archive")")
+done
 [ ! -e "$site" ] || refuse "$site is there already"
 
 mkdir -p "$site"
 for file in "${files[@]}"; do
   cp "$release/$file" "$release/$file.minisig" "$site/"
+done
+for archive in ${archives[@]+"${archives[@]}"}; do
+  mkdir -p "$site/images"
+  cp "$release/$archive" "$release/$archive.minisig" "$site/images/"
 done
 cp "$release/latest.json" "$release/latest.json.minisig" "$release/SHA256SUMS" "$site/"
 cp "$public_key" "$site/minisign.pub"
@@ -74,7 +85,14 @@ public key, <a href="minisign.pub">minisign.pub</a>, whose ID is <code>$key_id</
 <p>A new key would mean installing <code>ff</code> again with these scripts, which this page would say.</p>
 <p>The builds: $(for file in "${files[@]}"; do printf '<a href="%s">%s</a> ' "$file" "$file"; done)and their
 <a href="SHA256SUMS">SHA256SUMS</a>, each with its signature beside it (<code>.minisig</code>).</p>
+$(if [ "${#archives[@]}" -gt 0 ]; then
+  printf '<p>The runtime images <code>ff local</code> runs functions in, which it loads from here when Docker can'"'"'t pull them: '
+  for archive in "${archives[@]}"; do printf '<a href="%s">%s</a> ' "$archive" "${archive#images/}"; done
+  printf 'each signed too.</p>'
+fi)
 </body>
 </html>
 EOF
-echo "the downloads site of ff $version in $site: ${#files[@]} builds, latest.json, the install scripts for $address"
+said="${#files[@]} builds"
+[ "${#archives[@]}" -eq 0 ] || said="$said, ${#archives[@]} runtime images' archives"
+echo "the downloads site of ff $version in $site: $said, latest.json, the install scripts for $address"

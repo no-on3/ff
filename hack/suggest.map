@@ -50,6 +50,7 @@ runtimes/*                              static unit security l3 l4 l5 cli aws-to
 # The ff command; its Terraform project is AWS's tools' too.
 cli/src/commands/init.rs                static unit cli:init aws-tools
 cli/release/*                           static unit cli:downloads
+cli/src/images.rs                       static unit cli:local,local_images
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.
@@ -84,8 +85,9 @@ hack/lib/mail-receiver.mjs              static l4:mail_sent
 hack/lib/orders-app.sh                  static cli:small_app
 hack/lib/keycloak.sh                    static l5 cli:login
 hack/test-install.sh                    static cli:downloads
-hack/downloads-site.sh                  static cli:downloads
-hack/release.sh                         static cli:downloads
+hack/downloads-site.sh                  static cli:downloads,local_images
+hack/release.sh                         static cli:downloads,local_images
+hack/runtime-images.sh                  static cli:local_images
 hack/lib/ff-builds.sh                   static cli:downloads
 hack/lib/dkim-verify.mjs                static l4:mail_sent
 hack/lib/e2e-stack.sh                   static l4 l5 cli aws-tools

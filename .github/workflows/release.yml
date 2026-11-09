@@ -5,8 +5,11 @@
 # deployed by the Linux build itself with `ff sites deploy`, to a bucket of FF's own; GitHub's release holds a copy.
 # The site's place is the repository's variables FF_DOWNLOADS_URL (its address, built into the five for the update
 # notice), FF_DOWNLOADS_ENDPOINT (the API that serves it) and FF_DOWNLOADS_BUCKET, and its secret FF_DOWNLOADS_KEY, an
-# API key of an account that holds that bucket alone, with the scopes storage:read and storage:write. Actions pinned as
-# ci.yml's are.
+# API key of an account that holds that bucket alone, with the scopes storage:read and storage:write. Before the builds,
+# the runtime images `ff local` runs functions in, built for the release and pushed to GitHub's registry,
+# ghcr.io/<owner>/ff-runtime-<runtime>, with this run's own token (hack/runtime-images.sh): their manifest, each pinned
+# by digest, built into the five; their archives signed with the builds and put on the site, for a machine whose
+# Docker can't pull them. Actions pinned as ci.yml's are.
 name: release
 
 on:
@@ -47,16 +50,45 @@ jobs:
           FF_DOWNLOADS_BUCKET: ${{ vars.FF_DOWNLOADS_BUCKET }}
           FF_DOWNLOADS_KEY: ${{ secrets.FF_DOWNLOADS_KEY }}
 
-  builds:
+  images:
     needs: tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # the images, to GitHub's registry
+    outputs:
+      manifest: ${{ steps.images.outputs.manifest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: printf '%s\n' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - id: images
+        run: |
+          hack/runtime-images.sh "ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" "${GITHUB_REF_NAME#ff-v}" dist
+          echo "manifest=$(jq -c . dist/runtime-images.json)" >>"$GITHUB_OUTPUT"
+        env:
+          FF_IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        timeout-minutes: 10
+        with:
+          name: runtime-images
+          path: dist/images/
+          retention-days: 7
+      - run: docker logout ghcr.io
+
+  builds:
+    needs: images
     uses: ./.github/workflows/cli-builds.yml
     with:
       downloads-url: ${{ vars.FF_DOWNLOADS_URL }}
+      runtime-images: ${{ needs.images.outputs.manifest }}
 
   release:
-    needs: builds
+    needs: [images, builds]
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: write # GitHub's release
     steps:
@@ -66,13 +98,18 @@ jobs:
           pattern: cli-builds*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: runtime-images
+          path: dist/images
       - run: hack/install-tools.sh minisign
       - run: hack/release.sh dist "$GITHUB_REF_NAME" "$GITHUB_SHA"
         env:
           FF_RELEASE_KEY: ${{ secrets.FF_RELEASE_KEY }}
           FF_RELEASE_KEY_PASSWORD: ${{ secrets.FF_RELEASE_KEY_PASSWORD }}
+          FF_RUNTIME_IMAGES: ${{ needs.images.outputs.manifest }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        timeout-minutes: 5
+        timeout-minutes: 10
         with:
           name: release
           path: dist/
@@ -85,9 +122,10 @@ jobs:
           FF_DOWNLOADS_BUCKET: ${{ vars.FF_DOWNLOADS_BUCKET }}
           FF_ENDPOINT: ${{ vars.FF_DOWNLOADS_ENDPOINT }}
           FF_TOKEN: ${{ secrets.FF_DOWNLOADS_KEY }}
-      - run: |
+      - run: | # the files alone, the runtime images' archives among them, as a release holds no folder
+          mapfile -t files < <(find dist -type f | sort)
           gh release create "$GITHUB_REF_NAME" --verify-tag --title "ff ${GITHUB_REF_NAME#ff-v}" \
-            --notes "ff ${GITHUB_REF_NAME#ff-v}, built from $GITHUB_SHA: each file with its SHA-256 and its minisign signature, checked against cli/release/minisign.pub; latest.json names them all." \
-            dist/*
+            --notes "ff ${GITHUB_REF_NAME#ff-v}, built from $GITHUB_SHA: each file with its SHA-256 and its minisign signature, checked against cli/release/minisign.pub; latest.json names the builds, and the runtime images ff local runs are ghcr.io's, their archives here too." \
+            "${files[@]}"
         env:
           GH_TOKEN: ${{ github.token }}

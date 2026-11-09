@@ -14,6 +14,7 @@
 #   hack/build-cli.sh [<target>] [--container]
 #   FF_BUILD_COMMIT=<commit>   the commit to name, where there is no git checkout, as on the development server
 #   FF_BUILD_DOWNLOADS_URL=<address>   the downloads site the update notice reads, as a release's builds are given it
+#   FF_BUILD_RUNTIME_IMAGES=<manifest> the release's runtime images, pinned by digest (hack/runtime-images.sh), for ff local
 #   CARGO_BUILD_JOBS=<n>       Cargo's jobs, in the container too
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -65,7 +66,7 @@ if $container; then
   echo "== building in $RUST_IMAGE, for $target"
   # As root, to add musl's headers, which ring's C code needs; in a target folder of its own, given back to
   # this user at the end, even after a failure, so that no file of the build stays root's.
-  docker run --rm -v "$repo/cli:/src" -w /src -e FF_BUILD_COMMIT="$commit" -e FF_BUILD_DOWNLOADS_URL -e CARGO_BUILD_JOBS \
+  docker run --rm -v "$repo/cli:/src" -w /src -e FF_BUILD_COMMIT="$commit" -e FF_BUILD_DOWNLOADS_URL -e FF_BUILD_RUNTIME_IMAGES -e CARGO_BUILD_JOBS \
     -e CARGO_HOME=/src/target/container/cargo-home -e CARGO_TARGET_DIR=/src/target/container "$RUST_IMAGE" \
     sh -c "apk add --no-cache musl-dev >/dev/null && cargo build --release --locked --target $target; status=\$?; \
       chown -R $(id -u):$(id -g) /src/target/container; exit \$status"

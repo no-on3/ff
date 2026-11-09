@@ -22,7 +22,7 @@ pub fn run(out: &Output) -> Result<(), Error> {
         version: env!("CARGO_PKG_VERSION"),
         commit: env!("FF_COMMIT"),
         target: env!("FF_TARGET"),
-        release_key: crate::update::release_key_id(),
+        release_key: crate::downloads::release_key_id(),
     };
     out.result(&version, || {
         let text = format!("ff {}", crate::cli::VERSION_TEXT);
