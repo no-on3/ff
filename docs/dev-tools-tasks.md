@@ -62,7 +62,7 @@ Each task, or part of one, is one commit with its tests and its documents, as th
 - [ ] **M-07** Databases, caches, mail, and the small app end to end (the plan's D3):
   - [x] part 1, `--with postgres` and `--with valkey`: a container each from an image pinned by digest, `DATABASE_URL` and `REDIS_URL` set for every function unless the secrets file names them, the data in volumes of the project's, kept between runs, removed by `ff local reset --data`;
   - [x] part 2, mail: SES v2's `SendEmail` taken, each message kept under `.ff/local/mail/` as a file and said on stderr, none sent; `ff local mail` listing them; the SES front door's fixtures shared;
-  - [ ] part 3, the small app on `ff local`, in the `ff` suite: an order posted at the local URL, its receipt made through the local queue into the local bucket, its e-mail captured, the nightly run by hand, the page served, with `--with postgres,valkey`; the conformance written in the plan's row: the fixtures each front door passes, and the AWS CLI's cases of L4 that pass against it;
+  - [x] part 3, the small app on `ff local`, in the `ff` suite: an order posted at the local URL, its receipt made through the local queue into the local bucket, its e-mail captured, the nightly run by hand, the page served, with `--with postgres,valkey`; the conformance written in the plan's row: the fixtures each front door passes, and the AWS CLI's cases of L4 that pass against it;
   - [ ] part 4, the guide's page "The whole app on your laptop", with the table of what `ff local` is and isn't; `cli/README.md`; ADR 0017 as built; What to build next's §9.6 line on local development marked done.
 
 ### Phase 3: templates, agents and the provider's double

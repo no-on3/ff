@@ -51,8 +51,8 @@ runtimes/*                              static unit security l3 l4 l5 cli aws-to
 cli/src/commands/init.rs                static unit cli:init,local_apps aws-tools
 cli/release/*                           static unit cli:downloads
 cli/src/local/images.rs                 static unit cli:local,local_images
-cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail
-cli/src/commands/local*                 static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail
+cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail,local_small_app
+cli/src/commands/local*                 static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail,local_small_app
 cli/src/s3.rs                           static unit cli:sites,local_buckets
 cli/src/md5.rs                          static unit cli:sites,local_queues,local_buckets
 cli/src/sigv4.rs                        static unit cli:sites,local_template,local_queues,local_buckets,local_mail
@@ -72,7 +72,7 @@ deploy/dev-server/*                     static platform
 infrastructure/*                        static l4 l5 cli
 
 # The examples: the small app's handlers and the ff suite's functions.
-examples/orders-app/*                   static unit cli:small_app_db,small_app,local_apps
+examples/orders-app/*                   static unit cli:small_app_db,small_app,local_apps,local_small_app
 examples/ci/*                           static cli:ci,downloads
 examples/*                              static cli
 

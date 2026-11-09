@@ -52,7 +52,9 @@
 # on it, called at their URLs, the small app's nightly run by hand and retried; a template's queues there, the AWS
 # CLI's SQS cases against them, a function sending to one, a failed call's record and dead letter in them; the mail its
 # functions send, the AWS CLI's SES cases and a function's receipt, kept as files a mail reader opens, listed by ff
-# local mail, never sent; then a release's runtime image, made, signed and put on
+# local mail, never sent; the small app whole there with its database and its cache: its page served, an order kept,
+# listed from the cache, its receipt made through the local queue into the local bucket and e-mailed, its nightly
+# removing an old order and its receipt; then a release's runtime image, made, signed and put on
 # a site of FF's as the release job does, ff pinned to it: pulled by its digest from the dev registry, else its archive
 # loaded from the site, verified, once, and refused when signed by another key or changed.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
@@ -103,6 +105,31 @@ in_folder() { local folder=$1; shift; (cd "$folder" && ff "$@"); }
 
 # sql <statement>: run on FF's database, its answer dropped.
 sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
+
+# local_image <name>: the image ff local start --with runs, as cli/src/local/services.rs pins it, by digest; its client
+# reaches the service here as a developer's tools would, at its port.
+local_image() { sed -n "s|^ *\"\($1:[^\"]*@sha256:[0-9a-f]*\)\"$|\1|p" "$FF_REPO_ROOT/cli/src/local/services.rs"; }
+# local_url <ff local start's listing> <service>: the service's URL from this machine, with its password, as listed.
+local_url() { sed -n "s/^  $2 \{1,\}\([a-z]*:\/\/[^,]*\),.*/\1/p" "$1"; }
+# local_psql <listing> <statement>: the statement run at the PostgreSQL the listing names, its rows unaligned.
+local_psql() { docker run --rm --network host "$(local_image postgres)" psql "$(local_url "$1" postgres)" -Atqc "$2" 2>&1; }
+# read_mail <file>: the message as a mail reader shows it: its sender, its recipients, its subject decoded, its type,
+# and its text.
+read_mail() {
+  python3 -I -c 'import email, email.policy, sys
+message = email.message_from_binary_file(open(sys.argv[1], "rb"), policy=email.policy.default)
+print(message["from"], "|", message["to"], "|", message["subject"], "|", message.get_content_type(), "|", message.get_body(("plain",)).get_content().strip())' "$1"
+}
+
+# leftover: how many of ff local's containers are left, running or stopped.
+leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
+# at <url> [curl args...]: a request, its status and its answer; its headers in $work/at.head.
+at() {
+  local url="$1"
+  shift
+  curl -s -o "$work/at.body" -D "$work/at.head" -w '%{http_code}' "$@" "$url"
+  echo " $(cat "$work/at.body")"
+}
 
 # release_site <folder> <bucket>: a release of ff as the release job makes it, on a site FF serves as the downloads
 # site, http://<bucket>.site.localhost:<port>: this machine's build the suite's ff, the other four stand-ins, signed by
@@ -1793,7 +1820,6 @@ section_def login section_login backend budget=60
 
 section_local() {
 section "ff local: on this machine, in Docker, as production runs it"
-leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }
 for example in hello.ts hello.py; do
   ff local invoke "$FF_REPO_ROOT/examples/$example" --data '{"name": "Local"}'
   check "local invoke of $example answers, in its runtime image, and says how it went" "0 Hello Local true" \
@@ -1844,7 +1870,6 @@ section_def local section_local backend budget=45
 section_local_template() {
 section "ff local start template.yaml: the template's functions behind one front door, each started at its first call"
 local app="$work/shop" port starter
-leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
 # until_said <text> <file>: waits up to 30 s for the line ff local start says.
 until_said() {
   local _
@@ -2084,7 +2109,6 @@ section_def local_template section_local_template backend budget=45
 section_local_apps() {
 section "ff local start on the applications a developer has: ff init --template sam's, and the small app, its libraries installed, its page served from its folder"
 local hello="$work/cli-local-hello" shop="$work/cli-local-shop" port starter origin
-leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
 # started <out> <err> <args...>: ff local start in the background, its pid in $starter, until it says how to stop it.
 started() {
   local out="$1" err="$2" _
@@ -2100,13 +2124,6 @@ started() {
 stopped() {
   kill -INT "$starter"
   wait "$starter" 2>/dev/null || true
-}
-# at <url> [curl args...]: a request, its status and its answer; its headers in $work/at.head.
-at() {
-  local url="$1"
-  shift
-  curl -s -o "$work/at.body" -D "$work/at.head" -w '%{http_code}' "$@" "$url"
-  echo " $(cat "$work/at.body")"
 }
 
 (cd "$work" && rm -rf "$hello" && "$ff_bin" init "$(basename "$hello")" --runtime nodejs --template sam >"$work/out" 2>"$work/err")
@@ -2173,7 +2190,6 @@ section_def local_apps section_local_apps backend budget=45
 section_local_queues() {
 section "ff local start's queues: SQS at the front door, the AWS CLI's cases of L4, a function's sends, its failures' records, and a function reading one"
 local app="$work/queues" port starter key_id url
-leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
 # sqs_cli <args...>: the AWS CLI's sqs commands with the local key's file alone, the front door their endpoint.
 sqs_cli() {
   AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
@@ -2383,7 +2399,6 @@ section_local_buckets() {
 section "ff local start's buckets: S3 at the front door, the AWS CLI's cases of L4, objects as files kept from a start to the next, a function writing to its bucket, their events to a function and a queue, a site from its objects or a folder"
 local app="$work/buckets" port starter key_id described kept_file queue_url pages
 local photos_line="^  photos +.*/\\.ff/local/buckets/photos, its events to Uploads, Thumbs$"
-leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
 # s3_cli <args...>: the AWS CLI with the local key's file alone, the front door its S3 endpoint.
 s3_cli() {
   AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
@@ -2602,15 +2617,12 @@ section_local_data() {
 section "ff local start --with postgres,valkey: each beside the functions at its name and its variable, reached from this machine at its port, its data kept in Docker's volumes from a start to the next, a second start refused, ff local reset --data removing them"
 local app="$work/data" port starter project before
 local postgres_image valkey_image
-# The images ff local pins, whose clients reach each service here as a developer's tools would, at its port.
-postgres_image="$(sed -n 's/^ *"\(postgres:[^"]*@sha256:[0-9a-f]*\)"$/\1/p' "$FF_REPO_ROOT/cli/src/local/services.rs")"
-valkey_image="$(sed -n 's/^ *"\(valkey\/valkey:[^"]*@sha256:[0-9a-f]*\)"$/\1/p' "$FF_REPO_ROOT/cli/src/local/services.rs")"
+postgres_image="$(local_image postgres)"
+valkey_image="$(local_image valkey/valkey)"
 [ -n "$postgres_image" ] && [ -n "$valkey_image" ] || fail "the images of cli/src/local/services.rs weren't found"
-leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
 volumes() { docker volume ls --quiet --filter "label=ff.local.project=$project" | wc -l | tr -d ' '; }
-# url_of <service>: its URL from this machine, as the start lists it.
-url_of() { sed -n "s/^  $1 \{1,\}\([a-z]*:\/\/[^,]*\),.*/\1/p" "$work/data.out"; }
-psql_here() { docker run --rm --network host "$postgres_image" psql "$(url_of postgres)" -Atqc "$1" 2>&1; }
+url_of() { local_url "$work/data.out" "$1"; }
+psql_here() { local_psql "$work/data.out" "$1"; }
 valkey_here() { docker run --rm --network host "$valkey_image" valkey-cli --no-auth-warning -u "$(url_of valkey)" "$@" 2>&1; }
 # started [args...]: ff local start in the background with both, its listing waited for: a first start pulls the
 # images and makes the data.
@@ -2702,7 +2714,6 @@ section "ff local start's mail: SES v2's SendEmail at the front door, the AWS CL
 local app="$work/mail" port starter sent_id function_id raw_id
 local simple='{"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}'
 local to_orders='{"ToAddresses": ["orders@example.tn"]}'
-leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
 # ses_cli <args...>: the AWS CLI's sesv2 with the local key's file alone, the front door its SES endpoint.
 ses_cli() {
   AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
@@ -2712,13 +2723,6 @@ ses_cli() {
 ses_refused() { ses_cli "$@" >/dev/null 2>"$work/ses.err" && echo accepted || grep -m1 -oE 'An error occurred .*' "$work/ses.err"; }
 # kept <message ID> <extension>: the message's file, or its envelope's.
 kept() { printf '%s\n' "$app"/.ff/local/mail/*-"$1.$2"; }
-# read_mail <file>: the message as a mail reader shows it: its sender, its recipients, its subject decoded, its type,
-# and its text.
-read_mail() {
-  python3 -I -c 'import email, email.policy, sys
-message = email.message_from_binary_file(open(sys.argv[1], "rb"), policy=email.policy.default)
-print(message["from"], "|", message["to"], "|", message["subject"], "|", message.get_content_type(), "|", message.get_body(("plain",)).get_content().strip())' "$1"
-}
 # started: ff local start in the background, its listing waited for.
 started() {
   "$ff_bin" local start "$app/template.yaml" --port "$port" >"$work/mail.out" 2>"$work/mail.err" &
@@ -2820,6 +2824,84 @@ check "ff local reset removes the mail with what ff local keeps, and ff local ma
   "$(code) $(out | grep -E '^No mail in .*/\.ff/local/mail: ' >/dev/null && echo true || echo false) $(leftover)"
 }
 section_def local_mail section_local_mail backend budget=20
+
+section_local_small_app() {
+section "the small app whole on ff local, with --with postgres,valkey: its page served, an order posted at its URL kept in PostgreSQL, the latest listed from Valkey, its receipt made through the local queue into the local bucket and e-mailed, the mail kept; the nightly run by hand removing an old order and its receipt"
+# The small app local_apps installed, started again with its database, its cache and an address its receipts go from.
+local shop="$work/cli-local-shop" port starter origin api order old put report
+volumes() { docker volume ls --quiet --filter "label=ff.local.project=$(cd "$shop" && pwd -P)" | wc -l | tr -d ' '; }
+x_cache() { at "$api/orders" >/dev/null; sed -n 's/^x-cache: //Ip' "$work/at.head" | tr -d '\r'; }
+# until_true <command...>: waits up to 30 s for the command to succeed.
+until_true() {
+  for _ in $(seq 1 60); do
+    "$@" && return 0
+    sleep 0.5
+  done
+  return 1
+}
+receipt_of() { [ "$(at "$api/orders/$1/receipt" | sed -n '1s/ .*//p')" = "$2" ]; }
+mailed() { "$ff_bin" local mail "$shop" --output json 2>/dev/null | jq -e '.messages | length > 0' >/dev/null; }
+reported() { grep -F 'shop-nightly | ' "$work/small.err" | grep -F 'report {' >/dev/null; }
+[ -d "$shop/node_modules" ] || fail "the small app isn't installed in $shop: local_apps installs it"
+port="$(free_port)"
+origin="http://local-site.site.localhost:$port"
+api="http://shop-api.fn.localhost:$port"
+printf '{"api": "%s"}\n' "$api" >"$shop/site/config.json"
+FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z "$ff_bin" local start "$shop/template.yaml" --port "$port" \
+  --with postgres,valkey --site "local-site=$shop/site" --parameter-overrides ReceiptsBucketName=local-receipts \
+  SiteBucketName=local-site "SiteOrigin=$origin" ReceiptsFrom=receipts@shop.example.tn >"$work/small.out" 2>"$work/small.err" &
+starter=$!
+for _ in $(seq 1 240); do
+  grep -F "Ctrl-C stops them" "$work/small.out" >/dev/null 2>&1 && break
+  kill -0 "$starter" 2>/dev/null || break
+  sleep 0.5
+done
+grep -F "Ctrl-C stops them" "$work/small.out" >/dev/null || fail "ff local start --with said nothing in 120 s: $(cat "$work/small.err")"
+check "the small app starts with its database and its cache, each the functions' at DATABASE_URL and REDIS_URL" "true true" \
+  "$(grep -E "^  postgres  postgresql://app:[^@]+@127\.0\.0\.1:[0-9]+/app, at postgres:5432 from the functions, the functions' DATABASE_URL$" "$work/small.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  valkey    redis://default:[^@]+@127\.0\.0\.1:[0-9]+, at valkey:6379 from the functions, the functions' REDIS_URL$" "$work/small.out" >/dev/null && echo true || echo false)"
+check "  ... its page served at its site's address from its folder, its config.json naming the API here" \
+  "200 <title>Orders</title> $api" \
+  "$(at "$origin/" | sed -n '1s/ .*//p') $(grep -o '<title>Orders</title>' "$work/at.body") $(at "$origin/config.json" >/dev/null; jq -r .api "$work/at.body")"
+
+at "$api/orders" -X POST -H "Origin: $origin" -H 'content-type: application/json' \
+  -d '{"item": "tea", "quantity": 2, "email": "client@example.tn"}' >"$work/order.out"
+order="$(jq -r .id "$work/at.body")"
+check "an order posted at the API's URL, as the page posts it, is kept in PostgreSQL, its receipt queued" "201 tea 2 queued" \
+  "$(sed 's/ .*//' "$work/order.out") $(local_psql "$work/small.out" "select item, quantity from orders where id = $order" | tr '|' ' ') $(jq -r .receipt "$work/at.body")"
+check "  ... the latest listed, from the database the first time, then from Valkey" "miss hit tea" \
+  "$(x_cache) $(x_cache) $(jq -r '.[0].item' "$work/at.body")"
+until_true receipt_of "$order" 200 || true
+check "  ... its receipt made by shop-receipts from the local queue, into the local bucket, read back at its URL" \
+  "200 Order $order|2 × tea true" \
+  "$(at "$api/orders/$order/receipt" | sed -n '1s/ .*//p') $(head -2 "$work/at.body" | paste -sd'|') \
+$(grep -lF "\"receipts/$order.txt\"" "$shop"/.ff/local/buckets/local-receipts/*.object.json >/dev/null 2>&1 && echo true || echo false)"
+until_true mailed || true
+ff local mail "$shop" --output json
+check "  ... and e-mailed from ReceiptsFrom to the order's address through the SES endpoint FF gives it: kept, never sent" \
+  "1 receipts@shop.example.tn client@example.tn Your receipt, order $order true" \
+  "$(out | jq -r '.messages | length') $(out | jq -r '.messages[0] | "\(.from) \(.recipients | join(",")) \(.subject)"') \
+$(read_mail "$(out | jq -r '.messages[0].file')" | grep -F "2 × tea" >/dev/null && echo true || echo false)"
+
+# An order of last July and its receipt, which the nightly of 10 November removes, past 90 days.
+old="$(local_psql "$work/small.out" "insert into orders (item, quantity, created_at) values ('old', 1, '2026-07-01T10:00:00Z') returning id")"
+printf 'Order %s\n' "$old" >"$work/old-receipt.txt"
+put="$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary "@$work/old-receipt.txt" "http://127.0.0.1:$port/local-receipts/receipts/$old.txt")"
+x_cache >/dev/null
+ff local run EveryNight "$shop"
+until_true reported || true
+report="$(grep -F 'shop-nightly | ' "$work/small.err" | sed -n 's/.*report \({.*}\)$/\1/p' | tail -1)"
+check "ff local run runs the nightly with its database: the day before counted, the old order and its receipt removed" \
+  "200 0 2026-11-09 1 1 404 0 miss" \
+  "$put $(code) $(jq -r '"\(.day) \(.removed) \(.receipts)"' <<<"$report") $(at "$api/orders/$old/receipt" | sed -n '1s/ .*//p') \
+$(local_psql "$work/small.out" "select count(*) from orders where id = $old") $(x_cache)"
+kill -INT "$starter"
+wait "$starter" 2>/dev/null || true
+ff local reset "$shop" --data --yes
+check "Ctrl-C removes the containers, and ff local reset --data the database's and the cache's volumes" "0 0 0" \
+  "$(leftover) $(code) $(volumes)"
+}
+section_def local_small_app section_local_small_app local_apps budget=90
 
 section_local_images() {
 section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"
