@@ -1,73 +1,90 @@
 {
-  "about": "A message as SES v2's SendEmail takes it, as FF reads and makes it: the table the backend's L1 (email-send.spec.ts) and ff local's mail read for their tests, so that both read a request alike and make the same message of it. `addresses` are lists as a header or the API writes them, each address in lower case, null for one that is no address; `senders`, a sender's one address, null for none or more than one; `headers`, a request's own header and why it can't be the message's, null when it can; `raw`, a raw message's sender and recipients as its header names them, and the message without its Bcc. `composed` is simple content made into a message, as a reader shows it: each header field's value unfolded, its encoded words decoded, `{id}` the message's ID and `{host}` the SES endpoint's; the fields it hasn't; its type, and each part's type and body, decoded. `written` is how the backend's nodemailer writes a field, which ff local needn't: the backend's alone.",
+  "about": "A message as SES v2's SendEmail takes it, as FF reads and makes it: the table the backend's L1 (email-send.spec.ts and ses-operations.spec.ts) and ff local's mail read for their tests, so that both read a request alike and make the same message of it. `addresses` are lists as a header or the API writes them, each address in lower case, null for one that is no address; `senders`, a sender's one address, null for none or more than one; `headers`, a request's own header and why it can't be the message's, null when it can; `raw`, a raw message's sender and its recipients' fields as its header writes them, unfolded, and the message without its Bcc. `composed` is simple content made into a message, as a reader shows it: each header field's value unfolded, its encoded words decoded, `{id}` the message's ID and `{host}` the SES endpoint's; the fields it hasn't; its type, and each part's type and body, decoded, its line breaks \\n and the last dropped. `written` is how the backend's nodemailer writes a field, which ff local needn't: the backend's alone. `routes` are SES v2's that FF answers, each operation by its method and path, a name in the path decoded; null for one FF doesn't answer. `requests` are SendEmail's bodies, each checked in FF's order before the account's state is read: `refused`, with SES's status, error and words; `taken`, with the message's sender and its recipients, each once, in lower case, as its envelope names them. `manyTo` stands for that many recipients in ToAddresses, r1@example.tn and on; a raw message given as `message`, its text, is sent as `Data`, in base64.",
   "addresses": [
-    { "title": "a name with a comma in quotes, an address alone, and words that are no address", "list": "\"Ana, Shop\" <Orders@Shop.TN>, b@c.tn, not an address", "addresses": ["orders@shop.tn", "b@c.tn", null] }
+    {"title": "a name with a comma in quotes, an address alone, and words that are no address", "list": "\"Ana, Shop\" <Orders@Shop.TN>, b@c.tn, not an address", "addresses": ["orders@shop.tn", "b@c.tn", null]},
+    {"title": "a group's members", "list": "Team: a@b.tn, c@d.tn;", "addresses": ["a@b.tn", "c@d.tn"]},
+    {"title": "an address with a comment", "list": "a@b.tn (Ana)", "addresses": ["a@b.tn"]},
+    {"title": "an address in angle brackets alone", "list": "<A@B.TN>", "addresses": ["a@b.tn"]},
+    {"title": "a domain with its final dot", "list": "a@b.tn.", "addresses": ["a@b.tn"]},
+    {"title": "an empty entry, skipped", "list": "Ana <a@b.tn>, , c@d.tn", "addresses": ["a@b.tn", "c@d.tn"]},
+    {"title": "a quoted name that looks like an address", "list": "\"a@b.tn\" <c@d.tn>", "addresses": ["c@d.tn"]},
+    {"title": "two addresses without a comma: the first, the second its name", "list": "a@b.tn c@d.tn", "addresses": ["a@b.tn"]},
+    {"title": "a domain that is an IP address", "list": "x@[1.2.3.4]", "addresses": [null]},
+    {"title": "a domain of one label", "list": "a@localhost", "addresses": [null]},
+    {"title": "nothing", "list": "", "addresses": []}
   ],
   "senders": [
-    { "title": "a name and its address, in lower case", "text": "Boutique Ana <Orders@Shop.Example.TN>", "sender": "orders@shop.example.tn" },
-    { "title": "two addresses", "text": "a@b.tn, c@d.tn", "sender": null },
-    { "title": "no address", "text": "nobody", "sender": null }
+    {"title": "a name and its address, in lower case", "text": "Boutique Ana <Orders@Shop.Example.TN>", "sender": "orders@shop.example.tn"},
+    {"title": "two addresses", "text": "a@b.tn, c@d.tn", "sender": null},
+    {"title": "no address", "text": "nobody", "sender": null}
   ],
   "headers": [
-    { "title": "a header of the sender's", "name": "X-Campaign", "value": "autumn", "problem": null },
-    { "title": "a list's way out", "name": "List-Unsubscribe", "value": "<https://shop.example.tn/unsubscribe>", "problem": null },
-    { "title": "the sender", "name": "From", "value": "someone@else.tn", "problem": "From is a header SES writes itself" },
-    { "title": "a signature", "name": "DKIM-Signature", "value": "v=1", "problem": "DKIM-Signature is a header SES writes itself" },
-    { "title": "a value that would add a header", "name": "X-Bad", "value": "one\r\nBcc: spy@example.tn", "problem": "X-Bad's value is one line of 870 characters at most" },
-    { "title": "a name with a space", "name": "Bad Name", "value": "x", "problem": "\"Bad Name\" is not a header's name" }
+    {"title": "a header of the sender's", "name": "X-Campaign", "value": "autumn", "problem": null},
+    {"title": "a list's way out", "name": "List-Unsubscribe", "value": "<https://shop.example.tn/unsubscribe>", "problem": null},
+    {"title": "the sender", "name": "From", "value": "someone@else.tn", "problem": "From is a header SES writes itself"},
+    {"title": "a signature", "name": "DKIM-Signature", "value": "v=1", "problem": "DKIM-Signature is a header SES writes itself"},
+    {"title": "a value that would add a header", "name": "X-Bad", "value": "one\r\nBcc: spy@example.tn", "problem": "X-Bad's value is one line of 870 characters at most"},
+    {"title": "a name with a space", "name": "Bad Name", "value": "x", "problem": "\"Bad Name\" is not a header's name"}
   ],
   "raw": [
-    {
-      "title": "recipients folded over two lines, a Bcc folded with a tab, and a body line that looks like one",
-      "message": "From: Ana <orders@shop.example.tn>\r\nTo: a@example.tn,\r\n b@example.tn\r\nBcc: hidden@example.tn,\r\n\tother@example.tn\r\nSubject: Hi\r\n\r\nBcc: in the body stays\r\n",
-      "parties": { "from": "Ana <orders@shop.example.tn>", "to": ["a@example.tn", "b@example.tn"], "cc": [], "bcc": ["hidden@example.tn", "other@example.tn"] },
-      "withoutBcc": "From: Ana <orders@shop.example.tn>\r\nTo: a@example.tn,\r\n b@example.tn\r\nSubject: Hi\r\n\r\nBcc: in the body stays\r\n"
-    },
-    {
-      "title": "a Bcc as the header's last field",
-      "message": "From: a@b.tn\r\nBcc: c@d.tn\r\n\r\nbody",
-      "parties": { "from": "a@b.tn", "to": [], "cc": [], "bcc": ["c@d.tn"] },
-      "withoutBcc": "From: a@b.tn\r\n\r\nbody"
-    },
-    {
-      "title": "no Bcc: the message as it came",
-      "message": "From: a@b.tn\r\n\r\nbody",
-      "parties": { "from": "a@b.tn", "to": [], "cc": [], "bcc": [] },
-      "withoutBcc": "From: a@b.tn\r\n\r\nbody"
-    }
+    {"title": "recipients folded over two lines, a Bcc folded with a tab, and a body line that looks like one", "message": "From: Ana <orders@shop.example.tn>\r\nTo: a@example.tn,\r\n b@example.tn\r\nBcc: hidden@example.tn,\r\n\tother@example.tn\r\nSubject: Hi\r\n\r\nBcc: in the body stays\r\n", "parties": {"from": "Ana <orders@shop.example.tn>", "to": ["a@example.tn, b@example.tn"], "cc": [], "bcc": ["hidden@example.tn, other@example.tn"]}, "withoutBcc": "From: Ana <orders@shop.example.tn>\r\nTo: a@example.tn,\r\n b@example.tn\r\nSubject: Hi\r\n\r\nBcc: in the body stays\r\n"},
+    {"title": "a Bcc as the header's last field", "message": "From: a@b.tn\r\nBcc: c@d.tn\r\n\r\nbody", "parties": {"from": "a@b.tn", "to": [], "cc": [], "bcc": ["c@d.tn"]}, "withoutBcc": "From: a@b.tn\r\n\r\nbody"},
+    {"title": "no Bcc: the message as it came", "message": "From: a@b.tn\r\n\r\nbody", "parties": {"from": "a@b.tn", "to": [], "cc": [], "bcc": []}, "withoutBcc": "From: a@b.tn\r\n\r\nbody"}
   ],
   "composed": [
-    {
-      "title": "a subject in another alphabet, both bodies as alternatives, the request's own header, and no Bcc",
-      "content": {
-        "from": "Boutique Ana <orders@shop.example.tn>",
-        "to": ["client@example.tn"],
-        "cc": ["copy@example.tn"],
-        "replyTo": ["help@shop.example.tn"],
-        "subject": "Votre reçu n° 42",
-        "text": "Merci",
-        "html": "<p>Merci</p>",
-        "headers": [{ "name": "X-Order", "value": "42" }]
-      },
-      "at": "2026-10-30T08:00:00Z",
-      "fields": {
-        "from": "Boutique Ana <orders@shop.example.tn>",
-        "to": "client@example.tn",
-        "cc": "copy@example.tn",
-        "reply-to": "help@shop.example.tn",
-        "subject": "Votre reçu n° 42",
-        "message-id": "<{id}@{host}>",
-        "date": "Fri, 30 Oct 2026 08:00:00 +0000",
-        "mime-version": "1.0",
-        "x-order": "42"
-      },
-      "absent": ["bcc"],
-      "type": "multipart/alternative",
-      "parts": [
-        { "type": "text/plain", "body": "Merci" },
-        { "type": "text/html", "body": "<p>Merci</p>" }
-      ],
-      "written": { "subject": "=?UTF-8?Q?Votre_re=C3=A7u_n=C2=B0_42?=" }
-    }
-  ]
+    {"title": "a subject in another alphabet, both bodies as alternatives, the request's own header, and no Bcc", "content": {"from": "Boutique Ana <orders@shop.example.tn>", "to": ["client@example.tn"], "cc": ["copy@example.tn"], "replyTo": ["help@shop.example.tn"], "subject": "Votre reçu n° 42", "text": "Merci", "html": "<p>Merci</p>", "headers": [{"name": "X-Order", "value": "42"}]}, "at": "2026-10-30T08:00:00Z", "fields": {"from": "Boutique Ana <orders@shop.example.tn>", "to": "client@example.tn", "cc": "copy@example.tn", "reply-to": "help@shop.example.tn", "subject": "Votre reçu n° 42", "message-id": "<{id}@{host}>", "date": "Fri, 30 Oct 2026 08:00:00 +0000", "mime-version": "1.0", "x-order": "42"}, "absent": ["bcc"], "type": "multipart/alternative", "parts": [{"type": "text/plain", "body": "Merci"}, {"type": "text/html", "body": "<p>Merci</p>"}], "written": {"subject": "=?UTF-8?Q?Votre_re=C3=A7u_n=C2=B0_42?="}},
+    {"title": "text alone, in another alphabet, a line longer than 76 characters", "content": {"from": "orders@shop.example.tn", "to": ["client@example.tn"], "cc": [], "replyTo": [], "subject": "Reçu", "text": "Merci pour votre commande, à bientôt !\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "headers": []}, "at": "2026-10-30T08:00:00Z", "fields": {"from": "orders@shop.example.tn", "to": "client@example.tn", "subject": "Reçu", "message-id": "<{id}@{host}>"}, "absent": ["cc", "reply-to", "bcc"], "type": "text/plain", "parts": [{"type": "text/plain", "body": "Merci pour votre commande, à bientôt !\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}], "written": {}},
+    {"title": "HTML alone, a name quoted for its comma, two recipients, a subject's line break made a space", "content": {"from": "\"Ana, Shop\" <orders@shop.example.tn>", "to": ["Client Name <client@example.tn>", "b@example.tn"], "cc": [], "replyTo": [], "subject": "Line\nbreak", "html": "<p>Hi</p>", "headers": []}, "at": "2026-10-30T08:00:00Z", "fields": {"from": "\"Ana, Shop\" <orders@shop.example.tn>", "to": "Client Name <client@example.tn>, b@example.tn", "subject": "Line break"}, "absent": ["cc", "bcc"], "type": "text/html", "parts": [{"type": "text/html", "body": "<p>Hi</p>"}], "written": {}},
+    {"title": "a name in another alphabet, a subject long enough for several encoded words, a header's value in another alphabet", "content": {"from": "Boutique Éa <orders@shop.example.tn>", "to": ["client@example.tn"], "cc": [], "replyTo": [], "subject": "Une très longue ligne de sujet pour voir comment elle est pliée et découpée en mots", "text": "ok", "headers": [{"name": "X-Note", "value": "café"}]}, "at": "2026-10-30T08:00:00Z", "fields": {"from": "Boutique Éa <orders@shop.example.tn>", "subject": "Une très longue ligne de sujet pour voir comment elle est pliée et découpée en mots", "x-note": "café"}, "absent": ["bcc"], "type": "text/plain", "parts": [{"type": "text/plain", "body": "ok"}], "written": {}}
+  ],
+  "routes": [
+    {"method": "POST", "path": "/v2/email/outbound-emails", "operation": "SendEmail"},
+    {"method": "POST", "path": "/v2/email/identities", "operation": "CreateEmailIdentity"},
+    {"method": "POST", "path": "/v2/email/list-identities", "operation": "ListEmailIdentities"},
+    {"method": "GET", "path": "/v2/email/identities", "operation": "ListEmailIdentities"},
+    {"method": "GET", "path": "/v2/email/identities/orders%40shop.example.tn", "operation": "GetEmailIdentity", "name": "orders@shop.example.tn"},
+    {"method": "DELETE", "path": "/v2/email/identities/shop.example.tn", "operation": "DeleteEmailIdentity", "name": "shop.example.tn"},
+    {"method": "GET", "path": "/v2/email/account", "operation": "GetAccount"},
+    {"method": "PUT", "path": "/v2/email/suppression/addresses", "operation": "PutSuppressedDestination"},
+    {"method": "GET", "path": "/v2/email/suppression/addresses", "operation": "ListSuppressedDestinations"},
+    {"method": "GET", "path": "/v2/email/suppression/addresses/gone%40example.tn", "operation": "GetSuppressedDestination", "name": "gone@example.tn"},
+    {"method": "DELETE", "path": "/v2/email/suppression/addresses/gone%40example.tn", "operation": "DeleteSuppressedDestination", "name": "gone@example.tn"},
+    {"method": "GET", "path": "/v2/email/configuration-sets", "operation": null},
+    {"method": "PUT", "path": "/v2/email/outbound-emails", "operation": null},
+    {"method": "GET", "path": "/v2/email/identities/a/b", "operation": null}
+  ],
+  "requests": {
+    "refused": [
+      {"title": "a configuration set, which FF has none of", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}, "ConfigurationSetName": "events"}, "status": 404, "type": "NotFoundException", "message": "Configuration set \"events\" does not exist."},
+      {"title": "a sender that isn't text", "request": {"FromEmailAddress": 7, "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "FromEmailAddress must be a string"},
+      {"title": "a destination that isn't an object", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": ["orders@example.tn"], "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "Destination must be an object"},
+      {"title": "recipients that aren't a list", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": "orders@example.tn"}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "Destination.ToAddresses must be a list of strings"},
+      {"title": "a Bcc that isn't a list of text", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"], "BccAddresses": [7]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "Destination.BccAddresses must be a list of strings"},
+      {"title": "a reply-to that isn't a list", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}, "ReplyToAddresses": "help@shop.example.tn"}, "status": 400, "type": "BadRequestException", "message": "ReplyToAddresses must be a list of strings"},
+      {"title": "no content", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}}, "status": 400, "type": "BadRequestException", "message": "Content is required: Simple or Raw"},
+      {"title": "content that isn't an object", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": "Hello"}, "status": 400, "type": "BadRequestException", "message": "Content must be an object"},
+      {"title": "a template, which FF doesn't send", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Template": {"TemplateName": "receipt"}}}, "status": 501, "type": "NotImplemented", "message": "FF's SES endpoint doesn't send templates: send Simple or Raw content"},
+      {"title": "a subject without its text", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "Content.Simple.Subject.Data is required: a string"},
+      {"title": "no subject", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "Content.Simple.Subject is required"},
+      {"title": "a body without text or HTML", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {}}}}, "status": 400, "type": "BadRequestException", "message": "Content.Simple.Body needs Text, Html or both"},
+      {"title": "headers that aren't a list", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}, "Headers": {"X-Order": "42"}}}}, "status": 400, "type": "BadRequestException", "message": "Content.Simple.Headers must be a list"},
+      {"title": "a header without its value", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}, "Headers": [{"Name": "X-Order"}]}}}, "status": 400, "type": "BadRequestException", "message": "Content.Simple.Headers are each a Name and a Value"},
+      {"title": "a raw message that isn't base64", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Raw": {"Data": "not base64!"}}}, "status": 400, "type": "BadRequestException", "message": "Content.Raw.Data is required: the whole message, in base64"},
+      {"title": "content neither simple nor raw", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {}}, "status": 400, "type": "BadRequestException", "message": "Content is Simple or Raw"},
+      {"title": "no sender, and a raw message without a From", "request": {"Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Raw": {"message": "To: orders@example.tn\r\nSubject: Hi\r\n\r\nHello\r\n"}}}, "status": 400, "type": "BadRequestException", "message": "FromEmailAddress is required, unless the raw message has a From header"},
+      {"title": "a sender of two addresses", "request": {"FromEmailAddress": "a@shop.example.tn, b@shop.example.tn", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "a@shop.example.tn, b@shop.example.tn is not one address"},
+      {"title": "a recipient that is no address", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn", "nobody"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "Illegal address: nobody"},
+      {"title": "a raw message whose header names a recipient that is no address", "request": {"Content": {"Raw": {"message": "From: Shop <news@shop.example.tn>\r\nTo: orders@example.tn, nobody\r\nSubject: Hi\r\n\r\nHello\r\n"}}}, "status": 400, "type": "BadRequestException", "message": "Illegal address: orders@example.tn, nobody"},
+      {"title": "no recipient", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "A message needs a recipient: Destination's ToAddresses, CcAddresses or BccAddresses"},
+      {"title": "more than 50 recipients", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"manyTo": 51}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "status": 400, "type": "BadRequestException", "message": "Recipient count exceeds 50."},
+      {"title": "a reply-to that is no address", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}, "ReplyToAddresses": ["nobody"]}, "status": 400, "type": "BadRequestException", "message": "Illegal address in ReplyToAddresses"},
+      {"title": "a header SES writes itself", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["orders@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}, "Headers": [{"Name": "Subject", "Value": "Another"}]}}}, "status": 400, "type": "BadRequestException", "message": "Subject is a header SES writes itself"}
+    ],
+    "taken": [
+      {"title": "a named sender, a recipient in To and in Cc once, in lower case, and a Bcc in the envelope", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"ToAddresses": ["Orders@Example.TN", "b@example.tn"], "CcAddresses": ["orders@example.tn"], "BccAddresses": ["audit@example.tn"]}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}, "Headers": [{"Name": "X-Order", "Value": "42"}]}}, "ReplyToAddresses": ["Help <help@shop.example.tn>"]}, "from": "news@shop.example.tn", "recipients": ["orders@example.tn", "b@example.tn", "audit@example.tn"]},
+      {"title": "50 recipients, the most", "request": {"FromEmailAddress": "Shop <news@shop.example.tn>", "Destination": {"manyTo": 50}, "Content": {"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}}, "from": "news@shop.example.tn", "recipients": ["r1@example.tn", "r2@example.tn", "r3@example.tn", "r4@example.tn", "r5@example.tn", "r6@example.tn", "r7@example.tn", "r8@example.tn", "r9@example.tn", "r10@example.tn", "r11@example.tn", "r12@example.tn", "r13@example.tn", "r14@example.tn", "r15@example.tn", "r16@example.tn", "r17@example.tn", "r18@example.tn", "r19@example.tn", "r20@example.tn", "r21@example.tn", "r22@example.tn", "r23@example.tn", "r24@example.tn", "r25@example.tn", "r26@example.tn", "r27@example.tn", "r28@example.tn", "r29@example.tn", "r30@example.tn", "r31@example.tn", "r32@example.tn", "r33@example.tn", "r34@example.tn", "r35@example.tn", "r36@example.tn", "r37@example.tn", "r38@example.tn", "r39@example.tn", "r40@example.tn", "r41@example.tn", "r42@example.tn", "r43@example.tn", "r44@example.tn", "r45@example.tn", "r46@example.tn", "r47@example.tn", "r48@example.tn", "r49@example.tn", "r50@example.tn"]},
+      {"title": "a raw message: its sender and its recipients from its header, its Bcc's too", "request": {"Content": {"Raw": {"message": "From: Shop <news@shop.example.tn>\r\nTo: Orders@Example.TN\r\nCc: b@example.tn\r\nBcc: audit@example.tn\r\nSubject: Raw\r\n\r\nHello from a raw message.\r\n"}}}, "from": "news@shop.example.tn", "recipients": ["orders@example.tn", "b@example.tn", "audit@example.tn"]},
+      {"title": "a raw message with the request's sender and recipients, not its header's", "request": {"FromEmailAddress": "other@shop.example.tn", "Destination": {"ToAddresses": ["someone@example.tn"]}, "Content": {"Raw": {"message": "From: Shop <news@shop.example.tn>\r\nTo: Orders@Example.TN\r\nCc: b@example.tn\r\nBcc: audit@example.tn\r\nSubject: Raw\r\n\r\nHello from a raw message.\r\n"}}}, "from": "other@shop.example.tn", "recipients": ["someone@example.tn"]}
+    ]
+  }
 }

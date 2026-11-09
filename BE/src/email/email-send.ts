@@ -131,13 +131,12 @@ export function attachmentBytesOf(raw: Buffer, depth = 0): number {
   return bytes;
 }
 
-/** A raw message's sender and recipients, as its header names them. */
+/** A raw message's sender, its one From field, and its recipients' fields, each list as its header writes it, unfolded. */
 export function rawParties(raw: Buffer): { from: string | null; to: string[]; cc: string[]; bcc: string[] } {
   const { fields } = headerOf(raw);
   const all = (name: string) => fields.filter((field) => field.name === name).map((field) => field.value);
-  const list = (name: string) => all(name).flatMap(addressesOf) as string[];
   const from = all('from');
-  return { from: from.length === 1 ? from[0] : null, to: list('to'), cc: list('cc'), bcc: list('bcc') };
+  return { from: from.length === 1 ? from[0] : null, to: all('to'), cc: all('cc'), bcc: all('bcc') };
 }
 
 /** The raw message without its Bcc header, which only the envelope carries. */

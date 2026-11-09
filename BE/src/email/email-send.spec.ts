@@ -40,15 +40,12 @@ const decodedWords = (value: string): string =>
       (encoding.toUpperCase() === 'B' ? Buffer.from(text, 'base64') : Buffer.from(text.replace(/_/g, ' ').replace(/=([0-9A-F]{2})/gi, (__, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1')).toString('utf8'),
     );
 
-/** A part's body as a reader shows it: its transfer encoding undone. */
+/** A part's body as a reader shows it: its transfer encoding undone, its line breaks \n, the last dropped. */
 function decodedBody(fields: Array<{ name: string; value: string }>, body: Buffer): string {
   const encoding = fields.find((field) => field.name === 'content-transfer-encoding')?.value.toLowerCase();
-  if (encoding === 'base64') return Buffer.from(body.toString('latin1'), 'base64').toString('utf8');
-  if (encoding === 'quoted-printable') {
-    const text = body.toString('latin1').replace(/=\r?\n/g, '');
-    return Buffer.from(text.replace(/=([0-9A-F]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1').toString('utf8');
-  }
-  return body.toString('utf8');
+  const qp = (text: string) => Buffer.from(text.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, (_, hex: string) => String.fromCharCode(parseInt(hex, 16))), 'latin1');
+  const bytes = encoding === 'base64' ? Buffer.from(body.toString('latin1'), 'base64') : encoding === 'quoted-printable' ? qp(body.toString('latin1')) : body;
+  return bytes.toString('utf8').replace(/\r\n/g, '\n').replace(/\n+$/, '');
 }
 
 /** A message as a reader shows it: its fields decoded, by their names in lower case, its type, and its parts' types and bodies. */
