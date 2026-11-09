@@ -1,6 +1,14 @@
+/**
+ * The site server's tests. The objects, the visits and their answers, as
+ * S3's website endpoint gives them, are website-examples.json's, which ff
+ * local's sites read too; what only FF has, the counts, the plan's limit, the
+ * account's state, a customer's domain and the certificates, stays here.
+ */
 import { ConfigService } from '@nestjs/config';
+import { readFileSync } from 'node:fs';
 import { IncomingMessage, Server, ServerResponse, createServer, request as httpRequest } from 'node:http';
 import { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
@@ -15,16 +23,36 @@ import { WebsiteServer, keyOf } from './website-server';
 
 const ACCOUNT = '000000000001';
 const STORE_NAME = 'ff-000000000000000000000001';
+/** The sites' host, which a visit's {sites} names. */
+const SITES = 'site.example.test';
+
+/** A visit of the table's, and what its answer has. */
+interface SiteVisit {
+  name: string;
+  host?: string;
+  method?: string;
+  path: string;
+  request?: Record<string, string>;
+  revisit?: boolean;
+  website?: Partial<WebsiteConfiguration>;
+  status: number;
+  body?: string;
+  includes?: string[];
+  headers?: Record<string, string>;
+  present?: string[];
+  absent?: string[];
+  asked?: string[];
+}
+
+const table = JSON.parse(readFileSync(join(__dirname, 'website-examples.json'), 'utf8')) as {
+  objects: Record<string, { body: string; type?: string }>;
+  website: WebsiteConfiguration;
+  visits: Array<{ group: string; visits: SiteVisit[] }>;
+  keys: Array<{ path: string; key: string }>;
+};
 
 /** The objects in the store, under the bucket's store name: each with its type, as uploaded. */
-const OBJECTS: Record<string, { body: string; type?: string }> = {
-  'index.html': { body: '<title>index</title>', type: 'text/html' },
-  'docs/index.html': { body: '<title>docs</title>', type: 'text/html' },
-  '404.html': { body: '<title>error page</title>', type: 'text/html' },
-  'assets/app.js': { body: 'console.log("app")', type: 'text/javascript' },
-  'untyped.css': { body: 'body { color: navy }', type: 'binary/octet-stream' },
-  'a b/c.txt': { body: 'spaced', type: 'text/plain' },
-};
+const OBJECTS = table.objects;
 
 /** A store as SeaweedFS answers: GET and HEAD of an object, its ETag, If-None-Match and a byte range; what it was asked, kept. */
 function fakeStore(asked: string[]): Server {
@@ -78,7 +106,7 @@ describe("a bucket's site, as S3's website endpoint answers it", () => {
   const visit = (path: string, options: { host?: string; method?: string; headers?: Record<string, string> } = {}) =>
     new Promise<{ status: number; headers: IncomingMessage['headers']; body: string }>((resolve, reject) => {
       const request = httpRequest(
-        { hostname: '127.0.0.1', port, path, method: options.method ?? 'GET', headers: { host: options.host ?? 'shop.site.example.test:3004', ...options.headers } },
+        { hostname: '127.0.0.1', port, path, method: options.method ?? 'GET', headers: { host: options.host ?? `shop.${SITES}:3004`, ...options.headers } },
         (response) => {
           const chunks: Buffer[] = [];
           response.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -89,6 +117,42 @@ describe("a bucket's site, as S3's website endpoint answers it", () => {
       request.end();
     });
   const configure = (website: WebsiteConfiguration | null) => (site.website = website);
+
+  /** A group of the table's visits, each made and its answer compared with the table's; the answers. */
+  const play = async (group: string) => {
+    const visits = table.visits.find((candidate) => candidate.group === group)?.visits;
+    if (!visits) throw new Error(`website-examples.json has no group ${group}`);
+    const answers: Array<Awaited<ReturnType<typeof visit>>> = [];
+    for (const example of visits) {
+      configure({ ...table.website, ...example.website });
+      const headers = { ...example.request };
+      if (example.revisit) headers['if-none-match'] = (await visit(example.path)).headers.etag as string;
+      asked.length = 0;
+      const answer = await visit(example.path, { host: example.host?.replace('{sites}', SITES), method: example.method, headers });
+      const seen = (names: string[] | undefined, there: boolean) => (names ?? []).filter((name) => (answer.headers[name] !== undefined) === there);
+      expect({
+        name: example.name,
+        status: answer.status,
+        ...(example.body === undefined ? {} : { body: answer.body }),
+        includes: (example.includes ?? []).filter((text) => answer.body.includes(text)),
+        headers: Object.fromEntries(Object.keys(example.headers ?? {}).map((name) => [name, answer.headers[name]])),
+        present: seen(example.present, true),
+        absent: seen(example.absent, false),
+        ...(example.asked === undefined ? {} : { asked: [...asked] }),
+      }).toEqual({
+        name: example.name,
+        status: example.status,
+        ...(example.body === undefined ? {} : { body: example.body }),
+        includes: example.includes ?? [],
+        headers: example.headers ?? {},
+        present: example.present ?? [],
+        absent: example.absent ?? [],
+        ...(example.asked === undefined ? {} : { asked: example.asked.map((request) => request.replace(' ', ` /${STORE_NAME}/`)) }),
+      });
+      answers.push(answer);
+    }
+    return answers;
+  };
 
   beforeAll(async () => {
     store = fakeStore(asked);
@@ -121,85 +185,47 @@ describe("a bucket's site, as S3's website endpoint answers it", () => {
   });
 
   it("answers the index document at the site's root, its type as stored, never to be sniffed, counted as the site's with what it sent", async () => {
-    const answer = await visit('/');
+    const [answer] = await play('the index document');
 
-    expect([answer.status, answer.body, answer.headers['content-type']]).toEqual([200, '<title>index</title>', 'text/html']);
-    expect(answer.headers['x-content-type-options']).toBe('nosniff');
     expect([answer.headers.etag, answer.headers['last-modified'], answer.headers['cache-control']]).toEqual(['"3c7469746c653e69"', 'Thu, 29 Oct 2026 08:00:00 GMT', 'no-cache']);
-    expect(answer.headers['set-cookie']).toBeUndefined();
-    expect(asked).toEqual([`GET /${STORE_NAME}/index.html`]);
     expect(counted.map((request) => [request.bucketName, request.class, request.method, request.status, request.bytesOut])).toEqual([['shop', 'website', 'GET', 200, 20]]);
     expect(sent).toEqual([[ACCOUNT, 20]]);
   });
 
   it("answers a folder's index document, and redirects a folder named without its slash to it, its query kept, as S3 does", async () => {
-    expect((await visit('/docs/')).body).toBe('<title>docs</title>');
-
-    const redirect = await visit('/docs?from=nav');
-    expect([redirect.status, redirect.headers.location]).toEqual([302, '/docs/?from=nav']);
-    expect(asked.slice(-2)).toEqual([`GET /${STORE_NAME}/docs`, `HEAD /${STORE_NAME}/docs/index.html`]);
+    await play('a folder');
   });
 
   it('reads escapes in the path, as a browser sends a name with a space', async () => {
-    expect((await visit('/a%20b/c.txt')).body).toBe('spaced');
+    await play('escapes');
   });
 
   it('answers a path with no file with the error document and 404; without one, a page of its own naming the key', async () => {
-    const missing = await visit('/no/such/page.html');
-    expect([missing.status, missing.body]).toEqual([404, '<title>error page</title>']);
-
-    configure({ indexDocument: 'index.html', errorDocument: null, singlePageApp: false });
-    const own = await visit('/no/such/page.html');
-    expect(own.status).toBe(404);
-    expect(own.headers['content-type']).toBe('text/html; charset=utf-8');
-    expect(own.body).toContain('<li>Code: NoSuchKey</li>');
-    expect(own.body).toContain('<li>Key: no/such/page.html</li>');
+    await play('a path with no file');
   });
 
   it("answers a single-page app's routes with its index document and 200, and the files it has as they are", async () => {
-    configure({ indexDocument: 'index.html', errorDocument: '404.html', singlePageApp: true });
-
-    const route = await visit('/orders/42');
-    expect([route.status, route.body]).toEqual([200, '<title>index</title>']);
-    expect((await visit('/assets/app.js')).body).toBe('console.log("app")');
+    await play('a single-page app');
   });
 
   it("gives a file stored without a type one by its name, and passes the browser's conditions and ranges to the store", async () => {
-    expect((await visit('/untyped.css')).headers['content-type']).toBe('text/css; charset=utf-8');
+    const [, again] = await play('types, conditions and ranges');
 
-    const first = await visit('/assets/app.js');
-    const again = await visit('/assets/app.js', { headers: { 'if-none-match': first.headers.etag as string } });
-    expect([again.status, again.body, again.headers['content-type'], again.headers.etag]).toEqual([304, '', undefined, first.headers.etag]);
-
-    const part = await visit('/assets/app.js', { headers: { range: 'bytes=0-6' } });
-    expect([part.status, part.body, part.headers['content-range']]).toEqual([206, 'console', 'bytes 0-6/18']);
+    expect(again.headers.etag).toBe('"636f6e736f6c652e"');
   });
 
   it('answers HEAD without a body, and every other method 405, naming the two it takes', async () => {
-    const head = await visit('/assets/app.js', { method: 'HEAD' });
-    expect([head.status, head.headers['content-length'], head.body]).toEqual([200, '18', '']);
-
-    const post = await visit('/', { method: 'POST' });
-    expect([post.status, post.headers.allow]).toEqual([405, 'GET, HEAD']);
-    expect(post.body).toContain('Code: MethodNotAllowed');
+    await play('methods');
   });
 
   it('refuses a path that climbs out of the site, however it is escaped, without asking the store', async () => {
-    for (const path of ['/../private/index.html', '/%2e%2e/private/index.html', '/docs/%2E%2E/%2E%2E/x', '/./index.html', '/a%00b', '/%zz']) {
-      const answer = await visit(path);
-      expect([path, answer.status, answer.body.includes('Code: InvalidURI')]).toEqual([path, 400, true]);
-    }
-    expect(asked).toEqual([]);
-    expect(keyOf('/a/b/', 'index.html')).toBe('a/b/index.html');
-    expect(keyOf('/a..b/c', 'index.html')).toBe('a..b/c');
+    await play('paths out of the site');
+
+    expect(table.keys.map(({ path }) => keyOf(path, 'index.html'))).toEqual(table.keys.map(({ key }) => key));
   });
 
   it("answers S3's errors for a host that is no site: no such bucket, or a bucket without a website configuration", async () => {
-    expect((await visit('/', { host: 'nowhere.site.example.test' })).body).toContain('Code: NoSuchBucket');
-    expect((await visit('/', { host: 'private.site.example.test' })).body).toContain('Code: NoSuchWebsiteConfiguration');
-    expect((await visit('/', { host: 'a.shop.site.example.test' })).body).toContain('Code: NoSuchBucket');
-    expect((await visit('/', { host: 'example.test' })).status).toBe(404);
-    expect(asked).toEqual([]);
+    await play('hosts that are no site');
   });
 
   it("answers a customer's own domain for the bucket the gateway names, whatever its host", async () => {

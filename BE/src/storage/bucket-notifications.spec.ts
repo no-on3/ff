@@ -1,6 +1,15 @@
+/**
+ * A bucket's notifications' tests. S3's records, the keys in them, which rule
+ * an event goes by, the test event and GetBucketNotificationConfiguration's
+ * documents are bucket-event-examples.json's, which ff local's buckets read
+ * too; the configurations' checks stay here.
+ */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { S3Error } from './s3-error';
 import {
   NotificationRule,
+  S3EventFacts,
   checkRules,
   eventKey,
   nextSequencer,
@@ -12,6 +21,15 @@ import {
   s3EventRecord,
   testEvent,
 } from './bucket-notifications';
+
+const table = JSON.parse(readFileSync(join(__dirname, 'bucket-event-examples.json'), 'utf8')) as {
+  records: Array<{ name: string; facts: Omit<S3EventFacts, 'time'> & { time: string }; record: Record<string, unknown> }>;
+  keys: Array<{ key: string; inEvent: string }>;
+  rules: NotificationRule[];
+  matches: Array<{ eventName: string; key: string; rule: string | null }>;
+  testEvent: { bucket: string; requestId: string; time: string; event: Record<string, string> };
+  documents: Array<{ name: string; rules: NotificationRule[]; xml: string }>;
+};
 
 const FUNCTION_ARN = 'arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails';
 const QUEUE_ARN = 'arn:aws:sqs:tn-tunis-1:000000000001:uploads';
@@ -61,18 +79,11 @@ describe("a bucket's notification configuration, as S3's XML", () => {
   });
 
   it("writes them back as S3 answers them, which reads back the same", () => {
-    const rules = [rule({ prefix: 'images/', suffix: '.jpg' }), rule({ id: 'q', target: 'queue', arn: QUEUE_ARN, events: ['s3:ObjectRemoved:Delete'] })];
+    const [{ rules, xml }] = table.documents;
 
-    const xml = rulesXml(rules);
-
-    expect(xml).toBe(
-      '<?xml version="1.0" encoding="UTF-8"?>\n<NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">' +
-        `<QueueConfiguration><Id>q</Id><Queue>${QUEUE_ARN}</Queue><Event>s3:ObjectRemoved:Delete</Event></QueueConfiguration>` +
-        `<CloudFunctionConfiguration><Id>thumbs</Id><CloudFunction>${FUNCTION_ARN}</CloudFunction><Event>s3:ObjectCreated:*</Event>` +
-        '<Filter><S3Key><FilterRule><Name>prefix</Name><Value>images/</Value></FilterRule><FilterRule><Name>suffix</Name><Value>.jpg</Value></FilterRule></S3Key></Filter>' +
-        '</CloudFunctionConfiguration></NotificationConfiguration>',
-    );
+    expect(table.documents.map((document) => rulesXml(document.rules))).toEqual(table.documents.map((document) => document.xml));
     expect(rulesFromXml(xml)).toEqual([rules[1], rules[0]]);
+    expect(table.documents.map((document) => rulesFromXml(document.xml).length)).toEqual([2, 0]);
   });
 
   it.each([
@@ -146,21 +157,15 @@ describe('the rules S3 takes', () => {
 
 describe('an event, as S3 sends it', () => {
   it('goes by the rule whose events and filter name it', () => {
-    const rules = [rule({ id: 'images', prefix: 'images/', suffix: '.jpg' }), rule({ id: 'removals', events: ['s3:ObjectRemoved:Delete'] })];
+    const goesBy = ({ eventName, key }: { eventName: string; key: string }) => ruleFor(table.rules, eventName, key)?.id ?? null;
 
-    expect(ruleFor(rules, 'ObjectCreated:Put', 'images/cat.jpg')?.id).toBe('images');
-    expect(ruleFor(rules, 'ObjectCreated:Copy', 'images/cat.jpg')?.id).toBe('images');
-    expect(ruleFor(rules, 'ObjectCreated:Put', 'images/cat.png')).toBeUndefined();
-    expect(ruleFor(rules, 'ObjectCreated:Put', 'docs/images/cat.jpg')).toBeUndefined();
-    expect(ruleFor(rules, 'ObjectRemoved:Delete', 'anything')?.id).toBe('removals');
+    expect(table.matches.map((match) => [match.eventName, match.key, goesBy(match)])).toEqual(table.matches.map((match) => [match.eventName, match.key, match.rule]));
+    expect(table.matches).toHaveLength(5);
   });
 
   it("names its object's key form-encoded, as S3 writes it: a space a +, a slash and S3's other characters escaped", () => {
-    expect([eventKey('images/red flower(1)!~.jpg'), eventKey("a*b_c-d.e'f"), eventKey('صورة.png')]).toEqual([
-      'images%2Fred+flower%281%29%21%7E.jpg',
-      'a*b_c-d.e%27f',
-      '%D8%B5%D9%88%D8%B1%D8%A9.png',
-    ]);
+    expect(table.keys.map(({ key }) => eventKey(key))).toEqual(table.keys.map(({ inEvent }) => inEvent));
+    expect(table.keys).toHaveLength(3);
   });
 
   it('numbers events with an increasing sequencer, two in one millisecond too', () => {
@@ -171,42 +176,11 @@ describe('an event, as S3 sends it', () => {
   });
 
   it("is S3's record, version 2.1, a removed object's without its size and ETag; and S3's test event", () => {
-    const record = s3EventRecord({
-      region: 'tn-tunis-1',
-      eventName: 'ObjectRemoved:Delete',
-      time: new Date('2026-10-24T08:00:00Z'),
-      principalId: 'AKFF7Q2MLKX4RTZB3W5N',
-      sourceIp: '203.0.113.4',
-      requestId: 'r-1',
-      bucket: { name: 'photos', accountId: '000000000001' },
-      object: { key: 'old cat.jpg' },
-      configurationId: 'removals',
-      sequencer: '0055AED6DCD90281E5',
-    });
+    const records = table.records.map(({ facts }) => s3EventRecord({ ...facts, time: new Date(facts.time) }));
 
-    expect(record).toEqual({
-      eventVersion: '2.1',
-      eventSource: 'aws:s3',
-      awsRegion: 'tn-tunis-1',
-      eventTime: '2026-10-24T08:00:00.000Z',
-      eventName: 'ObjectRemoved:Delete',
-      userIdentity: { principalId: 'AWS:AKFF7Q2MLKX4RTZB3W5N' },
-      requestParameters: { sourceIPAddress: '203.0.113.4' },
-      responseElements: { 'x-amz-request-id': 'r-1', 'x-amz-id-2': 'r-1' },
-      s3: {
-        s3SchemaVersion: '1.0',
-        configurationId: 'removals',
-        bucket: { name: 'photos', ownerIdentity: { principalId: '000000000001' }, arn: 'arn:aws:s3:::photos' },
-        object: { key: 'old+cat.jpg', sequencer: '0055AED6DCD90281E5' },
-      },
-    });
-    expect(testEvent('photos', 'r-2', new Date('2026-10-24T08:00:00Z'))).toEqual({
-      Service: 'Amazon S3',
-      Event: 's3:TestEvent',
-      Time: '2026-10-24T08:00:00.000Z',
-      Bucket: 'photos',
-      RequestId: 'r-2',
-      HostId: 'r-2',
-    });
+    expect(records).toEqual(table.records.map(({ record }) => record));
+    expect(table.records.map(({ facts }) => facts.eventName)).toEqual(['ObjectRemoved:Delete', 'ObjectCreated:Put']);
+    const { bucket, requestId, time, event } = table.testEvent;
+    expect(testEvent(bucket, requestId, new Date(time))).toEqual(event);
   });
 });

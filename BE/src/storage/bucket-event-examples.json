@@ -1,0 +1,132 @@
+{
+  "about": "A bucket's events as S3 sends them to a function or a queue, as FF builds them: the table the backend's L1 (bucket-notifications.spec.ts) and ff local's buckets read for their tests (cli/src/local/s3/events.rs), so that both send the same event. `records` holds what a request that made or removed an object says, its `facts` (the time in ISO), and the record S3 sends for it, version 2.1. `keys` holds keys as stored and as S3's events name them, form-encoded. `rules` holds a bucket's configurations, and `matches` an event's name and key with the ID of the rule it goes by, null for none. `testEvent` is the message S3 sends a queue a configuration names. `documents` holds configurations with GetBucketNotificationConfiguration's answer for them, the queues' first.",
+  "records": [
+    {
+      "name": "a removed object's, without its size and ETag",
+      "facts": {
+        "region": "tn-tunis-1",
+        "eventName": "ObjectRemoved:Delete",
+        "time": "2026-10-24T08:00:00.000Z",
+        "principalId": "AKFF7Q2MLKX4RTZB3W5N",
+        "sourceIp": "203.0.113.4",
+        "requestId": "r-1",
+        "bucket": { "name": "photos", "accountId": "000000000001" },
+        "object": { "key": "old cat.jpg" },
+        "configurationId": "removals",
+        "sequencer": "0055AED6DCD90281E5"
+      },
+      "record": {
+        "eventVersion": "2.1",
+        "eventSource": "aws:s3",
+        "awsRegion": "tn-tunis-1",
+        "eventTime": "2026-10-24T08:00:00.000Z",
+        "eventName": "ObjectRemoved:Delete",
+        "userIdentity": { "principalId": "AWS:AKFF7Q2MLKX4RTZB3W5N" },
+        "requestParameters": { "sourceIPAddress": "203.0.113.4" },
+        "responseElements": { "x-amz-request-id": "r-1", "x-amz-id-2": "r-1" },
+        "s3": {
+          "s3SchemaVersion": "1.0",
+          "configurationId": "removals",
+          "bucket": { "name": "photos", "ownerIdentity": { "principalId": "000000000001" }, "arn": "arn:aws:s3:::photos" },
+          "object": { "key": "old+cat.jpg", "sequencer": "0055AED6DCD90281E5" }
+        }
+      }
+    },
+    {
+      "name": "a created object's, with its size and its ETag without quotes",
+      "facts": {
+        "region": "tn-tunis-1",
+        "eventName": "ObjectCreated:Put",
+        "time": "2026-10-24T08:00:01.250Z",
+        "principalId": "AKFF7Q2MLKX4RTZB3W5N",
+        "sourceIp": "127.0.0.1",
+        "requestId": "r-3",
+        "bucket": { "name": "photos", "accountId": "000000000001" },
+        "object": { "key": "uploads/red cat.jpg", "size": 1024, "eTag": "d41d8cd98f00b204e9800998ecf8427e" },
+        "configurationId": "thumbs",
+        "sequencer": "0055AED6DCD90281E6"
+      },
+      "record": {
+        "eventVersion": "2.1",
+        "eventSource": "aws:s3",
+        "awsRegion": "tn-tunis-1",
+        "eventTime": "2026-10-24T08:00:01.250Z",
+        "eventName": "ObjectCreated:Put",
+        "userIdentity": { "principalId": "AWS:AKFF7Q2MLKX4RTZB3W5N" },
+        "requestParameters": { "sourceIPAddress": "127.0.0.1" },
+        "responseElements": { "x-amz-request-id": "r-3", "x-amz-id-2": "r-3" },
+        "s3": {
+          "s3SchemaVersion": "1.0",
+          "configurationId": "thumbs",
+          "bucket": { "name": "photos", "ownerIdentity": { "principalId": "000000000001" }, "arn": "arn:aws:s3:::photos" },
+          "object": { "key": "uploads%2Fred+cat.jpg", "size": 1024, "eTag": "d41d8cd98f00b204e9800998ecf8427e", "sequencer": "0055AED6DCD90281E6" }
+        }
+      }
+    }
+  ],
+  "keys": [
+    { "key": "images/red flower(1)!~.jpg", "inEvent": "images%2Fred+flower%281%29%21%7E.jpg" },
+    { "key": "a*b_c-d.e'f", "inEvent": "a*b_c-d.e%27f" },
+    { "key": "صورة.png", "inEvent": "%D8%B5%D9%88%D8%B1%D8%A9.png" }
+  ],
+  "rules": [
+    {
+      "id": "images",
+      "target": "function",
+      "arn": "arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails",
+      "events": ["s3:ObjectCreated:*"],
+      "prefix": "images/",
+      "suffix": ".jpg"
+    },
+    {
+      "id": "removals",
+      "target": "function",
+      "arn": "arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails",
+      "events": ["s3:ObjectRemoved:Delete"],
+      "prefix": null,
+      "suffix": null
+    }
+  ],
+  "matches": [
+    { "eventName": "ObjectCreated:Put", "key": "images/cat.jpg", "rule": "images" },
+    { "eventName": "ObjectCreated:Copy", "key": "images/cat.jpg", "rule": "images" },
+    { "eventName": "ObjectCreated:Put", "key": "images/cat.png", "rule": null },
+    { "eventName": "ObjectCreated:Put", "key": "docs/images/cat.jpg", "rule": null },
+    { "eventName": "ObjectRemoved:Delete", "key": "anything", "rule": "removals" }
+  ],
+  "testEvent": {
+    "bucket": "photos",
+    "requestId": "r-2",
+    "time": "2026-10-24T08:00:00.000Z",
+    "event": { "Service": "Amazon S3", "Event": "s3:TestEvent", "Time": "2026-10-24T08:00:00.000Z", "Bucket": "photos", "RequestId": "r-2", "HostId": "r-2" }
+  },
+  "documents": [
+    {
+      "name": "a function's configuration with a filter and a queue's without, the queue's first",
+      "rules": [
+        {
+          "id": "thumbs",
+          "target": "function",
+          "arn": "arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails",
+          "events": ["s3:ObjectCreated:*"],
+          "prefix": "images/",
+          "suffix": ".jpg"
+        },
+        {
+          "id": "q",
+          "target": "queue",
+          "arn": "arn:aws:sqs:tn-tunis-1:000000000001:uploads",
+          "events": ["s3:ObjectRemoved:Delete"],
+          "prefix": null,
+          "suffix": null
+        }
+      ],
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><QueueConfiguration><Id>q</Id><Queue>arn:aws:sqs:tn-tunis-1:000000000001:uploads</Queue><Event>s3:ObjectRemoved:Delete</Event></QueueConfiguration><CloudFunctionConfiguration><Id>thumbs</Id><CloudFunction>arn:aws:lambda:tn-tunis-1:000000000001:function:thumbnails</CloudFunction><Event>s3:ObjectCreated:*</Event><Filter><S3Key><FilterRule><Name>prefix</Name><Value>images/</Value></FilterRule><FilterRule><Name>suffix</Name><Value>.jpg</Value></FilterRule></S3Key></Filter></CloudFunctionConfiguration></NotificationConfiguration>"
+    },
+    {
+      "name": "no configuration",
+      "rules": [],
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></NotificationConfiguration>"
+    }
+  ]
+}
