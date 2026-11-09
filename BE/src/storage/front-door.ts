@@ -131,7 +131,9 @@ interface Exchange {
   bytesOut: number;
   /** The client waits for "100 Continue" before it sends its body: sent only once the request is let in. */
   expectsContinue: boolean;
-  /** The keys a DeleteObjects deleted, as the store's answer names them, for the bucket's notifications. */
+  /** A DeleteObjects' document, as the store gets it, for the keys it asks to delete, when the bucket has notifications. */
+  deleteDocument?: string;
+  /** The keys a DeleteObjects deleted, for the bucket's notifications. */
   deletedKeys?: string[];
   /** The checksum the body carries, checked as it streams, which the store never gets. */
   checksum?: ExpectedChecksum;
@@ -148,10 +150,18 @@ const CREATED_EVENTS: Record<string, string> = {
   CompleteMultipartUpload: 'ObjectCreated:CompleteMultipartUpload',
 };
 
-/** The keys DeleteObjects' answer says it deleted; none when the answer can't be read. */
-function deletedKeysOf(document: string): string[] {
+/**
+ * The keys a DeleteObjects deleted: those its document asked for, but the ones the store's answer names an error for,
+ * as S3 answers either way, a quiet answer naming no other; none when either can't be read.
+ */
+function deletedKeysOf(asked: string, answered: string): string[] {
   try {
-    return childrenNamed(readXml(document), 'Deleted').map((deleted) => childText(deleted, 'Key') ?? '');
+    const answer = readXml(answered);
+    if (answer.name !== 'DeleteResult') return [];
+    const refused = new Set(childrenNamed(answer, 'Error').map((error) => childText(error, 'Key') ?? ''));
+    return childrenNamed(readXml(asked), 'Object')
+      .map((object) => childText(object, 'Key') ?? '')
+      .filter((key) => !refused.has(key));
   } catch (error) {
     if (error instanceof MalformedXml) return [];
     throw error;
@@ -490,6 +500,7 @@ export class S3FrontDoor implements OnModuleDestroy {
       whole = await readWhole(body, MAX_DOCUMENT_BYTES);
       headers['content-length'] = String(whole.length);
       headers['content-md5'] = createHash('md5').update(whole).digest('base64');
+      if (operation.name === 'DeleteObjects' && bucket.notifications?.length) exchange.deleteDocument = whole.toString('utf8');
     }
 
     const storePath = `/${bucket.storeName}${exchange.address.rawKey ? `/${exchange.address.rawKey}` : ''}`;
@@ -733,9 +744,10 @@ export class S3FrontDoor implements OnModuleDestroy {
       return status;
     }
     if (xml && operation.name === 'DeleteObjects' && bucket.notifications?.length) {
-      // Read whole, for the keys it deleted, which the bucket's notifications name.
-      const document = (await readWhole([answer], MAX_DOCUMENT_BYTES)).toString('utf8').split(bucket.storeName).join(bucket.name);
-      exchange.deletedKeys = deletedKeysOf(document);
+      // Read whole, for the keys it deleted, which the bucket's notifications name, before its bucket is the customer's.
+      const answered = (await readWhole([answer], MAX_DOCUMENT_BYTES)).toString('utf8');
+      exchange.deletedKeys = deletedKeysOf(exchange.deleteDocument ?? '', answered);
+      const document = answered.split(bucket.storeName).join(bucket.name);
       headers['content-length'] = String(Buffer.byteLength(document));
       response.writeHead(status, headers);
       response.end(document);

@@ -165,7 +165,13 @@ function fakeStore(seen: StoreRequestSeen[]): Server {
         if (!object || headsBeforeShown-- > 0) response.writeHead(404).end();
         else response.writeHead(200, { 'content-length': object.length, etag: '"etag-1"' }).end();
       } else if (request.method === 'POST') {
-        response.writeHead(200, { 'content-type': 'application/xml' }).end('<DeleteResult><Deleted><Key>a.txt</Key></Deleted></DeleteResult>');
+        // DeleteObjects: each key its document names deleted, but locked.txt, refused; a quiet answer names the refused alone.
+        const document = body.toString('utf8');
+        const quiet = /<Quiet>true<\/Quiet>/.test(document);
+        const results = [...document.matchAll(/<Key>([^<]*)<\/Key>/g)].map(([, name]) =>
+          name === 'locked.txt' ? `<Error><Key>${name}</Key><Code>AccessDenied</Code><Message>Access Denied</Message></Error>` : quiet ? '' : `<Deleted><Key>${name}</Key></Deleted>`,
+        );
+        response.writeHead(200, { 'content-type': 'application/xml' }).end(`<DeleteResult>${results.join('')}</DeleteResult>`);
       } else if (request.method === 'DELETE' && key.length) {
         objects.delete(name);
         response.writeHead(204).end();
@@ -950,6 +956,24 @@ describe('the S3 front door, as AWS\'s SDK for JavaScript calls it', () => {
         ['ObjectCreated:Copy', 'copies', 'copy.txt', 3],
         ['ObjectRemoved:Delete', 'removals', 'copy.txt', undefined],
         ['ObjectRemoved:Delete', 'removals', 'a.txt', undefined],
+      ]);
+    });
+
+    it('sends a deletion for each key a quiet DeleteObjects deleted, its answer naming only the one the store refused, as S3 does', async () => {
+      photos.notifications = [{ id: 'removals', target: 'queue', arn: QUEUE_ARN, events: ['s3:ObjectRemoved:*'], prefix: null, suffix: null }];
+
+      const deleted = await client().send(
+        new DeleteObjectsCommand({ Bucket: 'photos', Delete: { Quiet: true, Objects: [{ Key: 'a.txt' }, { Key: 'locked.txt' }, { Key: 'b c.txt' }] } }),
+      );
+      const said = await client().send(new DeleteObjectsCommand({ Bucket: 'photos', Delete: { Objects: [{ Key: 'locked.txt' }, { Key: 'd.txt' }] } }));
+      await frontDoor.notified();
+
+      expect([deleted.Deleted, deleted.Errors?.map((error) => error.Key)]).toEqual([undefined, ['locked.txt']]);
+      expect([said.Deleted, said.Errors?.map((error) => error.Key)]).toEqual([[{ Key: 'd.txt' }], ['locked.txt']]);
+      expect(records()).toEqual([
+        ['ObjectRemoved:Delete', 'removals', 'a.txt', undefined],
+        ['ObjectRemoved:Delete', 'removals', 'b+c.txt', undefined],
+        ['ObjectRemoved:Delete', 'removals', 'd.txt', undefined],
       ]);
     });
   });
