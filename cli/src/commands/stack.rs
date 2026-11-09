@@ -17,6 +17,7 @@ use super::queues;
 use super::schedule::{self, Schedule};
 use super::secrets::Secrets;
 use super::sites;
+use super::template::{self, Location, Problems, Read};
 use super::url::FunctionUrl;
 use super::{Context, account, async_config};
 use crate::api::types::{Function, LATEST, Stack, StackResource, find, name_in_arn};
@@ -24,25 +25,15 @@ use crate::api::{Call, Client};
 use crate::cli::{DeployArgs, Runtime};
 use crate::error::{Error, Kind};
 use crate::package::{self, Options, Package};
-use crate::sam::parameters::{self, SAMCONFIG, Samconfig};
+use crate::sam::Template;
+use crate::sam::parameters::SAMCONFIG;
 use crate::sam::plan::{
     self, ALIAS, BUCKET, EVENT_INVOKE_CONFIG, Known, MAPPING, Made, Place, QUEUE, RULE, SCHEDULE, Target, URL,
 };
 use crate::sam::resolve::FUNCTION;
-use crate::sam::{self, Template, subset};
 
-/// A stack's name, as CloudFormation takes one: letters, digits and hyphens, a letter first, 128 at most.
-pub(super) fn is_stack_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    name.len() <= 128
-        && bytes.next().is_some_and(|first| first.is_ascii_alphabetic())
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-}
-
-/// Whether `ff deploy` was given a SAM template: a .yaml or .yml file.
-pub fn is_template(path: &Path) -> bool {
-    path.is_file() && path.extension().is_some_and(|extension| extension == "yaml" || extension == "yml")
-}
+/// What a refused deploy says it did.
+const NOTHING: &str = "ff deploy changed nothing";
 
 /// The flags of a function's deploy, which a template's functions take from it instead.
 fn function_flags(args: &DeployArgs) -> Vec<&'static str> {
@@ -75,36 +66,6 @@ pub fn stack_flags(args: &DeployArgs) -> Result<(), Error> {
     Ok(())
 }
 
-/// Where a template's code and its samconfig.toml are. `sam build`'s template, in `.aws-sam/build`, names the folders
-/// it built, which ff deploys as they are; its project, and samconfig.toml, are two folders up.
-struct Location {
-    folder: PathBuf,
-    project: PathBuf,
-    built: bool,
-}
-
-impl Location {
-    fn of(template: &Path) -> Location {
-        let folder_of = |path: Option<&Path>| match path {
-            Some(path) if !path.as_os_str().is_empty() => path.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let folder = folder_of(template.parent());
-        let built = folder.ends_with(".aws-sam/build");
-        let project = if built { folder_of(folder.parent().and_then(Path::parent)) } else { folder.clone() };
-        Location { folder, project, built }
-    }
-}
-
-/// The folder's samconfig.toml as `sam deploy` reads it, if it has one.
-fn samconfig(folder: &Path) -> Result<Option<Samconfig>, Error> {
-    let path = folder.join(SAMCONFIG);
-    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(None) };
-    parameters::samconfig(&text)
-        .map(Some)
-        .map_err(|why| Error::usage(format!("{}: the SAM CLI can't read it for `sam deploy`: {why}", path.display())))
-}
-
 /// A SHA-256 in lowercase hexadecimal, as the stack keeps its template's.
 fn sha256_hex(bytes: &[u8]) -> String {
     ring::digest::digest(&ring::digest::SHA256, bytes).as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
@@ -120,41 +81,6 @@ fn suffixes(count: usize) -> Result<Vec<String>, Error> {
             Ok(plan::suffix(&random))
         })
         .collect()
-}
-
-/// A template's problems, each at its line, as one refusal.
-struct Problems<'a> {
-    file: String,
-    template: &'a Template,
-    found: Vec<String>,
-}
-
-impl Problems<'_> {
-    /// A problem at a value of the template, or where its resource starts when the value is the Globals'.
-    fn at(&mut self, pointer: &str, message: &str) {
-        let resource: String = pointer.split('/').take(3).collect::<Vec<_>>().join("/");
-        let line = self.template.line(pointer).or_else(|| self.template.line(&resource));
-        self.line(line, message);
-    }
-
-    fn line(&mut self, line: Option<usize>, message: &str) {
-        let file = &self.file;
-        self.found.push(match line {
-            Some(line) => format!("{file}:{line}: {message}"),
-            None => format!("{file}: {message}"),
-        });
-    }
-
-    fn refusal(self) -> Result<(), Error> {
-        match self.found.len() {
-            0 => Ok(()),
-            count => Err(Error::usage(format!(
-                "ff deploy changed nothing: the template has {}\n{}",
-                if count == 1 { "a problem".to_owned() } else { format!("{count} problems") },
-                self.found.join("\n")
-            ))),
-        }
-    }
 }
 
 /// The stack as FF keeps it, saved whole as the deploy goes: what it made is the stack's when it stops halfway.
@@ -740,38 +666,12 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
             if flags.len() == 1 { "is" } else { "are" }
         )));
     }
-    let path = &args.path;
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| Error::usage(format!("Couldn't read {} as UTF-8 text: {error}", path.display())))?;
-    let file = path.display().to_string();
-    let template = sam::read(&text).map_err(|error| {
-        Error::usage(format!(
-            "{file}:{}: CloudFormation can't read it, at column {}: {}",
-            error.at.line, error.at.column, error.message
-        ))
+    let read = Read::of(&args.path, args.stack_name.as_deref(), &args.parameter_overrides, |_| {
+        Err(Error::usage(format!(
+            "Name the stack: --stack-name, or stack_name in {SAMCONFIG}, as `sam deploy` takes it"
+        )))
     })?;
-    let at = Location::of(path);
-    let config = samconfig(&at.project)?;
-    let stack_name = match (&args.stack_name, config.as_ref().and_then(|config| config.stack_name.as_ref())) {
-        (Some(name), _) | (None, Some(name)) => name.clone(),
-        (None, None) => {
-            return Err(Error::usage(format!(
-                "Name the stack: --stack-name, or stack_name in {SAMCONFIG}, as `sam deploy` takes it"
-            )));
-        }
-    };
-    if !is_stack_name(&stack_name) {
-        return Err(Error::usage(format!(
-            "{stack_name} can't be a stack's name: letters, digits and hyphens, a letter first, 128 at most, as CloudFormation's"
-        )));
-    }
-    let (given, from) = if args.parameter_overrides.is_empty() {
-        (config.map(|config| config.parameter_overrides).unwrap_or_default(), SAMCONFIG)
-    } else {
-        let overrides = parameters::overrides(&args.parameter_overrides)
-            .map_err(|why| Error::usage(format!("--parameter-overrides: {why}")))?;
-        (overrides, "--parameter-overrides")
-    };
+    let Read { text, template, at, stack_name, .. } = &read;
 
     let settings = context.settings()?;
     let client = Client::new(&settings)?;
@@ -787,7 +687,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     let sqs_function_endpoint =
         if aws.sqs_function_endpoint.is_empty() { &aws.sqs_endpoint } else { &aws.sqs_function_endpoint };
     let place = Place {
-        stack: &stack_name,
+        stack: stack_name,
         region: &aws.region,
         account: &account.id,
         sqs_endpoint: &aws.sqs_endpoint,
@@ -798,32 +698,15 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     let last_resources = last.as_ref().map(|stack| stack.resources.as_slice()).unwrap_or_default();
 
     // Every problem before any change: the template's, its parameters', then what the account has.
-    let values = parameters::values(&template, &given_values(&template, last.as_ref(), given));
-    let mut problems = Problems { file: file.clone(), template: &template, found: Vec::new() };
-    let parameter_line = |name: &str| template.line(&format!("/Parameters/{name}"));
-    // What is outside FF's subset is refused too, which `ff doctor` warns of since AWS takes it.
-    for problem in subset::check(&template, &values.values) {
-        problems.line(problem.line, &problem.message);
-    }
-    for (name, why) in &values.refused {
-        problems.line(parameter_line(name), &format!("the parameter {name}: {why}, which CloudFormation refuses"));
-    }
-    for name in &values.missing {
-        problems.line(
-            parameter_line(name),
-            &format!("the parameter {name} has no Default and no value: give one with --parameter-overrides {name}=…, or in {SAMCONFIG}"),
-        );
-    }
-    for name in &values.unknown {
-        context.out.warn(&format!("{from} gives {name}, which the template has no parameter for: ff deploy passes it over, as `sam deploy` does"));
-    }
+    let given = given_values(template, last.as_ref(), read.given.clone());
+    let (values, mut problems) = read.checked(&given, "ff deploy", NOTHING, context.out);
     // Each function, queue and bucket may need a name CloudFormation's way, with a random suffix.
     let named_in_template = template.value.get("Resources").and_then(Value::as_object).map_or(0, |resources| {
         let named = [FUNCTION, QUEUE, BUCKET];
         resources.values().filter(|resource| named.iter().any(|kind| resource["Type"] == *kind)).count()
     });
     let mut suffixes = suffixes(named_in_template)?;
-    let planned = plan::plan(&template, &values.values, &place, last_resources, &at.folder, &mut || {
+    let planned = plan::plan(template, &values.values, &place, last_resources, &at.folder, &mut || {
         suffixes.pop().unwrap_or_default()
     });
     let deployment = match planned {
@@ -836,7 +719,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
         }
     };
     problems.refusal()?;
-    let mut problems = Problems { file: file.clone(), template: &template, found: Vec::new() };
+    let mut problems = read.problems(NOTHING);
 
     let ours = |kind: &str, name: &str| {
         last_resources.iter().any(|resource| resource.kind == kind && resource.physical_id.as_deref() == Some(name))
@@ -907,7 +790,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
     check_named(&client, &deployment, &mut problems)?;
     let next = deployment.resources();
     let removed = plan::removed(last_resources, &next, &deployment.replace_policies());
-    let (built, indexes) = packages(&deployment.functions, &at, args, &mut problems, context)?;
+    let (built, indexes) = packages(&deployment.functions, at, args, &mut problems, context)?;
     problems.refusal()?;
     if !removed.deleted.is_empty()
         && !confirmed(
@@ -946,10 +829,10 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
         }
     }
     let template_sha256 = sha256_hex(text.as_bytes());
-    let parameters = kept_values(&template, &values.values);
+    let parameters = kept_values(template, &values.values);
     let mut record = Record {
         client: &client,
-        name: &stack_name,
+        name: stack_name,
         template_sha256: last.as_ref().map_or_else(|| template_sha256.clone(), |stack| stack.template_sha256.clone()),
         parameters: last.as_ref().map_or_else(|| parameters.clone(), |stack| stack.parameters.clone()),
         resources: last_resources
@@ -1105,7 +988,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
             .collect(),
         ..Known::new(&place, &values.values, place.sqs_endpoint)
     };
-    let outputs = plan::outputs(&template, &known);
+    let outputs = plan::outputs(template, &known);
     let seconds = deploy::seconds_since(started);
     let removal_lines: Vec<String> = removal_lines(&removed).collect();
     let plan::Removed { deleted, kept } = removed;
@@ -1154,7 +1037,7 @@ pub fn deploy(args: &DeployArgs, context: &Context) -> Result<(), Error> {
 pub fn delete_stack(name: Option<&str>, yes: bool, context: &Context) -> Result<(), Error> {
     let name = match name {
         Some(name) => name.to_owned(),
-        None => samconfig(Path::new("."))?.and_then(|config| config.stack_name).ok_or_else(|| {
+        None => template::samconfig(Path::new("."))?.and_then(|config| config.stack_name).ok_or_else(|| {
             Error::usage(format!("Name the stack: ff delete-stack <name>, or run it where {SAMCONFIG} names it"))
         })?,
     };
@@ -1188,27 +1071,10 @@ pub fn delete_stack(name: Option<&str>, yes: bool, context: &Context) -> Result<
 mod tests {
     use super::*;
     use crate::api::types::DeletionPolicy;
+    use crate::sam::{self, parameters};
 
     fn template(text: &str) -> Template {
         sam::read(text).unwrap()
-    }
-
-    #[test]
-    fn a_stacks_name_is_cloudformations() {
-        assert!(is_stack_name("shop-prod2"));
-        for refused in ["", "2shop", "shop_prod", "shop.prod", &"s".repeat(129)] {
-            assert!(!is_stack_name(refused), "{refused}");
-        }
-    }
-
-    #[test]
-    fn sam_builds_template_names_its_built_folders_and_its_project_is_two_folders_up() {
-        let built = Location::of(Path::new("app/.aws-sam/build/template.yaml"));
-        assert_eq!((built.folder, built.project, built.built), ("app/.aws-sam/build".into(), "app".into(), true));
-        let here = Location::of(Path::new(".aws-sam/build/template.yaml"));
-        assert_eq!((here.project, here.built), (".".into(), true));
-        let source = Location::of(Path::new("template.yaml"));
-        assert_eq!((source.folder, source.project, source.built), (".".into(), ".".into(), false));
     }
 
     #[test]

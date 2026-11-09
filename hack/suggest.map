@@ -50,7 +50,7 @@ runtimes/*                              static unit security l3 l4 l5 cli aws-to
 # The ff command; its Terraform project is AWS's tools' too.
 cli/src/commands/init.rs                static unit cli:init aws-tools
 cli/release/*                           static unit cli:downloads
-cli/src/images.rs                       static unit cli:local,local_images
+cli/src/local/images.rs                 static unit cli:local,local_images
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.

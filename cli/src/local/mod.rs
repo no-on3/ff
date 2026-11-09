@@ -1,12 +1,19 @@
 //! A function run on this machine as production runs it (ADR 0002): in its runtime image, on
 //! Docker, with the pod's hardening (a read-only root, uid 10001, no capability, no new
-//! privileges), its memory and CPU, and the variables the backend gives a function's pod.
+//! privileges), its memory and CPU, and the variables the backend gives a function's pod; started,
+//! its code loaded, called and its log followed the same way by each of `ff local`'s commands.
+//! [`images`] finds its runtime's image, [`http`] serves HTTP on this machine, and [`url`] serves a
+//! function as its URL would.
 
-use std::io::Read;
+pub mod http;
+pub mod images;
+pub mod url;
+
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::Mutex;
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::cli::Runtime;
@@ -29,6 +36,8 @@ pub struct LocalFunction {
     pub memory: u32,
     pub timeout: u32,
     pub code: Code,
+    /// What the runtime calls: the module's path from the code's root, a dot, and its function.
+    pub handler: String,
     /// The function's own variables.
     pub environment: std::collections::BTreeMap<String, String>,
 }
@@ -99,7 +108,7 @@ pub fn run_args(function: &LocalFunction, container: &str, image: &str, port: Op
         ("FUNCTION_TIMEOUT", timeout_ms.to_string()),
         ("FF_MAX_QUEUE_WAIT_MS", timeout_ms.to_string()),
         ("LAMBDA_TASK_ROOT", "/var/task".to_owned()),
-        ("FF_HANDLER", "function.handler".to_owned()),
+        ("FF_HANDLER", function.handler.clone()),
         ("FF_EVENT_FORMAT", "lambda".to_owned()),
         ("PORT", RUNTIME_PORT.to_string()),
     ];
@@ -201,6 +210,55 @@ impl Container {
         }
     }
 
+    /// Starts it, then waits for its code to load: a load that failed is an error that exits 4, its log given to
+    /// `failed_log` before the container goes.
+    pub fn start_loaded(
+        function: &LocalFunction,
+        image: &str,
+        port: Option<u16>,
+        failed_log: impl FnOnce(&str),
+    ) -> Result<Container, Error> {
+        let container = Container::start(function, image, port)?;
+        match wait_until_ready(&container, function.timeout)? {
+            Readiness::Ready => Ok(container),
+            Readiness::Failed { error_type, message } => {
+                failed_log(&container.logs());
+                Err(Error::new(Kind::DeployFailed, format!("The function failed to load: {error_type}: {message}")))
+            }
+        }
+    }
+
+    /// Its log as it comes, the runtime's and the function's, written to `sink` line by line until the container goes
+    /// or the child is killed.
+    pub fn follow_log(&self, sink: impl Write + Send + 'static) -> Result<Child, Error> {
+        let mut follower = Command::new("docker")
+            .args(["logs", "--follow", &self.name])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| Error::new(Kind::Failed, format!("Couldn't follow the function's log: {error}")))?;
+        let sink = Arc::new(Mutex::new(sink));
+        let streams: [Option<Box<dyn Read + Send>>; 2] = [
+            follower.stdout.take().map(|stream| Box::new(stream) as Box<dyn Read + Send>),
+            follower.stderr.take().map(|stream| Box::new(stream) as Box<dyn Read + Send>),
+        ];
+        for stream in streams.into_iter().flatten() {
+            let sink = Arc::clone(&sink);
+            std::thread::spawn(move || {
+                let mut lines = BufReader::new(stream);
+                let mut line = Vec::new();
+                while lines.read_until(b'\n', &mut line).is_ok_and(|read| read > 0) {
+                    if let Ok(mut sink) = sink.lock() {
+                        let _ = sink.write_all(&line).and_then(|()| sink.flush());
+                    }
+                    line.clear();
+                }
+            });
+        }
+        Ok(follower)
+    }
+
     /// Its log lines so far: the runtime's and the function's.
     pub fn logs(&self) -> String {
         docker(&["logs".into(), self.name.clone()])
@@ -245,13 +303,32 @@ pub struct Answer {
     pub body: String,
 }
 
-/// `POST /invoke` with the event, as the backend calls a pod: waited for up to the timeout and
-/// 10 s more.
-pub fn invoke(container: &Container, event: &serde_json::Value, timeout: u32) -> Result<Answer, Error> {
+impl Answer {
+    /// The function's own error, its type and its message, as Lambda's error document has them: what it threw, its
+    /// timeout, its memory, its exit; none for its answer, or for a refusal of the call itself.
+    pub fn function_error(&self) -> Option<(String, String)> {
+        if self.status == 200 {
+            return None;
+        }
+        let body: serde_json::Value = serde_json::from_str(&self.body).unwrap_or_default();
+        let error_type = body["errorType"].as_str().unwrap_or("Runtime.Unknown");
+        let the_functions = self.function_error
+            || matches!(error_type, "Sandbox.Timedout" | "Runtime.OutOfMemory" | "Runtime.ExitError");
+        the_functions
+            .then(|| (error_type.to_owned(), body["errorMessage"].as_str().unwrap_or(self.body.trim()).to_owned()))
+    }
+}
+
+/// `POST /invoke` with the event to the runtime on this machine's port, as the backend calls a pod,
+/// under the request's ID when one is given, which the function's context has: waited for up to the
+/// timeout and 10 s more.
+pub fn call(port: u16, event: &serde_json::Value, request_id: Option<&str>, timeout: u32) -> Result<Answer, Error> {
     let agent = local_agent(Duration::from_secs(u64::from(timeout) + 10));
-    let mut response = agent
-        .post(container.url("/invoke"))
-        .header("content-type", "application/json")
+    let mut request = agent.post(format!("http://127.0.0.1:{port}/invoke")).header("content-type", "application/json");
+    if let Some(id) = request_id {
+        request = request.header("x-ff-request-id", id);
+    }
+    let mut response = request
         .send(event.to_string())
         .map_err(|error| Error::new(Kind::Failed, format!("The function's container didn't answer: {error}")))?;
     let header = |name: &str| response.headers().get(name).and_then(|value| value.to_str().ok()).map(str::to_owned);
@@ -321,6 +398,7 @@ mod tests {
             memory: 128,
             timeout: 5,
             code,
+            handler: "function.handler".into(),
             environment: Default::default(),
         }
     }

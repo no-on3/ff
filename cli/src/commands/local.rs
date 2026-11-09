@@ -3,7 +3,6 @@
 
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
@@ -18,9 +17,7 @@ use super::deploy::{name_of, runtime_of};
 use super::invoke::input_of;
 use crate::cli::{Format, LocalArgs, Runtime};
 use crate::error::{Error, Kind};
-use crate::images;
-use crate::local::{self, Answer, Code, Container, LocalFunction, Readiness};
-use crate::local_url;
+use crate::local::{self, Answer, Code, Container, LocalFunction, images, url as local_url};
 use crate::progress::Progress;
 
 /// The function a path holds: a file, its runtime from its extension; or a folder, its runtime
@@ -47,6 +44,7 @@ pub fn local_function(args: &LocalArgs) -> Result<LocalFunction, Error> {
         memory: args.memory,
         timeout: args.timeout,
         code,
+        handler: "function.handler".to_owned(),
         environment,
     })
 }
@@ -71,15 +69,13 @@ pub fn answer_error(answer: &Answer) -> Option<Error> {
     if answer.status == 200 {
         return None;
     }
+    if let Some((error_type, message)) = answer.function_error() {
+        return Some(Error::new(Kind::InvocationFailed, format!("{error_type}: {message}")));
+    }
     let body: Value = serde_json::from_str(&answer.body).unwrap_or_default();
     let error_type = body["errorType"].as_str().unwrap_or("Runtime.Unknown");
     let message = body["errorMessage"].as_str().unwrap_or(answer.body.trim());
-    let the_functions =
-        answer.function_error || matches!(error_type, "Sandbox.Timedout" | "Runtime.OutOfMemory" | "Runtime.ExitError");
-    Some(Error::new(
-        if the_functions { Kind::InvocationFailed } else { Kind::Failed },
-        format!("{error_type}: {message}"),
-    ))
+    Some(Error::new(Kind::Failed, format!("{error_type}: {message}")))
 }
 
 fn print_log(context: &Context, log: &str) {
@@ -105,17 +101,11 @@ fn started(function: &LocalFunction, image: &str, port: Option<u16>, context: &C
         context.out,
         &format!("starting {} ({}, {} MB) in {image}", function.name, function.runtime.as_str(), function.memory),
     );
-    let started = Container::start(function, image, port).and_then(|container| {
-        let readiness = local::wait_until_ready(&container, function.timeout)?;
-        Ok((container, readiness))
-    });
+    let mut failed_log = String::new();
+    let started = Container::start_loaded(function, image, port, |log| failed_log = log.to_owned());
     progress.stop();
-    let (container, readiness) = started?;
-    if let Readiness::Failed { error_type, message } = readiness {
-        print_log(context, &container.logs());
-        return Err(Error::new(Kind::DeployFailed, format!("The function failed to load: {error_type}: {message}")));
-    }
-    Ok(container)
+    print_log(context, &failed_log);
+    started
 }
 
 pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context) -> Result<(), Error> {
@@ -126,7 +116,7 @@ pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context
     local::remove_on_interrupt();
 
     let container = started(&function, &image, None, context)?;
-    let answer = local::invoke(&container, &event, function.timeout)?;
+    let answer = local::call(container.port, &event, None, function.timeout)?;
     let log = container.logs();
     drop(container);
     print_log(context, &log);
@@ -209,15 +199,7 @@ pub fn start(args: &LocalArgs, port: Option<u16>, watch: bool, url: bool, contex
             }
         })?;
         // Its log as it comes, on stderr, until the container goes, or a file changes: stdout has the address alone.
-        let mut logs = Command::new("docker")
-            .args(["logs", "--follow", &container.name])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(|error| Error::new(Kind::Failed, format!("Couldn't follow the function's log: {error}")))?;
-        if let Some(mut lines) = logs.stdout.take() {
-            std::thread::spawn(move || std::io::copy(&mut lines, &mut std::io::stderr()));
-        }
+        let mut logs = container.follow_log(std::io::stderr())?;
         if !watch {
             let _ = logs.wait();
             return Ok(());

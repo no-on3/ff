@@ -127,7 +127,7 @@ pub fn sam_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
 
 /// Writes a SAM application's folder, which must not exist yet, or be empty.
 fn create_sam(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf>, Error> {
-    if !super::stack::is_stack_name(name) {
+    if !super::template::is_stack_name(name) {
         return Err(Error::usage(format!(
             "\"{name}\" can't name a SAM application, which names its stack: letters, digits and hyphens, a letter \
              first, 128 at most, as CloudFormation's"

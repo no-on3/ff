@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The runtime images of a release of ff, which `ff local` runs functions in, pinned by digest. Each built from
 # runtimes/<runtime> for AWS Lambda's x86_64 (linux/amd64), which `ff package` builds for too, and tagged as the
-# repository tags it (cli/src/local.rs) with "-ff-<version>" after; pushed to <repository>/ff-runtime-<runtime>; then
+# repository tags it (cli/src/local/mod.rs) with "-ff-<version>" after; pushed to <repository>/ff-runtime-<runtime>; then
 # saved and compressed into <folder>/images/, the archive `ff local` loads when Docker can't pull the image (gzip, which
 # every Docker's load reads). <folder>/runtime-images.json names, for each runtime, the image, its tag, its digest on
 # the registry and its archive's path on the downloads site: the release's builds take it in FF_BUILD_RUNTIME_IMAGES,
@@ -43,14 +43,14 @@ case "$version" in '' | *[!0-9A-Za-z.-]* | [-.]*) refuse "\"$version\" isn't a v
 repository_tag() {
   local constant
   case "$1" in nodejs) constant=NODEJS_IMAGE ;; python) constant=PYTHON_IMAGE ;; *) refuse "no runtime $1" ;; esac
-  sed -n "s/^pub const $constant: &str = \"\\(.*\\)\";\$/\\1/p" "$repo/cli/src/local.rs"
+  sed -n "s/^pub const $constant: &str = \"\\(.*\\)\";\$/\\1/p" "$repo/cli/src/local/mod.rs"
 }
 
 mkdir -p "$folder/images"
 manifest='{}'
 for runtime in "${runtimes[@]}"; do
   local_tag="$(repository_tag "$runtime")"
-  [ -n "$local_tag" ] || refuse "cli/src/local.rs names no image for $runtime"
+  [ -n "$local_tag" ] || refuse "cli/src/local/mod.rs names no image for $runtime"
   name="${local_tag%%:*}"
   tag="${local_tag#*:}-ff-$version"
   image="$repository/$name"

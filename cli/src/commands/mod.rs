@@ -29,6 +29,7 @@ mod schedule;
 mod secrets;
 mod sites;
 mod stack;
+mod template;
 mod url;
 mod version;
 mod versions;

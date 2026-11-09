@@ -408,9 +408,9 @@ mod tests {
     }
 
     // The minisign fixtures stand in for an archive: a file, its signature by the tests' key, the file's name in it.
-    const KEY: &str = include_str!("minisign/fixtures/release.pub");
-    const FILE: &[u8] = include_bytes!("minisign/fixtures/latest.json");
-    const SIGNATURE: &[u8] = include_bytes!("minisign/fixtures/latest.json.minisig");
+    const KEY: &str = include_str!("../minisign/fixtures/release.pub");
+    const FILE: &[u8] = include_bytes!("../minisign/fixtures/latest.json");
+    const SIGNATURE: &[u8] = include_bytes!("../minisign/fixtures/latest.json.minisig");
 
     fn key() -> PublicKey {
         PublicKey::from_base64(KEY.lines().nth(1).unwrap()).unwrap()

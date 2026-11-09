@@ -4,45 +4,24 @@
 //! and `url-response.ts`). What the gateway answers itself, it answers here the same way: a JSON
 //! `Message`.
 
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Map, Value, json};
 
-/// A request, and a response, may hold 6 MB, as on Lambda.
-const PAYLOAD_LIMIT: usize = 6 * 1024 * 1024;
+use super::http::{self, Answers, PAYLOAD_LIMIT, percent_decode};
+pub use super::http::{Request, Response};
+
 /// Headers that belong to one connection, never passed on (RFC 9110, §7.6.1).
 const HOP_BY_HOP: [&str; 7] =
     ["connection", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"];
 /// Headers the server sets itself: never the function's.
 const SERVER_HEADERS: [&str; 8] =
     ["connection", "content-length", "keep-alive", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade"];
-
-/// A request as the front read it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Request {
-    pub method: String,
-    /// The path and query string, as the request line has them.
-    pub target: String,
-    pub protocol: String,
-    /// In order, as sent.
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
-
-/// A response to send.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Response {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
-}
 
 /// An answer the front gives itself, as the gateway does: a status, and a JSON Message.
 pub fn message(status: u16, message: &str) -> Response {
@@ -53,48 +32,12 @@ pub fn message(status: u16, message: &str) -> Response {
     }
 }
 
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'+' => decoded.push(b' '),
-            b'%' if index + 2 < bytes.len() => {
-                let hex = std::str::from_utf8(&bytes[index + 1..index + 3])
-                    .ok()
-                    .and_then(|hex| u8::from_str_radix(hex, 16).ok());
-                match hex {
-                    Some(byte) => {
-                        decoded.push(byte);
-                        index += 2;
-                    }
-                    None => decoded.push(b'%'),
-                }
-            }
-            byte => decoded.push(byte),
-        }
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
 /// API Gateway's request time, `12/Mar/2020:19:03:58 +0000`, in UTC.
 pub fn request_time(time: SystemTime) -> String {
     const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     let rfc3339 = humantime::format_rfc3339_seconds(time).to_string(); // 2026-10-21T08:00:00Z
     let month = rfc3339[5..7].parse::<usize>().map(|month| MONTHS[month - 1]).unwrap_or("Jan");
     format!("{}/{month}/{}:{} +0000", &rfc3339[8..10], &rfc3339[..4], &rfc3339[11..19])
-}
-
-/// A random UUID, version 4, for each call's request ID.
-pub fn request_id() -> String {
-    let mut bytes = [0u8; 16];
-    let _ = getrandom::fill(&mut bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
 }
 
 /// The event the request becomes: payload format 2.0, as a function URL sends it.
@@ -264,114 +207,23 @@ pub fn answer(output: &Value) -> Result<Response, String> {
     Ok(Response { status, headers, body })
 }
 
-/// Reads one request: its line, its headers, and its body by its length or its chunks.
-pub fn read_request(stream: &mut impl BufRead) -> io::Result<Option<Request>> {
-    let mut line = String::new();
-    if stream.read_line(&mut line)? == 0 {
-        return Ok(None);
-    }
-    let mut parts = line.trim_end().splitn(3, ' ');
-    let (method, target, protocol) =
-        (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("HTTP/1.1"));
-    let mut request = Request {
-        method: method.to_owned(),
-        target: target.to_owned(),
-        protocol: protocol.to_owned(),
-        ..Default::default()
-    };
-    loop {
-        let mut line = String::new();
-        stream.read_line(&mut line)?;
-        let line = line.trim_end_matches(['\r', '\n']);
-        if line.is_empty() {
-            break;
-        }
-        if let Some((name, value)) = line.split_once(':') {
-            request.headers.push((name.trim().to_owned(), value.trim().to_owned()));
-        }
-    }
-    let header = |name: &str| {
-        request.headers.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value.clone())
-    };
-    if header("transfer-encoding").is_some_and(|encoding| encoding.eq_ignore_ascii_case("chunked")) {
-        loop {
-            let mut size = String::new();
-            stream.read_line(&mut size)?;
-            let size = usize::from_str_radix(size.trim().split(';').next().unwrap_or("0"), 16)
-                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-            if request.body.len() + size > PAYLOAD_LIMIT {
-                return Err(io::Error::new(io::ErrorKind::FileTooLarge, "over 6 MB"));
-            }
-            let mut chunk = vec![0; size + 2];
-            stream.read_exact(&mut chunk)?;
-            if size == 0 {
-                break;
-            }
-            request.body.extend_from_slice(&chunk[..size]);
-        }
-    } else if let Some(length) = header("content-length").and_then(|length| length.parse::<usize>().ok()) {
-        if length > PAYLOAD_LIMIT {
-            return Err(io::Error::new(io::ErrorKind::FileTooLarge, "over 6 MB"));
-        }
-        request.body = vec![0; length];
-        stream.read_exact(&mut request.body)?;
-    }
-    Ok(Some(request))
-}
-
-fn write_response(stream: &mut TcpStream, response: &Response, request_id: &str, head_only: bool) -> io::Result<()> {
-    let reason = ureq::http::StatusCode::from_u16(response.status)
-        .ok()
-        .and_then(|status| status.canonical_reason())
-        .unwrap_or("");
-    let mut head =
-        format!("HTTP/1.1 {} {reason}\r\nx-amzn-RequestId: {request_id}\r\nconnection: close\r\n", response.status);
-    for (name, value) in &response.headers {
-        head.push_str(&format!("{name}: {value}\r\n"));
-    }
-    let bodiless = matches!(response.status, 204 | 304);
-    if !bodiless {
-        head.push_str(&format!("content-length: {}\r\n", response.body.len()));
-    }
-    head.push_str("\r\n");
-    stream.write_all(head.as_bytes())?;
-    if !bodiless && !head_only {
-        stream.write_all(&response.body)?;
-    }
-    stream.flush()
-}
-
 /// Calls the function's container with the event, as the backend calls a pod; the response.
 fn call(runtime_port: u16, event: &Value, request_id: &str, timeout: u32) -> Response {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(u64::from(timeout) + 10)))
-        .proxy(None)
-        .build()
-        .into();
-    let sent = agent
-        .post(format!("http://127.0.0.1:{runtime_port}/invoke"))
-        .header("content-type", "application/json")
-        .header("x-ff-request-id", request_id)
-        .send(event.to_string());
-    let mut reply = match sent {
-        Ok(reply) => reply,
+    let ran = match super::call(runtime_port, event, Some(request_id), timeout) {
+        Ok(ran) => ran,
         Err(error) => {
-            eprintln!("ff local: the function's container didn't answer ({error})");
+            eprintln!("ff local: {}", error.message);
             return message(502, "Internal Server Error");
         }
     };
-    let status = reply.status().as_u16();
-    let mut text = String::new();
-    let _ = reply.body_mut().as_reader().read_to_string(&mut text);
-    match status {
+    match ran.status {
         200 => {}
         // No instance was free in time: the caller may try again.
         429 => return message(429, "Too Many Requests"),
         // The function's own error, which the log has: the caller gets 502, as from the gateway.
         _ => return message(502, "Internal Server Error"),
     }
-    let output: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let output: Value = serde_json::from_str(&ran.body).unwrap_or(Value::Null);
     match answer(&output) {
         Ok(response) if response.body.len() > PAYLOAD_LIMIT => {
             eprintln!("ff local: the function answered {} bytes, over the 6 MB limit: 502", response.body.len());
@@ -385,44 +237,36 @@ fn call(runtime_port: u16, event: &Value, request_id: &str, timeout: u32) -> Res
     }
 }
 
-/// Serves the function's URL on the listener, each request on a thread of its own, calling the
-/// container on the port the shared value names (a restart, with `--watch`, changes it).
-pub fn serve(listener: TcpListener, runtime_port: Arc<AtomicU16>, timeout: u32) {
-    thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
-            let runtime_port = Arc::clone(&runtime_port);
-            thread::spawn(move || {
-                let mut stream = stream;
-                let source_ip = stream
-                    .peer_addr()
-                    .map(|address| address.ip().to_string())
-                    .unwrap_or_else(|_| "127.0.0.1".to_owned());
-                let request_id = request_id();
-                let read =
-                    BufReader::new(stream.try_clone().expect("a socket clones")).take(PAYLOAD_LIMIT as u64 + 64 * 1024);
-                let mut reader = BufReader::new(read);
-                let (response, head_only) = match read_request(&mut reader) {
-                    Ok(Some(request)) => {
-                        let event = event(&request, &request_id, SystemTime::now(), &source_ip);
-                        (
-                            call(runtime_port.load(Ordering::SeqCst), &event, &request_id, timeout),
-                            request.method == "HEAD",
-                        )
-                    }
-                    Ok(None) => return,
-                    Err(error) if error.kind() == io::ErrorKind::FileTooLarge => {
-                        (message(413, "Request Entity Too Large"), false)
-                    }
-                    Err(_) => (message(400, "Bad Request"), false),
-                };
-                let _ = write_response(&mut stream, &response, &request_id, head_only);
-            });
+/// A function's URL on this machine: each request calls the container on the port the shared value names, which a
+/// restart, with `--watch`, changes.
+struct Front {
+    runtime_port: Arc<AtomicU16>,
+    timeout: u32,
+}
+
+impl Answers for Front {
+    fn answer(&self, request: &Request, request_id: &str, source_ip: &str) -> Response {
+        let event = event(request, request_id, SystemTime::now(), source_ip);
+        call(self.runtime_port.load(Ordering::SeqCst), &event, request_id, self.timeout)
+    }
+
+    fn unreadable(&self, too_large: bool) -> Response {
+        match too_large {
+            true => message(413, "Request Entity Too Large"),
+            false => message(400, "Bad Request"),
         }
-    });
+    }
+}
+
+/// Serves the function's URL on the listener.
+pub fn serve(listener: TcpListener, runtime_port: Arc<AtomicU16>, timeout: u32) {
+    http::serve(listener, Arc::new(Front { runtime_port, timeout }));
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     fn request(method: &str, target: &str, headers: &[(&str, &str)], body: &[u8]) -> Request {
@@ -540,27 +384,10 @@ mod tests {
     }
 
     #[test]
-    fn a_request_is_read_by_its_length_or_its_chunks() {
-        let by_length = b"POST /a?b=1 HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhelloEXTRA";
-        let chunked = b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
-
-        let first = read_request(&mut &by_length[..]).unwrap().unwrap();
-        let second = read_request(&mut &chunked[..]).unwrap().unwrap();
-
-        assert_eq!(
-            (first.method.as_str(), first.target.as_str(), first.body.as_slice()),
-            ("POST", "/a?b=1", &b"hello"[..])
-        );
-        assert_eq!(second.body, b"hello world");
-        let too_large = format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", PAYLOAD_LIMIT + 1);
-        assert_eq!(read_request(&mut too_large.as_bytes()).unwrap_err().kind(), io::ErrorKind::FileTooLarge);
-    }
-
-    #[test]
     fn times_and_ids_are_as_api_gateways() {
         assert_eq!(request_time(at()), "21/Oct/2026:08:00:00 +0000");
-        let id = request_id();
+        let id = http::request_id();
         assert!(id.len() == 36 && id.as_bytes()[14] == b'4', "{id}");
-        assert_ne!(request_id(), id);
+        assert_ne!(http::request_id(), id);
     }
 }
