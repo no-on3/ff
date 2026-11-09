@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # hack/lib/changes.sh, on paths and on a repository of its own: documents are docs/ and *.md, the ff command's templates
-# are code, and so is every file the ff command embeds (include_str!, include_bytes!), whatever its name, so that a push
-# that changes one runs every job; commits that change only documents skip the heavy jobs, the others don't, and two
-# commits that can't be compared run everything. In a second or so.
+# are code, and so is every file the ff command embeds (include_str!, include_bytes!, ff init's template_files!), whatever
+# its name, so that a push that changes one runs every job; commits that change only documents skip the heavy jobs, the
+# others don't, and two commits that can't be compared run everything. In a second or so.
 #   hack/test-changes.sh
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -18,7 +18,7 @@ section "paths"
 for path in docs/getting-started.md docs/how-it-works.html docs/adr/0010-queue.md README.md hack/spikes/lambda/README.md; do
   check "$path is a document" document "$(kind "$path")"
 done
-for path in cli/templates/README.md cli/templates/function.ts hack/ci.sh .github/workflows/ci.yml BE/src/main.ts docs.sh; do
+for path in cli/templates/function/README.md cli/templates/function/nodejs/function.ts hack/ci.sh .github/workflows/ci.yml BE/src/main.ts docs.sh; do
   check "$path is code" code "$(kind "$path")"
 done
 check "only documents, and none at all, skip the heavy jobs; one path of code doesn't" "true true false" \
@@ -26,16 +26,21 @@ check "only documents, and none at all, skip the heavy jobs; one path of code do
 $(printf '%s\n' docs/a.md hack/ci.sh | only_documents && echo true || echo false)"
 
 section "what the ff command embeds is code"
-# Each include_str!/include_bytes! path, from the file it is in to the repository's root.
-embedded="$(cd "$repo" && git grep -nE 'include_(str|bytes)!\("' -- 'cli/src/*.rs' | python3 -c '
+# Each include_str!/include_bytes! path, from the file it is in to the repository's root; and each file of ff init's
+# templates, which template_files! lists by its path in its template's folder.
+embedded="$(cd "$repo" && git grep -lE 'include_(str|bytes)!\(|template_files!\(' -- 'cli/src/*.rs' | python3 -I -c '
 import os, re, sys
-for line in sys.stdin:
-    file, _, code = line.split(":", 2)
+for file in sys.stdin.read().split():
+    code = open(file, encoding="utf-8").read()
     for target in re.findall(r"include_(?:str|bytes)!\(\"([^\"]+)\"\)", code):
         print(os.path.normpath(os.path.join(os.path.dirname(file), target)))
+    for folder, paths in re.findall(r"template_files!\(\s*\"([^\"]+)\",\s*\[([^\]]*)\]", code):
+        for path in re.findall(r"\"([^\"]+)\"", paths):
+            print(os.path.join("cli/templates", folder, path))
 ' | sort -u)"
 check "the ff command embeds files: its templates and the backend's sources it checks against" true \
-  "$(grep -x 'cli/templates/README.md' <<<"$embedded" >/dev/null && grep '^BE/src/' <<<"$embedded" >/dev/null && echo true || echo false)"
+  "$(grep -x 'cli/templates/function/README.md' <<<"$embedded" >/dev/null && grep -x 'cli/templates/sam/gitignore' <<<"$embedded" >/dev/null &&
+    grep '^BE/src/' <<<"$embedded" >/dev/null && echo true || echo false)"
 check "every one of them is code" "" "$(while read -r path; do is_document "$path" && echo "$path"; done <<<"$embedded" | paste -sd' ')"
 
 section "commits"

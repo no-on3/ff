@@ -16,78 +16,94 @@ use crate::cli::{Runtime, Template};
 use crate::config::is_function_name;
 use crate::error::{Error, Kind};
 
-const FUNCTION_TS: &str = include_str!("../../templates/function.ts");
-const FUNCTION_PY: &str = include_str!("../../templates/function.py");
-const EVENT: &str = include_str!("../../templates/event.json");
-const README: &str = include_str!("../../templates/README.md");
+/// A template's files, each by its path in the template's folder under `cli/templates/` and its text: those under
+/// `nodejs/` and `python/` are that runtime's alone, written without that folder; the others are both runtimes'. A
+/// `gitignore` is written as `.gitignore`, which in this repository would apply to the repository itself.
+type Files = &'static [(&'static str, &'static str)];
 
-/// A Terraform project's files, by their path in it, but its code's.
-const TERRAFORM: [(&str, &str); 18] = [
-    ("providers.tf", include_str!("../../templates/terraform/providers.tf")),
-    ("main.tf", include_str!("../../templates/terraform/main.tf")),
-    ("README.md", include_str!("../../templates/terraform/README.md")),
-    (".gitignore", include_str!("../../templates/terraform/gitignore")),
-    ("modules/function/main.tf", include_str!("../../templates/terraform/modules/function/main.tf")),
-    ("modules/function/variables.tf", include_str!("../../templates/terraform/modules/function/variables.tf")),
-    ("modules/function/outputs.tf", include_str!("../../templates/terraform/modules/function/outputs.tf")),
-    ("modules/queue-worker/main.tf", include_str!("../../templates/terraform/modules/queue-worker/main.tf")),
-    ("modules/queue-worker/variables.tf", include_str!("../../templates/terraform/modules/queue-worker/variables.tf")),
-    ("modules/queue-worker/outputs.tf", include_str!("../../templates/terraform/modules/queue-worker/outputs.tf")),
-    ("modules/bucket-function/main.tf", include_str!("../../templates/terraform/modules/bucket-function/main.tf")),
-    (
+/// The files of the template whose folder is named, in the order they are written.
+macro_rules! template_files {
+    ($folder:literal, [$($path:literal),* $(,)?]) => {
+        &[$(($path, include_str!(concat!("../../templates/", $folder, "/", $path)))),*]
+    };
+}
+
+/// A function's folder: its handler in the runtime's language, an event to call it with, and a README.
+const FUNCTION: Files =
+    template_files!("function", ["nodejs/function.ts", "python/function.py", "events/event.json", "README.md"]);
+
+/// A Terraform project: FF's provider block, the app's four modules, its site, and its three functions' handlers.
+const TERRAFORM: Files = template_files!(
+    "terraform",
+    [
+        "providers.tf",
+        "main.tf",
+        "README.md",
+        "gitignore",
+        "modules/function/main.tf",
+        "modules/function/variables.tf",
+        "modules/function/outputs.tf",
+        "modules/queue-worker/main.tf",
+        "modules/queue-worker/variables.tf",
+        "modules/queue-worker/outputs.tf",
+        "modules/bucket-function/main.tf",
         "modules/bucket-function/variables.tf",
-        include_str!("../../templates/terraform/modules/bucket-function/variables.tf"),
-    ),
-    (
         "modules/bucket-function/outputs.tf",
-        include_str!("../../templates/terraform/modules/bucket-function/outputs.tf"),
-    ),
-    ("modules/site/main.tf", include_str!("../../templates/terraform/modules/site/main.tf")),
-    ("modules/site/variables.tf", include_str!("../../templates/terraform/modules/site/variables.tf")),
-    ("modules/site/outputs.tf", include_str!("../../templates/terraform/modules/site/outputs.tf")),
-    ("site/index.html", include_str!("../../templates/terraform/site/index.html")),
-    ("site/404.html", include_str!("../../templates/terraform/site/404.html")),
-];
+        "modules/site/main.tf",
+        "modules/site/variables.tf",
+        "modules/site/outputs.tf",
+        "site/index.html",
+        "site/404.html",
+        "nodejs/src/api.mjs",
+        "nodejs/src/worker.mjs",
+        "nodejs/src/uploads.mjs",
+        "python/src/api.py",
+        "python/src/worker.py",
+        "python/src/uploads.py",
+    ]
+);
 
-/// A Terraform project's code: its three functions' handlers, in each runtime.
-const TERRAFORM_NODEJS: [(&str, &str); 3] = [
-    ("src/api.mjs", include_str!("../../templates/terraform/src/api.mjs")),
-    ("src/worker.mjs", include_str!("../../templates/terraform/src/worker.mjs")),
-    ("src/uploads.mjs", include_str!("../../templates/terraform/src/uploads.mjs")),
-];
-const TERRAFORM_PYTHON: [(&str, &str); 3] = [
-    ("src/api.py", include_str!("../../templates/terraform/src/api.py")),
-    ("src/worker.py", include_str!("../../templates/terraform/src/worker.py")),
-    ("src/uploads.py", include_str!("../../templates/terraform/src/uploads.py")),
-];
+/// A SAM application, `sam init`'s hello world as FF takes it: its template, samconfig.toml naming its stack, a
+/// function URL's request as its event, and a README; its code in each runtime's language, in the folder and with the
+/// handler `sam init`'s has, and the handler's test.
+const SAM: Files = template_files!(
+    "sam",
+    [
+        "template.yaml",
+        "samconfig.toml",
+        "README.md",
+        "gitignore",
+        "events/event.json",
+        "nodejs/hello-world/app.mjs",
+        "nodejs/hello-world/package.json",
+        "nodejs/tests/unit/test-handler.mjs",
+        "python/hello_world/__init__.py",
+        "python/hello_world/app.py",
+        "python/hello_world/requirements.txt",
+        "python/tests/__init__.py",
+        "python/tests/unit/__init__.py",
+        "python/tests/unit/test_handler.py",
+    ]
+);
 
-/// A SAM application's files, by their path in it, but its code's: `sam init`'s hello world as FF takes it, its
-/// template, samconfig.toml naming its stack, a function URL's request as its event, and a README.
-const SAM: [(&str, &str); 5] = [
-    ("template.yaml", include_str!("../../templates/sam/template.yaml")),
-    ("samconfig.toml", include_str!("../../templates/sam/samconfig.toml")),
-    ("README.md", include_str!("../../templates/sam/README.md")),
-    (".gitignore", include_str!("../../templates/sam/gitignore")),
-    ("events/event.json", include_str!("../../templates/sam/event.json")),
-];
-/// Its code in each runtime's language, in the folder and with the handler `sam init`'s has, and the handler's test.
-const SAM_NODEJS: [(&str, &str); 3] = [
-    ("hello-world/app.mjs", include_str!("../../templates/sam/nodejs/hello-world/app.mjs")),
-    ("hello-world/package.json", include_str!("../../templates/sam/nodejs/hello-world/package.json")),
-    ("tests/unit/test-handler.mjs", include_str!("../../templates/sam/nodejs/tests/unit/test-handler.mjs")),
-];
-const SAM_PYTHON: [(&str, &str); 6] = [
-    ("hello_world/__init__.py", ""),
-    ("hello_world/app.py", include_str!("../../templates/sam/python/hello_world/app.py")),
-    ("hello_world/requirements.txt", include_str!("../../templates/sam/python/hello_world/requirements.txt")),
-    ("tests/__init__.py", ""),
-    ("tests/unit/__init__.py", ""),
-    ("tests/unit/test_handler.py", include_str!("../../templates/sam/python/tests/unit/test_handler.py")),
-];
+/// A template's files for a runtime, each by the path it is written at, with its text.
+fn files_for(files: Files, runtime: Runtime) -> impl Iterator<Item = (&'static str, &'static str)> {
+    files.iter().filter_map(move |&(path, text)| {
+        let (own, other) = match runtime {
+            Runtime::Nodejs => ("nodejs/", "python/"),
+            Runtime::Python => ("python/", "nodejs/"),
+        };
+        let written = match path.strip_prefix(own) {
+            Some(rest) => rest,
+            None if path.starts_with(other) => return None,
+            None => path,
+        };
+        Some((if written == "gitignore" { ".gitignore" } else { written }, text))
+    })
+}
 
 /// A SAM application's function in a runtime's language, as `sam init`'s hello world has it.
 struct SamCode {
-    files: &'static [(&'static str, &'static str)],
     /// The folder of its code, its CodeUri.
     code_uri: &'static str,
     handler: &'static str,
@@ -97,15 +113,10 @@ struct SamCode {
 
 const fn sam_code(runtime: Runtime) -> SamCode {
     match runtime {
-        Runtime::Nodejs => {
-            SamCode { files: &SAM_NODEJS, code_uri: "hello-world/", handler: "app.lambdaHandler", test: "node --test" }
+        Runtime::Nodejs => SamCode { code_uri: "hello-world/", handler: "app.lambdaHandler", test: "node --test" },
+        Runtime::Python => {
+            SamCode { code_uri: "hello_world/", handler: "app.lambda_handler", test: "python3 -m unittest" }
         }
-        Runtime::Python => SamCode {
-            files: &SAM_PYTHON,
-            code_uri: "hello_world/",
-            handler: "app.lambda_handler",
-            test: "python3 -m unittest",
-        },
     }
 }
 
@@ -122,7 +133,7 @@ pub fn sam_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
             // The README's command, its comment in the column of the others'.
             .replace("{{test}}", &format!("{:<41}", code.test))
     };
-    SAM.iter().chain(code.files).map(|(path, template)| (*path, fill(template))).collect()
+    files_for(SAM, runtime).map(|(path, template)| (path, fill(template))).collect()
 }
 
 /// Writes a SAM application's folder, which must not exist yet, or be empty.
@@ -139,14 +150,14 @@ fn create_sam(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf
 
 /// The files of a new function's folder, by their path in it, with the function's name in them.
 pub fn files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
-    let (file, handler, language, extension) = match runtime {
-        Runtime::Nodejs => ("function.ts", FUNCTION_TS, "TypeScript, for Node.js", "ts"),
-        Runtime::Python => ("function.py", FUNCTION_PY, "Python", "py"),
+    let (language, extension) = match runtime {
+        Runtime::Nodejs => ("TypeScript, for Node.js", "ts"),
+        Runtime::Python => ("Python", "py"),
     };
     let fill = |template: &str| {
         template.replace("{{name}}", name).replace("{{language}}", language).replace("{{extension}}", extension)
     };
-    vec![(file, fill(handler)), ("events/event.json", EVENT.to_owned()), ("README.md", fill(README))]
+    files_for(FUNCTION, runtime).map(|(path, template)| (path, fill(template))).collect()
 }
 
 /// The longest name of a Terraform project: its buckets and queues are named after it, and the longest of them,
@@ -210,9 +221,9 @@ pub fn terraform_files(
 ) -> Result<Vec<(&'static str, String)>, Error> {
     let endpoints = endpoints_block(aws)?;
     let key = terraform_key_command(name);
-    let (code, language) = match runtime {
-        Runtime::Nodejs => (&TERRAFORM_NODEJS, "JavaScript, for Node.js"),
-        Runtime::Python => (&TERRAFORM_PYTHON, "Python"),
+    let language = match runtime {
+        Runtime::Nodejs => "JavaScript, for Node.js",
+        Runtime::Python => "Python",
     };
     let fill = |template: &str| {
         template
@@ -224,7 +235,7 @@ pub fn terraform_files(
             .replace("{{language}}", language)
             .replace("{{key}}", &key)
     };
-    Ok(TERRAFORM.iter().chain(code.iter()).map(|(path, template)| (*path, fill(template))).collect())
+    Ok(files_for(TERRAFORM, runtime).map(|(path, template)| (path, fill(template))).collect())
 }
 
 #[derive(Serialize)]
@@ -337,6 +348,43 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The files under a folder, by their path in it, with `/` between its parts.
+    fn files_under(folder: &Path, prefix: &str, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let entry = entry.unwrap();
+            let path = format!("{prefix}{}", entry.file_name().to_string_lossy());
+            if entry.file_type().unwrap().is_dir() {
+                files_under(&entry.path(), &format!("{path}/"), found);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn each_template_s_folder_is_written_whole_as_its_list_names_every_file_once() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let templates = [("function", FUNCTION), ("sam", SAM), ("terraform", TERRAFORM)];
+        let mut folders: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "export")
+            .collect();
+        folders.sort();
+        assert_eq!(folders, templates.map(|(folder, _)| folder), "a template's folder that ff init doesn't know");
+        for (folder, files) in templates {
+            let mut found = Vec::new();
+            files_under(&root.join(folder), "", &mut found);
+            found.sort();
+            let mut listed: Vec<String> = files.iter().map(|(path, _)| path.to_string()).collect();
+            listed.sort();
+            assert_eq!(listed, found, "{folder}");
+        }
+        let written: Vec<&str> = files_for(SAM, Runtime::Python).map(|(path, _)| path).collect();
+        assert_eq!(written[..5], ["template.yaml", "samconfig.toml", "README.md", ".gitignore", "events/event.json"]);
+        assert!(written.contains(&"hello_world/app.py") && !written.iter().any(|path| path.ends_with(".mjs")));
+    }
 
     #[test]
     fn a_python_function_has_its_handler_an_event_and_a_readme_with_its_name() {
