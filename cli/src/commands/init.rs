@@ -86,6 +86,43 @@ const SAM: Files = template_files!(
     ]
 );
 
+/// A REST API at a function's URL, as SAM writes it: its routes by method and path, its items in PostgreSQL through
+/// `DATABASE_URL`, CORS for one origin; its code in `src/`, its tests in `tests/`, two requests in `events/`.
+const REST_API: Files = template_files!(
+    "rest-api",
+    [
+        "template.yaml",
+        "samconfig.toml",
+        "README.md",
+        "events/list-items.json",
+        "events/create-item.json",
+        "nodejs/gitignore",
+        "nodejs/src/app.mjs",
+        "nodejs/src/package.json",
+        "nodejs/src/package-lock.json",
+        "nodejs/tests/app.test.mjs",
+        "python/gitignore",
+        "python/src/app.py",
+        "python/src/requirements.txt",
+        "python/tests/__init__.py",
+        "python/tests/test_app.py",
+    ]
+);
+
+/// What a template makes, as `ff init --list` says it.
+fn about(template: Template) -> &'static str {
+    match template {
+        Template::Function => "a function's folder: its handler, an event to call it with, and a README (the default)",
+        Template::Terraform => {
+            "an app's Terraform project: FF's provider block and four modules, which apply on FF and on AWS"
+        }
+        Template::Sam => "sam init's hello world as FF takes it: one function at its URL, as a SAM application",
+        Template::RestApi => {
+            "a REST API at a function's URL: its routes by method and path, its items in PostgreSQL, CORS for one origin"
+        }
+    }
+}
+
 /// A template's files for a runtime, each by the path it is written at, with its text.
 fn files_for(files: Files, runtime: Runtime) -> impl Iterator<Item = (&'static str, &'static str)> {
     files.iter().filter_map(move |&(path, text)| {
@@ -134,6 +171,55 @@ pub fn sam_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
             .replace("{{test}}", &format!("{:<41}", code.test))
     };
     files_for(SAM, runtime).map(|(path, template)| (path, fill(template))).collect()
+}
+
+/// The longest name of the REST API: it names its stack, and its function `<name>-api`, which Lambda's 64 characters
+/// for a function's name hold.
+const REST_API_NAME_MOST: usize = 60;
+
+/// The files of a new REST API, by their path in it: its name, its stack's, in them, and its code in the runtime's
+/// language, with the commands that install its library and run its tests.
+pub fn rest_api_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
+    let (language, handler_file, install, test) = match runtime {
+        Runtime::Nodejs => (
+            "JavaScript, for Node.js",
+            "app.mjs",
+            "(cd src && npm ci)                               # pg, for ff local start: ff deploy and sam build install their own",
+            "node --test",
+        ),
+        Runtime::Python => (
+            "Python",
+            "app.py",
+            "# psycopg, Linux's build, beside the code for ff local start: ff deploy and sam build install their own\n\
+             python3 -m pip install -r src/requirements.txt -t src/ --only-binary=:all: \\\n  \
+             --implementation cp --python-version 3.13 --platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64",
+            "python3 -m unittest",
+        ),
+    };
+    let fill = |template: &str| {
+        template
+            .replace("{{name}}", name)
+            .replace("{{name_lower}}", &name.to_lowercase())
+            .replace("{{runtime}}", runtime.lambda())
+            .replace("{{language}}", language)
+            .replace("{{handler_file}}", handler_file)
+            .replace("{{install}}", install)
+            // The README's command, its comment in the column of the others'.
+            .replace("{{test}}", &format!("{test:<49}"))
+    };
+    files_for(REST_API, runtime).map(|(path, template)| (path, fill(template))).collect()
+}
+
+/// Writes a REST API's folder, which must not exist yet, or be empty.
+fn create_rest_api(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf>, Error> {
+    if !super::template::is_stack_name(name) || name.len() > REST_API_NAME_MOST {
+        return Err(Error::usage(format!(
+            "\"{name}\" can't name a REST API, which names its stack and its function, {name}-api: letters, digits and \
+             hyphens, a letter first, {REST_API_NAME_MOST} at most, as Lambda's function names are 64 at most"
+        )));
+    }
+    new_folder(folder, "ff init makes a new folder")?;
+    write_folder(folder, rest_api_files(name, runtime))
 }
 
 /// Writes a SAM application's folder, which must not exist yet, or be empty.
@@ -307,12 +393,42 @@ fn create_terraform(folder: &Path, name: &str, runtime: Runtime, context: &Conte
     write_folder(folder, terraform_files(name, runtime, &chosen.id, aws)?)
 }
 
+#[derive(Serialize)]
+struct Listed {
+    name: &'static str,
+    about: &'static str,
+    runtimes: [&'static str; 2],
+}
+
+/// `ff init --list`: each template, with what it makes; each for both runtimes.
+pub fn list(context: &Context) -> Result<(), Error> {
+    use clap::ValueEnum;
+    let templates: Vec<Listed> = Template::value_variants()
+        .iter()
+        .map(|&template| Listed {
+            name: template.as_str(),
+            about: about(template),
+            runtimes: [Runtime::Nodejs.as_str(), Runtime::Python.as_str()],
+        })
+        .collect();
+    let widest = templates.iter().map(|template| template.name.len()).max().unwrap_or_default();
+    context.out.result(&serde_json::json!({ "templates": &templates }), || {
+        let lines: Vec<String> =
+            templates.iter().map(|template| format!("  {:<widest$}  {}", template.name, template.about)).collect();
+        format!(
+            "ff init <name> --runtime nodejs|python --template <template>, each for both runtimes:\n{}",
+            lines.join("\n")
+        )
+    })
+}
+
 pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) -> Result<(), Error> {
     let folder = PathBuf::from(name);
     let written = match template {
         Template::Function => create(&folder, name, runtime)?,
         Template::Terraform => create_terraform(&folder, name, runtime, context)?,
         Template::Sam => create_sam(&folder, name, runtime)?,
+        Template::RestApi => create_rest_api(&folder, name, runtime)?,
     };
     let created = Created {
         name: name.to_owned(),
@@ -342,6 +458,13 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
             folder.display(),
             sam_code(runtime).code_uri
         ),
+        Template::RestApi => format!(
+            "created {}/, a REST API: template.yaml, its function in src/ with its tests in tests/, two requests in \
+             events/, samconfig.toml naming the stack {name}\n\
+             then: cd {name}, and README.md's lines: its library installed, ff local start template.yaml --with \
+             postgres here; ff deploy template.yaml and ff db create on FF; sam deploy on AWS",
+            folder.display()
+        ),
     })
 }
 
@@ -365,7 +488,7 @@ mod tests {
     #[test]
     fn each_template_s_folder_is_written_whole_as_its_list_names_every_file_once() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
-        let templates = [("function", FUNCTION), ("sam", SAM), ("terraform", TERRAFORM)];
+        let templates = [("function", FUNCTION), ("rest-api", REST_API), ("sam", SAM), ("terraform", TERRAFORM)];
         let mut folders: Vec<String> = std::fs::read_dir(&root)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
@@ -603,5 +726,79 @@ mod tests {
             assert_eq!(crate::package::handler_problem(&files, &function.handler, runtime), None);
         }
         assert_eq!(create_sam(&PathBuf::from("2shop"), "2shop", Runtime::Nodejs).unwrap_err().exit_code(), 2);
+    }
+
+    #[test]
+    fn a_rest_api_is_one_function_at_its_url_with_cors_for_one_origin_in_ffs_subset_which_ff_deploy_plans() {
+        use crate::sam::{parameters, plan, subset};
+        for (runtime, code) in [
+            (Runtime::Nodejs, ["app.mjs", "package.json", "package-lock.json"].as_slice()),
+            (Runtime::Python, &["app.py", "requirements.txt"]),
+        ] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let folder = dir.path().join("Shop-2");
+            let written = create_rest_api(&folder, "Shop-2", runtime).unwrap();
+            let mut paths: Vec<String> =
+                written.iter().map(|path| path.strip_prefix(&folder).unwrap().display().to_string()).collect();
+            paths.sort();
+            let mut expected: Vec<String> = [
+                "template.yaml",
+                "samconfig.toml",
+                "README.md",
+                ".gitignore",
+                "events/list-items.json",
+                "events/create-item.json",
+            ]
+            .map(String::from)
+            .into();
+            expected.extend(code.iter().map(|file| format!("src/{file}")));
+            expected.extend(match runtime {
+                Runtime::Nodejs => vec!["tests/app.test.mjs".to_owned()],
+                Runtime::Python => ["tests/__init__.py", "tests/test_app.py"].map(String::from).into(),
+            });
+            expected.sort();
+            assert_eq!(paths, expected);
+            let files = rest_api_files("Shop-2", runtime);
+            assert!(!files.iter().any(|(_, text)| text.contains("{{")), "every placeholder is filled");
+            let read = |file: &str| std::fs::read_to_string(folder.join(file)).unwrap();
+            assert!(read("README.md").contains("ff db create shop-2 --secret-for Shop-2-api"));
+            assert!(read("README.md").contains("http://shop-2-api.fn.localhost:3700/items"));
+
+            let template = crate::sam::read(&read("template.yaml")).unwrap();
+            let config = parameters::samconfig(&read("samconfig.toml")).unwrap();
+            assert_eq!(config.stack_name.as_deref(), Some("Shop-2"));
+            let values = parameters::values(&template, &config.parameter_overrides);
+            assert_eq!(subset::check(&template, &values.values), []);
+            let place = plan::Place {
+                stack: "Shop-2",
+                region: "tn-tunis-1",
+                account: "000000000001",
+                sqs_endpoint: "https://sqs.ffunc.cloud",
+                sqs_function_endpoint: "http://10.43.0.251:3003",
+                s3_endpoint: "https://s3.ffunc.cloud",
+            };
+            let planned = plan::plan(&template, &values.values, &place, &[], &folder, &mut || "ABCDEFGHIJKL".into());
+            let [function] = &planned.unwrap().functions[..] else { panic!("one function") };
+            assert_eq!((function.name.as_str(), function.runtime, function.timeout), ("Shop-2-api", runtime, 10));
+            let url = function.url.as_ref().unwrap();
+            assert_eq!(url.auth_type, "NONE");
+            assert_eq!(url.cors.as_ref().unwrap()["allowOrigins"], serde_json::json!(["http://localhost:5173"]));
+            assert_eq!(function.code, folder.join("src/"));
+            let files: Vec<String> = code.iter().map(|file| file.to_string()).collect();
+            assert_eq!(crate::package::handler_problem(&files, &function.handler, runtime), None);
+        }
+        for name in ["2shop", "shop_api", &"a".repeat(REST_API_NAME_MOST + 1)] {
+            assert_eq!(create_rest_api(&PathBuf::from(name), name, Runtime::Nodejs).unwrap_err().exit_code(), 2);
+        }
+    }
+
+    #[test]
+    fn the_list_names_every_template_as_its_flag_takes_it_with_what_it_makes() {
+        use clap::ValueEnum;
+        for &template in Template::value_variants() {
+            let flag = template.to_possible_value().unwrap();
+            assert_eq!(flag.get_name(), template.as_str());
+            assert!(!about(template).is_empty() && about(template).len() <= 110, "{}", template.as_str());
+        }
     }
 }

@@ -14,7 +14,8 @@
 # world with a URL for its API, deployed as a stack, called and deleted with ff delete-stack, and sam init's own refused at
 # its Api event; a stack with an alias, a second function, queues and a bucket's site and notifications, again
 # unchanged, then without them, after asking, a variable with a secret's name refused, and ff delete-stack, stopped by
-# the bucket's files; folders deployed as
+# the bucket's files; ff init's REST API, its README's commands run for both runtimes, the Python one deployed with
+# a database of ff db's and called at its URL, with its CORS, each run with ff local start --with postgres; folders deployed as
 # packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
@@ -782,6 +783,112 @@ ff get "$hello"
 check "which is gone" "3" "$(code)"
 }
 section_def stacks section_stacks backend budget=80
+
+section_template_rest_api() {
+section "ff init --template rest-api: a REST API at a function's URL, its items in PostgreSQL; the Python one deployed on FF with a database of ff db's, then each runtime's run here as its README says, with ff local start --with postgres"
+local runtime api url items db_conn deleted base port starter id status
+declare -A written=(
+  [nodejs]=".gitignore README.md events/create-item.json events/list-items.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/create-item.json events/list-items.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+# preflight <URL> <origin>: the origin a browser's preflight for a POST from it is let in as, or none.
+preflight() {
+  local allowed
+  allowed="$(curl -s -o /dev/null -D - -X OPTIONS "$1" -H "Origin: $2" -H 'Access-Control-Request-Method: POST' \
+    -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
+  echo "${allowed:-none}"
+}
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-rest-$runtime" && "$ff_bin" init "cli-rest-$runtime" --runtime "$runtime" --template rest-api >"$work/out" 2>"$work/err")
+  check "ff init --template rest-api makes cli-rest-$runtime's template, code, tests, events and README, and nothing else" "${written[$runtime]}" \
+    "$(cd "$work/cli-rest-$runtime" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | paste -sd' ')"
+done
+
+# On FF, from the folder as ff init wrote it: ff deploy installs psycopg's Linux build itself.
+api="$work/cli-rest-python"
+in_folder "$api" deploy template.yaml --output json
+url="$(out | jq -r '.outputs[] | select(.name == "ApiUrl") | .value')"
+check "the Python one deployed as the stack samconfig.toml names: its function, psycopg installed by ff deploy, its URL the output ApiUrl" \
+  "0 cli-rest-python created cli-rest-python-api true" \
+  "$(code) $(out | jq -r '"\(.stack) \(.functions[0].action) \(.functions[0].name)"') $(out | jq -r --arg url "$url" '.functions[0].url == $url and ($url | startswith("http"))')"
+ff db create cli-rest --secret-for cli-rest-python-api --output json
+db_conn="$(out | jq -r .connectionString)"
+check "ff db create makes its database, its address the function's DATABASE_URL, as its README says" "0 active cli-rest-python-api:DATABASE_URL" \
+  "$(code) $(out | jq -r '"\(.status) \(.secretsSet[0].function):\(.secretsSet[0].secret)"')"
+ff invoke cli-rest-python-api --http POST /items --data '{"name": "Harissa, 2 jars"}'
+id="$(out | tail -1 | jq -r .id)"
+check "  ... ff invoke --http POST /items keeps an item there, over TLS, the table made at the first call" "0 HTTP 201 Harissa, 2 jars $id|Harissa, 2 jars" \
+  "$(code) $(out | head -1) $(out | tail -1 | jq -r .name) $(data_db_psql "$db_conn" 'select id, name from items')"
+items="$("$ff_bin" url show cli-rest-python-api --output json | jq -r .url.functionUrl)items"
+check "  ... its URL, as its README reads it from ff url show, lists it, and gives it at its address" "true 200 1 200 Harissa, 2 jars" \
+  "$([ "$items" = "${url}items" ] && echo true || echo false) $(at "$items" | sed 's/ .*//') $(jq length "$work/at.body") \
+$(at "$items/$id" | sed 's/ .*//') $(jq -r .name "$work/at.body")"
+check "  ... deletes it, then has none; a path without a route is 404, a method its route lacks 405 with Allow" \
+  "204 404 No item $id 404 405 GET, DELETE" \
+  "$(at "$items/$id" -X DELETE | sed 's/ .*//') $(at "$items/$id" | sed 's/ .*//') $(jq -r .message "$work/at.body") \
+$(at "${url}orders" | sed 's/ .*//') $(at "$items/$id" -X PUT | sed 's/ .*//') $(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+check "  ... its URL's CORS, as the template says, lets in its one origin and no other" "http://localhost:5173 none" \
+  "$(preflight "$items" http://localhost:5173) $(preflight "$items" https://elsewhere.example)"
+in_folder "$api" delete-stack --yes
+deleted="$(code) $(out | paste -sd' ')"
+ff db delete cli-rest --yes
+check "ff delete-stack deletes its function with its URL, ff db delete its database" \
+  "0 deleted the function cli-rest-python-api (Api) deleted the stack cli-rest-python 0 deleted the database cli-rest, with its data" \
+  "$deleted $(code) $(out)"
+
+# Here, each runtime as its README says: its commands before ff local start, as written, install its library and run
+# its tests; then ff local start --with postgres, called with its curl.
+started() {
+  "$ff_bin" local start "$api/template.yaml" --port "$port" --with postgres >"$work/rest.out" 2>"$work/rest.err" &
+  starter=$!
+  for _ in $(seq 1 240); do
+    grep -F "Ctrl-C stops them" "$work/rest.out" >/dev/null 2>&1 && break
+    kill -0 "$starter" 2>/dev/null || break
+    sleep 0.5
+  done
+  grep -F "Ctrl-C stops them" "$work/rest.out" >/dev/null || fail "ff local start --with postgres said nothing in 120 s: $(cat "$work/rest.err")"
+}
+stopped() {
+  kill -INT "$starter"
+  wait "$starter" 2>/dev/null || true
+}
+for runtime in python nodejs; do
+  api="$work/cli-rest-$runtime"
+  if (cd "$api" && bash -e -o pipefail -c "$(sed -n '/^## Here$/,/^ff local start/p' README.md | sed '1,3d;$d')") >"$work/rest-steps.out" 2>&1; then
+    status=0
+  else
+    status=$?
+  fi
+  check "cli-rest-$runtime's README: its commands install its library and run its 7 tests, which pass" "0 7" \
+    "$status $(sed -nE 's/^(# |ℹ )pass ([0-9]+)$/\2/p; s/^Ran ([0-9]+) tests? in .*/\1/p' "$work/rest-steps.out")"
+  port="$(free_port)"
+  base="http://cli-rest-$runtime-api.fn.localhost:$port"
+  started
+  check "  ... ff local start --with postgres runs it at the address its README names, a PostgreSQL beside it" "true true" \
+    "$(grep -E "^  cli-rest-$runtime-api +$runtime +256 MB, 10 s  $base/$" "$work/rest.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  postgres  postgresql://' "$work/rest.out" >/dev/null && echo true || echo false)"
+  id="$(at "$base/items" -d '{"name": "Harissa, 2 jars"}' >"$work/rest-post"; jq -r .id "$work/at.body")"
+  check "  ... its README's curl keeps an item: 201, its address in Location, kept in that PostgreSQL" \
+    "201 /items/$id Harissa, 2 jars $id|Harissa, 2 jars" \
+    "$(sed 's/ .*//' "$work/rest-post") $(sed -n 's/^location: //Ip' "$work/at.head" | tr -d '\r') $(jq -r .name "$work/at.body") \
+$(local_psql "$work/rest.out" 'select id, name from items')"
+  check "  ... lists it, gives it at its address, deletes it, then has none, and answers 405 with Allow" \
+    "200 Harissa, 2 jars 200 Harissa, 2 jars 204 404 405 GET, DELETE" \
+    "$(at "$base/items" | sed 's/ .*//') $(jq -r '.[0].name' "$work/at.body") $(at "$base/items/$id" | sed 's/ .*//') $(jq -r .name "$work/at.body") \
+$(at "$base/items/$id" -X DELETE | sed 's/ .*//') $(at "$base/items/$id" | sed 's/ .*//') \
+$(at "$base/items/$id" -X PUT | sed 's/ .*//') $(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+  check "  ... its URL's CORS lets in its one origin and no other, as on FF" "http://localhost:5173 none" \
+    "$(preflight "$base/items" http://localhost:5173) $(preflight "$base/items" https://elsewhere.example)"
+  stopped
+  ff local reset "$api" --data --yes
+  check "  ... Ctrl-C leaving no container, ff local reset --data its database's volume gone" "0 0 0" \
+    "$(code) $(leftover) $(docker volume ls --quiet --filter "label=ff.local.project=$(cd "$api" && pwd -P)" | wc -l | tr -d ' ')"
+  git -C "$api" init -q
+  check "  ... and its .gitignore leaves out what its README's commands installed and ff local kept: git sees ff init's files alone" \
+    "${written[$runtime]}" "$(git -C "$api" status --porcelain --untracked-files=all | sed 's/^?? //' | LC_ALL=C sort | paste -sd' ')"
+done
+}
+section_def template_rest_api section_template_rest_api backend budget=90
 
 section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"

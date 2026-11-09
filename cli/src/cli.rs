@@ -93,23 +93,28 @@ pub enum Format {
 #[derive(Subcommand)]
 pub enum Command {
     /// Make a function's folder: its handler, an event to call it with, and a README; or an app's Terraform project, or
-    /// a SAM application
+    /// a SAM application, sam init's hello world or an app to start from; --list names them
     Init {
         /// The function's name, and its folder's; a Terraform project's, which names its resources; a SAM
         /// application's, its stack's
-        name: String,
+        #[arg(required_unless_present = "list")]
+        name: Option<String>,
 
         /// Its runtime; a Terraform project's or a SAM application's functions'
-        #[arg(long, value_enum)]
-        runtime: Runtime,
+        #[arg(long, value_enum, required_unless_present = "list")]
+        runtime: Option<Runtime>,
 
         /// What to make: a function's folder; a Terraform project, FF's provider block with the endpoints of the FF
         /// logged in to and four modules (a function with its URL, a queue worker, a bucket that runs a function, a
-        /// site), which apply on FF and, with only the provider block changed, on AWS; or a SAM application, a
-        /// template of one function with its alias and its URL and samconfig.toml naming the stack, which ff deploy
-        /// puts on FF and sam deploy on AWS
+        /// site), which apply on FF and, with only the provider block changed, on AWS; or a SAM application, which
+        /// ff deploy puts on FF, sam deploy on AWS and ff local start here: sam init's hello world, or an app to start
+        /// from
         #[arg(long, value_enum, default_value = "function")]
         template: Template,
+
+        /// Name the templates, with what each makes, and make nothing
+        #[arg(long, conflicts_with_all = ["name", "runtime"])]
+        list: bool,
     },
 
     /// Create a function from a file or a folder, or update the function of that name with what changed; or deploy a SAM
@@ -578,6 +583,7 @@ pub enum Template {
     Function,
     Terraform,
     Sam,
+    RestApi,
 }
 
 impl Template {
@@ -586,6 +592,7 @@ impl Template {
             Template::Function => "function",
             Template::Terraform => "terraform",
             Template::Sam => "sam",
+            Template::RestApi => "rest-api",
         }
     }
 }

@@ -472,6 +472,8 @@ ff delete hello --yes
 ff local invoke examples/hello.py --data '{"name": "here"}'   # on this machine, in Docker, as FF runs it
 ff init orders --runtime python                   # a new function's folder: its handler and an event
 ff init shop --template terraform --runtime nodejs   # an app's Terraform project, for FF and, its provider changed, AWS
+ff init items --template rest-api --runtime python  # a REST API at a function's URL, its items in PostgreSQL
+ff init --list                                    # the templates, each with what it makes
 ff deploy ./orders                                # a folder: packaged with its libraries, uploaded when new
 ff package ./orders                               # the same zip, for AWS Lambda too: ./orders/.ff/orders.zip
 ff account                                        # its plan's limits, and whether functions reach the internet
