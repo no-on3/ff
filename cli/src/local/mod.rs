@@ -3,8 +3,8 @@
 //! privileges), its memory and CPU, and the variables the backend gives a function's pod; started,
 //! its code loaded, called and its log followed the same way by each of `ff local`'s commands.
 //! [`images`] finds its runtime's image, [`http`] serves HTTP on this machine, [`url`] serves a
-//! function as its URL would, [`schedules`] runs a template's schedules, [`sqs`] keeps its queues, and [`mappings`]
-//! reads them for the functions whose SQS events name them.
+//! function as its URL would, [`schedules`] runs a template's schedules, [`sqs`] keeps its queues, [`mappings`]
+//! reads them for the functions whose SQS events name them, and [`s3`] keeps its buckets.
 
 pub mod events;
 pub mod front_door;
@@ -13,6 +13,7 @@ pub mod images;
 pub mod instances;
 pub mod key;
 pub mod mappings;
+pub mod s3;
 pub mod schedule_expression;
 pub mod schedules;
 pub mod sqs;
@@ -53,8 +54,9 @@ pub struct LocalFunction {
     /// Variables whose values `docker run` takes from its own environment, by their names alone, so that no command
     /// line shows them: a template's secrets, and its functions' key.
     pub secrets: std::collections::BTreeMap<String, String>,
-    /// Whether it reaches this machine as `host.docker.internal`, where a template's front door listens.
-    pub reaches_this_machine: bool,
+    /// The names it reaches this machine by, each given to Docker as the host's gateway: `host.docker.internal`, where
+    /// a template's front door listens, and each bucket's name under it, as AWS's SDK for JavaScript addresses a bucket.
+    pub this_machine_as: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,8 +150,8 @@ pub fn run_args(function: &LocalFunction, container: &str, image: &str, port: Op
     for name in function.secrets.keys() {
         args.extend(["--env".to_owned(), name.clone()]);
     }
-    if function.reaches_this_machine {
-        args.extend(["--add-host".to_owned(), "host.docker.internal:host-gateway".to_owned()]);
+    for host in &function.this_machine_as {
+        args.extend(["--add-host".to_owned(), format!("{host}:host-gateway")]);
     }
     args.push(image.to_owned());
     args
@@ -465,7 +467,7 @@ mod tests {
             handler: "function.handler".into(),
             environment: Default::default(),
             secrets: Default::default(),
-            reaches_this_machine: false,
+            this_machine_as: Vec::new(),
         }
     }
 
@@ -493,11 +495,11 @@ mod tests {
     }
 
     #[test]
-    fn a_templates_function_has_its_handler_its_secrets_by_name_alone_and_reaches_this_machine() {
+    fn a_templates_function_has_its_handler_its_secrets_by_name_alone_and_reaches_this_machine_by_its_names() {
         let mut function = hello(Code::Folder(PathBuf::from("/home/me/app")));
         function.handler = "src/app.handler".into();
         function.secrets = [("API_TOKEN".to_owned(), "s3cr3t".to_owned())].into();
-        function.reaches_this_machine = true;
+        function.this_machine_as = vec!["host.docker.internal".into(), "photos.host.docker.internal".into()];
 
         let args = run_args(&function, "c", "img", None);
 
@@ -505,6 +507,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--env", "API_TOKEN"]));
         assert!(!args.iter().any(|arg| arg.contains("s3cr3t")));
         assert!(args.windows(2).any(|pair| pair == ["--add-host", "host.docker.internal:host-gateway"]));
+        assert!(args.windows(2).any(|pair| pair == ["--add-host", "photos.host.docker.internal:host-gateway"]));
         assert_eq!(args.last().map(String::as_str), Some("img"));
     }
 

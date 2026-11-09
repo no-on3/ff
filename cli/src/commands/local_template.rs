@@ -26,13 +26,15 @@ use super::template::{Location, Problems, Read, is_stack_name, is_template};
 use crate::api::types::{DeletionPolicy, StackResource};
 use crate::cli::LocalArgs;
 use crate::config::{is_bucket_name, is_function_name, is_queue_name};
+use crate::dates::iso;
 use crate::error::{Error, Kind};
 use crate::local::events::{LAMBDA_RETRY_POLICY, RetryPolicy};
 use crate::local::front_door::{FrontDoor, FunctionUrl, Settings, URL_DOMAIN};
 use crate::local::instances::{Docker, Instances};
 use crate::local::key::Key;
 use crate::local::mappings::LocalMapping;
-use crate::local::schedule_expression::{Expression, InvalidExpression, Millis, iso};
+use crate::local::s3::Buckets;
+use crate::local::schedule_expression::{Expression, InvalidExpression, Millis};
 use crate::local::schedules::{self, LocalSchedule, Timetable};
 use crate::local::sqs::{QueueSettings, Queues};
 use crate::local::{self, Code, LocalFunction, http, images, url};
@@ -59,6 +61,8 @@ const KEPT: &str = ".ff/local";
 const SECRETS: &str = ".env.local";
 /// The local key's file, in what ff local keeps.
 const CREDENTIALS: &str = "credentials";
+/// The buckets' folders, in what ff local keeps.
+const BUCKETS: &str = "buckets";
 /// The front door's address while ff local start runs, in what ff local keeps, for ff local run to find it.
 const ENDPOINT: &str = "endpoint";
 
@@ -182,6 +186,11 @@ fn functions(
     problems: &mut Problems,
     notes: &mut Vec<String>,
 ) -> Vec<LocalFunction> {
+    // A bucket's virtual-hosted address, which AWS's SDK for JavaScript makes of a bucket's name, reaches this machine
+    // too.
+    let this_machine_as: Vec<String> = std::iter::once(HOST.to_owned())
+        .chain(planned.buckets.iter().map(|bucket| format!("{}.{HOST}", bucket.name)))
+        .collect();
     let mut functions = Vec::new();
     for function in &planned.functions {
         let id = &function.id;
@@ -224,7 +233,7 @@ fn functions(
             handler: function.handler.clone(),
             environment,
             secrets: secret_values,
-            reaches_this_machine: true,
+            this_machine_as: this_machine_as.clone(),
         });
     }
     functions
@@ -570,6 +579,15 @@ struct StartedMapping {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StartedBucket {
+    logical_id: String,
+    name: String,
+    /// The folder its objects are files in.
+    folder: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StartedKey {
     access_key_id: String,
     secret_access_key: String,
@@ -587,6 +605,7 @@ struct Started {
     schedules: Vec<StartedSchedule>,
     queues: Vec<StartedQueue>,
     mappings: Vec<StartedMapping>,
+    buckets: Vec<StartedBucket>,
     logs: String,
 }
 
@@ -663,6 +682,19 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     let docker = Docker { images: runtime_images, logs: logs.clone(), echo: !quiet };
     let instances = Arc::new(Instances::new(docker, functions.clone(), idle, move |line| to_say(line)));
     let queues = planned.queues.iter().map(|queue| (queue.name.clone(), QueueSettings::of(&queue.attributes)));
+    let buckets_folder = kept.join(BUCKETS);
+    let bucket_names = planned.buckets.iter().map(|bucket| bucket.name.clone()).collect();
+    let buckets = Buckets::open(
+        &buckets_folder,
+        bucket_names,
+        REGION,
+        ACCOUNT,
+        Arc::new(|| schedules::now_ms(0)),
+        Arc::clone(&say),
+    )
+    .map_err(|error| {
+        Error::new(Kind::Failed, format!("Couldn't keep the buckets in {}: {error}", buckets_folder.display()))
+    })?;
     let door = FrontDoor {
         instances: Arc::clone(&instances),
         region: REGION.to_owned(),
@@ -674,6 +706,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
         say,
         clock_offset: clock_offset(),
         queues: Arc::new(Queues::new(REGION, ACCOUNT, queues, Arc::new(|| schedules::now_ms(0)))),
+        buckets: Arc::new(buckets),
     };
     let front_door: Arc<dyn http::Answers> = Arc::new(door.clone());
     http::serve(listener, Arc::clone(&front_door));
@@ -774,6 +807,15 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
             })
             .collect(),
         mappings: started_mappings,
+        buckets: planned
+            .buckets
+            .iter()
+            .map(|bucket| StartedBucket {
+                logical_id: bucket.id.clone(),
+                name: bucket.name.clone(),
+                folder: buckets_folder.join(&bucket.name).display().to_string(),
+            })
+            .collect(),
         logs: logs.display().to_string(),
     };
     context.out.result(&started, || {
@@ -837,6 +879,13 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 }
                 line
             }));
+        }
+        if !started.buckets.is_empty() {
+            lines.push(format!(
+                "Its buckets, S3's at {endpoint}, each object a file in its bucket's folder, kept from a start to the next:"
+            ));
+            let width = started.buckets.iter().map(|bucket| bucket.name.len()).max().unwrap_or(0);
+            lines.extend(started.buckets.iter().map(|bucket| format!("  {:width$}  {}", bucket.name, bucket.folder)));
         }
         lines.push(format!(
             "Its key, which a signed request is checked against, is in {}: AWS_ACCESS_KEY_ID={} AWS_SECRET_ACCESS_KEY={}, in the region {REGION}",
@@ -1067,7 +1116,7 @@ Resources:
         assert_eq!(orders.secrets["AWS_SECRET_ACCESS_KEY"], key().secret);
         assert_eq!(prepared.notes, ["Orders: the secret TOKEN takes the place of the template's variable"]);
         assert_eq!(prepared.secrets_file.as_deref().map(|file| file.ends_with(".env.local")), Some(true));
-        assert!(orders.reaches_this_machine);
+        assert_eq!(orders.this_machine_as, ["host.docker.internal", "uploads.host.docker.internal"]);
 
         let (orders, payments) = (&prepared.settings["Orders"], &prepared.settings["payments-fn"]);
         assert_eq!(orders.alias.as_deref(), Some("live"));

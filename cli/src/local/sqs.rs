@@ -1228,8 +1228,8 @@ pub mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::time::UNIX_EPOCH;
 
-    use super::super::schedule_expression::iso;
     use super::*;
+    use crate::dates::iso;
 
     /// The backend's table of SQS's requests and answers, which its L1 reads too.
     pub fn table() -> Value {

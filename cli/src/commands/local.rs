@@ -53,7 +53,7 @@ pub fn local_function(args: &LocalArgs) -> Result<LocalFunction, Error> {
         handler: "function.handler".to_owned(),
         environment,
         secrets: Default::default(),
-        reaches_this_machine: false,
+        this_machine_as: Vec::new(),
     })
 }
 

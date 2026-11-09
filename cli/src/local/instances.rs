@@ -366,7 +366,7 @@ pub mod stand {
             handler: handler.into(),
             environment: BTreeMap::new(),
             secrets: BTreeMap::new(),
-            reaches_this_machine: true,
+            this_machine_as: vec!["host.docker.internal".into()],
         }
     }
 

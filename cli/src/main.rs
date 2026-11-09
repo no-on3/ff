@@ -7,6 +7,7 @@ mod backend_source;
 mod cli;
 mod commands;
 mod config;
+mod dates;
 mod downloads;
 mod error;
 mod local;

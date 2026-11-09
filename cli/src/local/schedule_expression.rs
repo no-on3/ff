@@ -9,6 +9,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use crate::dates::{civil_from_days, days_from_civil};
+
 /// Unix milliseconds, UTC.
 pub type Millis = i64;
 
@@ -426,30 +428,6 @@ fn days_in_month(year: i64, month: u32) -> u32 {
     }
 }
 
-/// Days since 1970-01-01 of a date in the proleptic Gregorian calendar (Howard Hinnant's `days_from_civil`).
-pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let month = i64::from(month);
-    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + i64::from(day) - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
-/// The date of a day since 1970-01-01: its year, month and day.
-pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let days = days + 719_468;
-    let era = days.div_euclid(146_097);
-    let day_of_era = days - era * 146_097;
-    let year_of_era = (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
-    let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 } as u32;
-    (year_of_era + era * 400 + i64::from(month <= 2), month, day)
-}
-
 /// 1 Sunday to 7 Saturday, as EventBridge counts them; 1970-01-01 was a Thursday.
 fn weekday_of(year: i64, month: u32, day: u32) -> u32 {
     (days_from_civil(year, month, day) + 4).rem_euclid(7) as u32 + 1
@@ -479,18 +457,12 @@ fn last_weekday(year: i64, month: u32) -> u32 {
     }
 }
 
-/// A time as the backend's API prints one, to the second: `2026-10-21T08:00:00Z`.
-pub fn iso(millis: Millis) -> String {
-    let (year, month, day) = civil_from_days(millis.div_euclid(DAY_MS));
-    let seconds = millis.rem_euclid(DAY_MS) / 1000;
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", seconds / 3600, seconds / 60 % 60, seconds % 60)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dates::iso;
     use serde_json::Value;
-    use std::time::{Duration, UNIX_EPOCH};
+    use std::time::UNIX_EPOCH;
 
     /// The backend's table of expressions and next runs, which its L1 tests read too.
     const TABLE: &str = include_str!("../../../BE/src/schedules/schedule-expressions.json");
@@ -576,16 +548,9 @@ mod tests {
     }
 
     #[test]
-    fn the_calendar_agrees_with_humantimes_every_day_from_1970_to_2200() {
-        let end = days_from_civil(2200, 1, 1);
-        for days in 0..end {
-            let (year, month, day) = civil_from_days(days);
-            assert_eq!(days_from_civil(year, month, day), days);
-            let millis = days * DAY_MS + 45_296_000; // 12:34:56
-            let theirs = humantime::format_rfc3339_seconds(UNIX_EPOCH + Duration::from_millis(millis as u64));
-            assert_eq!(iso(millis), theirs.to_string());
-        }
+    fn counts_weekdays_as_eventbridge_does() {
         assert_eq!(weekday_of(2026, 10, 23), 6, "2026-10-23 is a Friday");
+        assert_eq!(weekday_of(2026, 10, 25), 1, "2026-10-25 is a Sunday");
     }
 
     #[test]

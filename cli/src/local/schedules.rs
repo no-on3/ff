@@ -8,7 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use super::schedule_expression::{Expression, Millis, iso};
+use super::schedule_expression::{Expression, Millis};
+use crate::dates::iso;
 
 /// A function's schedule, as its Schedule or ScheduleV2 event declares it.
 #[derive(Clone, Debug, PartialEq)]

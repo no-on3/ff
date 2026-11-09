@@ -14,7 +14,7 @@ docs/*                                  static
 # The backend, a module at a time where its suites' sections are its own; L5 tries every route, so it runs whole.
 BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted,local_queues aws-tools
 BE/src/event-sources/*                  static unit db l4:mappings l5 cli:event_sources,local_queues aws-tools
-BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted aws-tools
+BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted,local_buckets aws-tools
 BE/src/object-store/*                   static unit db l4:buckets,buckets_room,notifications,sites l5 cli:buckets,sites
 BE/src/databases/*                      static unit db l4:databases,databases_sampled l5 cli:databases,databases_used
 BE/src/caches/*                         static unit db l4:caches,caches_sampled l5 cli:small_app
@@ -51,11 +51,12 @@ runtimes/*                              static unit security l3 l4 l5 cli aws-to
 cli/src/commands/init.rs                static unit cli:init,local_apps aws-tools
 cli/release/*                           static unit cli:downloads
 cli/src/local/images.rs                 static unit cli:local,local_images
-cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues
-cli/src/commands/local*                 static unit cli:local,local_template,local_apps,local_queues
-cli/src/s3.rs                           static unit cli:sites
-cli/src/md5.rs                          static unit cli:sites,local_queues
-cli/src/sigv4.rs                        static unit cli:sites,local_template,local_queues
+cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues,local_buckets
+cli/src/commands/local*                 static unit cli:local,local_template,local_apps,local_queues,local_buckets
+cli/src/s3.rs                           static unit cli:sites,local_buckets
+cli/src/md5.rs                          static unit cli:sites,local_queues,local_buckets
+cli/src/sigv4.rs                        static unit cli:sites,local_template,local_queues,local_buckets
+cli/src/dates.rs                        static unit cli:local_template,local_queues,local_buckets
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.
@@ -87,6 +88,7 @@ hack/test-evidence.sh                   static l3
 hack/k8s/test-it.sh                     static l3
 hack/lib/s3-clients/*                   static l4:buckets
 hack/lib/sqs-clients/*                  static l4:queues
+hack/lib/local-functions/*              static cli:local_queues,local_buckets
 hack/lib/mail-receiver.mjs              static l4:mail_sent
 hack/lib/orders-app.sh                  static cli:small_app
 hack/lib/keycloak.sh                    static l5 cli:login

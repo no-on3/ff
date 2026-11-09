@@ -2243,35 +2243,18 @@ Resources:
 YAML
 # A function that sends to its queue as an SDK would, with no setting: the endpoint, the region and the key FF gives
 # it, its request signed by hand, as the runtime images have no SDK.
+cp "$FF_REPO_ROOT/hack/lib/local-functions/signed.py" "$app/sender/"
 cat >"$app/sender/app.py" <<'PY'
-import datetime
-import hashlib
-import hmac
 import json
 import os
-import urllib.request
+
+from signed import send
 
 
 def handler(event, context):
-    endpoint, region = os.environ["AWS_ENDPOINT_URL_SQS"], os.environ["AWS_REGION"]
-    body = json.dumps({"QueueUrl": os.environ["QUEUE_URL"], "MessageBody": event["body"]})
-    now = datetime.datetime.now(datetime.timezone.utc)
-    amz_date, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
-    headers = {"content-type": "application/x-amz-json-1.0", "host": endpoint.split("://")[1], "x-amz-date": amz_date,
-               "x-amz-target": "AmazonSQS.SendMessage"}
-    names = ";".join(sorted(headers))
-    lines = [f"{name}:{headers[name]}" for name in sorted(headers)]
-    canonical = "\n".join(["POST", "/", "", *lines, "", names, hashlib.sha256(body.encode()).hexdigest()])
-    scope = f"{day}/{region}/sqs/aws4_request"
-    to_sign = "\n".join(["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(canonical.encode()).hexdigest()])
-    key = ("AWS4" + os.environ["AWS_SECRET_ACCESS_KEY"]).encode()
-    for part in (day, region, "sqs", "aws4_request"):
-        key = hmac.new(key, part.encode(), hashlib.sha256).digest()
-    signature = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
-    headers["authorization"] = (f"AWS4-HMAC-SHA256 Credential={os.environ['AWS_ACCESS_KEY_ID']}/{scope}, "
-                                f"SignedHeaders={names}, Signature={signature}")
-    request = urllib.request.Request(endpoint + "/", data=body.encode(), headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=10) as answer:
+    body = json.dumps({"QueueUrl": os.environ["QUEUE_URL"], "MessageBody": event["body"]}).encode()
+    headers = {"content-type": "application/x-amz-json-1.0", "x-amz-target": "AmazonSQS.SendMessage"}
+    with send("sqs", "POST", os.environ["AWS_ENDPOINT_URL_SQS"] + "/", body, headers) as answer:
         return json.load(answer)
 PY
 printf 'def handler(event, context):\n    raise RuntimeError("no luck")\n' >"$app/failing/app.py"
@@ -2386,6 +2369,136 @@ wait "$starter" 2>/dev/null || true
 check "Ctrl-C removes their containers" 0 "$(leftover)"
 }
 section_def local_queues section_local_queues backend budget=45
+
+section_local_buckets() {
+section "ff local start's buckets: S3 at the front door, the AWS CLI's cases of L4, objects as files kept from a start to the next, a function writing to its bucket"
+local app="$work/buckets" port starter key_id described kept_file
+local photos_line="^  photos +.*/\\.ff/local/buckets/photos$"
+leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
+# s3_cli <args...>: the AWS CLI with the local key's file alone, the front door its S3 endpoint.
+s3_cli() {
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
+    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_S3="http://127.0.0.1:$port" "${aws_cli[@]}" "$@"
+}
+# s3_refused <args...>: an AWS CLI command's error, by the code it names.
+s3_refused() { s3_cli "$@" >/dev/null 2>"$work/s3.err" && echo accepted || grep -m1 -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/s3.err"; }
+# started: ff local start in the background, its listing waited for.
+started() {
+  "$ff_bin" local start "$app/template.yaml" --port "$port" >"$work/buckets.out" 2>"$work/buckets.err" &
+  starter=$!
+  for _ in $(seq 1 60); do
+    grep -F "Ctrl-C stops them" "$work/buckets.out" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  grep -F "Ctrl-C stops them" "$work/buckets.out" >/dev/null || fail "ff local start said nothing in 30 s: $(cat "$work/buckets.err")"
+}
+stopped() {
+  kill -INT "$starter"
+  wait "$starter" 2>/dev/null || true
+}
+rm -rf "$app" && mkdir -p "$app/writer"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Photos:
+    Type: AWS::S3::Bucket
+  Writer:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: writer/
+      Runtime: python3.13
+      Handler: app.handler
+      Timeout: 10
+      Environment:
+        Variables:
+          BUCKET: !Ref Photos
+YAML
+# A function that writes to its bucket as an SDK would, with no setting: at the bucket's own host under the endpoint
+# FF gives it, its request signed by hand, as the runtime images have no SDK.
+cp "$FF_REPO_ROOT/hack/lib/local-functions/signed.py" "$app/writer/"
+cat >"$app/writer/app.py" <<'PY'
+import os
+
+from signed import send
+
+
+def handler(event, context):
+    scheme, authority = os.environ["AWS_ENDPOINT_URL_S3"].split("://")
+    url = f"{scheme}://{os.environ['BUCKET']}.{authority}/from-a-function.txt"
+    with send("s3", "PUT", url, event["body"].encode(), {"content-type": "text/plain"}) as answer:
+        return {"status": answer.status, "etag": answer.headers["ETag"]}
+PY
+
+port="$(free_port)"
+started
+key_id="$(sed -n 's/^aws_access_key_id = //p' "$app/.ff/local/credentials")"
+check "the start lists the template's bucket and the folder its objects are files in" "true true" \
+  "$(grep -F "Its buckets, S3's at http://127.0.0.1:$port, each object a file in its bucket's folder, kept from a start to the next:" "$work/buckets.out" >/dev/null && echo true || echo false) \
+$(grep -E "$photos_line" "$work/buckets.out" >/dev/null && echo true || echo false)"
+check "the AWS CLI lists it and finds it, with the local key" "photos accepted" \
+  "$(s3_cli s3 ls | awk '{print $3}' | paste -sd' ') $(s3_refused s3api head-bucket --bucket photos)"
+
+head -c $((100 * 1024 * 1024)) /dev/urandom >"$work/big.bin"
+s3_cli s3 cp "$work/big.bin" s3://photos/cli/big.bin --only-show-errors
+s3_cli s3 cp s3://photos/cli/big.bin "$work/big.out" --only-show-errors
+check "aws: 100 MB up in parts and down again, byte for byte" "104857600 0" \
+  "$(s3_cli s3api head-object --bucket photos --key cli/big.bin --query ContentLength --output text) $(cmp -s "$work/big.bin" "$work/big.out"; echo $?)"
+described="$(jq -r 'select(.key == "cli/big.bin") | input_filename' "$app"/.ff/local/buckets/photos/*.object.json)"
+kept_file="$app/.ff/local/buckets/photos/$(jq -r .file "$described")"
+check "  ... a file in its bucket's folder, its key's extension kept, its key and its parts in the file beside it, no part left" \
+  "0 bin cli/big.bin true 0" \
+  "$(cmp -s "$work/big.bin" "$kept_file"; echo $?) ${kept_file##*.} $(jq -r '"\(.key) \(.parts | length > 1)"' "$described") \
+$(find "$app/.ff/local/buckets/photos/.uploads" -type f 2>/dev/null | wc -l | tr -d ' ')"
+s3_cli s3api get-object --bucket photos --key cli/big.bin --range bytes=0-9 "$work/range.out" >/dev/null
+check "aws: a range" "$(head -c 10 "$work/big.bin" | od -An -tx1 | tr -d ' \n')" "$(od -An -tx1 "$work/range.out" | tr -d ' \n')"
+rm -rf "$work/site" "$work/site-back"
+mkdir -p "$work/site/css" "$work/site-back"
+printf '<h1>Ahlan</h1>' >"$work/site/index.html"
+printf 'body {}' >"$work/site/css/main.css"
+s3_cli s3 sync "$work/site" s3://photos/site --only-show-errors
+s3_cli s3 sync s3://photos/site "$work/site-back" --only-show-errors
+check "aws: a folder synced up, listed, and down again, the same" "2 0" \
+  "$(s3_cli s3 ls s3://photos/site/ --recursive | wc -l | tr -d ' ') $(diff -r "$work/site" "$work/site-back" >/dev/null; echo $?)"
+presigned="$(s3_cli s3 presign s3://photos/site/index.html --expires-in 300)"
+expiring="$(s3_cli s3 presign s3://photos/site/index.html --expires-in 1)"
+sleep 2
+check "aws: a presigned URL, fetched; one past its expiry, AccessDenied" "<h1>Ahlan</h1> 403 AccessDenied" \
+  "$(curl -s "$presigned") $(curl -s -o "$work/expired" -w '%{http_code}' "$expiring") $(grep -o '<Code>[^<]*' "$work/expired" | cut -c7-)"
+s3_cli s3 cp s3://photos/site/index.html s3://photos/copied/index.html --only-show-errors
+check "aws: an object copied, then the folder's two deleted in one request" "<h1>Ahlan</h1> 2 0" \
+  "$(s3_cli s3 cp s3://photos/copied/index.html - 2>/dev/null) \
+$(s3_cli s3api delete-objects --bucket photos --delete '{"Objects": [{"Key": "site/index.html"}, {"Key": "site/css/main.css"}]}' | jq '.Deleted | length') \
+$(s3_cli s3 ls s3://photos/site/ --recursive | wc -l | tr -d ' ')"
+check "aws: a wrong secret, SignatureDoesNotMatch" "An error occurred (SignatureDoesNotMatch)" \
+  "$(AWS_ACCESS_KEY_ID="$key_id" AWS_SECRET_ACCESS_KEY=wrong-secret s3_refused s3 ls s3://photos)"
+AWS_ACCESS_KEY_ID=AKFFNOTTHELOCALKEY00 AWS_SECRET_ACCESS_KEY=not-the-secret AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+  AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_S3="http://127.0.0.1:$port" "${aws_cli[@]}" s3 ls s3://photos >/dev/null 2>"$work/s3.err" || true
+check "  ... another key, InvalidAccessKeyId, the key said on stderr" "true true" \
+  "$(grep -F 'An error occurred (InvalidAccessKeyId)' "$work/s3.err" >/dev/null && echo true || echo false) \
+$(grep -F "A request signed with AKFFNOTTHELOCALKEY00, not the local key $key_id" "$work/buckets.err" >/dev/null && echo true || echo false)"
+check "aws: a bucket the template hasn't, NoSuchBucket; one made or deleted, refused as the template's to make" \
+  "An error occurred (NoSuchBucket) An error occurred (NotImplemented) An error occurred (NotImplemented)" \
+  "$(s3_refused s3 ls s3://nowhere) $(s3_refused s3 mb s3://more) $(s3_refused s3 rb s3://photos)"
+check "aws: s3api reads a bucket's settings it hasn't as S3 answers a bucket without them: the owner paying, versioning never on" \
+  "BucketOwner never" \
+  "$(s3_cli s3api get-bucket-request-payment --bucket photos --query Payer --output text) \
+$(s3_cli s3api get-bucket-versioning --bucket photos --query "Status || 'never'" --output text)"
+curl -s -o "$work/writer.json" -X POST "http://127.0.0.1:$port/2015-03-31/functions/Writer/invocations" -d '{"body": "from a function"}'
+check "a function writes to its bucket with no setting, at the bucket's host under the endpoint it is given, with its key" \
+  "200 from a function" \
+  "$(jq -r .status "$work/writer.json") $(s3_cli s3 cp s3://photos/from-a-function.txt - 2>/dev/null)"
+s3_cli s3 ls s3://photos --recursive | awk '{print $3, $4}' | sort >"$work/listed"
+stopped
+check "Ctrl-C removes the function's container" 0 "$(leftover)"
+started
+check "the objects are kept from a start to the next: listed the same, read the same" "true 0" \
+  "$(s3_cli s3 ls s3://photos --recursive | awk '{print $3, $4}' | sort | cmp -s - "$work/listed" && echo true || echo false) \
+$(s3_cli s3 cp s3://photos/cli/big.bin - 2>/dev/null | cmp -s - "$work/big.bin"; echo $?)"
+stopped
+rm -rf "$work/big.bin" "$work/big.out" "$app/.ff/local/buckets"
+}
+section_def local_buckets section_local_buckets backend budget=45
 
 section_local_images() {
 section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"

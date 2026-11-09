@@ -165,6 +165,7 @@ mod tests {
     use super::super::front_door::Settings;
     use super::super::instances::stand::{Stand, function, instances_of};
     use super::super::key::Key;
+    use super::super::s3::Buckets;
     use super::super::schedules;
     use super::super::sqs::{Caller, QueueSettings, Queues};
     use super::*;
@@ -222,6 +223,7 @@ mod tests {
                 [("orders".to_owned(), queue)],
                 Arc::new(|| schedules::now_ms(0)),
             )),
+            buckets: Arc::new(Buckets::none()),
         };
         Reading { door, stand, said, stop: Arc::new(AtomicBool::new(false)) }
     }

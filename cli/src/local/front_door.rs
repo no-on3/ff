@@ -11,7 +11,9 @@
 //! the account's credentials refused without the local key's signature. A function's schedules run as asynchronous
 //! calls, on time ([`super::schedules`]) or now, when `ff local run` asks. SQS's JSON protocol, at `/` or by its
 //! `X-Amz-Target`, is answered by the template's queues ([`super::sqs`]), its signature checked as Lambda's is; an
-//! asynchronous call's record and its dead letter go to them as FF sends both.
+//! asynchronous call's record and its dead letter go to them as FF sends both. S3 is answered by the template's
+//! buckets ([`super::s3`]): a request at a bucket's host, signed for S3, or unsigned and naming one of them, or the
+//! service, by its path; its body read as it streams.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -22,15 +24,18 @@ use base64::engine::general_purpose::{GeneralPurpose, NO_PAD_INDIFFERENT, STANDA
 use serde_json::{Value, json};
 
 use super::events::{self, Attempts, End, Outcome, RetryPolicy, Settlement};
-use super::http::{Answers, PAYLOAD_LIMIT, Request, Response, percent_decode, request_id};
+use super::http::{Answers, Incoming, PAYLOAD_LIMIT, Reply, Request, Response, percent_decode, request_id};
 use super::instances::{Called, Instances, Runner};
 use super::key::Key;
 use super::mappings::LocalMapping;
-use super::schedule_expression::{Millis, iso};
+use super::s3::requests::{Style, address_of, signed_service};
+use super::s3::{Buckets, OWN_HOSTS};
+use super::schedule_expression::Millis;
 use super::schedules::{self, LocalSchedule};
 use super::sqs::{self, Outgoing, Queues};
 use super::url::{self, Caller, Cors, Ran, UrlRequest};
 use super::{Asks, Code};
+use crate::dates::iso;
 use crate::error::{Error, Kind};
 use crate::sigv4::{Problem, SignedRequest, Words, check_authorization, read_authorization, sha256_hex, words};
 
@@ -291,6 +296,8 @@ pub struct FrontDoor<R: Runner> {
     pub clock_offset: Millis,
     /// The template's queues.
     pub queues: Arc<Queues>,
+    /// The template's buckets.
+    pub buckets: Arc<Buckets>,
 }
 
 impl<R: Runner> Clone for FrontDoor<R> {
@@ -306,6 +313,7 @@ impl<R: Runner> Clone for FrontDoor<R> {
             say: Arc::clone(&self.say),
             clock_offset: self.clock_offset,
             queues: Arc::clone(&self.queues),
+            buckets: Arc::clone(&self.buckets),
         }
     }
 }
@@ -829,9 +837,25 @@ impl<R: Runner> FrontDoor<R> {
 }
 
 impl<R: Runner> FrontDoor<R> {
-    /// Whether a request is SQS's, not a function URL's.
+    /// Whether a request is SQS's, not a function URL's, nor S3's.
     fn is_sqs(&self, head: &Request) -> bool {
-        self.url_of(head).is_none() && sqs::is_sqs(head)
+        self.url_of(head).is_none() && !self.is_s3(head) && sqs::is_sqs(head)
+    }
+
+    /// Whether a request is S3's: signed for S3; or unsigned, at a bucket's host, or naming one of the template's
+    /// buckets by its path, or the service itself. Never a function URL's, nor one of SQS's JSON protocol.
+    fn is_s3(&self, head: &Request) -> bool {
+        if self.url_of(head).is_some() || head.header("x-amz-target").is_some() {
+            return false;
+        }
+        let (path, query) = head.target.split_once('?').unwrap_or((head.target.as_str(), ""));
+        if let Some(service) = signed_service(head.header("authorization"), query) {
+            return service == "s3";
+        }
+        let address = address_of(head.header("host"), path, &OWN_HOSTS);
+        address.style == Style::VirtualHosted
+            || self.buckets.has(&address.bucket)
+            || (head.method == "GET" && path == "/")
     }
 
     /// A request in SQS's JSON protocol, answered by the queues, their URLs under the address it reached: this
@@ -887,6 +911,9 @@ impl<R: Runner> Answers for FrontDoor<R> {
                 None => refused,
             };
         }
+        if head.is_some_and(|head| self.is_s3(head)) {
+            return self.buckets.unreadable(&request_id());
+        }
         if head.is_some_and(sqs::is_sqs) {
             return sqs::unreadable(too_large);
         }
@@ -903,10 +930,22 @@ impl<R: Runner> Answers for FrontDoor<R> {
     fn limit(&self, head: &Request) -> usize {
         if self.is_sqs(head) { sqs::MAX_BODY_BYTES } else { PAYLOAD_LIMIT }
     }
+
+    fn streams(&self, head: &Request) -> bool {
+        self.is_s3(head)
+    }
+
+    fn answer_streaming(&self, head: &Request, body: &mut Incoming, request_id: &str, source_ip: &str) -> Reply {
+        if !self.is_s3(head) {
+            return Reply::Whole(self.answer(head, request_id, source_ip));
+        }
+        self.buckets.answer(head, body, &self.key, request_id, |key_id| self.not_the_local_key(key_id))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
     use std::sync::Mutex;
     use std::sync::atomic::Ordering;
 
@@ -925,6 +964,8 @@ mod tests {
         door: FrontDoor<Stand>,
         said: Arc<Mutex<Vec<String>>>,
         stand: Stand,
+        /// The buckets' folder, removed with the door.
+        _buckets: tempfile::TempDir,
     }
 
     fn key() -> Key {
@@ -937,7 +978,7 @@ mod tests {
     }
 
     /// The functions on the stand-in, behind a front door, each with its alias `live` and what `adjust` gives it, an
-    /// asynchronous call's second a millisecond; and the queues `orders`, `Done` and `Dead`.
+    /// asynchronous call's second a millisecond; the queues `orders`, `Done` and `Dead`; and the bucket `photos`.
     fn door_with(functions: Vec<LocalFunction>, adjust: impl Fn(&str, &mut Settings)) -> Door {
         let said = Arc::new(Mutex::new(Vec::new()));
         let settings = functions
@@ -950,6 +991,17 @@ mod tests {
             .collect();
         let (instances, stand) = instances_of(functions, &said);
         let say_to = Arc::clone(&said);
+        let say: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |line| say_to.lock().unwrap().push(line.to_owned()));
+        let folder = tempfile::tempdir().unwrap();
+        let buckets = Buckets::open(
+            folder.path(),
+            vec!["photos".into()],
+            REGION,
+            ACCOUNT,
+            Arc::new(|| schedules::now_ms(0)),
+            Arc::clone(&say),
+        )
+        .unwrap();
         let door = FrontDoor {
             instances: Arc::new(instances),
             region: REGION.into(),
@@ -958,7 +1010,7 @@ mod tests {
             settings: Arc::new(settings),
             started: started(),
             second: Duration::from_millis(1),
-            say: Arc::new(move |line| say_to.lock().unwrap().push(line.to_owned())),
+            say,
             clock_offset: 0,
             queues: Arc::new(Queues::new(
                 REGION,
@@ -966,8 +1018,9 @@ mod tests {
                 ["orders", "Done", "Dead"].map(|name| (name.to_owned(), QueueSettings::default())),
                 Arc::new(|| schedules::now_ms(0)),
             )),
+            buckets: Arc::new(buckets),
         };
-        Door { door, said, stand }
+        Door { door, said, stand, _buckets: folder }
     }
 
     fn door_of(functions: Vec<LocalFunction>) -> Door {
@@ -1888,6 +1941,89 @@ mod tests {
         assert_eq!(sent.1["MD5OfMessageBody"], crate::md5::hex(b"an order"));
         assert_eq!(received.1["Messages"][0]["MessageId"], sent.1["MessageId"]);
         assert_eq!(received.1["Messages"][0]["Attributes"]["SenderId"], local.id, "sent by the key that signed");
+    }
+
+    /// A request's line and headers, to a host.
+    fn head_to(method: &str, host: &str, target: &str, headers: &[(&str, &str)]) -> Request {
+        let mut sent = vec![("Host".to_owned(), host.to_owned())];
+        sent.extend(headers.iter().map(|(name, value)| (name.to_string(), value.to_string())));
+        Request {
+            method: method.into(),
+            target: target.into(),
+            protocol: "HTTP/1.1".into(),
+            headers: sent,
+            body: Vec::new(),
+        }
+    }
+
+    /// The front door's answer to a request whose body streams, as its server reads it: its status and its body.
+    fn streamed(door: &Door, head: &Request, body: &[u8]) -> (u16, String) {
+        let (mut reader, mut written) = (body, Vec::new());
+        let mut incoming = Incoming::of(head, &mut reader, &mut written).unwrap();
+        match door.door.answer_streaming(head, &mut incoming, "a-request", "127.0.0.1") {
+            Reply::Whole(response) => (response.status, String::from_utf8(response.body).unwrap()),
+            Reply::File { response, file, length } => {
+                let mut read = String::new();
+                file.unwrap().take(length).read_to_string(&mut read).unwrap();
+                (response.status, read)
+            }
+        }
+    }
+
+    #[test]
+    fn s3_is_a_request_signed_for_it_at_a_buckets_host_or_naming_one_its_body_streamed_to_the_buckets() {
+        let door = door();
+        let signed_for = |service: &str| {
+            let scope = format!("20261023/{REGION}/{service}/aws4_request");
+            format!("AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders=host, Signature=00", key().id)
+        };
+        let (s3, sqs, lambda) = (signed_for("s3"), signed_for("sqs"), signed_for("lambda"));
+        let is_s3 = |method: &str, host: &str, target: &str, headers: &[(&str, &str)]| {
+            door.door.is_s3(&head_to(method, host, target, headers))
+        };
+        let presigned = "/photos/a.jpg?X-Amz-Credential=AKFF%2F20261023%2Ftn-tunis-1%2Fs3%2Faws4_request";
+        let invoke = "/2015-03-31/functions/Orders/invocations";
+        let target = ("X-Amz-Target", "AmazonSQS.ListQueues");
+
+        assert!(is_s3("GET", "127.0.0.1:3700", "/", &[("Authorization", &s3)]), "ListBuckets");
+        assert!(is_s3("PUT", "127.0.0.1:3700", "/elsewhere/a.jpg", &[("Authorization", &s3)]));
+        assert!(is_s3("GET", "127.0.0.1:3700", presigned, &[]));
+        assert!(is_s3("GET", "photos.localhost:3700", "/a.jpg", &[]), "at a bucket's host");
+        assert!(is_s3("GET", "photos.host.docker.internal:3700", "/a.jpg", &[]), "from a function");
+        assert!(is_s3("GET", "127.0.0.1:3700", "/photos/a.jpg", &[]), "unsigned, naming a bucket");
+        assert!(is_s3("GET", "127.0.0.1:3700", "/", &[]), "unsigned, the service");
+        assert!(!is_s3("POST", "127.0.0.1:3700", "/", &[("Authorization", &sqs), target]));
+        assert!(!is_s3("POST", "127.0.0.1:3700", "/", &[target]), "SQS's JSON protocol unsigned");
+        assert!(!is_s3("POST", "127.0.0.1:3700", invoke, &[("Authorization", &lambda)]));
+        assert!(!is_s3("POST", "127.0.0.1:3700", invoke, &[]), "unsigned, naming no bucket");
+        assert!(!is_s3("GET", "orders.fn.localhost:3700", "/photos/a.jpg", &[]), "a function's URL");
+        assert!(door.door.streams(&head_to("GET", "127.0.0.1:3700", "/photos/a.jpg", &[])));
+        assert!(!door.door.streams(&head_to("POST", "127.0.0.1:3700", invoke, &[])));
+        assert_eq!(door.door.limit(&head_to("POST", "127.0.0.1:3700", "/", &[target])), sqs::MAX_BODY_BYTES);
+
+        let put = head_to("PUT", "photos.localhost:3700", "/a.txt", &[("Content-Length", "5")]);
+        assert_eq!(streamed(&door, &put, b"hello").0, 200);
+        assert_eq!(
+            streamed(&door, &head_to("GET", "127.0.0.1:3700", "/photos/a.txt", &[]), b""),
+            (200, "hello".into())
+        );
+        let other = [
+            ("X-Amz-Date", "20261023T060000Z"),
+            ("X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD"),
+            (
+                "Authorization",
+                "AWS4-HMAC-SHA256 Credential=AKFFOTHERKEY0000TEST/20261023/tn-tunis-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=00",
+            ),
+        ];
+        let (status, body) = streamed(&door, &head_to("GET", "127.0.0.1:3700", "/photos/a.txt", &other), b"");
+        assert_eq!(status, 403);
+        assert!(body.contains("<Code>InvalidAccessKeyId</Code>"), "{body}");
+        assert_eq!(
+            door.said(),
+            [
+                "A request signed with AKFFOTHERKEY0000TEST, not the local key AKFFLOCALKEY0000TEST: .ff/local/credentials holds it"
+            ]
+        );
     }
 
     /// `Cleaner`, with a schedule `Nightly`; and `Reporter`, with one too, and `Weekly`, which has its own input.

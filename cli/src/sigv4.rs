@@ -1,13 +1,16 @@
 //! Signature Version 4: the canonical request, the string to sign and the day's key, with which `ff` signs its
-//! requests to S3 and `ff local`'s front door checks a request signed in its Authorization header, as the backend's
-//! front doors check it (`BE/src/common/signature-v4.ts`), over each form of the path a client may have signed. Its
-//! problems are named, and the front door says them in its service's words. Ported from the local front door's spike
-//! (`hack/spikes/local-front-door/`), its tests AWS's suite as the backend's read it; S3's own path, each segment
-//! encoded once, and its presigned and chunked forms come with S3's front door.
+//! requests to S3 and `ff local`'s front door checks a request's signature, as the backend's front doors check it
+//! (`BE/src/common/signature-v4.ts`), over each form of the path a client may have signed: every service's but S3's
+//! normalized and escaped twice, S3's each segment encoded once. Its problems are named, and the front door says them
+//! in its service's words. A signature checked gives what an aws-chunked body's chunks chain from. Ported from the
+//! local front door's spike (`hack/spikes/local-front-door/`), its tests AWS's suite as the backend's read it, and
+//! AWS's examples for S3 as `BE/src/storage/s3-examples.json` holds them.
 
 use std::time::SystemTime;
 
 use ring::{digest, hmac};
+
+use crate::dates::days_from_civil;
 
 pub const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 /// How far from now a header-signed request's time may be, either way: 15 minutes.
@@ -77,7 +80,8 @@ pub struct SignedRequest<'a> {
     pub headers: &'a [(String, String)],
 }
 
-/// What an Authorization header's signature says, read but not yet checked.
+/// What a request's signature says, read but not yet checked: from its Authorization header, or a presigned URL's
+/// query.
 #[derive(Debug, Clone)]
 pub struct HeaderSignature {
     pub access_key_id: String,
@@ -151,6 +155,31 @@ pub fn decode_escapes(text: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| text.to_string())
 }
 
+/// How a service signs a path: every service but S3, normalized and each segment escaped twice; S3, each segment
+/// encoded once, nothing normalized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Paths {
+    Normalized,
+    Once,
+}
+
+/// What an aws-chunked body's chunks chain from: the day's key, the scope, the time, and the request's own signature.
+#[derive(Clone)]
+pub struct Chain {
+    pub key: hmac::Key,
+    pub scope: String,
+    pub amz_date: String,
+    pub seed: String,
+}
+
+/// The path as S3 signs it: each segment encoded once, each escape as the client meant it, nothing normalized: "a//b"
+/// stays.
+pub fn canonical_uri(raw_path: &str) -> String {
+    let path = raw_path.split('/').map(|segment| uri_encode(&decode_escapes(segment), false)).collect::<Vec<_>>();
+    let path = path.join("/");
+    if path.is_empty() { "/".into() } else { path }
+}
+
 /// Each segment escaped twice, for a client of a service but S3 that sent it unescaped.
 fn canonical_uri_twice(raw_path: &str) -> String {
     let path = raw_path
@@ -190,8 +219,9 @@ pub fn encoded_query(query: &[(String, String)]) -> String {
     pairs.iter().map(|(name, value)| format!("{name}={value}")).collect::<Vec<_>>().join("&")
 }
 
-/// A query as it came, signed: its escapes decoded, then encoded as signing encodes them.
-pub fn canonical_query(raw_query: &str) -> String {
+/// A query as it came, signed: its escapes decoded, then encoded as signing encodes them; `exclude`, a presigned URL's
+/// signature, left out.
+pub fn canonical_query(raw_query: &str, exclude: Option<&str>) -> String {
     let pairs: Vec<(String, String)> = raw_query
         .split('&')
         .filter(|pair| !pair.is_empty())
@@ -199,6 +229,7 @@ pub fn canonical_query(raw_query: &str) -> String {
             let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
             (decode_escapes(name), decode_escapes(value))
         })
+        .filter(|(name, _)| Some(name.as_str()) != exclude)
         .collect();
     encoded_query(&pairs)
 }
@@ -213,12 +244,20 @@ pub fn canonical_header_value(headers: &[(String, String)], name: &str) -> Optio
     (!values.is_empty()).then(|| values.join(","))
 }
 
-pub fn canonical_request(request: &SignedRequest, path: &str, signed_headers: &[String], payload: &str) -> String {
+/// The request as signed over the path in one of its forms: `unsigned_query` names a query parameter left out.
+pub fn canonical_request(
+    request: &SignedRequest,
+    path: &str,
+    signed_headers: &[String],
+    payload: &str,
+    unsigned_query: Option<&str>,
+) -> String {
     let headers: String = signed_headers
         .iter()
         .map(|name| format!("{name}:{}\n", canonical_header_value(request.headers, name).unwrap_or_default()))
         .collect();
-    [request.method, path, &canonical_query(request.raw_query), &headers, &signed_headers.join(";"), payload].join("\n")
+    let query = canonical_query(request.raw_query, unsigned_query);
+    [request.method, path, &query, &headers, &signed_headers.join(";"), payload].join("\n")
 }
 
 pub fn string_to_sign(amz_date: &str, scope: &str, canonical: &str) -> String {
@@ -308,16 +347,6 @@ pub fn read_authorization(headers: &[(String, String)], service: &str) -> Result
     }))
 }
 
-/// Days since 1970-01-01 of a day in the proleptic Gregorian calendar (Howard Hinnant's days_from_civil).
-pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let year_of_era = year - era * 400;
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
 /// A signed time, YYYYMMDDTHHMMSSZ, in seconds since the epoch; None when malformed.
 pub fn signed_time(amz_date: &str) -> Option<i64> {
     let bytes = amz_date.as_bytes();
@@ -333,7 +362,7 @@ pub fn signed_time(amz_date: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 59 {
         return None;
     }
-    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second)
+    Some(days_from_civil(year, month as u32, day as u32) * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 /// The time a request was signed at: well formed, and on the credential's day.
@@ -363,24 +392,34 @@ fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
-/// The signature checked with the key's secret, over each form of the path the service's clients may have signed:
-/// normalized, then each segment escaped twice, as a client sent it unescaped.
+/// The forms of a path the service may have signed, tried in turn: its own; then, for S3, the path as sent, which some
+/// clients sign; for every other service, each segment escaped twice, as a client sent it unescaped.
+fn path_forms(raw_path: &str, paths: Paths) -> Vec<String> {
+    let (own, other) = match paths {
+        Paths::Once => (canonical_uri(raw_path), if raw_path.is_empty() { "/".into() } else { raw_path.into() }),
+        Paths::Normalized => (canonical_path(raw_path), canonical_uri_twice(raw_path)),
+    };
+    if other == own { vec![own] } else { vec![own, other] }
+}
+
+/// The signature checked with the key's secret over the request and its body as signed (`payload`: its SHA-256 in hex,
+/// or S3's UNSIGNED-PAYLOAD and aws-chunked forms), over each form of the path the service's clients may have signed.
+/// Answers what an aws-chunked body's chunks chain from.
 pub fn match_signature(
     request: &SignedRequest,
     signature: &HeaderSignature,
     payload: &str,
     secret: &str,
     service: &str,
-) -> Result<(), Problem> {
+    paths: Paths,
+    unsigned_query: Option<&str>,
+) -> Result<Chain, Problem> {
     let scope = scope_of(&signature.date, &signature.region, service);
     let key = signing_key(secret, &signature.date, &signature.region, service);
-    let own = canonical_path(request.raw_path);
-    let other = canonical_uri_twice(request.raw_path);
-    let forms = if other == own { vec![own] } else { vec![own, other] };
-    for path in forms {
-        let canonical = canonical_request(request, &path, &signature.signed_headers, payload);
+    for path in path_forms(request.raw_path, paths) {
+        let canonical = canonical_request(request, &path, &signature.signed_headers, payload, unsigned_query);
         if same(&hmac_hex(&key, &string_to_sign(&signature.amz_date, &scope, &canonical)), &signature.signature) {
-            return Ok(());
+            return Ok(Chain { key, scope, amz_date: signature.amz_date.clone(), seed: signature.signature.clone() });
         }
     }
     Err(Problem::Mismatch)
@@ -437,7 +476,7 @@ pub fn check_authorization(
 ) -> Result<(), Problem> {
     check_skew(signed_at(&signature.date, &signature.amz_date)?, &signature.amz_date, now)?;
     require_signed(&signature.signed_headers, "host")?;
-    match_signature(request, signature, &sha256_hex(body), secret, service)
+    match_signature(request, signature, &sha256_hex(body), secret, service, Paths::Normalized, None).map(|_| ())
 }
 
 #[cfg(test)]
@@ -523,6 +562,7 @@ mod tests {
                 &canonical_path(&sent.raw_path),
                 &read.signed_headers,
                 &sha256_hex(&sent.body),
+                None,
             );
             let signed = string_to_sign(&read.amz_date, &scope_of(&read.date, &read.region, service), &canonical);
             assert_eq!(canonical, case["header"]["canonicalRequest"].as_str().unwrap(), "{}", case["name"]);
@@ -566,81 +606,71 @@ mod tests {
         }
     }
 
-    /// The SHA-256 of nothing, which a request without a body signs.
-    const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    /// AWS's documented examples of Signature Version 4 for S3, as the backend's tests read them: each request with
+    /// its headers in order, made with the table's key and secret at its time, and its signature.
+    fn s3_signatures() -> Value {
+        let table: Value = serde_json::from_str(include_str!("../../BE/src/storage/s3-examples.json")).unwrap();
+        table["signatures"].clone()
+    }
 
-    /// The key of AWS's examples of Signature Version 4 for S3.
-    fn example() -> Credentials {
-        Credentials {
-            access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".into(),
+    #[test]
+    fn signs_awss_examples_for_s3_a_key_that_needs_encoding_and_a_query_sorted() {
+        let signatures = s3_signatures();
+        let text = |value: &Value| value.as_str().unwrap().to_owned();
+        let credentials = Credentials {
+            access_key_id: text(&signatures["key"]),
+            secret_access_key: text(&signatures["secret"]),
             region: "us-east-1".into(),
+        };
+        let at = amz_date(humantime::parse_rfc3339(signatures["at"].as_str().unwrap()).unwrap());
+        let examples = signatures["examples"].as_object().unwrap();
+        assert_eq!(examples.len(), 4);
+        for (name, example) in examples {
+            let headers: Vec<(String, String)> =
+                example["headers"].as_array().unwrap().iter().map(|pair| (text(&pair[0]), text(&pair[1]))).collect();
+            let target = text(&example["target"]);
+            let (path, raw_query) = target.split_once('?').unwrap_or((&target, ""));
+            let query: Vec<(String, String)> = raw_query
+                .split('&')
+                .filter(|pair| !pair.is_empty())
+                .map(|pair| pair.split_once('=').unwrap_or((pair, "")))
+                .map(|(name, value)| (decode_escapes(name), decode_escapes(value)))
+                .collect();
+            let payload = header(&headers, "x-amz-content-sha256").unwrap();
+            let method = text(&example["method"]);
+            // As a client sends the key: each segment encoded once.
+            let path = canonical_uri(path);
+            let request =
+                Signable { method: &method, path: &path, query: &query, headers: &headers, payload_sha256: payload };
+            let mut names: Vec<String> = headers.iter().map(|(name, _)| name.to_ascii_lowercase()).collect();
+            names.sort();
+
+            let signed = authorization(&credentials, &request, &at, "s3");
+
+            assert_eq!(
+                signed,
+                format!(
+                    "AWS4-HMAC-SHA256 Credential={}/20130524/us-east-1/s3/aws4_request, SignedHeaders={}, Signature={}",
+                    credentials.access_key_id,
+                    names.join(";"),
+                    text(&example["signature"])
+                ),
+                "{name}"
+            );
         }
-    }
-
-    fn headers(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect()
-    }
-
-    fn signature(header: &str) -> &str {
-        header.rsplit("Signature=").next().unwrap()
-    }
-
-    #[test]
-    fn signs_aws_s_example_get_object_with_a_range() {
-        let headers = headers(&[
-            ("Host", "examplebucket.s3.amazonaws.com"),
-            ("Range", "bytes=0-9"),
-            ("x-amz-content-sha256", EMPTY),
-            ("x-amz-date", "20130524T000000Z"),
-        ]);
-        let request =
-            Signable { method: "GET", path: "/test.txt", query: &[], headers: &headers, payload_sha256: EMPTY };
-        let header = authorization(&example(), &request, "20130524T000000Z", "s3");
-
+        assert_eq!(sha256_hex(b"Welcome to Amazon S3."), header_of(&examples["putObject"], "x-amz-content-sha256"));
+        assert_eq!(canonical_uri("/test$file.text"), "/test%24file.text");
         assert_eq!(
-            header.split(", Signature=").next().unwrap(),
-            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;range;x-amz-content-sha256;x-amz-date"
-        );
-        assert_eq!(signature(&header), "f0e8bdb87c964420e857bd35b5d6ed310bd44f0170aba48dd91039c6036bdb41");
-    }
-
-    #[test]
-    fn signs_aws_s_example_put_object_whose_key_needs_encoding() {
-        let payload = sha256_hex(b"Welcome to Amazon S3.");
-        assert_eq!(payload, "44ce7dd67c959e0d3524ffac1771dfbba87d2b6b4b4e99e42034a8b803f8b072");
-        let headers = headers(&[
-            ("Date", "Fri, 24 May 2013 00:00:00 GMT"),
-            ("Host", "examplebucket.s3.amazonaws.com"),
-            ("x-amz-content-sha256", &payload),
-            ("x-amz-date", "20130524T000000Z"),
-            ("x-amz-storage-class", "REDUCED_REDUNDANCY"),
-        ]);
-        let path = format!("/{}", uri_encode("test$file.text", true));
-        let request = Signable { method: "PUT", path: &path, query: &[], headers: &headers, payload_sha256: &payload };
-
-        assert_eq!(path, "/test%24file.text");
-        assert_eq!(
-            signature(&authorization(&example(), &request, "20130524T000000Z", "s3")),
-            "98ad721746da40c64f1a55b78f14c238d841ea1380cd77a1b5971af0ece108bd"
+            encoded_query(&[("prefix".into(), "J".into()), ("max-keys".into(), "2".into())]),
+            "max-keys=2&prefix=J"
         );
     }
 
-    #[test]
-    fn signs_aws_s_example_list_objects_with_its_query_sorted() {
-        let headers = headers(&[
-            ("Host", "examplebucket.s3.amazonaws.com"),
-            ("x-amz-content-sha256", EMPTY),
-            ("x-amz-date", "20130524T000000Z"),
-        ]);
-        let query = vec![("prefix".to_owned(), "J".to_owned()), ("max-keys".to_owned(), "2".to_owned())];
-        let request = Signable { method: "GET", path: "/", query: &query, headers: &headers, payload_sha256: EMPTY };
-
-        assert_eq!(encoded_query(&query), "max-keys=2&prefix=J");
-        assert_eq!(
-            signature(&authorization(&example(), &request, "20130524T000000Z", "s3")),
-            "34b48302e7b5fa45bde8084f4b7868a86f0a534bc59db6670ed5711ef69dc6f7"
-        );
+    /// A header's value in an example.
+    fn header_of(example: &Value, name: &str) -> String {
+        let headers = example["headers"].as_array().unwrap();
+        let pair = headers.iter().find(|pair| pair[0].as_str().unwrap().eq_ignore_ascii_case(name)).unwrap();
+        pair[1].as_str().unwrap().to_owned()
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub struct Object {
 }
 
 /// The text of the first `<name>` element in `xml`, its entities decoded.
-fn element(xml: &str, name: &str) -> Option<String> {
+pub fn element(xml: &str, name: &str) -> Option<String> {
     let (open, close) = (format!("<{name}>"), format!("</{name}>"));
     let start = xml.find(&open)? + open.len();
     let end = start + xml[start..].find(&close)?;
@@ -28,7 +28,7 @@ fn element(xml: &str, name: &str) -> Option<String> {
 }
 
 /// XML's five entities and its character references, decoded; anything else kept as it is.
-fn unescape(text: &str) -> String {
+pub fn unescape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find('&') {
