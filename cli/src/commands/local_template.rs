@@ -26,10 +26,10 @@ use crate::cli::LocalArgs;
 use crate::config::{is_bucket_name, is_function_name, is_queue_name};
 use crate::error::{Error, Kind};
 use crate::local::events::{LAMBDA_RETRY_POLICY, RetryPolicy};
-use crate::local::front_door::{FrontDoor, Settings};
+use crate::local::front_door::{FrontDoor, FunctionUrl, Settings, URL_DOMAIN};
 use crate::local::instances::{Docker, Instances};
 use crate::local::key::Key;
-use crate::local::{self, Code, LocalFunction, http, images};
+use crate::local::{self, Code, LocalFunction, http, images, url};
 use crate::output::Output;
 use crate::sam::Template;
 use crate::sam::plan::{self, BUCKET, Place, QUEUE};
@@ -221,14 +221,16 @@ fn functions(
 }
 
 /// What the front door answers of each function besides how it runs, by its name: its alias, its description and
-/// the template's variables, a secret's left out; and its asynchronous calls' retries and destinations, each within
-/// what FF takes, else a problem at its line.
+/// the template's variables, a secret's left out; its asynchronous calls' retries and destinations, each within what
+/// FF takes, else a problem at its line; and its URL, its CORS as FF takes it, its host no other's.
 fn settings(
     planned: &plan::Plan,
     secrets: &BTreeMap<String, String>,
     problems: &mut Problems,
 ) -> BTreeMap<String, Settings> {
     let mut all = BTreeMap::new();
+    // Each URL's host, by the function whose logical ID has it.
+    let mut hosts: BTreeMap<String, &String> = BTreeMap::new();
     for function in &planned.functions {
         let id = &function.id;
         let config = function.event_invoke_config.as_ref();
@@ -274,6 +276,24 @@ fn settings(
             Some(arn.to_owned())
         };
         let (on_success, on_failure) = (destination("onSuccess", "OnSuccess"), destination("onFailure", "OnFailure"));
+        let url = function.url.as_ref().map(|function_url| {
+            let cors = function_url.cors.as_ref().and_then(|cors| {
+                let refused = url::cors_refusals(cors);
+                for (property, why) in &refused {
+                    let at = format!("/Resources/{id}/Properties/FunctionUrlConfig/Cors/{property}");
+                    problems.at(&at, &format!("{id}: FunctionUrlConfig's Cors {why}"));
+                }
+                if refused.is_empty() { serde_json::from_value(cors.clone()).ok() } else { None }
+            });
+            if let Some(other) = hosts.insert(function.name.to_ascii_lowercase(), id) {
+                let message = format!(
+                    "{id}: its URL's host, {}, would be {other}'s too, as a host's case doesn't count: name one of them otherwise",
+                    url_host(&function.name)
+                );
+                problems.at(&format!("/Resources/{id}/Properties/FunctionUrlConfig"), &message);
+            }
+            FunctionUrl { iam: function_url.auth_type == "AWS_IAM", cors }
+        });
         let variables = function.environment.iter().filter(|(name, _)| !secrets.contains_key(*name));
         all.insert(
             function.name.clone(),
@@ -285,10 +305,16 @@ fn settings(
                 retries,
                 on_success,
                 on_failure,
+                url,
             },
         );
     }
     all
+}
+
+/// The host of a function's URL here, its name in lower case under the URLs' domain.
+fn url_host(name: &str) -> String {
+    format!("{}.{URL_DOMAIN}", name.to_ascii_lowercase())
 }
 
 /// How long a second of an asynchronous call's waits and age lasts: a second, but in a test build, as the `ff` suite's,
@@ -425,6 +451,12 @@ struct StartedFunction {
     runtime: &'static str,
     memory: u32,
     timeout: u32,
+    /// Its URL, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    /// Its URL's AuthType.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_type: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -564,6 +596,8 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 runtime: function.runtime.as_str(),
                 memory: function.memory,
                 timeout: function.timeout,
+                url: function.url.as_ref().map(|_| format!("http://{}:{port}/", url_host(&function.name))),
+                auth_type: function.url.as_ref().map(|function_url| function_url.auth_type.clone()),
             })
             .collect(),
         logs: logs.display().to_string(),
@@ -572,7 +606,13 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
         let mut lines = vec![format!("{} ({}) runs on this machine, its front door at {endpoint}:", read.stack_name, read.file)];
         let width = started.functions.iter().map(|function| function.name.len()).max().unwrap_or(0);
         lines.extend(started.functions.iter().map(|function| {
-            format!("  {:width$}  {:6}  {} MB, {} s", function.name, function.runtime, function.memory, function.timeout)
+            let line =
+                format!("  {:width$}  {:6}  {} MB, {} s", function.name, function.runtime, function.memory, function.timeout);
+            match (&function.url, function.auth_type.as_deref()) {
+                (Some(url), Some("AWS_IAM")) => format!("{line}  {url}, signed with its key"),
+                (Some(url), _) => format!("{line}  {url}"),
+                _ => line,
+            }
         }));
         if let Some(first) = started.functions.first() {
             lines.push(format!(
@@ -629,6 +669,7 @@ mod tests {
     use crate::cli::ConnectionArgs;
 
     use super::*;
+    use crate::local::url::Cors;
 
     const TEMPLATE: &str = r#"AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
@@ -761,6 +802,65 @@ Resources:
                  {file}:23: Payments: CodeUri names a .zip, which ff local doesn't unpack: name the folder it is made of\n\
                  {file}:25: Payments: EventInvokeConfig's MaximumRetryAttempts is a whole number from 0 to 2, as FF takes it, not 5\n\
                  {file}:28: Payments: a function can't be its own destination, as each record would call it again"
+            )
+        );
+    }
+
+    /// The template, `Orders` with a URL anyone may call, its CORS as `cors` says, and `Payments` with one that takes
+    /// the account's credentials, named `payments_name`.
+    fn with_urls(cors: &str, payments_name: &str) -> String {
+        TEMPLATE
+            .replace(
+                "      CodeUri: orders/\n",
+                &format!(
+                    "      CodeUri: orders/\n      FunctionUrlConfig:\n        AuthType: NONE\n        Cors:\n{cors}"
+                ),
+            )
+            .replace("FunctionName: payments-fn", &format!("FunctionName: {payments_name}"))
+            .replace(
+                "      CodeUri: payments/\n",
+                "      CodeUri: payments/\n      FunctionUrlConfig:\n        AuthType: AWS_IAM\n",
+            )
+    }
+
+    #[test]
+    fn a_functions_url_is_its_host_here_with_the_templates_cors() {
+        let cors = "          AllowOrigins: [https://app.example.tn]\n          AllowMethods: [GET, POST]\n          MaxAge: 300\n";
+        let (_folder, project) = project(&with_urls(cors, "payments-fn"));
+
+        let prepared = prepared(&project.join("template.yaml"), &options(), 3700, &key(), &Output::quiet()).unwrap();
+
+        let cors = Cors {
+            allow_origins: Some(vec!["https://app.example.tn".into()]),
+            allow_methods: Some(vec!["GET".into(), "POST".into()]),
+            max_age: Some(300),
+            ..Cors::default()
+        };
+        assert_eq!(prepared.settings["Orders"].url, Some(FunctionUrl { iam: false, cors: Some(cors) }));
+        assert_eq!(prepared.settings["payments-fn"].url, Some(FunctionUrl { iam: true, cors: None }));
+        assert_eq!(
+            (url_host("Orders"), url_host("payments-fn")),
+            ("orders.fn.localhost".into(), "payments-fn.fn.localhost".into())
+        );
+    }
+
+    #[test]
+    fn a_url_that_ff_would_refuse_or_whose_host_is_anothers_is_refused_at_its_line() {
+        let cors = "          AllowOrigins: [https://app.example.tn/path]\n          AllowMethods: [GET, OPTIONS]\n          MaxAge: 90000\n";
+        let (_folder, project) = project(&with_urls(cors, "ORDERS"));
+        let path = project.join("template.yaml");
+
+        let error = prepared(&path, &options(), 3700, &key(), &Output::quiet()).err().unwrap();
+
+        let file = path.display();
+        assert_eq!(
+            error.message,
+            format!(
+                "ff local start ran nothing: the template has 4 problems\n\
+                 {file}:15: Orders: FunctionUrlConfig's Cors AllowOrigins is a list of at most 100 origins, such as https://www.example.tn, or *, as FF takes it, not \"https://app.example.tn/path\"\n\
+                 {file}:16: Orders: FunctionUrlConfig's Cors AllowMethods is a list of at most 6 of GET, PUT, HEAD, POST, PATCH, DELETE and *, as FF takes it, not \"OPTIONS\"\n\
+                 {file}:17: Orders: FunctionUrlConfig's Cors MaxAge is a whole number of seconds from 0 to 86400, as FF takes it, not 90000\n\
+                 {file}:30: Payments: its URL's host, orders.fn.localhost, would be Orders's too, as a host's case doesn't count: name one of them otherwise"
             )
         );
     }

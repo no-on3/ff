@@ -1855,6 +1855,15 @@ invoked() {
   curl -s -o "$work/invoked" -w '%{http_code}' -X POST "http://127.0.0.1:$port/2015-03-31/functions/$1/invocations" -d "$2"
   echo " $(cat "$work/invoked")"
 }
+# at_url <host> [curl args...]: a request to a function's URL, its status and its answer; its headers in $work/url.head.
+at_url() {
+  local host="$1"
+  shift
+  curl -s -o "$work/url.body" -D "$work/url.head" -w '%{http_code}' "$@" "http://$host.fn.localhost:$port/"
+  echo " $(cat "$work/url.body")"
+}
+# url_header <name>: the header of the last answer at_url got.
+url_header() { sed -n "s/^$1: //Ip" "$work/url.head" | tr -d '\r'; }
 # lambda_cli <args...>: the AWS CLI's lambda commands with the local key's file alone, the front door their endpoint.
 lambda_cli() {
   AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
@@ -1888,6 +1897,12 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: greeter/
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: [https://app.example.tn]
+          AllowMethods: [GET, POST]
+          MaxAge: 300
       Environment:
         Variables:
           GREETING: Hola
@@ -1896,6 +1911,8 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: caller/
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
       Environment:
         Variables:
           GREETER: !Ref Greeter
@@ -1937,6 +1954,9 @@ until_said "Ctrl-C stops them" "$work/start.out" || fail "ff local start said no
 check "it says where the app runs, its functions, and how to call them" \
   "shop ($app/template.yaml) runs on this machine, its front door at http://127.0.0.1:$port:" \
   "$(head -1 "$work/start.out")"
+check "  ... each function's URL, and which takes the local key's signature" "true true" \
+  "$(grep -E "^  Greeter +python +128 MB, 10 s  http://greeter.fn.localhost:$port/$" "$work/start.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  Caller +python +128 MB, 10 s  http://caller.fn.localhost:$port/, signed with its key$" "$work/start.out" >/dev/null && echo true || echo false)"
 check "  ... with its secrets file" "true" "$(grep -F "Their secrets are $app/.env.local's." "$work/start.out" >/dev/null && echo true || echo false)"
 check "nothing runs before a call" 0 "$(leftover)"
 check "a call starts the function and answers, its variables resolved here and its secret given" \
@@ -1976,6 +1996,26 @@ AWS_ACCESS_KEY_ID=AKFFNOTTHELOCALKEY00 AWS_SECRET_ACCESS_KEY=not-the-secret AWS_
   >"$work/refused.out" 2>&1 || true
 check "a request signed with another key is refused in Lambda's words" "true" \
   "$(grep -F '(UnrecognizedClientException) when calling the Invoke operation: The security token included in the request is invalid.' "$work/refused.out" >/dev/null && echo true || echo false)"
+# Greeter's calls without a name so far, each a line of its log: the URL's event has none.
+local nameless
+nameless="$(grep -c 'Greeter | greeting None' "$work/start.err" || true)"
+check "a function's URL calls it with the URL's event, and answers its value with the template's CORS" \
+  "200 Hola https://app.example.tn" \
+  "$(at_url greeter -H 'Origin: https://app.example.tn' | sed 's/ .*//') $(jq -r .greeting "$work/url.body") $(url_header access-control-allow-origin)"
+for _ in $(seq 1 60); do
+  [ "$(grep -c 'Greeter | greeting None' "$work/start.err" || true)" -gt "$nameless" ] && break
+  sleep 0.5
+done
+check "  ... a browser's preflight answered by its CORS, without a call" "204 POST 300 $((nameless + 1))" \
+  "$(at_url greeter -X OPTIONS -H 'Origin: https://app.example.tn' -H 'Access-Control-Request-Method: POST' | sed 's/ .*//') \
+$(url_header access-control-allow-methods | tr -d ' ' | tr ',' '\n' | grep -x POST) $(url_header access-control-max-age) \
+$(grep -c 'Greeter | greeting None' "$work/start.err")"
+check "a host that names no function's URL is the gateway's 404" '404 {"Message":"Not Found"}' "$(at_url recorder)"
+check "a URL that takes the account's credentials refuses a request without the local key's signature" \
+  '403 Forbidden: this URL takes a request signed for lambda by an access key of its account, or an API key of it, as "Authorization: Bearer ffk_…"' \
+  "$(at_url caller | sed 's/ .*//') $(jq -r .Message "$work/url.body")"
+check "  ... and takes one signed with it, as curl --aws-sigv4 signs it" "200 Hola" \
+  "$(at_url caller --aws-sigv4 aws:amz:tn-tunis-1:lambda --user "$key_id:$(sed -n 's/^aws_secret_access_key = //p' "$app/.ff/local/credentials")" | sed 's/ .*//') $(jq -r .called.greeting "$work/url.body")"
 check "an asynchronous call is answered 202" 202 \
   "$(lambda_cli invoke --function-name Failing --invocation-type Event --payload '{"n": 1}' --cli-binary-format raw-in-base64-out "$work/event.json" | jq -r .StatusCode)"
 until_said "Recorder | recorded" "$work/start.err" || true

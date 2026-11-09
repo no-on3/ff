@@ -6,7 +6,9 @@
 //! call's log with `X-Amz-Log-Type: Tail`, the caller's ClientContext passed on; an `Event`, answered 202 and run apart
 //! as FF runs one, retried, its record sent to its destination; a `DryRun`, checked only. Its cases are
 //! `BE/src/lambda/lambda-invoke-examples.json`'s, which the backend's tests read too. And `GetFunctionConfiguration`,
-//! as the backend answers it for `$LATEST`.
+//! as the backend answers it for `$LATEST`. Each function's URL is at `http://<function>.fn.localhost:<port>`, served
+//! as FF's gateway serves one (`BE/src/function-urls/function-url.gateway.ts`), its CORS applied, and one that takes
+//! the account's credentials refused without the local key's signature.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,6 +22,7 @@ use super::events::{self, Attempts, End, Outcome, RetryPolicy, Settlement};
 use super::http::{Answers, PAYLOAD_LIMIT, Request, Response, percent_decode, request_id};
 use super::instances::{Called, Instances, Runner};
 use super::key::Key;
+use super::url::{self, Caller, Cors, Ran, UrlRequest};
 use super::{Asks, Code};
 use crate::error::{Error, Kind};
 use crate::sigv4::{Problem, SignedRequest, check_authorization, read_authorization, sha256_hex};
@@ -37,8 +40,13 @@ const SERVICE_EXCEPTION: &str = "The AWS Lambda service encountered an internal 
 const INSTANCES_BUSY: &str = "ReservedFunctionConcurrentInvocationLimitExceeded";
 /// The service Lambda's requests are signed for.
 const SERVICE: &str = "lambda";
-/// Lambda's words for a signature that isn't the key's.
+/// Lambda's words for a signature that isn't the key's, and its URLs'.
 const SIGNATURE_MISMATCH: &str = "The request signature we calculated does not match the signature you provided. Check your AWS Secret Access Key and signing method. Consult the service documentation for details.";
+const URL_SIGNATURE_MISMATCH: &str = "The request signature we calculated does not match the signature you provided. Check your AWS Secret Access Key and signing method.";
+/// Lambda's words for a key it doesn't know.
+const INVALID_TOKEN: &str = "The security token included in the request is invalid.";
+/// The domain each function's URL is under, its name the first label: `<function>.fn.localhost`.
+pub const URL_DOMAIN: &str = "fn.localhost";
 
 /// An answer of Lambda's REST JSON protocol: a status, the error's name in `x-amzn-ErrorType`, and whose fault it is
 /// with its message, and Lambda's fields beside them.
@@ -62,15 +70,22 @@ fn refusal(status: u16, error_type: &str, message: &str) -> Response {
 }
 
 fn unrecognized_client() -> Response {
-    refusal(403, "UnrecognizedClientException", "The security token included in the request is invalid.")
+    refusal(403, "UnrecognizedClientException", INVALID_TOKEN)
 }
 
-/// A signature's problem in Lambda's words, as the backend says them (`serviceWords`, `BE/src/common/signature-v4.ts`).
-fn signature_refusal(problem: Problem) -> Response {
-    let incomplete = |message: &str| refusal(400, "IncompleteSignatureException", message);
-    let mismatch = |message: &str| refusal(403, "InvalidSignatureException", message);
+/// What is wrong with a signature, as the backend says it (`serviceWords`, `BE/src/common/signature-v4.ts`): a key
+/// it doesn't know; a signature incomplete, and why; or not the key's, and why, when it isn't the service's own words.
+enum Words {
+    Token,
+    Incomplete(String),
+    Mismatch(Option<String>),
+}
+
+fn signature_words(problem: Problem) -> Words {
+    let incomplete = |message: &str| Words::Incomplete(message.to_owned());
+    let mismatch = |message: String| Words::Mismatch(Some(message));
     match problem {
-        Problem::Token => unrecognized_client(),
+        Problem::Token => Words::Token,
         Problem::Algorithm => {
             incomplete("The authorization mechanism you have provided is not supported. Please use AWS4-HMAC-SHA256.")
         }
@@ -80,7 +95,7 @@ fn signature_refusal(problem: Problem) -> Response {
         Problem::Credential { .. } => {
             incomplete(&format!("The Credential is not <access key ID>/<date>/<region>/{SERVICE}/aws4_request."))
         }
-        Problem::Service { .. } => mismatch(&format!("Credential should be scoped to correct service: '{SERVICE}'.")),
+        Problem::Service { .. } => mismatch(format!("Credential should be scoped to correct service: '{SERVICE}'.")),
         Problem::NoDate => {
             incomplete("Authorization header requires existence of either a X-Amz-Date or a Date header.")
         }
@@ -88,11 +103,42 @@ fn signature_refusal(problem: Problem) -> Response {
             incomplete(&format!("The date \"{amz_date}\" is not YYYYMMDDTHHMMSSZ, or not the credential's."))
         }
         Problem::Skewed { amz_date } => {
-            mismatch(&format!("Signature expired: {amz_date} is more than 15 minutes from the request's arrival."))
+            mismatch(format!("Signature expired: {amz_date} is more than 15 minutes from the request's arrival."))
         }
-        Problem::Unsigned { .. } => mismatch("'Host' must be a 'SignedHeader' in the AWS Authorization."),
-        Problem::Mismatch => mismatch(SIGNATURE_MISMATCH),
+        Problem::Unsigned { .. } => mismatch("'Host' must be a 'SignedHeader' in the AWS Authorization.".to_owned()),
+        Problem::Mismatch => Words::Mismatch(None),
     }
+}
+
+/// A signature's problem in Lambda's words.
+fn signature_refusal(problem: Problem) -> Response {
+    match signature_words(problem) {
+        Words::Token => unrecognized_client(),
+        Words::Incomplete(message) => refusal(400, "IncompleteSignatureException", &message),
+        Words::Mismatch(message) => {
+            refusal(403, "InvalidSignatureException", message.as_deref().unwrap_or(SIGNATURE_MISMATCH))
+        }
+    }
+}
+
+/// A 403 of a function's URL that says why, as the gateway says it.
+fn forbidden(message: &str) -> Response {
+    url::message(403, &format!("Forbidden: {message}"))
+}
+
+/// A signature's problem in the words of a function's URL: each a 403, as the gateway says them.
+fn url_signature_refusal(problem: Problem) -> Response {
+    match signature_words(problem) {
+        Words::Token => forbidden(INVALID_TOKEN),
+        Words::Incomplete(message) => forbidden(&message),
+        Words::Mismatch(message) => forbidden(message.as_deref().unwrap_or(URL_SIGNATURE_MISMATCH)),
+    }
+}
+
+/// Now, in seconds since 1970, as a signature's time is checked against.
+fn now_seconds() -> i64 {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
+    i64::try_from(now).unwrap_or(i64::MAX)
 }
 
 /// A function's answer, or its error as Lambda's document, both 200, as Lambda answers them; the call's log with them
@@ -227,8 +273,16 @@ fn named<'a>(text: &'a str, qualifier: Option<&'a str>) -> Named<'a> {
     Named { region, account, name, qualifier: qualifier.or(own) }
 }
 
-/// What the front door knows of a function besides how it runs: what Lambda's operations answer of it, and how its
-/// asynchronous calls end.
+/// A function's URL, as its FunctionUrlConfig asks: whether it takes the account's credentials, and its CORS.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FunctionUrl {
+    /// AuthType AWS_IAM: a request signed with the local key, as FF takes one signed by an access key of the account.
+    pub iam: bool,
+    pub cors: Option<Cors>,
+}
+
+/// What the front door knows of a function besides how it runs: what Lambda's operations answer of it, how its
+/// asynchronous calls end, and its URL.
 #[derive(Clone, Debug, Default)]
 pub struct Settings {
     /// Its alias: a name for the function as it is, here.
@@ -242,6 +296,7 @@ pub struct Settings {
     pub retries: RetryPolicy,
     pub on_success: Option<String>,
     pub on_failure: Option<String>,
+    pub url: Option<FunctionUrl>,
 }
 
 /// The front door to the template's app.
@@ -284,18 +339,137 @@ impl<R: Runner> FrontDoor<R> {
             return Ok(());
         };
         if signature.access_key_id != self.key.id {
-            (self.say)(&format!(
-                "A request signed with {}, not the local key {}: .ff/local/credentials holds it",
-                signature.access_key_id, self.key.id
-            ));
+            self.not_the_local_key(&signature.access_key_id);
             return Err(unrecognized_client());
         }
         let signed =
             SignedRequest { method: &request.method, raw_path: path, raw_query: query, headers: &request.headers };
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs());
-        let now = i64::try_from(now).unwrap_or(i64::MAX);
-        check_authorization(&signed, &request.body, &signature, &self.key.secret, now, SERVICE)
+        check_authorization(&signed, &request.body, &signature, &self.key.secret, now_seconds(), SERVICE)
             .map_err(signature_refusal)
+    }
+
+    /// Says that a request was signed with a key that isn't the local one, which no caller learns.
+    fn not_the_local_key(&self, key_id: &str) {
+        (self.say)(&format!(
+            "A request signed with {key_id}, not the local key {}: .ff/local/credentials holds it",
+            self.key.id
+        ));
+    }
+
+    /// The function whose URL a request's host names, `<function>.fn.localhost` in any case, with its URL; None for a
+    /// host under that domain that names none; and nothing for any other host.
+    fn url_of(&self, request: &Request) -> Option<Option<(&String, &FunctionUrl)>> {
+        let host = url::host_name(request.header("host"))?;
+        let label = host.strip_suffix(URL_DOMAIN)?.strip_suffix('.')?;
+        Some(self.settings.iter().find_map(|(name, settings)| {
+            let function_url = settings.url.as_ref()?;
+            name.eq_ignore_ascii_case(label).then_some((name, function_url))
+        }))
+    }
+
+    /// A request to a function's URL, answered as FF's gateway answers it: 404 for a host that names no URL; a
+    /// browser's preflight answered by its CORS, without a call; one that takes the account's credentials refused
+    /// without the local key's signature; the function called with the URL's event, its return value the response;
+    /// and the CORS's headers on every answer, a refusal's too.
+    fn url(
+        &self,
+        found: Option<(&String, &FunctionUrl)>,
+        request: &Request,
+        request_id: &str,
+        source_ip: &str,
+    ) -> Response {
+        let Some((name, function_url)) = found else { return url::message(404, "Not Found") };
+        let origin = request.header("origin");
+        let cors = function_url.cors.as_ref();
+        if let Some(cors) = cors
+            && url::is_preflight(request)
+        {
+            return Response { status: 204, headers: cors.preflight_headers(origin), body: Vec::new() };
+        }
+        let answer =
+            self.url_call(name, function_url, request, request_id, source_ip).unwrap_or_else(|refused| refused);
+        match cors {
+            Some(cors) => cors.applied(answer, origin),
+            None => answer,
+        }
+    }
+
+    /// The URL's call of its function, as the gateway makes it; a refusal when it can't be made.
+    fn url_call(
+        &self,
+        name: &str,
+        function_url: &FunctionUrl,
+        request: &Request,
+        request_id: &str,
+        source_ip: &str,
+    ) -> Result<Response, Response> {
+        let caller = if function_url.iam { Some(self.url_caller(request)?) } else { None };
+        let domain_name = url::host_name(request.header("host")).unwrap_or_default();
+        let url_id = domain_name.split('.').next().unwrap_or_default();
+        let event = url::sized(url::event(&UrlRequest {
+            request,
+            source_ip,
+            domain_name: &domain_name,
+            domain_prefix: url_id,
+            url_id,
+            request_id,
+            time: SystemTime::now(),
+            account_id: if caller.is_some() { &self.account } else { "anonymous" },
+            caller: caller.as_ref(),
+            // The signature that let the caller in is never the function's to see.
+            without_headers: if caller.is_some() { &["authorization"] } else { &[] },
+        }))?;
+        let ran = match self.instances.call(name, &event, request_id, &Asks::default()) {
+            Some(Ok(Called::Answered(answer))) if answer.status == 200 => {
+                Ran::Output(serde_json::from_str(&answer.body).unwrap_or(Value::Null))
+            }
+            Some(Ok(Called::Answered(answer))) if answer.status == 429 => Ran::Throttled,
+            // The function's own error, which its log has.
+            Some(Ok(_)) => Ran::Failed,
+            Some(Err(error)) => {
+                (self.say)(&format!("{name}: {}", error.message));
+                Ran::Failed
+            }
+            None => return Err(url::message(404, "Not Found")),
+        };
+        Ok(url::response_of(ran, &|line| (self.say)(&format!("{name}: {line}"))))
+    }
+
+    /// The caller of a URL that takes the account's credentials, as the gateway checks one: a request signed for
+    /// lambda, here with the local key, the account's one key. ff local has no API keys, which FF takes too.
+    fn url_caller(&self, request: &Request) -> Result<Caller, Response> {
+        let authorization = request.header("authorization").unwrap_or_default().trim();
+        if authorization.starts_with("AWS4-HMAC-SHA256 ") {
+            let signature = read_authorization(&request.headers, SERVICE)
+                .map_err(url_signature_refusal)?
+                .ok_or_else(|| forbidden(INVALID_TOKEN))?;
+            if signature.access_key_id != self.key.id {
+                self.not_the_local_key(&signature.access_key_id);
+                return Err(forbidden(INVALID_TOKEN));
+            }
+            let (path, query) = request.target.split_once('?').unwrap_or((request.target.as_str(), ""));
+            let signed =
+                SignedRequest { method: &request.method, raw_path: path, raw_query: query, headers: &request.headers };
+            check_authorization(&signed, &request.body, &signature, &self.key.secret, now_seconds(), SERVICE)
+                .map_err(url_signature_refusal)?;
+            return Ok(Caller {
+                access_key: self.key.id.clone(),
+                account_id: self.account.clone(),
+                user_id: self.key.id.clone(),
+            });
+        }
+        let bearer = authorization.split_once(char::is_whitespace);
+        if bearer
+            .is_some_and(|(scheme, key)| scheme.eq_ignore_ascii_case("bearer") && key.trim_start().starts_with("ffk_"))
+        {
+            (self.say)(
+                "A request to a URL with an API key, which ff local hasn't: sign it with the local key, as AWS's tools do",
+            );
+            return Err(url::message(403, "Forbidden"));
+        }
+        Err(forbidden(
+            "this URL takes a request signed for lambda by an access key of its account, or an API key of it, as \"Authorization: Bearer ffk_…\"",
+        ))
     }
 
     fn arn(&self, name: &str) -> String {
@@ -584,7 +758,10 @@ impl<R: Runner> FrontDoor<R> {
 }
 
 impl<R: Runner> Answers for FrontDoor<R> {
-    fn answer(&self, request: &Request, request_id: &str, _source_ip: &str) -> Response {
+    fn answer(&self, request: &Request, request_id: &str, source_ip: &str) -> Response {
+        if let Some(found) = self.url_of(request) {
+            return self.url(found, request, request_id, source_ip);
+        }
         let (path, query) = request.target.split_once('?').unwrap_or((request.target.as_str(), ""));
         if let Err(refused) = self.signed(request, path, query) {
             return refused;
@@ -608,7 +785,16 @@ impl<R: Runner> Answers for FrontDoor<R> {
         answer.unwrap_or_else(|refused| refused)
     }
 
-    fn unreadable(&self, too_large: bool) -> Response {
+    fn unreadable(&self, too_large: bool, head: Option<&Request>) -> Response {
+        // A function's URL refuses it in its words, its CORS with them.
+        if let Some(found) = head.and_then(|head| self.url_of(head)) {
+            let Some((_, function_url)) = found else { return url::message(404, "Not Found") };
+            let refused = if too_large { url::too_large() } else { url::message(400, "Bad Request") };
+            return match &function_url.cors {
+                Some(cors) => cors.applied(refused, head.and_then(|head| head.header("origin"))),
+                None => refused,
+            };
+        }
         match too_large {
             true => refusal(
                 413,
@@ -683,15 +869,31 @@ mod tests {
 
     /// A request's headers as AWS's SDKs sign Lambda's, with `key`, at `amz_date`: its Host and its time signed.
     fn signed(key: &Key, path: &str, body: &[u8], amz_date: &str, service: &str) -> Vec<(String, String)> {
-        let mut headers =
-            vec![("Host".to_owned(), "127.0.0.1:3700".to_owned()), ("X-Amz-Date".to_owned(), amz_date.to_owned())];
+        signed_to("127.0.0.1:3700", "POST", key, path, body, amz_date, service)
+    }
+
+    /// The same, to a host, by a method.
+    fn signed_to(
+        host: &str,
+        method: &str,
+        key: &Key,
+        path: &str,
+        body: &[u8],
+        amz_date: &str,
+        service: &str,
+    ) -> Vec<(String, String)> {
+        let mut headers = vec![("Host".to_owned(), host.to_owned()), ("X-Amz-Date".to_owned(), amz_date.to_owned())];
         let credentials =
             Credentials { access_key_id: key.id.clone(), secret_access_key: key.secret.clone(), region: REGION.into() };
         let payload = sha256_hex(body);
-        let request = Signable { method: "POST", path, query: &[], headers: &headers, payload_sha256: &payload };
+        let request = Signable { method, path, query: &[], headers: &headers, payload_sha256: &payload };
         let signature = authorization(&credentials, &request, amz_date, service);
         headers.push(("Authorization".to_owned(), signature));
         headers
+    }
+
+    fn as_refs(headers: &[(String, String)]) -> Vec<(&str, &str)> {
+        headers.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect()
     }
 
     /// `Orders`, its alias `live`, and `Broken`, whose code doesn't load.
@@ -1015,7 +1217,7 @@ mod tests {
         let listed = door.send("GET", "/2015-03-31/functions", &[], b"");
 
         assert_eq!((refused(&listed).0, refused(&listed).1.as_str()), (400, "UnknownOperationException"));
-        assert_eq!(refused(&door.door.unreadable(true)).0, 413);
+        assert_eq!(refused(&door.door.unreadable(true, None)).0, 413);
         assert_eq!(door.stand.starts.load(Ordering::SeqCst), 0, "nothing refused started its function");
     }
 
@@ -1195,5 +1397,214 @@ mod tests {
             }
         }
         assert_eq!(checked, 28, "every case of the table but the one that names a version");
+    }
+
+    /// `orders`, its URL as `function_url` says.
+    fn door_with_url(function_url: FunctionUrl) -> Door {
+        door_with(vec![function("orders", "app.handler")], move |_, settings| settings.url = Some(function_url.clone()))
+    }
+
+    /// What the runtime answers: a status, whether the function failed, the body.
+    fn runtime(status: u16, function_error: bool, body: String) -> Answer {
+        Answer { status, request_id: None, duration_ms: None, memory_mb: None, function_error, body, log_result: None }
+    }
+
+    /// A response as the server sends it for the request's method: its status, its headers by lower-case name, its
+    /// body.
+    fn as_sent(response: &Response, method: &str) -> (u16, BTreeMap<String, String>, Vec<u8>) {
+        let mut sent = Vec::new();
+        super::super::http::write_response(&mut sent, response, "a-request", method == "HEAD").unwrap();
+        let end = sent.windows(4).position(|window| window == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&sent[..end]).into_owned();
+        let headers = head
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(": "))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.to_owned()))
+            .collect();
+        (response.status, headers, sent[end + 4..].to_vec())
+    }
+
+    /// A function URL's Message.
+    fn message_of(response: &Response) -> (u16, String) {
+        (response.status, body_of(response)["Message"].as_str().unwrap_or_default().to_owned())
+    }
+
+    #[test]
+    fn a_url_answers_the_gateways_cases_as_the_gateway_does() {
+        let table = url::tests::table();
+        let mut checked = 0;
+        for (group, cases) in table["gateway"].as_object().unwrap() {
+            for case in cases.as_array().unwrap() {
+                let title = format!("{group}: {}", case["title"]);
+                let cors = case.get("cors").map(|cors| serde_json::from_value::<Cors>(cors.clone()).unwrap());
+                let door = door_with_url(FunctionUrl { iam: false, cors });
+                let ran = &case["ran"];
+                let scripted = match (ran.get("output"), ran.get("error")) {
+                    (Some(output), _) => runtime(200, false, output.to_string()),
+                    (None, Some(error)) if error["kind"] == "throttled" => {
+                        let document =
+                            json!({ "errorType": "TooManyRequestsException", "errorMessage": error["message"] });
+                        runtime(429, false, document.to_string())
+                    }
+                    (None, Some(error)) => runtime(
+                        500,
+                        true,
+                        json!({ "errorType": error["type"], "errorMessage": error["message"] }).to_string(),
+                    ),
+                    (None, None) => runtime(200, false, json!({ "statusCode": 200, "body": "ok" }).to_string()),
+                };
+                door.stand.script.lock().unwrap().push_back(Ok(scripted));
+                let request = &case["request"];
+                let method = request["method"].as_str().unwrap();
+                let mut headers = vec![("Host".to_owned(), "orders.fn.localhost:3700".to_owned())];
+                headers.extend(
+                    request["headers"]
+                        .as_object()
+                        .into_iter()
+                        .flatten()
+                        .map(|(name, value)| (name.clone(), value.as_str().unwrap().to_owned())),
+                );
+                let body = request["body"].as_str().unwrap_or_default();
+
+                let response =
+                    door.send(method, request["path"].as_str().unwrap(), &as_refs(&headers), body.as_bytes());
+
+                let (status, sent, body) = as_sent(&response, method);
+                let expected = &case["answer"];
+                assert_eq!(u64::from(status), expected["status"].as_u64().unwrap(), "{title}");
+                for (name, value) in expected.get("headers").and_then(Value::as_object).into_iter().flatten() {
+                    assert_eq!(sent.get(name).map(String::as_str), value.as_str(), "{title}: {name}");
+                }
+                for prefix in expected.get("noHeadersStartingWith").and_then(Value::as_array).into_iter().flatten() {
+                    let prefix = prefix.as_str().unwrap();
+                    assert!(!sent.keys().any(|name| name.starts_with(prefix)), "{title}: {sent:?}");
+                }
+                if let Some(text) = expected.get("body").and_then(Value::as_str) {
+                    assert_eq!(String::from_utf8_lossy(&body), text, "{title}");
+                }
+                let received = door.stand.received.lock().unwrap().clone();
+                match case.get("called") {
+                    Some(Value::Bool(false)) => assert!(received.is_empty(), "{title}: nothing called"),
+                    Some(called) => {
+                        for (path, value) in called["has"].as_object().unwrap() {
+                            assert_eq!(url::tests::at(&received[0].0, path), Some(value), "{title}: {path}");
+                        }
+                    }
+                    None => {}
+                }
+                if let Some(says) = case.get("says").and_then(Value::as_str) {
+                    assert!(door.said().iter().any(|line| line.contains(says)), "{title}: {:?}", door.said());
+                }
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 10, "every case of the gateway's");
+    }
+
+    #[test]
+    fn a_url_is_its_functions_name_under_fn_localhost_in_any_case() {
+        let door =
+            door_with(vec![function("Orders", "app.handler"), function("Plain", "app.handler")], |name, settings| {
+                if name == "Orders" {
+                    settings.url = Some(FunctionUrl::default());
+                }
+            });
+        let get = |host: &str, target: &str| door.send("GET", target, &[("Host", host)], b"");
+
+        // The stand-in answers with the event it got, which a value without statusCode answers as its JSON.
+        let answered = get("ORDERS.fn.localhost:3700", "/items?id=7");
+        let event = body_of(&answered);
+        assert_eq!(answered.status, 200);
+        assert_eq!(
+            [&event["rawPath"], &event["requestContext"]["domainName"], &event["requestContext"]["apiId"]],
+            ["/items", "orders.fn.localhost", "orders"]
+        );
+        assert_eq!(
+            [&event["requestContext"]["accountId"], &event["requestContext"]["http"]["sourceIp"]],
+            ["anonymous", "127.0.0.1"]
+        );
+        // A function without a URL, or none at all, is the gateway's 404; another host, Lambda's API.
+        for host in ["plain.fn.localhost:3700", "nothing.fn.localhost", "a.orders.fn.localhost"] {
+            assert_eq!(message_of(&get(host, "/")), (404, "Not Found".to_owned()), "{host}");
+        }
+        assert_eq!(refused(&get("fn.localhost", "/")).1, "UnknownOperationException");
+        assert_eq!(refused(&get("127.0.0.1:3700", "/")).1, "UnknownOperationException");
+        assert_eq!(door.stand.received.lock().unwrap().len(), 1, "only the URL's function was called");
+    }
+
+    #[test]
+    fn a_url_that_takes_the_accounts_credentials_takes_a_request_signed_with_the_local_key() {
+        let door = door_with_url(FunctionUrl { iam: true, cors: None });
+        let host = "orders.fn.localhost:3700";
+        let now = amz_date(SystemTime::now());
+        let send = |headers: &[(String, String)], body: &[u8]| door.send("POST", "/pay", &as_refs(headers), body);
+
+        let called = send(&signed_to(host, "POST", &key(), "/pay", b"{}", &now, "lambda"), b"{}");
+        let event = body_of(&called);
+        assert_eq!(called.status, 200);
+        assert_eq!(event["requestContext"]["accountId"], ACCOUNT);
+        assert_eq!(
+            event["requestContext"]["authorizer"]["iam"],
+            json!({ "accessKey": key().id, "accountId": ACCOUNT, "callerId": key().id, "cognitoIdentity": null, "principalOrgId": null, "userArn": null, "userId": key().id })
+        );
+        assert!(event["headers"].get("authorization").is_none(), "the signature is never the function's");
+
+        let another = Key { id: "AKFFNOTTHELOCALKEY00".into(), secret: "other".into() };
+        let refusals = [
+            (
+                send(&[("Host".to_owned(), host.to_owned())], b""),
+                "Forbidden: this URL takes a request signed for lambda by an access key of its account, or an API key of it, as \"Authorization: Bearer ffk_…\"",
+            ),
+            (
+                send(&signed_to(host, "POST", &another, "/pay", b"{}", &now, "lambda"), b"{}"),
+                "Forbidden: The security token included in the request is invalid.",
+            ),
+            (
+                send(&signed_to(host, "POST", &key(), "/pay", b"{}", &now, "lambda"), b"{\"changed\": 1}"),
+                "Forbidden: The request signature we calculated does not match the signature you provided. Check your AWS Secret Access Key and signing method.",
+            ),
+            (
+                send(&signed_to(host, "POST", &key(), "/pay", b"{}", &now, "s3"), b"{}"),
+                "Forbidden: Credential should be scoped to correct service: 'lambda'.",
+            ),
+            (
+                send(
+                    &[("Host".to_owned(), host.to_owned()), ("Authorization".to_owned(), "Bearer ffk_abc".to_owned())],
+                    b"",
+                ),
+                "Forbidden",
+            ),
+        ];
+        for (response, message) in refusals {
+            assert_eq!(message_of(&response), (403, message.to_owned()));
+        }
+        assert_eq!(door.stand.received.lock().unwrap().len(), 1, "nothing refused was called");
+        let said = door.said();
+        assert!(said.iter().any(|line| line.contains("AKFFNOTTHELOCALKEY00, not the local key")), "{said:?}");
+        assert!(said.iter().any(|line| line.contains("an API key, which ff local hasn't")), "{said:?}");
+    }
+
+    #[test]
+    fn a_request_too_large_for_a_url_is_refused_in_its_words_with_its_cors() {
+        let cors = Cors { allow_origins: Some(vec!["https://app.example.tn".into()]), ..Cors::default() };
+        let door = door_with_url(FunctionUrl { iam: false, cors: Some(cors) });
+        let head = |host: &str| Request {
+            method: "POST".into(),
+            target: "/".into(),
+            protocol: "HTTP/1.1".into(),
+            headers: vec![("Host".into(), host.into()), ("Origin".into(), "https://app.example.tn".into())],
+            body: Vec::new(),
+        };
+
+        let refused_here = door.door.unreadable(true, Some(&head("orders.fn.localhost:3700")));
+        assert_eq!(message_of(&refused_here), (413, "Request Entity Too Large".to_owned()));
+        assert_eq!(header(&refused_here, "access-control-allow-origin"), Some("https://app.example.tn"));
+        assert_eq!(message_of(&door.door.unreadable(true, Some(&head("none.fn.localhost")))).0, 404);
+        assert_eq!(
+            refused(&door.door.unreadable(true, Some(&head("127.0.0.1:3700")))).1,
+            "RequestEntityTooLargeException"
+        );
+        assert_eq!(refused(&door.door.unreadable(false, None)).1, "InvalidRequestContentException");
     }
 }

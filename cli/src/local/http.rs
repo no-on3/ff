@@ -2,7 +2,7 @@
 //! response closing it. What answers is the caller's: a function's URL, or the front door to a template's app.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
 
@@ -42,8 +42,9 @@ pub trait Answers: Send + Sync + 'static {
     /// address.
     fn answer(&self, request: &Request, request_id: &str, source_ip: &str) -> Response;
 
-    /// The response to a request that couldn't be read: over the payload's limit, or not HTTP.
-    fn unreadable(&self, too_large: bool) -> Response;
+    /// The response to a request that couldn't be read: over the payload's limit, or not HTTP; its line and its
+    /// headers, when they were read.
+    fn unreadable(&self, too_large: bool, head: Option<&Request>) -> Response;
 }
 
 /// A random UUID, version 4, for each request's ID.
@@ -84,7 +85,15 @@ pub fn percent_decode(text: &str) -> String {
 }
 
 /// Reads one request: its line, its headers, and its body by its length or its chunks.
+#[cfg(test)]
 pub fn read_request(stream: &mut impl BufRead) -> io::Result<Option<Request>> {
+    let Some(mut request) = read_head(stream)? else { return Ok(None) };
+    read_body(stream, &mut request)?;
+    Ok(Some(request))
+}
+
+/// Reads a request's line and its headers; none when the connection closed first.
+fn read_head(stream: &mut impl BufRead) -> io::Result<Option<Request>> {
     let mut line = String::new();
     if stream.read_line(&mut line)? == 0 {
         return Ok(None);
@@ -109,6 +118,11 @@ pub fn read_request(stream: &mut impl BufRead) -> io::Result<Option<Request>> {
             request.headers.push((name.trim().to_owned(), value.trim().to_owned()));
         }
     }
+    Ok(Some(request))
+}
+
+/// Reads a request's body, by its length or its chunks, up to the payload's limit.
+fn read_body(stream: &mut impl BufRead, request: &mut Request) -> io::Result<()> {
     if request.header("transfer-encoding").is_some_and(|encoding| encoding.eq_ignore_ascii_case("chunked")) {
         loop {
             let mut size = String::new();
@@ -132,10 +146,16 @@ pub fn read_request(stream: &mut impl BufRead) -> io::Result<Option<Request>> {
         request.body = vec![0; length];
         stream.read_exact(&mut request.body)?;
     }
-    Ok(Some(request))
+    Ok(())
 }
 
-fn write_response(stream: &mut TcpStream, response: &Response, request_id: &str, head_only: bool) -> io::Result<()> {
+/// Writes the response, its request's ID with it, as HTTP/1.1 closing the connection; its head alone for HEAD.
+pub fn write_response(
+    stream: &mut impl Write,
+    response: &Response,
+    request_id: &str,
+    head_only: bool,
+) -> io::Result<()> {
     let reason = ureq::http::StatusCode::from_u16(response.status)
         .ok()
         .and_then(|status| status.canonical_reason())
@@ -172,11 +192,19 @@ pub fn serve(listener: TcpListener, answers: Arc<dyn Answers>) {
                 let read =
                     BufReader::new(stream.try_clone().expect("a socket clones")).take(PAYLOAD_LIMIT as u64 + 64 * 1024);
                 let mut reader = BufReader::new(read);
-                let (response, head_only) = match read_request(&mut reader) {
-                    Ok(Some(request)) => (answers.answer(&request, &request_id, &source_ip), request.method == "HEAD"),
+                let mut request = match read_head(&mut reader) {
+                    Ok(Some(request)) => request,
                     Ok(None) => return,
-                    Err(error) => (answers.unreadable(error.kind() == io::ErrorKind::FileTooLarge), false),
+                    Err(_) => {
+                        let _ = write_response(&mut stream, &answers.unreadable(false, None), &request_id, false);
+                        return;
+                    }
                 };
+                let response = match read_body(&mut reader, &mut request) {
+                    Ok(()) => answers.answer(&request, &request_id, &source_ip),
+                    Err(error) => answers.unreadable(error.kind() == io::ErrorKind::FileTooLarge, Some(&request)),
+                };
+                let head_only = request.method == "HEAD";
                 let _ = write_response(&mut stream, &response, &request_id, head_only);
             });
         }
