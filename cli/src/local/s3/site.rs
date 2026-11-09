@@ -549,7 +549,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         keep_objects(root.path());
 
-        assert_eq!(play(root.path(), None, false), 21);
+        assert_eq!(play(root.path(), None, false), 23);
     }
 
     #[test]
@@ -564,7 +564,7 @@ mod tests {
         std::fs::create_dir_all(folder.path().join(".well-known")).unwrap();
         std::fs::write(folder.path().join(".well-known/security.txt"), "Contact: x").unwrap();
 
-        assert_eq!(play(root.path(), Some(folder.path()), true), 21);
+        assert_eq!(play(root.path(), Some(folder.path()), true), 23);
         let buckets = buckets(root.path(), table().website, Some(folder.path()));
         let page = visit(&buckets, "shop.site.localhost:3700", "GET", "/", &[]);
         assert_eq!(

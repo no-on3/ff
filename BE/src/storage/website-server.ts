@@ -294,6 +294,9 @@ export class WebsiteServer implements OnModuleDestroy {
     const headers: Record<string, string | string[]> = { 'x-content-type-options': 'nosniff', 'x-amz-request-id': visit.id };
     for (const [name, value] of Object.entries(answer.headers)) if (value !== undefined && ANSWERED.test(name)) headers[name] = value;
     if (own === 200 || own === 206) headers['content-type'] = servedContentType(single(answer.headers['content-type']), key);
+    // A condition that doesn't hold, or a range past the file, is answered without the store's error: no body, and a
+    // length that says so, where the store's would keep a browser waiting for its error's bytes.
+    if (own === 412 || own === 416) headers['content-length'] = '0';
     response.writeHead(status, headers);
     if (method === 'HEAD' || own === 304 || own === 412 || own === 416) {
       answer.resume();

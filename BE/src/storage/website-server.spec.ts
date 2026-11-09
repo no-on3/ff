@@ -54,7 +54,10 @@ const table = JSON.parse(readFileSync(join(__dirname, 'website-examples.json'), 
 /** The objects in the store, under the bucket's store name: each with its type, as uploaded. */
 const OBJECTS = table.objects;
 
-/** A store as SeaweedFS answers: GET and HEAD of an object, its ETag, If-None-Match and a byte range; what it was asked, kept. */
+/**
+ * A store as SeaweedFS answers: GET and HEAD of an object, its ETag, If-None-Match, If-Match and a byte range, a refusal
+ * with its XML error and that error's length; what it was asked, kept.
+ */
 function fakeStore(asked: string[]): Server {
   return createServer((request: IncomingMessage, response: ServerResponse) => {
     const path = decodeURIComponent((request.url ?? '').split('?')[0]);
@@ -70,7 +73,19 @@ function fakeStore(asked: string[]): Server {
       response.writeHead(304, { etag }).end();
       return;
     }
+    const refuse = (status: number, code: string) => {
+      const error = `<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>${code}</Code><Resource>${path}</Resource></Error>`;
+      response.writeHead(status, { 'content-type': 'application/xml', 'content-length': Buffer.byteLength(error) }).end(error);
+    };
+    if (request.headers['if-match'] !== undefined && request.headers['if-match'] !== etag) {
+      refuse(412, 'PreconditionFailed');
+      return;
+    }
     const range = /^bytes=(\d+)-(\d+)$/.exec(request.headers.range ?? '');
+    if (range && Number(range[1]) >= object.body.length) {
+      refuse(416, 'InvalidRange');
+      return;
+    }
     const body = range ? Buffer.from(object.body).subarray(Number(range[1]), Number(range[2]) + 1) : Buffer.from(object.body);
     const headers = { ...common, 'content-length': body.length, ...(range ? { 'content-range': `bytes ${range[1]}-${range[2]}/${object.body.length}` } : {}) };
     response.writeHead(range ? 206 : 200, headers).end(request.method === 'HEAD' ? undefined : body);

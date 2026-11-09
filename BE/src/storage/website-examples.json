@@ -176,6 +176,36 @@
           "headers": {
             "content-range": "bytes 0-6/18"
           }
+        },
+        {
+          "name": "a condition that doesn't hold: 412, without a body or a type",
+          "path": "/assets/app.js",
+          "request": {
+            "if-match": "\"another\""
+          },
+          "status": 412,
+          "body": "",
+          "headers": {
+            "content-length": "0"
+          },
+          "absent": [
+            "content-type"
+          ]
+        },
+        {
+          "name": "a range past the file: 416, without a body or a type",
+          "path": "/assets/app.js",
+          "request": {
+            "range": "bytes=100-200"
+          },
+          "status": 416,
+          "body": "",
+          "headers": {
+            "content-length": "0"
+          },
+          "absent": [
+            "content-type"
+          ]
         }
       ]
     },
