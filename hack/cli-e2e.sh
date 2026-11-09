@@ -1636,7 +1636,9 @@ for _ in $(seq 1 30); do
   fi
   sleep 5
 done
-ff history cli-sched --output json
+# A run each minute since it was made: a whole run comes here some 13 minutes on, past the 10 calls of history's
+# default page, which would leave its first run out; 100 go back further than a whole run.
+ff history cli-sched --limit 100 --output json
 first_run_after="$(out | jq --argjson made "$sched_made_at" '[.invocations[] | select(.source == "schedule") | (.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $made] | min')"
 check "within about 70 s it has run, and ff schedule list says it succeeded" "true true" \
   "$ran $([ "${first_run_after:-null}" != null ] && [ "$first_run_after" -le 75 ] && echo true || echo "false: $first_run_after s after")"
