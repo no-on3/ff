@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs pinned kubectl and k3d into hack/bin/ (git-ignored) after verifying
-# the SHA-256 checksums each project publishes, and the ff command's Rust toolchain
+# the SHA-256 checksums each project publishes (a GitHub release's file through GitHub's API when its address fails), and the ff command's Rust toolchain
 # (cli/rust-toolchain.toml's) through rustup, the PATH's, or one installed into
 # hack/.rust/ (git-ignored), rustup-init's checksum verified too; hack/ci.sh uses
 # it from there. On request, the AWS tools the tests of AWS's way in and out drive:
@@ -85,11 +85,33 @@ esac
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# fetch <url> <file, - for stdout>: a download, retried. A file of a GitHub release that its download address won't
+# serve comes through GitHub's API, which serves the same file: the address has answered 504 for hours for some files
+# while the API gave them. What comes either way is checked against its checksum after.
+fetch() {
+  curl -fsSL --retry 3 -o "$2" "$1" && return 0
+  case "$1" in
+    https://github.com/*/releases/download/*) ;;
+    *) return 1 ;;
+  esac
+  local path="${1#https://github.com/}" repo tag name asset_url
+  repo="${path%%/releases/download/*}"
+  tag="${path#*/releases/download/}"
+  name="${tag#*/}"
+  tag="${tag%%/*}"
+  command -v jq >/dev/null || { echo "$1 failed, and jq, which finds the file in GitHub's API, isn't here" >&2; return 1; }
+  echo "$1 failed: through GitHub's API instead" >&2
+  asset_url="$(curl -fsSL --retry 3 "https://api.github.com/repos/$repo/releases/tags/$tag" |
+    jq -r --arg name "$name" '.assets[] | select(.name == $name) | .url')"
+  [ -n "$asset_url" ] || { echo "$repo's release $tag has no $name in GitHub's API" >&2; return 1; }
+  curl -fsSL --retry 3 -H 'Accept: application/octet-stream' -o "$2" "$asset_url"
+}
+
 # The SHA-256 a project's checksum file gives one of its files: lines of "<sha256>  <file>", the file's name perhaps
 # with a path or a leading *.
 published_sha256() { # <checksum file's URL> <file name>
   local expected
-  expected="$(curl -fsSL --retry 3 "$1" |
+  expected="$(fetch "$1" - |
     awk -v a="$2" '{ f = $2; sub(/^\*/, "", f); n = split(f, p, "/"); if (p[n] == a) { print $1; exit } }')"
   [ -n "$expected" ] || { echo "no checksum for $2 in $1" >&2; return 1; }
   echo "$expected"
@@ -125,8 +147,8 @@ install_kubectl() {
     return
   fi
   local base="https://dl.k8s.io/release/$KUBECTL_VERSION/bin/$os/$arch"
-  curl -fsSL --retry 3 -o "$tmp/kubectl" "$base/kubectl"
-  verify "$tmp/kubectl" "$(curl -fsSL --retry 3 "$base/kubectl.sha256")"
+  fetch "$base/kubectl" "$tmp/kubectl"
+  verify "$tmp/kubectl" "$(fetch "$base/kubectl.sha256" -)"
   install -m 0755 "$tmp/kubectl" "$bin_dir/kubectl"
   echo "installed kubectl $KUBECTL_VERSION (sha256 verified)"
 }
@@ -138,7 +160,7 @@ install_k3d() {
   fi
   local base="https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION"
   local asset="k3d-$os-$arch" expected
-  curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+  fetch "$base/$asset" "$tmp/$asset"
   expected="$(published_sha256 "$base/checksums.txt" "$asset")"
   verify "$tmp/$asset" "$expected"
   install -m 0755 "$tmp/$asset" "$bin_dir/k3d"
@@ -169,8 +191,8 @@ install_rust() {
     darwin-arm64) triple=aarch64-apple-darwin ;;
   esac
   local base="https://static.rust-lang.org/rustup/dist/$triple"
-  curl -fsSL --retry 3 -o "$tmp/rustup-init" "$base/rustup-init"
-  verify "$tmp/rustup-init" "$(curl -fsSL --retry 3 "$base/rustup-init.sha256" | awk '{ print $1 }')"
+  fetch "$base/rustup-init" "$tmp/rustup-init"
+  verify "$tmp/rustup-init" "$(fetch "$base/rustup-init.sha256" - | awk '{ print $1 }')"
   chmod +x "$tmp/rustup-init"
   RUSTUP_HOME="$rust_dir/rustup" CARGO_HOME="$rust_dir/cargo" "$tmp/rustup-init" -y --no-modify-path --profile minimal \
     --default-toolchain "$RUST_TOOLCHAIN" --component rustfmt,clippy >/dev/null
@@ -188,7 +210,7 @@ install_tofu() {
   fi
   local base="https://github.com/opentofu/opentofu/releases/download/v$TOFU_VERSION"
   local asset="tofu_${TOFU_VERSION}_${os}_${arch}.tar.gz" expected
-  curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+  fetch "$base/$asset" "$tmp/$asset"
   expected="$(published_sha256 "$base/tofu_${TOFU_VERSION}_SHA256SUMS" "$asset")"
   verify "$tmp/$asset" "$expected"
   tar -xzf "$tmp/$asset" -C "$tmp" tofu
@@ -203,7 +225,7 @@ install_terraform() {
   fi
   local base="https://releases.hashicorp.com/terraform/$TERRAFORM_VERSION"
   local asset="terraform_${TERRAFORM_VERSION}_${os}_${arch}.zip" expected
-  curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+  fetch "$base/$asset" "$tmp/$asset"
   expected="$(published_sha256 "$base/terraform_${TERRAFORM_VERSION}_SHA256SUMS" "$asset")"
   verify "$tmp/$asset" "$expected"
   unzip_to "$tmp/$asset" "$tmp/terraform"
@@ -224,7 +246,7 @@ install_provider() { # <name> <version> <its name in messages>
     echo "Terraform's $label provider $version already installed"
   else
     local base="https://releases.hashicorp.com/terraform-provider-$name/$version"
-    curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+    fetch "$base/$asset" "$tmp/$asset"
     expected="$(published_sha256 "$base/terraform-provider-${name}_${version}_SHA256SUMS" "$asset")"
     verify "$tmp/$asset" "$expected"
     mkdir -p "$(dirname "$zip")" "$mirror/registry.opentofu.org/hashicorp/$name"
@@ -272,7 +294,7 @@ install_sam() {
   local expected="${SAM_SHA256:-$(sam_sha256 "$SAM_VERSION-$os-$arch")}" asset
   [ -n "$expected" ] || { echo "no checksum for the SAM CLI $SAM_VERSION: give SAM_SHA256, from its release's notes" >&2; return 1; }
   asset="aws-sam-cli-linux-$([ "$arch" = amd64 ] && echo x86_64 || echo arm64).zip"
-  curl -fsSL --retry 3 -o "$tmp/$asset" "https://github.com/aws/aws-sam-cli/releases/download/v$SAM_VERSION/$asset"
+  fetch "https://github.com/aws/aws-sam-cli/releases/download/v$SAM_VERSION/$asset" "$tmp/$asset"
   verify "$tmp/$asset" "$expected"
   unzip_to "$tmp/$asset" "$tmp/sam"
   "$tmp/sam/install" --install-dir "$sam_dir" --bin-dir "$bin_dir" --update >/dev/null
@@ -316,7 +338,7 @@ install_minisign() {
       binary=minisign
       ;;
   esac
-  curl -fsSL --retry 3 -o "$tmp/$asset" "https://github.com/jedisct1/minisign/releases/download/$MINISIGN_VERSION/$asset"
+  fetch "https://github.com/jedisct1/minisign/releases/download/$MINISIGN_VERSION/$asset" "$tmp/$asset"
   verify "$tmp/$asset" "$expected"
   if [ "$os" = linux ]; then tar -xzf "$tmp/$asset" -C "$tmp" "$binary" 2>/dev/null; else unzip_to "$tmp/$asset" "$tmp"; fi
   install -m 0755 "$tmp/$binary" "$bin_dir/minisign$exe"
@@ -336,8 +358,8 @@ install_zig() {
   [ -n "$expected" ] || { echo "no checksum for zig $ZIG_VERSION on $processor $system: give ZIG_SHA256, from its index" >&2; return 1; }
   install_minisign >/dev/null
   local asset="zig-$processor-$system-$ZIG_VERSION.tar.xz" zig_dir="$repo_root/hack/.zig/$ZIG_VERSION"
-  curl -fsSL --retry 3 -o "$tmp/$asset" "https://ziglang.org/download/$ZIG_VERSION/$asset"
-  curl -fsSL --retry 3 -o "$tmp/$asset.minisig" "https://ziglang.org/download/$ZIG_VERSION/$asset.minisig"
+  fetch "https://ziglang.org/download/$ZIG_VERSION/$asset" "$tmp/$asset"
+  fetch "https://ziglang.org/download/$ZIG_VERSION/$asset.minisig" "$tmp/$asset.minisig"
   "$bin_dir/minisign" -Vqm "$tmp/$asset" -P "$ZIG_KEY" >/dev/null ||
     { echo "zig's $asset isn't signed by zig's key: nothing installed" >&2; exit 1; }
   verify "$tmp/$asset" "$expected"
@@ -362,7 +384,7 @@ install_cargo_zigbuild() {
   esac
   local base="https://github.com/rust-cross/cargo-zigbuild/releases/download/v$CARGO_ZIGBUILD_VERSION"
   local asset="cargo-zigbuild-$triple.tar.xz"
-  curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+  fetch "$base/$asset" "$tmp/$asset"
   verify "$tmp/$asset" "$(published_sha256 "$base/$asset.sha256" "$asset")"
   tar -xJf "$tmp/$asset" -C "$tmp" "cargo-zigbuild-$triple/cargo-zigbuild"
   install -m 0755 "$tmp/cargo-zigbuild-$triple/cargo-zigbuild" "$bin_dir/cargo-zigbuild"
