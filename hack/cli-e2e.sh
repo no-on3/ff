@@ -131,6 +131,36 @@ at() {
   curl -s -o "$work/at.body" -D "$work/at.head" -w '%{http_code}' "$@" "$url"
   echo " $(cat "$work/at.body")"
 }
+# local_started <listing> <its stderr> <ff local start's args...>: ff local start in the background, its pid in
+# $starter, until it says how to stop it: 120 s at most, as a first start with --with pulls its images, and less if it
+# ends.
+local_started() {
+  local listing="$1" errors="$2" _
+  shift 2
+  "$ff_bin" local start "$@" >"$listing" 2>"$errors" &
+  starter=$!
+  for _ in $(seq 1 240); do
+    grep -F "Ctrl-C stops" "$listing" >/dev/null 2>&1 && return 0
+    kill -0 "$starter" 2>/dev/null || break
+    sleep 0.5
+  done
+  grep -F "Ctrl-C stops" "$listing" >/dev/null 2>&1 ||
+    fail "ff local start $* said nothing in 120 s, or ended: $(cat "$errors")"
+}
+# local_stopped: Ctrl-C to the ff local start local_started made, its end waited for.
+local_stopped() {
+  kill -INT "$starter"
+  wait "$starter" 2>/dev/null || true
+}
+# local_aws <project> <port> <aws args...>: the AWS CLI with the local key's file of ff local's project alone, none of
+# this machine's settings, the front door at the port the endpoint of each service.
+local_aws() {
+  local project="$1" door="http://127.0.0.1:$2"
+  shift 2
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$project/.ff/local/credentials" AWS_PROFILE=default \
+    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_LAMBDA="$door" AWS_ENDPOINT_URL_SQS="$door" AWS_ENDPOINT_URL_S3="$door" \
+    AWS_ENDPOINT_URL_SESV2="$door" "${aws_cli[@]}" "$@"
+}
 
 # release_site <folder> <bucket>: a release of ff as the release job makes it, on a site FF serves as the downloads
 # site, http://<bucket>.site.localhost:<port>: this machine's build the suite's ff, the other four stand-ins, signed by
@@ -166,7 +196,8 @@ site_of() { echo "http://$1.site.localhost:$website_port"; }
 if command -v aws >/dev/null; then aws_cli=("$(command -v aws)"); else
   aws_cli=(docker run --rm --network host --add-host s3.localhost:127.0.0.1 --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work"
     -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_ENDPOINT_URL_SQS
-    -e AWS_ENDPOINT_URL_LAMBDA -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_PROFILE amazon/aws-cli:2.34.32)
+    -e AWS_ENDPOINT_URL_LAMBDA -e AWS_ENDPOINT_URL_SESV2 -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
+    -e AWS_PROFILE amazon/aws-cli:2.34.32)
 fi
 
 section_stack() {
@@ -838,20 +869,6 @@ check "ff delete-stack deletes its function with its URL, ff db delete its datab
 
 # Here, each runtime as its README says: its commands before ff local start, as written, install its library and run
 # its tests; then ff local start --with postgres, called with its curl.
-started() {
-  "$ff_bin" local start "$api/template.yaml" --port "$port" --with postgres >"$work/rest.out" 2>"$work/rest.err" &
-  starter=$!
-  for _ in $(seq 1 240); do
-    grep -F "Ctrl-C stops them" "$work/rest.out" >/dev/null 2>&1 && break
-    kill -0 "$starter" 2>/dev/null || break
-    sleep 0.5
-  done
-  grep -F "Ctrl-C stops them" "$work/rest.out" >/dev/null || fail "ff local start --with postgres said nothing in 120 s: $(cat "$work/rest.err")"
-}
-stopped() {
-  kill -INT "$starter"
-  wait "$starter" 2>/dev/null || true
-}
 for runtime in python nodejs; do
   api="$work/cli-rest-$runtime"
   if (cd "$api" && bash -e -o pipefail -c "$(sed -n '/^## Here$/,/^ff local start/p' README.md | sed '1,3d;$d')") >"$work/rest-steps.out" 2>&1; then
@@ -863,7 +880,7 @@ for runtime in python nodejs; do
     "$status $(sed -nE 's/^(# |ℹ )pass ([0-9]+)$/\2/p; s/^Ran ([0-9]+) tests? in .*/\1/p' "$work/rest-steps.out")"
   port="$(free_port)"
   base="http://cli-rest-$runtime-api.fn.localhost:$port"
-  started
+  local_started "$work/rest.out" "$work/rest.err" "$api/template.yaml" --port "$port" --with postgres
   check "  ... ff local start --with postgres runs it at the address its README names, a PostgreSQL beside it" "true true" \
     "$(grep -E "^  cli-rest-$runtime-api +$runtime +256 MB, 10 s  $base/$" "$work/rest.out" >/dev/null && echo true || echo false) \
 $(grep -E '^  postgres  postgresql://' "$work/rest.out" >/dev/null && echo true || echo false)"
@@ -879,7 +896,7 @@ $(at "$base/items/$id" -X DELETE | sed 's/ .*//') $(at "$base/items/$id" | sed '
 $(at "$base/items/$id" -X PUT | sed 's/ .*//') $(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
   check "  ... its URL's CORS lets in its one origin and no other, as on FF" "http://localhost:5173 none" \
     "$(preflight "$base/items" http://localhost:5173) $(preflight "$base/items" https://elsewhere.example)"
-  stopped
+  local_stopped
   ff local reset "$api" --data --yes
   check "  ... Ctrl-C leaving no container, ff local reset --data its database's volume gone" "0 0 0" \
     "$(code) $(leftover) $(docker volume ls --quiet --filter "label=ff.local.project=$(cd "$api" && pwd -P)" | wc -l | tr -d ' ')"
@@ -1944,32 +1961,20 @@ ff local invoke "$work/hog.py" --memory 128
 check "a call over its memory exits 5, as the runtime reports it" "5 error: Runtime.OutOfMemory: Runtime exceeded its memory limit" "$(code) $(err | grep '^error:')"
 check "no container is left behind" 0 "$(leftover)"
 local_port="$(free_port)"
-"$ff_bin" local start "$FF_REPO_ROOT/examples/hello.py" --port "$local_port" >"$work/start.out" 2>"$work/start.err" &
-starter=$!
-for _ in $(seq 1 60); do
-  grep -q 'runs at' "$work/start.out" 2>/dev/null && break
-  sleep 0.5
-done
+local_started "$work/start.out" "$work/start.err" "$FF_REPO_ROOT/examples/hello.py" --port "$local_port"
 check "local start says where it runs" "hello (python) runs at http://127.0.0.1:$local_port/invoke: POST an event to it. Ctrl-C stops it" "$(cat "$work/start.out")"
 check "and answers there, as the runtime answers the backend" "Hello Port" \
   "$(curl -s -X POST "http://127.0.0.1:$local_port/invoke" -d '{"name": "Port"}' | jq -r .message)"
-kill -INT "$starter"
-wait "$starter" 2>/dev/null || true
+local_stopped
 check "Ctrl-C stops it and removes its container" 0 "$(leftover)"
 url_local_port="$(free_port)"
-"$ff_bin" local start "$work/web.ts" --url --port "$url_local_port" >"$work/start.out" 2>"$work/start.err" &
-starter=$!
-for _ in $(seq 1 60); do
-  grep -q 'runs as its URL would' "$work/start.out" 2>/dev/null && break
-  sleep 0.5
-done
+local_started "$work/start.out" "$work/start.err" "$work/web.ts" --url --port "$url_local_port"
 check "local start --url serves it as its URL would" \
   "web (nodejs) runs as its URL would at http://127.0.0.1:$url_local_port/: any request calls it with AWS Lambda's URL event. Ctrl-C stops it" \
   "$(cat "$work/start.out")"
 check "a request there gets the function's answer, from Lambda's URL event" "200 Ahlan Local at /hi" \
   "$(curl -s -o "$work/answer" -w '%{http_code}' "http://127.0.0.1:$url_local_port/hi?name=Local") $(cat "$work/answer")"
-kill -INT "$starter"
-wait "$starter" 2>/dev/null || true
+local_stopped
 check "and Ctrl-C removes its container too" 0 "$(leftover)"
 }
 section_def local section_local backend budget=45
@@ -2001,10 +2006,7 @@ at_url() {
 # url_header <name>: the header of the last answer at_url got.
 url_header() { sed -n "s/^$1: //Ip" "$work/url.head" | tr -d '\r'; }
 # lambda_cli <args...>: the AWS CLI's lambda commands with the local key's file alone, the front door their endpoint.
-lambda_cli() {
-  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
-    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_LAMBDA="http://127.0.0.1:$port" "${aws_cli[@]}" lambda "$@"
-}
+lambda_cli() { local_aws "$app" "$port" lambda "$@"; }
 rm -rf "$app" && mkdir -p "$app/greeter" "$app/caller" "$app/failing" "$app/recorder" "$app/reporter"
 cat >"$app/template.yaml" <<'YAML'
 AWSTemplateFormatVersion: '2010-09-09'
@@ -2101,10 +2103,8 @@ check "a secrets file's problem is refused at its line, before anything starts" 
 port="$(free_port)"
 # An asynchronous call's second lasts 20 ms in the suite's build: its retry's minute comes in 1.2 s. Its schedules' clock
 # is at noon, so that no schedule runs, whenever the suite does.
-FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z "$ff_bin" local start "$app/template.yaml" --port "$port" --idle 4s --watch \
-  >"$work/start.out" 2>"$work/start.err" &
-starter=$!
-until_said "Ctrl-C stops them" "$work/start.out" || fail "ff local start said nothing in 30 s: $(cat "$work/start.err")"
+FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z \
+  local_started "$work/start.out" "$work/start.err" "$app/template.yaml" --port "$port" --idle 4s --watch
 check "it says where the app runs, its functions, and how to call them" \
   "shop ($app/template.yaml) runs on this machine, its front door at http://127.0.0.1:$port:" \
   "$(head -1 "$work/start.out")"
@@ -2178,16 +2178,13 @@ check "  ... retried as FF retries it, as many times as its function says, then 
   "$(grep -E '^Failing: the asynchronous call [^ ]+ failed: RuntimeError: no luck; tried again in 60 s$' "$work/start.err" >/dev/null && echo true || echo false) \
 $(grep -E '^Failing: the asynchronous call [^ ]+ failed: RuntimeError: no luck; dropped after 2 attempts: its retries are used$' "$work/start.err" >/dev/null && echo true || echo false) \
 $(grep -F 'Recorder | recorded RetriesExhausted 2 1' "$work/start.err" >/dev/null && echo true || echo false)"
-kill -INT "$starter"
-wait "$starter" 2>/dev/null || true
+local_stopped
 check "Ctrl-C removes their containers" 0 "$(leftover)"
 
 # The schedules, in a start of their own: its clock, a test build's, three seconds before the Nightly's time.
 port="$(free_port)"
-FF_TEST_NOW=2026-11-10T01:59:57Z "$ff_bin" local start "$app/template.yaml" --port "$port" \
-  >"$work/scheduled.out" 2>"$work/scheduled.err" &
-starter=$!
-until_said "Ctrl-C stops them" "$work/scheduled.out" || fail "ff local start said nothing in 30 s: $(cat "$work/scheduled.err")"
+FF_TEST_NOW=2026-11-10T01:59:57Z \
+  local_started "$work/scheduled.out" "$work/scheduled.err" "$app/template.yaml" --port "$port"
 check "the start lists each schedule, its expression and its next run" "true true" \
   "$(grep -E '^  Reporter/Nightly +cron\(0 2 \* \* \? \*\)  next 2026-11-10T02:00:00Z$' "$work/scheduled.out" >/dev/null && echo true || echo false) \
 $(grep -E '^  Reporter/Hourly +rate\(1 hour\)  disabled$' "$work/scheduled.out" >/dev/null && echo true || echo false)"
@@ -2202,8 +2199,7 @@ check "ff local run runs one now, a disabled one too, with its own input" "0 Rep
 ff local run Weekly "$app"
 check "  ... and refuses one the template hasn't, naming those it has" \
   "2 error: No function has a schedule Weekly: the template's are Reporter/Hourly, Reporter/Nightly" "$(code) $(err | grep '^error:')"
-kill -INT "$starter"
-wait "$starter" 2>/dev/null || true
+local_stopped
 ff local run Nightly "$app"
 check "  ... and says when ff local start isn't running" "3 true" \
   "$(code) $(err | grep -F "error: ff local start isn't running for $app: nothing answers at http://127.0.0.1:$port" >/dev/null && echo true || echo false)"
@@ -2216,22 +2212,8 @@ section_def local_template section_local_template backend budget=45
 section_local_apps() {
 section "ff local start on the applications a developer has: ff init --template sam's, and the small app, its libraries installed, its page served from its folder"
 local hello="$work/cli-local-hello" shop="$work/cli-local-shop" port starter origin
-# started <out> <err> <args...>: ff local start in the background, its pid in $starter, until it says how to stop it.
-started() {
-  local out="$1" err="$2" _
-  shift 2
-  FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z "$ff_bin" local start "$@" --port "$port" >"$out" 2>"$err" &
-  starter=$!
-  for _ in $(seq 1 60); do
-    grep -F "Ctrl-C stops them" "$out" >/dev/null 2>&1 && return 0
-    sleep 0.5
-  done
-  fail "ff local start said nothing in 30 s: $(cat "$err")"
-}
-stopped() {
-  kill -INT "$starter"
-  wait "$starter" 2>/dev/null || true
-}
+# started <out> <err> <args...>: ff local start in the background, at the section's port, with the test clocks.
+started() { FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z local_started "$@" --port "$port"; }
 
 (cd "$work" && rm -rf "$hello" && "$ff_bin" init "$(basename "$hello")" --runtime nodejs --template sam >"$work/out" 2>"$work/err")
 check "ff init --template sam's .gitignore leaves out what ff local keeps, and its secrets file" "true true" \
@@ -2243,7 +2225,7 @@ check "its application starts as it is, its function's URL printed" "true" \
   "$(grep -E "^  HelloWorldFunction +nodejs +128 MB, 3 s  http://helloworldfunction.fn.localhost:$port/$" "$work/hello.out" >/dev/null && echo true || echo false)"
 check "  ... and called there, answers as it does on FF" '200 {"message":"hello world"}' \
   "$(at "http://helloworldfunction.fn.localhost:$port/hello")"
-stopped
+local_stopped
 git -C "$hello" init -q
 check "  ... what ff local keeps and the secrets file stay out of git" ".gitignore README.md events/ hello-world/ samconfig.toml template.yaml tests/" \
   "$(git -C "$hello" status --porcelain --untracked-files=normal | sed 's/^?? //' | LC_ALL=C sort | paste -sd' ')"
@@ -2286,7 +2268,7 @@ check "  ... and, failing without its database, is tried again twice, then dropp
   "$(grep -cE '^shop-nightly: the asynchronous call [^ ]+ failed: Error: DATABASE_URL is not set' "$work/shop.err") \
 $(grep -cE '^shop-nightly: the asynchronous call [^ ]+ failed: Error: DATABASE_URL is not set: .*; tried again in (60|120) s$' "$work/shop.err") \
 $(grep -E '^shop-nightly: the asynchronous call [^ ]+ failed: Error: DATABASE_URL is not set: .*; dropped after 3 attempts: its retries are used$' "$work/shop.err" >/dev/null && echo true || echo false)"
-stopped
+local_stopped
 check "Ctrl-C removes their containers" 0 "$(leftover)"
 git -C "$shop" init -q
 check "what ff local keeps stays out of git in an app whose .gitignore doesn't name it: .ff/ has its own" "true 0" \
@@ -2298,10 +2280,7 @@ section_local_queues() {
 section "ff local start's queues: SQS at the front door, the AWS CLI's cases of L4, a function's sends, its failures' records, and a function reading one"
 local app="$work/queues" port starter key_id url
 # sqs_cli <args...>: the AWS CLI's sqs commands with the local key's file alone, the front door their endpoint.
-sqs_cli() {
-  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
-    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_SQS="http://127.0.0.1:$port" "${aws_cli[@]}" sqs "$@" --output json
-}
+sqs_cli() { local_aws "$app" "$port" sqs "$@" --output json; }
 # refused <args...>: an sqs command's error, by the code the AWS CLI names.
 refused() { sqs_cli "$@" >/dev/null 2>"$work/sqs.err" && echo accepted || grep -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/sqs.err" | head -1; }
 # received <queue> [args...]: the messages a queue answers a receive, all their attributes asked; nothing for none.
@@ -2408,14 +2387,8 @@ PY
 
 port="$(free_port)"
 url="http://127.0.0.1:$port/000000000000"
-FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z "$ff_bin" local start "$app/template.yaml" --port "$port" \
-  >"$work/queues.out" 2>"$work/queues.err" &
-starter=$!
-for _ in $(seq 1 60); do
-  grep -F "Ctrl-C stops them" "$work/queues.out" >/dev/null 2>&1 && break
-  sleep 0.5
-done
-grep -F "Ctrl-C stops them" "$work/queues.out" >/dev/null || fail "ff local start said nothing in 30 s: $(cat "$work/queues.err")"
+FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z \
+  local_started "$work/queues.out" "$work/queues.err" "$app/template.yaml" --port "$port"
 check "the start lists the template's queues, their URLs and a redrive policy" "true true true" \
   "$(grep -F "Its queues, SQS's at http://127.0.0.1:$port, kept while it runs:" "$work/queues.out" >/dev/null && echo true || echo false) \
 $(grep -E "^  Orders +$url/Orders, to Dead after 2 receives$" "$work/queues.out" >/dev/null && echo true || echo false) \
@@ -2496,8 +2469,7 @@ $(sqs_cli get-queue-attributes --queue-url "$url/Jobs" --attribute-names Approxi
   | jq -r '.Attributes | "\(.ApproximateNumberOfMessages) \(.ApproximateNumberOfMessagesNotVisible)"')"
 check "  ... and, received as often as the queue's redrive policy allows, goes to its dead-letter queue" "fail 4" \
   "$(jq -r '.Messages[0].Body' "$work/jobs-dead.json") $(records | wc -l | tr -d ' ')"
-kill -INT "$starter"
-wait "$starter" 2>/dev/null || true
+local_stopped
 check "Ctrl-C removes their containers" 0 "$(leftover)"
 }
 section_def local_queues section_local_queues backend budget=45
@@ -2507,10 +2479,7 @@ section "ff local start's buckets: S3 at the front door, the AWS CLI's cases of 
 local app="$work/buckets" port starter key_id described kept_file queue_url pages
 local photos_line="^  photos +.*/\\.ff/local/buckets/photos, its events to Uploads, Thumbs$"
 # s3_cli <args...>: the AWS CLI with the local key's file alone, the front door its S3 endpoint.
-s3_cli() {
-  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
-    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_S3="http://127.0.0.1:$port" "${aws_cli[@]}" "$@"
-}
+s3_cli() { local_aws "$app" "$port" "$@"; }
 # s3_refused <args...>: an AWS CLI command's error, by the code it names.
 s3_refused() { s3_cli "$@" >/dev/null 2>"$work/s3.err" && echo accepted || grep -m1 -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/s3.err"; }
 # page <path> [curl args...]: a visit to the site pages, its status and its answer; `| sed -n '1s/ .*//p'` its status alone.
@@ -2521,19 +2490,7 @@ page() {
   echo " $(cat "$work/page.body")"
 }
 # started [args...]: ff local start in the background, its listing waited for.
-started() {
-  "$ff_bin" local start "$app/template.yaml" --port "$port" "$@" >"$work/buckets.out" 2>"$work/buckets.err" &
-  starter=$!
-  for _ in $(seq 1 60); do
-    grep -F "Ctrl-C stops them" "$work/buckets.out" >/dev/null 2>&1 && break
-    sleep 0.5
-  done
-  grep -F "Ctrl-C stops them" "$work/buckets.out" >/dev/null || fail "ff local start said nothing in 30 s: $(cat "$work/buckets.err")"
-}
-stopped() {
-  kill -INT "$starter"
-  wait "$starter" 2>/dev/null || true
-}
+started() { local_started "$work/buckets.out" "$work/buckets.err" "$app/template.yaml" --port "$port" "$@"; }
 rm -rf "$app" && mkdir -p "$app/writer"
 cat >"$app/template.yaml" <<'YAML'
 AWSTemplateFormatVersion: '2010-09-09'
@@ -2662,9 +2619,8 @@ check "aws: an object copied, then the folder's two deleted in one request" "<h1
 $(s3_cli s3api delete-objects --bucket photos --delete '{"Objects": [{"Key": "site/index.html"}, {"Key": "site/css/main.css"}]}' | jq '.Deleted | length') \
 $(s3_cli s3 ls s3://photos/site/ --recursive | wc -l | tr -d ' ')"
 queue_url="http://127.0.0.1:$port/000000000000/Uploads"
-AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default AWS_REGION=tn-tunis-1 \
-  AWS_ENDPOINT_URL_SQS="http://127.0.0.1:$port" "${aws_cli[@]}" sqs receive-message --queue-url "$queue_url" \
-  --max-number-of-messages 10 --attribute-names SenderId --output json >"$work/uploads.json"
+local_aws "$app" "$port" sqs receive-message --queue-url "$queue_url" --max-number-of-messages 10 \
+  --attribute-names SenderId --output json >"$work/uploads.json"
 check "a removal's event goes to the queue the bucket's notification names, S3's record from the bucket, after S3's test event at the start" \
   "ObjectRemoved:Delete site%2Fcss%2Fmain.css, ObjectRemoved:Delete site%2Findex.html, s3:TestEvent arn:aws:s3:::photos" \
   "$(jq -r '[.Messages[].Body | fromjson | .Event // (.Records[0].eventName + " " + .Records[0].s3.object.key)] | sort | join(", ")' "$work/uploads.json") \
@@ -2702,7 +2658,7 @@ check "the start lists the site at its address; a browser gets the index documen
   "$(grep -E "^  pages +http://pages\.site\.localhost:$port/, its objects$" "$work/buckets.out" >/dev/null && echo true || echo false) \
 $(page /) $(page /no/such/page) $(page / -X POST | sed -n '1s/ .*//p')"
 s3_cli s3 ls s3://photos --recursive | awk '{print $3, $4}' | sort >"$work/listed"
-stopped
+local_stopped
 check "Ctrl-C removes the functions' containers" 0 "$(leftover)"
 started --site "pages=$app/pages-folder"
 pages="$(cd "$app/pages-folder" && pwd -P)"
@@ -2715,7 +2671,7 @@ check "--site: the site answers a folder's files, a change seen at once without 
   "true 200 <h1>From the folder</h1> 200 <h1>Changed in the folder</h1> 404 <h1>Pages</h1>" \
   "$(grep -F "  pages  http://pages.site.localhost:$port/, $pages's files" "$work/buckets.out" >/dev/null && echo true || echo false) \
 $first $(page /) $(page /404.html | sed -n '1s/ .*//p') $(s3_cli s3 cp s3://pages/index.html - 2>/dev/null)"
-stopped
+local_stopped
 rm -rf "$work/big.bin" "$work/big.out" "$app/.ff/local/buckets"
 }
 section_def local_buckets section_local_buckets backend budget=45
@@ -2734,18 +2690,7 @@ valkey_here() { docker run --rm --network host "$valkey_image" valkey-cli --no-a
 # started [args...]: ff local start in the background with both, its listing waited for: a first start pulls the
 # images and makes the data.
 started() {
-  "$ff_bin" local start "$app/template.yaml" --port "$port" --with postgres,valkey "$@" >"$work/data.out" 2>"$work/data.err" &
-  starter=$!
-  for _ in $(seq 1 240); do
-    grep -F "Ctrl-C stops them" "$work/data.out" >/dev/null 2>&1 && break
-    kill -0 "$starter" 2>/dev/null || break
-    sleep 0.5
-  done
-  grep -F "Ctrl-C stops them" "$work/data.out" >/dev/null || fail "ff local start --with said nothing in 120 s: $(cat "$work/data.err")"
-}
-stopped() {
-  kill -INT "$starter"
-  wait "$starter" 2>/dev/null || true
+  local_started "$work/data.out" "$work/data.err" "$app/template.yaml" --port "$port" --with postgres,valkey "$@"
 }
 rm -rf "$app" && mkdir -p "$app/probe"
 project="$(cd "$app" && pwd -P)"
@@ -2798,18 +2743,18 @@ check "a second start of the project is refused while the first runs its data, t
   "3 another ff local start of this project runs it" \
   "$(code) $(err | grep -o 'another ff local start of this project runs it')"
 before="$(url_of postgres)"
-stopped
+local_stopped
 check "Ctrl-C removes the containers, the functions' and the services', and keeps their volumes" "0 2" "$(leftover) $(volumes)"
 started
 check "the data is kept from a start to the next, at the same URL" "first kept true" \
   "$(psql_here "select word from kept") $(valkey_here get word) $([ "$(url_of postgres)" = "$before" ] && echo true || echo false)"
-stopped
+local_stopped
 ff local reset "$project" --yes
 started
 check "ff local reset leaves the data: the next start makes another password, and reads the data with it" "true first kept" \
   "$([ "$(url_of postgres | sed 's/@.*//')" != "$(printf '%s' "$before" | sed 's/@.*//')" ] && echo true || echo false) \
 $(psql_here "select word from kept") $(valkey_here get word)"
-stopped
+local_stopped
 ff local reset "$project" --data --yes
 check "ff local reset --data removes the volumes, naming them" "0 2 0" \
   "$(code) $(out | grep -o "Docker's volume ff-local-data-[0-9a-f]*-[a-z]*" | wc -l | tr -d ' ') $(volumes)"
@@ -2822,28 +2767,13 @@ local app="$work/mail" port starter sent_id function_id raw_id
 local simple='{"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}'
 local to_orders='{"ToAddresses": ["orders@example.tn"]}'
 # ses_cli <args...>: the AWS CLI's sesv2 with the local key's file alone, the front door its SES endpoint.
-ses_cli() {
-  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
-    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_SESV2="http://127.0.0.1:$port" "${aws_cli[@]}" sesv2 "$@"
-}
+ses_cli() { local_aws "$app" "$port" sesv2 "$@"; }
 # ses_refused <args...>: the error the CLI prints, its name and FF's words.
 ses_refused() { ses_cli "$@" >/dev/null 2>"$work/ses.err" && echo accepted || grep -m1 -oE 'An error occurred .*' "$work/ses.err"; }
 # kept <message ID> <extension>: the message's file, or its envelope's.
 kept() { printf '%s\n' "$app"/.ff/local/mail/*-"$1.$2"; }
 # started: ff local start in the background, its listing waited for.
-started() {
-  "$ff_bin" local start "$app/template.yaml" --port "$port" >"$work/mail.out" 2>"$work/mail.err" &
-  starter=$!
-  for _ in $(seq 1 60); do
-    grep -F "Ctrl-C stops them" "$work/mail.out" >/dev/null 2>&1 && break
-    sleep 0.5
-  done
-  grep -F "Ctrl-C stops them" "$work/mail.out" >/dev/null || fail "ff local start said nothing in 30 s: $(cat "$work/mail.err")"
-}
-stopped() {
-  kill -INT "$starter"
-  wait "$starter" 2>/dev/null || true
-}
+started() { local_started "$work/mail.out" "$work/mail.err" "$app/template.yaml" --port "$port"; }
 rm -rf "$app" && mkdir -p "$app/sender"
 cat >"$app/template.yaml" <<'YAML'
 AWSTemplateFormatVersion: '2010-09-09'
@@ -2914,7 +2844,7 @@ check "a sender of two addresses is refused in FF's words, a template as FF refu
 check "FF's account's operations are FF's: ff local says so" \
   "An error occurred (NotImplemented) when calling the GetAccount operation: ff local keeps the mail its functions send, and answers SendEmail alone: GetAccount is FF's, whose account has identities, quotas and a suppression list" \
   "$(ses_refused get-account)"
-stopped
+local_stopped
 
 ff local mail "$app"
 check "ff local mail lists them once the app has stopped, the latest last, each with its file" \
@@ -2954,16 +2884,10 @@ port="$(free_port)"
 origin="http://local-site.site.localhost:$port"
 api="http://shop-api.fn.localhost:$port"
 printf '{"api": "%s"}\n' "$api" >"$shop/site/config.json"
-FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z "$ff_bin" local start "$shop/template.yaml" --port "$port" \
-  --with postgres,valkey --site "local-site=$shop/site" --parameter-overrides ReceiptsBucketName=local-receipts \
-  SiteBucketName=local-site "SiteOrigin=$origin" ReceiptsFrom=receipts@shop.example.tn >"$work/small.out" 2>"$work/small.err" &
-starter=$!
-for _ in $(seq 1 240); do
-  grep -F "Ctrl-C stops them" "$work/small.out" >/dev/null 2>&1 && break
-  kill -0 "$starter" 2>/dev/null || break
-  sleep 0.5
-done
-grep -F "Ctrl-C stops them" "$work/small.out" >/dev/null || fail "ff local start --with said nothing in 120 s: $(cat "$work/small.err")"
+FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z \
+  local_started "$work/small.out" "$work/small.err" "$shop/template.yaml" --port "$port" --with postgres,valkey \
+  --site "local-site=$shop/site" --parameter-overrides ReceiptsBucketName=local-receipts SiteBucketName=local-site \
+  "SiteOrigin=$origin" ReceiptsFrom=receipts@shop.example.tn
 check "the small app starts with its database and its cache, each the functions' at DATABASE_URL and REDIS_URL" "true true" \
   "$(grep -E "^  postgres  postgresql://app:[^@]+@127\.0\.0\.1:[0-9]+/app, at postgres:5432 from the functions, the functions' DATABASE_URL$" "$work/small.out" >/dev/null && echo true || echo false) \
 $(grep -E "^  valkey    redis://default:[^@]+@127\.0\.0\.1:[0-9]+, at valkey:6379 from the functions, the functions' REDIS_URL$" "$work/small.out" >/dev/null && echo true || echo false)"
@@ -3002,8 +2926,7 @@ check "ff local run runs the nightly with its database: the day before counted, 
   "200 0 2026-11-09 1 1 404 0 miss" \
   "$put $(code) $(jq -r '"\(.day) \(.removed) \(.receipts)"' <<<"$report") $(at "$api/orders/$old/receipt" | sed -n '1s/ .*//p') \
 $(local_psql "$work/small.out" "select count(*) from orders where id = $old") $(x_cache)"
-kill -INT "$starter"
-wait "$starter" 2>/dev/null || true
+local_stopped
 ff local reset "$shop" --data --yes
 check "Ctrl-C removes the containers, and ff local reset --data the database's and the cache's volumes" "0 0 0" \
   "$(leftover) $(code) $(volumes)"
