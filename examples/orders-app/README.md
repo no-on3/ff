@@ -28,4 +28,14 @@ printf '{"api": "%s"}\n' "$(ff url show shop-api --output json | jq -r .url.func
 ff sites deploy shop-site site
 ```
 
+On this machine, `ff local start` runs it in Docker as FF runs it, once its libraries are installed, as `sam build` installs them for `sam local`; its secrets come from `.env.local`, which git leaves out, as it does `.ff/`, where `ff local` keeps its logs and key. `shop-api` answers at its URL, its CORS the template's, and the schedule runs on time, or now with `ff local run`. The queue, the buckets and the mail don't run there yet, so a new order goes without its receipt:
+
+```bash
+npm ci --omit=dev
+echo 'DATABASE_URL=postgres://postgres:…@host.docker.internal:5432/shop' >.env.local    # a database of yours, reached from the containers
+ff local start template.yaml --parameter-overrides ReceiptsBucketName=shop-receipts SiteBucketName=shop-site SiteOrigin=http://localhost:5173
+curl http://shop-api.fn.localhost:3700/orders                   # shop-api at its URL
+ff local run EveryNight                                         # shop-nightly's run, now, as its schedule calls it
+```
+
 FF's database, the cache, the buckets, the queue and the mail are reached whatever the account's internet access. A database of your own elsewhere works too, through the same secret, once FF's operator turns the account's internet access on. On AWS Lambda, with an RDS database, an ElastiCache cache and SES beside it, `sam deploy` takes the template `ff export` writes from the stack, which adds `DATABASE_URL` and `REDIS_URL` as parameters CloudFormation doesn't show back; this one passes `sam validate --lint` as it is, each function's `Policies` giving its role what it uses, and once FF has an AWS account, `hack/e2e-aws.sh` deploys it there each month, without a database. A receipt is read without one. The export kit's [`data/sqs.md`](../../cli/templates/export/data/sqs.md) has the queue and the mapping, [`data/s3-website.md`](../../cli/templates/export/data/s3-website.md) the page, [`data/elasticache.md`](../../cli/templates/export/data/elasticache.md) the cache and [`data/ses.md`](../../cli/templates/export/data/ses.md) the mail. `test/handlers.test.js` tries each handler's paths with its clients stubbed, no database or cache needed: `node --test test/handlers.test.js`, the ones FF can't show, such as a cache that can't be reached or SES refusing an e-mail. `.ffignore` leaves this README, the template, `samconfig.toml`, `events/`, `site/` and `test/` out of the package.

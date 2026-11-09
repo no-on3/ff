@@ -6,6 +6,7 @@
 
 ```bash
 ff deploy template.yaml                  # the stack {{name}}: its function and URL, the outputs printed; again after a change
+ff local start template.yaml             # on this machine: its URL http://helloworldfunction.fn.localhost:3700/, Ctrl-C ends it
 curl <HelloWorldApi>                     # the function's URL, the deploy's output HelloWorldApi: {"message":"hello world"}
 ff invoke <name> --data @events/event.json   # a URL's request, by the function's name, which the deploy printed
 ff logs <name>                           # its log: --follow for the new lines as they come
@@ -21,6 +22,10 @@ What differs from `sam init`'s:
 - **Its event:** `events/event.json` is a function URL's request, Lambda's payload of version 2.0, which FF's URLs
   send. The handler is `sam init`'s, its answer a URL's as it was API Gateway's.
 - **Its test** needs no library, and sits outside `{{code_uri}}`, so that no package holds it.
+
+`ff local start` runs the function on this machine, in Docker, as FF runs it, its URL on the port 3700; its logs
+and its key are in `.ff/`, and `.env.local` holds the secrets it gives the functions, `KEY=value` lines, which
+`.gitignore` keeps out of git.
 
 `ff doctor template.yaml` says what of a template is outside FF's subset of SAM; the next deploy changes what the
 template changed, and deletes what it no longer has after asking (`--yes` in a script). On AWS, `sam deploy` uses the

@@ -5,12 +5,33 @@
 //! `#` comments. `!` isn't read: a pattern starting with it is refused, rather than taken another
 //! way.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 
+/// ff's own folder in a project, which holds what ff makes there: `ff package`'s zips, `ff local`'s logs and key.
+pub const FF_FOLDER: &str = ".ff";
+
+/// What ff's folder's `.gitignore` says, when ff makes the folder: none of it is committed.
+const FF_FOLDER_GITIGNORE: &str = "# ff's own: what ff makes here, ff package's zips and ff local's logs and key\n*\n";
+
+/// Makes `folder` and the folders above it that aren't there; one of them named `.ff` gets its `.gitignore`, so
+/// that what ff makes in a project never shows in git, whatever the project's own `.gitignore` says.
+pub fn make_folder(folder: &Path) -> std::io::Result<()> {
+    let made: Vec<PathBuf> = folder
+        .ancestors()
+        .take_while(|above| !above.as_os_str().is_empty() && !above.exists())
+        .map(Path::to_path_buf)
+        .collect();
+    std::fs::create_dir_all(folder)?;
+    for ff_folder in made.iter().filter(|made| made.file_name().is_some_and(|name| name == FF_FOLDER)) {
+        std::fs::write(ff_folder.join(".gitignore"), FF_FOLDER_GITIGNORE)?;
+    }
+    Ok(())
+}
+
 /// Left out of every package, at any depth: version control, editors' and Python's own files,
-/// and ff's: `.ff/` holds the zips `ff package` writes.
+/// and ff's: `.ff/` holds what ff makes in the project.
 const ALWAYS: &[&str] = &[".git/", ".hg/", ".svn/", "__pycache__/", ".DS_Store", ".ff/", ".ffignore"];
 
 struct Pattern {
@@ -170,5 +191,25 @@ mod tests {
         assert!(is_env_file(".env"));
         assert!(is_env_file(".env.production"));
         assert!(!is_env_file(".envrc") && !is_env_file("env.js"));
+    }
+
+    #[test]
+    fn ffs_folder_made_gets_a_gitignore_leaving_all_of_it_out_and_one_already_there_is_let_be() {
+        let project = tempfile::TempDir::new().unwrap();
+        let logs = project.path().join(".ff/local/logs");
+
+        make_folder(&logs).unwrap();
+
+        assert!(logs.is_dir());
+        let gitignore = std::fs::read_to_string(project.path().join(".ff/.gitignore")).unwrap();
+        assert_eq!(gitignore.lines().filter(|line| !line.starts_with('#')).collect::<Vec<_>>(), ["*"]);
+        assert!(!project.path().join(".ff/local/.gitignore").exists(), "the folders under it are .ff's");
+
+        std::fs::write(project.path().join(".ff/.gitignore"), "mine\n").unwrap();
+        make_folder(&project.path().join(".ff/local/buckets")).unwrap();
+        assert_eq!(std::fs::read_to_string(project.path().join(".ff/.gitignore")).unwrap(), "mine\n");
+
+        make_folder(&project.path().join("out")).unwrap();
+        assert!(!project.path().join("out/.gitignore").exists(), "another folder is the project's");
     }
 }

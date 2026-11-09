@@ -117,7 +117,7 @@ fn package_writes_the_same_zip_twice_into_ffs_own_folder_and_says_what_it_holds(
     assert_eq!(names(&zip), ["index.js", "lib/greet.js"]);
     assert_eq!(
         std::fs::read_to_string(root.join(".ff/.gitignore")).unwrap(),
-        "# ff's own: the zips ff package makes\n*\n"
+        "# ff's own: what ff makes here, ff package's zips and ff local's logs and key\n*\n"
     );
 
     // Again, its own zip in the folder: the same bytes.

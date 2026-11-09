@@ -48,11 +48,11 @@ runtimes/python/*                       static unit security l3 l4 cli aws-tools
 runtimes/*                              static unit security l3 l4 l5 cli aws-tools images
 
 # The ff command; its Terraform project is AWS's tools' too.
-cli/src/commands/init.rs                static unit cli:init aws-tools
+cli/src/commands/init.rs                static unit cli:init,local_apps aws-tools
 cli/release/*                           static unit cli:downloads
 cli/src/local/images.rs                 static unit cli:local,local_images
-cli/src/local/*                         static unit cli:local,local_template
-cli/src/commands/local*                 static unit cli:local,local_template
+cli/src/local/*                         static unit cli:local,local_template,local_apps
+cli/src/commands/local*                 static unit cli:local,local_template,local_apps
 cli/src/s3.rs                           static unit cli:sites
 cli/src/sigv4.rs                        static unit cli:sites,local_template
 cli/*                                   static unit cli
@@ -69,7 +69,7 @@ deploy/dev-server/*                     static platform
 infrastructure/*                        static l4 l5 cli
 
 # The examples: the small app's handlers and the ff suite's functions.
-examples/orders-app/*                   static unit cli:small_app_db,small_app
+examples/orders-app/*                   static unit cli:small_app_db,small_app,local_apps
 examples/ci/*                           static cli:ci,downloads
 examples/*                              static cli
 

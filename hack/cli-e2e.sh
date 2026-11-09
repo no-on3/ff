@@ -48,7 +48,8 @@
 # revoking the offline token at the realm; and ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
 # answering on its port until Ctrl-C, no container left behind; a template's app behind its front door, each function
 # started at its first call, its variables resolved there and its secrets from .env.local, one calling another through
-# the front door, started again when its code changes and stopped when idle; then a release's runtime image, made, signed and put on
+# the front door, started again when its code changes and stopped when idle; ff init's SAM application and the small app
+# on it, called at their URLs, the small app's nightly run by hand and retried; then a release's runtime image, made, signed and put on
 # a site of FF's as the release job does, ff pinned to it: pulled by its digest from the dev registry, else its archive
 # loaded from the site, verified, once, and refused when signed by another key or changed.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
@@ -2076,6 +2077,87 @@ check "ff local reset removes what ff local keeps, the logs and the key" "0 remo
   "$(code) $(out) $([ -e "$app/.ff/local" ] && echo true || echo false)"
 }
 section_def local_template section_local_template backend budget=45
+
+section_local_apps() {
+section "ff local start on the applications a developer has: ff init --template sam's, and the small app, its libraries installed"
+local hello="$work/cli-local-hello" shop="$work/cli-local-shop" port starter origin=http://localhost:5173
+leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
+# started <out> <err> <args...>: ff local start in the background, its pid in $starter, until it says how to stop it.
+started() {
+  local out="$1" err="$2" _
+  shift 2
+  FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z "$ff_bin" local start "$@" --port "$port" >"$out" 2>"$err" &
+  starter=$!
+  for _ in $(seq 1 60); do
+    grep -F "Ctrl-C stops them" "$out" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  fail "ff local start said nothing in 30 s: $(cat "$err")"
+}
+stopped() {
+  kill -INT "$starter"
+  wait "$starter" 2>/dev/null || true
+}
+# at <url> [curl args...]: a request, its status and its answer; its headers in $work/at.head.
+at() {
+  local url="$1"
+  shift
+  curl -s -o "$work/at.body" -D "$work/at.head" -w '%{http_code}' "$@" "$url"
+  echo " $(cat "$work/at.body")"
+}
+
+(cd "$work" && rm -rf "$hello" && "$ff_bin" init "$(basename "$hello")" --runtime nodejs --template sam >"$work/out" 2>"$work/err")
+check "ff init --template sam's .gitignore leaves out what ff local keeps, and its secrets file" "true true" \
+  "$(grep -x '.ff/' "$hello/.gitignore" >/dev/null && echo true || echo false) $(grep -x '.env.local' "$hello/.gitignore" >/dev/null && echo true || echo false)"
+printf 'GREETING=never-committed\n' >"$hello/.env.local"
+port="$(free_port)"
+started "$work/hello.out" "$work/hello.err" "$hello/template.yaml"
+check "its application starts as it is, its function's URL printed" "true" \
+  "$(grep -E "^  HelloWorldFunction +nodejs +128 MB, 3 s  http://helloworldfunction.fn.localhost:$port/$" "$work/hello.out" >/dev/null && echo true || echo false)"
+check "  ... and called there, answers as it does on FF" '200 {"message":"hello world"}' \
+  "$(at "http://helloworldfunction.fn.localhost:$port/hello")"
+stopped
+git -C "$hello" init -q
+check "  ... what ff local keeps and the secrets file stay out of git" ".gitignore README.md events/ hello-world/ samconfig.toml template.yaml tests/" \
+  "$(git -C "$hello" status --porcelain --untracked-files=normal | sed 's/^?? //' | LC_ALL=C sort | paste -sd' ')"
+
+# The small app as a developer runs it here: its libraries installed, as sam build installs them for sam local, and its
+# page's origin a development server's. Its queue is ff local's next step: what goes to it is printed.
+rm -rf "$shop" && cp -r "$FF_REPO_ROOT/examples/orders-app" "$shop"
+(cd "$shop" && npm ci --no-audit --no-fund --omit=dev >"$work/npm.out" 2>&1) || fail "npm ci in the small app: $(tail -5 "$work/npm.out")"
+port="$(free_port)"
+started "$work/shop.out" "$work/shop.err" "$shop/template.yaml" \
+  --parameter-overrides ReceiptsBucketName=local-receipts SiteBucketName=local-site "SiteOrigin=$origin"
+check "the small app starts, its three functions named as the stack names them, its URL and its schedule listed" "shop-api,shop-nightly,shop-receipts true true" \
+  "$(sed -n 's/^  \(shop-[a-z]*\) .*/\1/p' "$work/shop.out" | LC_ALL=C sort | paste -sd,) \
+$(grep -E "^  shop-api +nodejs +128 MB, 5 s  http://shop-api.fn.localhost:$port/$" "$work/shop.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  shop-nightly/EveryNight +cron\(0 2 \* \* \? \*\)  next 2026-11-11T02:00:00Z$' "$work/shop.out" >/dev/null && echo true || echo false)"
+orders_cors_check "http://shop-api.fn.localhost:$port" "$origin"
+check "  ... and its handler, loaded with its libraries, refuses a wrong order before it reaches the database" \
+  "400 An order is {\"item\": \"<what>\", \"quantity\": <a whole number above 0>}, and \"email\": \"<an address>\" for its receipt $origin" \
+  "$(at "http://shop-api.fn.localhost:$port/orders" -X POST -H "Origin: $origin" -d '{"item": ""}' | sed 's/ .*//') $(jq -r .message "$work/at.body") \
+$(sed -n 's/^access-control-allow-origin: //Ip' "$work/at.head" | tr -d '\r')"
+ff local run EveryNight "$shop"
+check "ff local run runs its nightly now, as its schedule would" "0 shop-nightly's schedule EveryNight runs now" \
+  "$(code) $(out | sed 's/: the asynchronous call.*//')"
+for _ in $(seq 1 60); do
+  grep -F 'dropped after 3 attempts' "$work/shop.err" >/dev/null && break
+  sleep 0.5
+done
+# Without its database's address, a secret, it fails: an asynchronous call's failure, tried twice more, a minute and
+# then two after it, which the suite's build makes 1.2 s and 2.4 s.
+check "  ... and, failing without its database, is tried again twice, then dropped, as FF retries an asynchronous call" \
+  "3 2 true" \
+  "$(grep -cE '^shop-nightly: the asynchronous call [^ ]+ failed: Error: DATABASE_URL is not set' "$work/shop.err") \
+$(grep -cE '^shop-nightly: the asynchronous call [^ ]+ failed: Error: DATABASE_URL is not set: .*; tried again in (60|120) s$' "$work/shop.err") \
+$(grep -E '^shop-nightly: the asynchronous call [^ ]+ failed: Error: DATABASE_URL is not set: .*; dropped after 3 attempts: its retries are used$' "$work/shop.err" >/dev/null && echo true || echo false)"
+stopped
+check "Ctrl-C removes their containers" 0 "$(leftover)"
+git -C "$shop" init -q
+check "what ff local keeps stays out of git in an app whose .gitignore doesn't name it: .ff/ has its own" "true 0" \
+  "$([ -e "$shop/.ff/local/credentials" ] && echo true || echo false) $(git -C "$shop" status --porcelain --untracked-files=normal | grep -c '^?? \.ff/' || true)"
+}
+section_def local_apps section_local_apps backend budget=45
 
 section_local_images() {
 section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"

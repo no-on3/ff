@@ -33,6 +33,7 @@ use crate::local::schedule_expression::{Expression, InvalidExpression, Millis, i
 use crate::local::schedules::{self, LocalSchedule, Timetable};
 use crate::local::{self, Code, LocalFunction, http, images, url};
 use crate::output::Output;
+use crate::package::ignore::{self, FF_FOLDER};
 use crate::sam::Template;
 use crate::sam::plan::{self, BUCKET, Place, QUEUE};
 use crate::sam::resolve::FUNCTION;
@@ -570,7 +571,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     let project = std::fs::canonicalize(&read.at.project).unwrap_or_else(|_| read.at.project.clone());
     let kept = project.join(KEPT);
     let logs = kept.join("logs");
-    std::fs::create_dir_all(&logs)
+    ignore::make_folder(&logs)
         .map_err(|error| Error::new(Kind::Failed, format!("Couldn't make {}: {error}", logs.display())))?;
     let credentials = kept.join(CREDENTIALS);
     if kept_key.is_none() {
@@ -624,7 +625,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
         }
     });
     if options.watch {
-        watch(Arc::clone(&instances), &functions, project.join(".ff"))?;
+        watch(Arc::clone(&instances), &functions, project.join(FF_FOLDER))?;
     }
     let offset = door.clock_offset;
     let table = Timetable::new(

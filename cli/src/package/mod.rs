@@ -4,7 +4,7 @@
 //! same way each time, so that the same folder gives the same SHA-256 and a deploy can say "no
 //! changes".
 
-mod ignore;
+pub mod ignore;
 mod project;
 mod zip;
 
