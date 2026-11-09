@@ -12,6 +12,7 @@ mod downloads;
 mod error;
 mod local;
 mod login;
+mod mcp;
 mod md5;
 mod minisign;
 mod output;

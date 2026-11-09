@@ -36,6 +36,8 @@ mod version;
 mod versions;
 mod whoami;
 
+use std::io;
+
 use crate::cli::{
     AliasCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EmailCommand,
     EnvCommand, EventSourcesCommand, LocalCommand, QueuesCommand, ScheduleCommand, SecretsCommand, SiteDomainsCommand,
@@ -353,5 +355,6 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Config(command) => config::run(command, context),
         Command::Version => version::run(context.out),
         Command::Completion { shell } => completion::run(shell, context.out),
+        Command::Mcp => crate::mcp::serve(io::stdin().lock(), io::stdout(), context),
     }
 }

@@ -370,6 +370,11 @@ pub enum Command {
         /// The shell
         shell: Shell,
     },
+
+    /// Serve ff's commands to an AI coding agent as the Model Context Protocol's tools, on stdin and stdout: the
+    /// functions, their logs, calls and metrics, usage, balance, the cost on AWS, queues, buckets, databases, caches
+    /// and doctor, each run with this profile's login or key and answered with its JSON document
+    Mcp,
 }
 
 #[derive(Args)]

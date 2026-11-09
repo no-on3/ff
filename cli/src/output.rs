@@ -3,9 +3,7 @@
 //! format.
 
 use std::io::{self, IsTerminal, Write};
-#[cfg(test)]
-use std::sync::Arc;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Serialize;
 use serde_json::json;
@@ -21,6 +19,8 @@ pub struct Output {
     color: bool,
     /// Where the results go: stdout for a command, a buffer for whoever reads them instead.
     results: Mutex<Box<dyn Write + Send>>,
+    /// The buffer that keeps the warnings for its reader, who would never see stderr.
+    warnings: Option<Buffer>,
 }
 
 impl Output {
@@ -32,19 +32,24 @@ impl Output {
             quiet: global.quiet,
             color: !no_color && io::stderr().is_terminal(),
             results: Mutex::new(Box::new(io::stdout())),
+            warnings: None,
         }
     }
 
-    /// An output whose results go into a buffer, read back from the buffer: JSON, nothing on
-    /// stderr but warnings, no color.
-    #[cfg(test)]
+    /// An output whose results and warnings go into a buffer, read back from the buffer: JSON,
+    /// nothing on stderr, no color.
     pub fn buffered() -> (Self, Buffer) {
         let buffer = Buffer::default();
         let results: Box<dyn Write + Send> = Box::new(buffer.clone());
-        (
-            Output { format: Format::Json, verbose: false, quiet: true, color: false, results: Mutex::new(results) },
-            buffer,
-        )
+        let output = Output {
+            format: Format::Json,
+            verbose: false,
+            quiet: true,
+            color: false,
+            results: Mutex::new(results),
+            warnings: Some(buffer.clone()),
+        };
+        (output, buffer)
     }
 
     /// An output for tests whose results no one reads.
@@ -74,8 +79,11 @@ impl Output {
         Ok(())
     }
 
-    /// Something to fix that doesn't stop the command, on stderr.
+    /// Something to fix that doesn't stop the command, on stderr, or kept in the buffer.
     pub fn warn(&self, text: &str) {
+        if let Some(buffer) = &self.warnings {
+            return buffer.warnings.lock().unwrap_or_else(PoisonError::into_inner).push(text.to_owned());
+        }
         let label = if self.color { "\x1b[1;33mwarning:\x1b[0m" } else { "warning:" };
         let _ = writeln!(io::stderr().lock(), "{label} {text}");
     }
@@ -103,23 +111,28 @@ impl Output {
     }
 }
 
-/// What an output wrote into its buffer, for its reader.
-#[cfg(test)]
+/// What an output wrote into its buffer, and the warnings it gave, for its reader.
 #[derive(Clone, Default)]
-pub struct Buffer(Arc<Mutex<Vec<u8>>>);
+pub struct Buffer {
+    written: Arc<Mutex<Vec<u8>>>,
+    warnings: Arc<Mutex<Vec<String>>>,
+}
 
-#[cfg(test)]
 impl Buffer {
     /// What was written so far, as text.
     pub fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner)).into_owned()
+        String::from_utf8_lossy(&self.written.lock().unwrap_or_else(PoisonError::into_inner)).into_owned()
+    }
+
+    /// The warnings given so far.
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 }
 
-#[cfg(test)]
 impl Write for Buffer {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(bytes);
+        self.written.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(bytes);
         Ok(bytes.len())
     }
 
@@ -139,7 +152,7 @@ fn error_text(error: &Error, color: bool) -> String {
 
 /// The error for a script: always the same keys, the API's status and request ID null when the
 /// API gave none.
-fn error_document(error: &Error) -> serde_json::Value {
+pub fn error_document(error: &Error) -> serde_json::Value {
     json!({ "error": { "message": error.message, "exitCode": error.exit_code(), "status": error.status, "requestId": error.request_id } })
 }
 
@@ -163,15 +176,18 @@ mod tests {
     }
 
     #[test]
-    fn the_results_go_where_the_output_was_made_to_write_them_a_document_then_lines_then_bytes_as_they_are() {
+    fn the_results_go_where_the_output_was_made_to_write_them_a_document_then_lines_then_bytes_as_they_are_and_warnings_with_them()
+     {
         let (out, buffer) = Output::buffered();
         out.result(&json!({ "name": "orders" }), || unreachable!("JSON asked")).unwrap();
         out.line("{\"message\":\"started\"}").unwrap();
         out.raw(b"function,calls\norders,3\n").unwrap();
+        out.warn("12 lines dropped");
         assert_eq!(
             buffer.text(),
             "{\n  \"name\": \"orders\"\n}\n{\"message\":\"started\"}\nfunction,calls\norders,3\n"
         );
+        assert_eq!(buffer.warnings(), ["12 lines dropped"], "kept for the buffer's reader, who never sees stderr");
     }
 
     #[test]

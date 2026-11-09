@@ -1,0 +1,293 @@
+//! `ff mcp`: ff's commands as the tools of a Model Context Protocol server, for an AI coding agent on the developer's
+//! machine. JSON-RPC 2.0 on stdin and stdout, a message a line, as the protocol's stdio transport says: the
+//! handshake, `ping`, `tools/list` and `tools/call`, at one version of the protocol. The server holds no state and
+//! opens no port; each tool runs its command with the profile's token, as typed, into a buffer it answers with.
+
+mod tools;
+
+use std::io::{BufRead, Write};
+
+use serde_json::{Value, json};
+
+use crate::commands::Context;
+use crate::error::Error;
+
+/// The protocol's version this server speaks, which it answers a client asking for another with: the client then
+/// goes on with it or stops.
+pub const PROTOCOL_VERSION: &str = "2025-11-25";
+
+// JSON-RPC's codes.
+const PARSE_ERROR: i64 = -32700;
+const INVALID_REQUEST: i64 = -32600;
+const METHOD_NOT_FOUND: i64 = -32601;
+const INVALID_PARAMS: i64 = -32602;
+
+/// A request refused before any tool ran: JSON-RPC's code and its message.
+struct Refused {
+    code: i64,
+    message: String,
+}
+
+impl Refused {
+    fn new(code: i64, message: impl Into<String>) -> Self {
+        Refused { code, message: message.into() }
+    }
+}
+
+/// Answers each message read until the input ends, as a client closes it to stop the server.
+pub fn serve(input: impl BufRead, mut output: impl Write, context: &Context) -> Result<(), Error> {
+    for line in input.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(answer) = answer(&line, context) {
+            writeln!(output, "{answer}")?;
+            output.flush()?;
+        }
+    }
+    Ok(())
+}
+
+/// The answer to one line: none for a notification, or for a response, as this server asks the client nothing.
+fn answer(line: &str, context: &Context) -> Option<Value> {
+    let message: Value = match serde_json::from_str(line) {
+        Ok(message) => message,
+        Err(error) => return Some(refusal(Value::Null, Refused::new(PARSE_ERROR, format!("Not JSON: {error}")))),
+    };
+    let Some(message) = message.as_object() else {
+        let why = "A message is one JSON-RPC object, a request or a notification: a batch isn't taken";
+        return Some(refusal(Value::Null, Refused::new(INVALID_REQUEST, why)));
+    };
+    let id = message.get("id").cloned();
+    let method = message.get("method").and_then(Value::as_str);
+    match (id, method) {
+        (None, _) => None,
+        (Some(_), None) if message.contains_key("result") || message.contains_key("error") => None,
+        (Some(id), None) => Some(refusal(id, Refused::new(INVALID_REQUEST, "A request names its method"))),
+        (Some(id), Some(method)) => {
+            let params = message.get("params").cloned().unwrap_or(Value::Null);
+            Some(match handled(method, &params, context) {
+                Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+                Err(refused) => refusal(id, refused),
+            })
+        }
+    }
+}
+
+fn refusal(id: Value, refused: Refused) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": refused.code, "message": refused.message } })
+}
+
+fn handled(method: &str, params: &Value, context: &Context) -> Result<Value, Refused> {
+    match method {
+        "initialize" => Ok(initialized()),
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({ "tools": tools::definitions() })),
+        "tools/call" => {
+            let Some(name) = params.get("name").and_then(Value::as_str) else {
+                return Err(Refused::new(INVALID_PARAMS, "tools/call names its tool, in params.name"));
+            };
+            let arguments = match params.get("arguments") {
+                None | Some(Value::Null) => serde_json::Map::new(),
+                Some(Value::Object(arguments)) => arguments.clone(),
+                Some(_) => return Err(Refused::new(INVALID_PARAMS, "A tool's arguments are a JSON object")),
+            };
+            let Some(tool) = tools::named(name) else {
+                return Err(Refused::new(INVALID_PARAMS, format!("Unknown tool: {name}; tools/list names ff's")));
+            };
+            Ok(tools::call(tool, &arguments, context))
+        }
+        _ => Err(Refused::new(METHOD_NOT_FOUND, format!("Method not found: {method}"))),
+    }
+}
+
+/// The handshake's answer, whichever version the client asked for: this server speaks one.
+fn initialized() -> Value {
+    json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "capabilities": { "tools": { "listChanged": false } },
+        "serverInfo": { "name": "ff", "title": "FF", "version": env!("CARGO_PKG_VERSION") },
+        "instructions": "Each tool runs one of ff's commands with the developer's own login or key, as typed in a \
+            terminal, and answers with the command's JSON document, and under `warned` the warnings a terminal would \
+            show; a failed command answers with its error and its exit code. The tools read the account; none \
+            changes it.",
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io::Cursor;
+
+    use super::*;
+    use crate::cli::ConnectionArgs;
+    use crate::output::Output;
+
+    /// The server's answers to the lines, in order, as a client reads them.
+    fn session(lines: &[Value]) -> Vec<Value> {
+        let input: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let (connection, out) = (ConnectionArgs::default(), Output::quiet());
+        let mut output = Vec::new();
+        serve(Cursor::new(input), &mut output, &Context { connection: &connection, out: &out }).unwrap();
+        String::from_utf8(output).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+    }
+
+    fn request(id: i64, method: &str, params: Value) -> Value {
+        json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+    }
+
+    fn call(id: i64, tool: &str, arguments: Value) -> Value {
+        request(id, "tools/call", json!({ "name": tool, "arguments": arguments }))
+    }
+
+    #[test]
+    fn the_handshake_at_its_version_a_client_asking_another_told_which_its_notification_unanswered_a_probe_refused() {
+        let answers = session(&[
+            request(1, "server/discover", json!({ "_meta": { "protocolVersion": "2026-07-28" } })),
+            request(2, "initialize", json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": {} })),
+            json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+            request(3, "initialize", json!({ "protocolVersion": "2024-11-05", "capabilities": {} })),
+            request(4, "ping", json!({})),
+        ]);
+        assert_eq!(answers.len(), 4, "a notification gets no answer: {answers:?}");
+        assert_eq!(answers[0]["error"]["code"], METHOD_NOT_FOUND);
+        assert_eq!(answers[1]["id"], 2);
+        assert_eq!(answers[1]["result"]["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(answers[1]["result"]["capabilities"], json!({ "tools": { "listChanged": false } }));
+        assert_eq!(answers[1]["result"]["serverInfo"]["name"], "ff");
+        assert_eq!(answers[2]["result"]["protocolVersion"], PROTOCOL_VERSION, "the one it speaks, not the one asked");
+        assert_eq!(answers[3], json!({ "jsonrpc": "2.0", "id": 4, "result": {} }));
+    }
+
+    #[test]
+    fn what_isn_t_a_request_is_refused_with_json_rpc_s_codes_and_a_response_is_left() {
+        let input =
+            "not json\n[1, 2]\n{\"jsonrpc\": \"2.0\", \"id\": 7}\n{\"jsonrpc\": \"2.0\", \"id\": 8, \"result\": {}}\n";
+        let (connection, out) = (ConnectionArgs::default(), Output::quiet());
+        let mut output = Vec::new();
+        serve(Cursor::new(input), &mut output, &Context { connection: &connection, out: &out }).unwrap();
+        let answers: Vec<Value> =
+            String::from_utf8(output).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        let codes: Vec<(Value, Value)> =
+            answers.iter().map(|a| (a["id"].clone(), a["error"]["code"].clone())).collect();
+        assert_eq!(
+            codes,
+            [
+                (Value::Null, json!(PARSE_ERROR)),
+                (Value::Null, json!(INVALID_REQUEST)),
+                (json!(7), json!(INVALID_REQUEST))
+            ]
+        );
+    }
+
+    #[test]
+    fn tools_list_names_the_read_tools_each_with_its_schema_from_its_command_and_no_api_needed() {
+        let answers = session(&[request(1, "tools/list", json!({}))]);
+        let tools = answers[0]["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+        assert_eq!(
+            names,
+            [
+                "ff_list_functions",
+                "ff_get_function",
+                "ff_logs",
+                "ff_history",
+                "ff_metrics",
+                "ff_usage",
+                "ff_balance",
+                "ff_estimate",
+                "ff_list_queues",
+                "ff_get_queue",
+                "ff_list_buckets",
+                "ff_get_bucket",
+                "ff_list_databases",
+                "ff_get_database",
+                "ff_list_caches",
+                "ff_get_cache",
+                "ff_doctor"
+            ]
+        );
+        let logs = tools.iter().find(|tool| tool["name"] == "ff_logs").unwrap();
+        assert_eq!(
+            logs["description"],
+            "Show a function's log lines: the newest of a window, every page of it, or the live tail"
+        );
+        let schema = &logs["inputSchema"];
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["required"], json!(["name"]));
+        assert_eq!(schema["properties"]["name"], json!({ "type": "string", "description": "The function's name" }));
+        assert_eq!(schema["properties"]["tail"]["type"], "integer");
+        assert_eq!(schema["properties"]["tail"]["default"], 100);
+        assert_eq!(schema["properties"]["requestId"]["type"], "string");
+        assert_eq!(schema["properties"]["all"]["type"], "boolean");
+        assert!(schema["properties"].get("follow").is_none(), "a tool's call ends: no live tail");
+        assert_eq!(logs["annotations"]["readOnlyHint"], true);
+        let doctor = tools.iter().find(|tool| tool["name"] == "ff_doctor").unwrap();
+        assert_eq!(doctor["inputSchema"]["properties"]["parameterOverrides"]["type"], "array");
+        assert_eq!(doctor["inputSchema"]["properties"]["path"]["default"], ".");
+        let estimate = tools.iter().find(|tool| tool["name"] == "ff_estimate").unwrap();
+        assert!(estimate["description"].as_str().unwrap().starts_with("The last months as FF counted them at AWS's"));
+        let balance = tools.iter().find(|tool| tool["name"] == "ff_balance").unwrap();
+        assert_eq!(
+            balance["inputSchema"],
+            json!({ "type": "object", "properties": {}, "additionalProperties": false })
+        );
+    }
+
+    #[test]
+    fn a_tool_answers_with_its_command_s_json_document_as_structured_content_and_as_text() {
+        let folder = tempfile::tempdir().unwrap();
+        fs::write(folder.path().join("index.mjs"), "export const handler = async () => ({ ok: true });\n").unwrap();
+        let path = folder.path().to_str().unwrap();
+        let answers = session(&[call(1, "ff_doctor", json!({ "path": path }))]);
+        let result = &answers[0]["result"];
+        assert_eq!(result["isError"], false, "{result}");
+        assert_eq!(result["structuredContent"]["errors"], 0);
+        assert_eq!(result["content"][0]["type"], "text");
+        let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, result["structuredContent"]);
+    }
+
+    #[test]
+    fn a_failed_command_answers_as_a_tool_s_error_its_message_and_exit_code_as_ff_writes_them() {
+        let answers = session(&[call(1, "ff_doctor", json!({ "path": "/nowhere/at/all" }))]);
+        let result = &answers[0]["result"];
+        assert_eq!(result["isError"], true);
+        assert_eq!(result["structuredContent"]["error"]["message"], "/nowhere/at/all isn't there");
+        assert_eq!(result["structuredContent"]["error"]["exitCode"], 2);
+        let text: Value = serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, result["structuredContent"]);
+    }
+
+    #[test]
+    fn arguments_the_tool_or_its_command_refuses_are_a_tool_s_error_an_unknown_tool_json_rpc_s() {
+        let answers = session(&[
+            call(1, "ff_logs", json!({ "name": "orders", "follow": true })),
+            call(2, "ff_logs", json!({ "name": "orders", "tail": "many" })),
+            call(3, "ff_logs", json!({ "name": "orders", "since": "1h", "start": "2026-11-09T09:00:00Z" })),
+            call(4, "ff_logs", json!({})),
+            call(5, "ff_delete", json!({ "name": "orders" })),
+            request(6, "tools/call", json!({ "name": "ff_logs", "arguments": ["orders"] })),
+        ]);
+        let said = |answer: &Value| {
+            assert_eq!(answer["result"]["isError"], true, "{answer}");
+            answer["result"]["structuredContent"]["error"]["message"].as_str().unwrap().to_owned()
+        };
+        assert_eq!(
+            said(&answers[0]),
+            "ff_logs takes no argument follow: it takes name, tail, since, start, end, grep, requestId, all"
+        );
+        assert_eq!(said(&answers[1]), "ff_logs's tail is a whole number");
+        assert!(
+            said(&answers[2]).contains("'--since <SINCE>' cannot be used with '--start <START>'"),
+            "{}",
+            answers[2]
+        );
+        assert!(said(&answers[3]).contains("<NAME>"), "{}", answers[3]);
+        assert_eq!(answers[4]["error"]["code"], INVALID_PARAMS);
+        assert_eq!(answers[4]["error"]["message"], "Unknown tool: ff_delete; tools/list names ff's");
+        assert_eq!(answers[5]["error"]["code"], INVALID_PARAMS);
+    }
+}
