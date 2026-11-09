@@ -1,7 +1,11 @@
-//! What a command prints: its result on stdout, as text for people or as one JSON document for
-//! scripts; and its error on stderr, in the same format.
+//! What a command prints: its result, as text for people or as one JSON document for scripts, on
+//! stdout or into a buffer that `ff mcp` and the tests read; and its error on stderr, in the same
+//! format.
 
 use std::io::{self, IsTerminal, Write};
+#[cfg(test)]
+use std::sync::Arc;
+use std::sync::{Mutex, PoisonError};
 
 use serde::Serialize;
 use serde_json::json;
@@ -15,6 +19,8 @@ pub struct Output {
     pub quiet: bool,
     /// Colors on stderr: a terminal, and neither `--no-color` nor `NO_COLOR`.
     color: bool,
+    /// Where the results go: stdout for a command, a buffer for whoever reads them instead.
+    results: Mutex<Box<dyn Write + Send>>,
 }
 
 impl Output {
@@ -25,22 +31,46 @@ impl Output {
             verbose: global.verbose,
             quiet: global.quiet,
             color: !no_color && io::stderr().is_terminal(),
+            results: Mutex::new(Box::new(io::stdout())),
         }
     }
 
-    /// An output for tests: JSON, nothing on stderr but warnings.
+    /// An output whose results go into a buffer, read back from the buffer: JSON, nothing on
+    /// stderr but warnings, no color.
+    #[cfg(test)]
+    pub fn buffered() -> (Self, Buffer) {
+        let buffer = Buffer::default();
+        let results: Box<dyn Write + Send> = Box::new(buffer.clone());
+        (
+            Output { format: Format::Json, verbose: false, quiet: true, color: false, results: Mutex::new(results) },
+            buffer,
+        )
+    }
+
+    /// An output for tests whose results no one reads.
     #[cfg(test)]
     pub fn quiet() -> Self {
-        Output { format: Format::Json, verbose: false, quiet: true, color: false }
+        Output::buffered().0
     }
 
     /// The command's result: the text, or the value as one JSON document.
     pub fn result<T: Serialize>(&self, value: &T, text: impl FnOnce() -> String) -> Result<(), Error> {
-        let mut stdout = io::stdout().lock();
         match self.format {
-            Format::Text => writeln!(stdout, "{}", text())?,
-            Format::Json => writeln!(stdout, "{}", serde_json::to_string_pretty(value).expect("a result serializes"))?,
+            Format::Text => self.line(&text()),
+            Format::Json => self.line(&serde_json::to_string_pretty(value).expect("a result serializes")),
         }
+    }
+
+    /// A line of a result written as it comes, as a log's lines are.
+    pub fn line(&self, text: &str) -> Result<(), Error> {
+        self.raw(format!("{text}\n").as_bytes())
+    }
+
+    /// A result as it is, neither ff's text nor its JSON: a CSV, a shell's script.
+    pub fn raw(&self, bytes: &[u8]) -> Result<(), Error> {
+        let mut results = self.results.lock().unwrap_or_else(PoisonError::into_inner);
+        results.write_all(bytes)?;
+        results.flush()?;
         Ok(())
     }
 
@@ -70,6 +100,31 @@ impl Output {
             Format::Json => serde_json::to_string_pretty(&error_document(error)).expect("an error serializes"),
         };
         let _ = writeln!(io::stderr().lock(), "{text}");
+    }
+}
+
+/// What an output wrote into its buffer, for its reader.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+#[cfg(test)]
+impl Buffer {
+    /// What was written so far, as text.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap_or_else(PoisonError::into_inner)).into_owned()
+    }
+}
+
+#[cfg(test)]
+impl Write for Buffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -105,6 +160,18 @@ mod tests {
         assert_eq!(error_text(&refused(), false), "error: The function failed to load\nrequest ID: 7d1e5c1a");
         assert_eq!(error_text(&Error::usage("Bad JSON"), false), "error: Bad JSON");
         assert!(error_text(&refused(), true).starts_with("\x1b[1;31merror:\x1b[0m The function"));
+    }
+
+    #[test]
+    fn the_results_go_where_the_output_was_made_to_write_them_a_document_then_lines_then_bytes_as_they_are() {
+        let (out, buffer) = Output::buffered();
+        out.result(&json!({ "name": "orders" }), || unreachable!("JSON asked")).unwrap();
+        out.line("{\"message\":\"started\"}").unwrap();
+        out.raw(b"function,calls\norders,3\n").unwrap();
+        assert_eq!(
+            buffer.text(),
+            "{\n  \"name\": \"orders\"\n}\n{\"message\":\"started\"}\nfunction,calls\norders,3\n"
+        );
     }
 
     #[test]

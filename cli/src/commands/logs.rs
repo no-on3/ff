@@ -2,7 +2,7 @@
 //! it, or the live tail as lines come.
 
 use std::collections::{HashSet, VecDeque};
-use std::io::{self, Write};
+use std::io;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -121,11 +121,11 @@ impl<'a> Printer<'a> {
         }
         self.last_time = Some(line.time.clone());
         if self.out.format == Format::Json {
-            writeln!(io::stdout().lock(), "{}", serde_json::to_string(line).expect("a line serializes"))?;
+            self.out.line(&serde_json::to_string(line).expect("a line serializes"))?;
         } else if line.stream.as_deref() == Some("ff") {
             self.out.warn(&line.message);
         } else {
-            writeln!(io::stdout().lock(), "{}", text(line, self.out.verbose))?;
+            self.out.line(&text(line, self.out.verbose))?;
         }
         Ok(())
     }

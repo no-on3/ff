@@ -352,6 +352,6 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Metrics { name, period, since } => account::metrics(name.as_deref(), period, &since, context),
         Command::Config(command) => config::run(command, context),
         Command::Version => version::run(context.out),
-        Command::Completion { shell } => completion::run(shell),
+        Command::Completion { shell } => completion::run(shell, context.out),
     }
 }

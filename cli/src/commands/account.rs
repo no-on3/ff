@@ -269,8 +269,7 @@ pub fn usage(month_asked: Option<&str>, csv: bool, context: &Context) -> Result<
     }
     if csv {
         let text = client.text(&call.accept("text/csv"))?;
-        print!("{text}");
-        return Ok(());
+        return context.out.raw(text.as_bytes());
     }
     let usage: Usage = client.json(&call)?;
     context.out.result(&usage, || {
