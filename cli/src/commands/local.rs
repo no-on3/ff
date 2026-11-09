@@ -130,7 +130,7 @@ pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context
     local::remove_on_interrupt();
 
     let container = started(&function, &image, None, context)?;
-    let answer = local::call(container.port, &event, None, function.timeout)?;
+    let answer = local::call(container.port, &event, None, &local::Asks::default(), function.timeout)?;
     let log = container.logs();
     drop(container);
     print_log(context, &log);
@@ -332,7 +332,15 @@ mod tests {
     }
 
     fn answer(status: u16, function_error: bool, body: &str) -> Answer {
-        Answer { status, request_id: None, duration_ms: None, memory_mb: None, function_error, body: body.into() }
+        Answer {
+            status,
+            request_id: None,
+            duration_ms: None,
+            memory_mb: None,
+            function_error,
+            body: body.into(),
+            log_result: None,
+        }
     }
 
     #[test]

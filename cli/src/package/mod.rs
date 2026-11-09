@@ -224,14 +224,27 @@ pub struct FolderFile {
 
 /// The folder's files as its package holds them before a build: what the package's rules leave
 /// out left out, `.env` files too, links followed to the folder's own files.
-pub fn folder_files(root: &Path) -> Result<Vec<FolderFile>, Error> {
+fn unbuilt_entries(root: &Path) -> Result<Vec<zip::Entry>, Error> {
     let unreadable = |error: io::Error| failed(format!("Couldn't read {}: {error}", root.display()));
     let resolved = std::fs::canonicalize(root).map_err(unreadable)?;
     let mut entries = Vec::new();
     collect(&resolved, &resolved, &Ignore::of(&resolved)?, false, &mut entries, &mut Vec::new()).map_err(unreadable)?;
-    Ok(entries
+    entries.retain(|entry| !is_env_file(entry.name.rsplit('/').next().unwrap_or_default()));
+    Ok(entries)
+}
+
+/// The folder as its package would hold it unbuilt, zipped: the size and the SHA-256 in base64, as AWS Lambda's
+/// CodeSize and CodeSha256 say them, of what a function runs from it on this machine.
+pub fn unbuilt_code(root: &Path) -> Result<(u64, String), Error> {
+    let zip = zip::write(unbuilt_entries(root)?)
+        .map_err(|error| failed(format!("Couldn't zip {}: {error}", root.display())))?;
+    Ok((zip.len() as u64, STANDARD.encode(ring::digest::digest(&ring::digest::SHA256, &zip))))
+}
+
+/// The folder's files as its package holds them before a build.
+pub fn folder_files(root: &Path) -> Result<Vec<FolderFile>, Error> {
+    Ok(unbuilt_entries(root)?
         .into_iter()
-        .filter(|entry| !is_env_file(entry.name.rsplit('/').next().unwrap_or_default()))
         .map(|entry| FolderFile {
             size: std::fs::metadata(&entry.source).map_or(0, |metadata| metadata.len()),
             name: entry.name,

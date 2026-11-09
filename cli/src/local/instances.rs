@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::{Answer, Container, LocalFunction, Readiness, call, wait_until_ready};
+use super::{Answer, Asks, Container, LocalFunction, Readiness, call, wait_until_ready};
 use crate::cli::Runtime;
 use crate::error::Error;
 
@@ -29,13 +29,14 @@ pub trait Runner: Send + Sync + 'static {
     /// Starts the function, and waits for its code to load.
     fn start(&self, function: &LocalFunction) -> Result<Started<Self::Running>, Error>;
 
-    /// Calls it with the event under the request's ID, waited for up to its timeout.
+    /// Calls it with the event under the request's ID, with what the call asks, waited for up to its timeout.
     fn call(
         &self,
         running: &Self::Running,
         function: &LocalFunction,
         event: &Value,
         request_id: &str,
+        asks: &Asks,
     ) -> Result<Answer, Error>;
 }
 
@@ -130,7 +131,7 @@ impl<R: Runner> Instances<R> {
 
     /// Calls the function named, started first if it doesn't run; one that ended its runtime, or didn't answer, is
     /// started again at the next call. None when the template has no function of that name.
-    pub fn call(&self, name: &str, event: &Value, request_id: &str) -> Option<Result<Called, Error>> {
+    pub fn call(&self, name: &str, event: &Value, request_id: &str, asks: &Asks) -> Option<Result<Called, Error>> {
         let Entry { function, slot } = self.functions.get(name)?;
         let running = {
             let mut slot = locked(slot);
@@ -150,7 +151,7 @@ impl<R: Runner> Instances<R> {
             slot.calls += 1;
             running
         };
-        let answered = self.runner.call(&running, function, event, request_id);
+        let answered = self.runner.call(&running, function, event, request_id, asks);
         let mut slot = locked(slot);
         slot.calls -= 1;
         slot.last_call = Instant::now();
@@ -241,9 +242,10 @@ impl Runner for Docker {
         function: &LocalFunction,
         event: &Value,
         request_id: &str,
+        asks: &Asks,
     ) -> Result<Answer, Error> {
         let port = running.container.as_ref().map_or(0, |container| container.port);
-        call(port, event, Some(request_id), function.timeout)
+        call(port, event, Some(request_id), asks, function.timeout)
     }
 }
 
@@ -282,18 +284,21 @@ impl Write for Log {
 /// A stand-in for Docker, for the tests of what runs functions and calls them.
 #[cfg(test)]
 pub mod stand {
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::local::Code;
 
-    /// Starts and calls nothing: counts its starts and its stops, and answers with the event; a load fails when the
-    /// function's handler is `broken.handler`, a call throws when its event says `throw`, and ends the runtime when it
-    /// says `exit`.
-    #[derive(Default)]
+    /// Starts and calls nothing: counts its starts and its stops, keeps each call's event and asks, and answers as
+    /// `script` says, the next call first, else with the event; a load fails when the function's handler is
+    /// `broken.handler`, a call throws when its event says `throw`, and ends the runtime when it says `exit`.
+    #[derive(Clone, Default)]
     pub struct Stand {
         pub starts: Arc<AtomicUsize>,
         pub stops: Arc<AtomicUsize>,
+        pub script: Arc<Mutex<VecDeque<Result<Answer, Error>>>>,
+        pub received: Arc<Mutex<Vec<(Value, Asks)>>>,
     }
 
     pub struct Running {
@@ -317,7 +322,18 @@ pub mod stand {
             Ok(Started::Running(Running { stops: Arc::clone(&self.stops) }))
         }
 
-        fn call(&self, _: &Running, _: &LocalFunction, event: &Value, request_id: &str) -> Result<Answer, Error> {
+        fn call(
+            &self,
+            _: &Running,
+            _: &LocalFunction,
+            event: &Value,
+            request_id: &str,
+            asks: &Asks,
+        ) -> Result<Answer, Error> {
+            locked(&self.received).push((event.clone(), asks.clone()));
+            if let Some(scripted) = locked(&self.script).pop_front() {
+                return scripted;
+            }
             let error = match (event["exit"].as_bool(), event["throw"].as_bool()) {
                 (Some(true), _) => Some(("Runtime.ExitError", "exited")),
                 (_, Some(true)) => Some(("Error", "thrown")),
@@ -335,6 +351,7 @@ pub mod stand {
                     }
                     None => event.to_string(),
                 },
+                log_result: None,
             })
         }
     }
@@ -354,15 +371,18 @@ pub mod stand {
     }
 
     /// `Orders`, and `Broken`, whose code doesn't load; what they say kept in `said`.
-    pub fn instances(said: &Arc<Mutex<Vec<String>>>) -> (Instances<Stand>, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    pub fn instances(said: &Arc<Mutex<Vec<String>>>) -> (Instances<Stand>, Stand) {
+        instances_of(vec![function("Orders", "app.handler"), function("Broken", "broken.handler")], said)
+    }
+
+    /// The functions on the stand-in, and the stand-in's counts, script and calls, shared with it.
+    pub fn instances_of(functions: Vec<LocalFunction>, said: &Arc<Mutex<Vec<String>>>) -> (Instances<Stand>, Stand) {
         let stand = Stand::default();
-        let (starts, stops) = (Arc::clone(&stand.starts), Arc::clone(&stand.stops));
         let said = Arc::clone(said);
-        let functions = vec![function("Orders", "app.handler"), function("Broken", "broken.handler")];
-        let instances = Instances::new(stand, functions, Duration::from_secs(600), move |line| {
+        let instances = Instances::new(stand.clone(), functions, Duration::from_secs(600), move |line| {
             said.lock().unwrap().push(line.to_owned());
         });
-        (instances, starts, stops)
+        (instances, stand)
     }
 }
 
@@ -372,7 +392,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::stand::instances;
+    use super::stand::{Stand, instances};
     use super::*;
 
     fn answered(called: Option<Result<Called, Error>>) -> String {
@@ -387,12 +407,12 @@ mod tests {
     #[test]
     fn a_function_starts_at_its_first_call_and_is_kept() {
         let said = Arc::default();
-        let (instances, starts, _) = instances(&said);
+        let (instances, Stand { starts, .. }) = instances(&said);
 
         assert!(instances.running().is_empty());
-        assert_eq!(answered(instances.call("Orders", &json!({ "n": 1 }), "r1")), r#"{"n":1}"#);
-        assert_eq!(answered(instances.call("Orders", &json!({ "n": 2 }), "r2")), r#"{"n":2}"#);
-        assert_eq!(answered(instances.call("Missing", &json!({}), "r3")), "no such function");
+        assert_eq!(answered(instances.call("Orders", &json!({ "n": 1 }), "r1", &Asks::default())), r#"{"n":1}"#);
+        assert_eq!(answered(instances.call("Orders", &json!({ "n": 2 }), "r2", &Asks::default())), r#"{"n":2}"#);
+        assert_eq!(answered(instances.call("Missing", &json!({}), "r3", &Asks::default())), "no such function");
 
         assert_eq!(starts.load(Ordering::SeqCst), 1);
         assert_eq!(instances.running(), ["Orders"]);
@@ -402,10 +422,10 @@ mod tests {
     #[test]
     fn code_that_fails_to_load_answers_its_error_and_the_next_call_tries_again() {
         let said = Arc::default();
-        let (instances, starts, _) = instances(&said);
+        let (instances, Stand { starts, .. }) = instances(&said);
 
-        let first = answered(instances.call("Broken", &json!({}), "r1"));
-        let second = answered(instances.call("Broken", &json!({}), "r2"));
+        let first = answered(instances.call("Broken", &json!({}), "r1", &Asks::default()));
+        let second = answered(instances.call("Broken", &json!({}), "r2", &Asks::default()));
 
         assert_eq!(first, "not loaded: Runtime.UserCodeSyntaxError: bad");
         assert_eq!(second, first);
@@ -420,10 +440,10 @@ mod tests {
     #[test]
     fn a_call_that_ends_the_runtime_has_the_next_one_start_it_again() {
         let said = Arc::default();
-        let (instances, starts, stops) = instances(&said);
+        let (instances, Stand { starts, stops, .. }) = instances(&said);
 
-        let exited = answered(instances.call("Orders", &json!({ "exit": true }), "r1"));
-        instances.call("Orders", &json!({}), "r2");
+        let exited = answered(instances.call("Orders", &json!({ "exit": true }), "r1", &Asks::default()));
+        instances.call("Orders", &json!({}), "r2", &Asks::default());
 
         assert!(exited.contains("Runtime.ExitError"), "{exited}");
         assert_eq!((starts.load(Ordering::SeqCst), stops.load(Ordering::SeqCst)), (2, 1));
@@ -432,14 +452,14 @@ mod tests {
     #[test]
     fn an_idle_function_is_stopped_until_its_next_call() {
         let said = Arc::default();
-        let (instances, starts, stops) = instances(&said);
-        instances.call("Orders", &json!({}), "r1");
+        let (instances, Stand { starts, stops, .. }) = instances(&said);
+        instances.call("Orders", &json!({}), "r1", &Asks::default());
 
         instances.stop_idle(Instant::now() + Duration::from_secs(599));
         assert_eq!(instances.running(), ["Orders"]);
         instances.stop_idle(Instant::now() + Duration::from_secs(600));
         assert!(instances.running().is_empty());
-        instances.call("Orders", &json!({}), "r2");
+        instances.call("Orders", &json!({}), "r2", &Asks::default());
 
         assert_eq!((starts.load(Ordering::SeqCst), stops.load(Ordering::SeqCst)), (2, 1));
         assert_eq!(said.lock().unwrap()[1], "Orders: no call for 10m: stopped, until its next call");
@@ -448,11 +468,11 @@ mod tests {
     #[test]
     fn a_change_starts_a_running_function_again_and_leaves_a_stopped_one() {
         let said = Arc::default();
-        let (instances, starts, stops) = instances(&said);
+        let (instances, Stand { starts, stops, .. }) = instances(&said);
 
         instances.restart("Orders");
         assert_eq!(starts.load(Ordering::SeqCst), 0);
-        instances.call("Orders", &json!({}), "r1");
+        instances.call("Orders", &json!({}), "r1", &Asks::default());
         instances.restart("Orders");
 
         assert_eq!((starts.load(Ordering::SeqCst), stops.load(Ordering::SeqCst)), (2, 1));

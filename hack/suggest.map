@@ -53,6 +53,8 @@ cli/release/*                           static unit cli:downloads
 cli/src/local/images.rs                 static unit cli:local,local_images
 cli/src/local/*                         static unit cli:local,local_template
 cli/src/commands/local*                 static unit cli:local,local_template
+cli/src/s3.rs                           static unit cli:sites
+cli/src/sigv4.rs                        static unit cli:sites,local_template
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.

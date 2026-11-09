@@ -209,7 +209,7 @@ pub fn answer(output: &Value) -> Result<Response, String> {
 
 /// Calls the function's container with the event, as the backend calls a pod; the response.
 fn call(runtime_port: u16, event: &Value, request_id: &str, timeout: u32) -> Response {
-    let ran = match super::call(runtime_port, event, Some(request_id), timeout) {
+    let ran = match super::call(runtime_port, event, Some(request_id), &super::Asks::default(), timeout) {
         Ok(ran) => ran,
         Err(error) => {
             eprintln!("ff local: {}", error.message);

@@ -129,6 +129,14 @@ release_site() {
 }
 site_of() { echo "http://$1.site.localhost:$website_port"; }
 
+# aws_cli: the AWS CLI, this machine's, else AWS's image: as this user, so that the files it writes are this user's,
+# s3.localhost this machine, given the variables AWS's tools read that the sections set.
+if command -v aws >/dev/null; then aws_cli=("$(command -v aws)"); else
+  aws_cli=(docker run --rm --network host --add-host s3.localhost:127.0.0.1 --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work"
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_ENDPOINT_URL_SQS
+    -e AWS_ENDPOINT_URL_LAMBDA -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE -e AWS_PROFILE amazon/aws-cli:2.34.32)
+fi
+
 section_stack() {
 section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
 e2e_within_one_month 12
@@ -1010,12 +1018,6 @@ out | grep '^export AWS_' >"$work/s3.env"
 key_id="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/s3.env")"
 printf 'Ahlan from the CLI' >"$work/hello.txt"
 # The AWS CLI with those variables alone, none of this machine's settings: AWS_ENDPOINT_URL_S3 names FF's endpoint.
-# Without one here, AWS's image: as this user, so that the files it writes are this user's, s3.localhost this machine.
-if command -v aws >/dev/null; then aws_cli=("$(command -v aws)"); else
-  aws_cli=(docker run --rm --network host --add-host s3.localhost:127.0.0.1 --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work"
-    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_ENDPOINT_URL_SQS -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
-    -e AWS_PROFILE amazon/aws-cli:2.34.32)
-fi
 aws_with_key() { (set -a; . "$work/s3.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
 uploaded="$(aws_with_key s3 cp "$work/hello.txt" s3://cli-photos/hello.txt --only-show-errors >/dev/null 2>&1; echo $?)"
 check "the AWS CLI uploads with them and reads it back, AWS_ENDPOINT_URL_S3 its only change" "0 Ahlan from the CLI" \
@@ -1853,7 +1855,12 @@ invoked() {
   curl -s -o "$work/invoked" -w '%{http_code}' -X POST "http://127.0.0.1:$port/2015-03-31/functions/$1/invocations" -d "$2"
   echo " $(cat "$work/invoked")"
 }
-rm -rf "$app" && mkdir -p "$app/greeter" "$app/caller"
+# lambda_cli <args...>: the AWS CLI's lambda commands with the local key's file alone, the front door their endpoint.
+lambda_cli() {
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
+    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_LAMBDA="http://127.0.0.1:$port" "${aws_cli[@]}" lambda "$@"
+}
+rm -rf "$app" && mkdir -p "$app/greeter" "$app/caller" "$app/failing" "$app/recorder"
 cat >"$app/template.yaml" <<'YAML'
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
@@ -1863,6 +1870,20 @@ Globals:
     Handler: app.handler
     Timeout: 10
 Resources:
+  Failing:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: failing/
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        DestinationConfig:
+          OnFailure:
+            Type: Lambda
+            Destination: !GetAtt Recorder.Arn
+  Recorder:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: recorder/
   Greeter:
     Type: AWS::Serverless::Function
     Properties:
@@ -1897,6 +1918,9 @@ def handler(event, context):
     with urllib.request.urlopen(request, timeout=10) as answer:
         return {"called": json.load(answer)}
 PY
+printf 'def handler(event, context):\n    raise RuntimeError("no luck")\n' >"$app/failing/app.py"
+printf 'def handler(event, context):\n    request = event["requestContext"]\n    print("recorded", request["condition"], request["approximateInvokeCount"], event["requestPayload"]["n"])\n' \
+  >"$app/recorder/app.py"
 printf '# what the functions are given apart from the template\nSECRET=from-env-local\n' >"$app/.env.local"
 printf 'SECRET=fine\nAWS_REGION=eu-west-1\n' >"$work/reserved.env"
 ff local start "$app/template.yaml" --secrets "$work/reserved.env"
@@ -1905,7 +1929,9 @@ check "a secrets file's problem is refused at its line, before anything starts" 
   "$(code) $(err | grep -A1 '^error:' | paste -sd'|')"
 
 port="$(free_port)"
-"$ff_bin" local start "$app/template.yaml" --port "$port" --idle 4s --watch >"$work/start.out" 2>"$work/start.err" &
+# An asynchronous call's second lasts 20 ms in the suite's build: its retry's minute comes in 1.2 s.
+FF_TEST_ASYNC_SECOND_MS=20 "$ff_bin" local start "$app/template.yaml" --port "$port" --idle 4s --watch \
+  >"$work/start.out" 2>"$work/start.err" &
 starter=$!
 until_said "Ctrl-C stops them" "$work/start.out" || fail "ff local start said nothing in 30 s: $(cat "$work/start.err")"
 check "it says where the app runs, its functions, and how to call them" \
@@ -1935,14 +1961,37 @@ until_said "Caller: no call for 4s: stopped" "$work/start.err" || true
 check "--idle stops each function after that long without a call" 0 "$(leftover)"
 check "  ... and its next call starts it again" "200 second 0" \
   "$(invoked Greeter '{}' | sed 's/ .*//') $(jq -r .code "$work/invoked") $(grep -c 'its code failed' "$work/start.err")"
+local key_id
+key_id="$(sed -n 's/^aws_access_key_id = //p' "$app/.ff/local/credentials")"
+check "the local key is printed, and kept in .ff/local/credentials, which its owner alone reads" "AKFF 600 true" \
+  "${key_id:0:4} $(stat -c %a "$app/.ff/local/credentials") $(grep -F "is in $app/.ff/local/credentials: AWS_ACCESS_KEY_ID=$key_id " "$work/start.out" >/dev/null && echo true || echo false)"
+lambda_cli invoke --function-name Greeter --payload '{"name": "Cli"}' --cli-binary-format raw-in-base64-out \
+  --log-type Tail "$work/cli-invoked.json" >"$work/cli-invoke.out"
+check "the AWS CLI calls a function with the local key, its log asked with LogType Tail" "200 Hola true" \
+  "$(jq -r .StatusCode "$work/cli-invoke.out") $(jq -r .greeting "$work/cli-invoked.json") $(jq -r .LogResult "$work/cli-invoke.out" | base64 -d | grep -F 'greeting Cli' >/dev/null && echo true || echo false)"
+check "  ... and reads its configuration, the template's variables and never a secret" "python3.13 app.handler GREETING,QUEUE_URL Active" \
+  "$(lambda_cli get-function-configuration --function-name Greeter | jq -r '[.Runtime, .Handler, (.Environment.Variables | keys | join(",")), .State] | join(" ")')"
+AWS_ACCESS_KEY_ID=AKFFNOTTHELOCALKEY00 AWS_SECRET_ACCESS_KEY=not-the-secret AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+  AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_LAMBDA="http://127.0.0.1:$port" "${aws_cli[@]}" lambda invoke --function-name Greeter "$work/refused.json" \
+  >"$work/refused.out" 2>&1 || true
+check "a request signed with another key is refused in Lambda's words" "true" \
+  "$(grep -F '(UnrecognizedClientException) when calling the Invoke operation: The security token included in the request is invalid.' "$work/refused.out" >/dev/null && echo true || echo false)"
+check "an asynchronous call is answered 202" 202 \
+  "$(lambda_cli invoke --function-name Failing --invocation-type Event --payload '{"n": 1}' --cli-binary-format raw-in-base64-out "$work/event.json" | jq -r .StatusCode)"
+until_said "Recorder | recorded" "$work/start.err" || true
+check "  ... retried as FF retries it, as many times as its function says, then its record is its OnFailure destination's" \
+  "true true true" \
+  "$(grep -E '^Failing: the asynchronous call [^ ]+ failed: RuntimeError: no luck; tried again in 60 s$' "$work/start.err" >/dev/null && echo true || echo false) \
+$(grep -E '^Failing: the asynchronous call [^ ]+ failed: RuntimeError: no luck; dropped after 2 attempts: its retries are used$' "$work/start.err" >/dev/null && echo true || echo false) \
+$(grep -F 'Recorder | recorded RetriesExhausted 2 1' "$work/start.err" >/dev/null && echo true || echo false)"
 kill -INT "$starter"
 wait "$starter" 2>/dev/null || true
 check "Ctrl-C removes their containers" 0 "$(leftover)"
 ff local reset "$app" --yes
-check "ff local reset removes what ff local keeps, the logs" "0 removed $app/.ff/local false" \
+check "ff local reset removes what ff local keeps, the logs and the key" "0 removed $app/.ff/local false" \
   "$(code) $(out) $([ -e "$app/.ff/local" ] && echo true || echo false)"
 }
-section_def local_template section_local_template backend budget=30
+section_def local_template section_local_template backend budget=45
 
 section_local_images() {
 section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"

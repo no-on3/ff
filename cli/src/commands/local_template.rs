@@ -3,13 +3,15 @@
 //! the local front door, on one port, kept while calls come and stopped after `--idle` without one; `--watch` starts
 //! one again when its code changes. Their names are their logical IDs unless the template names them, as `sam local`
 //! names them; their variables the template's, its `Ref`s and `GetAtt`s resolved to what they are here, with the
-//! variables FF gives a pod pointed at the front door, and the secrets file's. `ff local reset` empties what it keeps.
+//! variables FF gives a pod pointed at the front door, and the secrets file's. The functions sign with the local key,
+//! which the front door checks a signed request against: made at the first start, printed at each, and kept in
+//! `.ff/local/credentials`. `ff local reset` empties what it keeps.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
@@ -23,8 +25,10 @@ use crate::api::types::{DeletionPolicy, StackResource};
 use crate::cli::LocalArgs;
 use crate::config::{is_bucket_name, is_function_name, is_queue_name};
 use crate::error::{Error, Kind};
-use crate::local::front_door::FrontDoor;
+use crate::local::events::{LAMBDA_RETRY_POLICY, RetryPolicy};
+use crate::local::front_door::{FrontDoor, Settings};
 use crate::local::instances::{Docker, Instances};
+use crate::local::key::Key;
 use crate::local::{self, Code, LocalFunction, http, images};
 use crate::output::Output;
 use crate::sam::Template;
@@ -45,6 +49,8 @@ const DEFAULT_IDLE: Duration = Duration::from_secs(600);
 /// What ff local keeps, in the project's folder; and the secrets file there, unless `--secrets` names one.
 const KEPT: &str = ".ff/local";
 const SECRETS: &str = ".env.local";
+/// The local key's file, in what ff local keeps.
+const CREDENTIALS: &str = "credentials";
 
 /// What `ff local start` was given for a template.
 pub struct Options<'a> {
@@ -86,27 +92,14 @@ fn folder_stack(at: &Location) -> String {
     name.filter(|name| is_stack_name(name)).unwrap_or("local").to_owned()
 }
 
-/// A key for the functions to sign with, as each function has its own on FF: an ID as FF's keys have them, and a secret.
-fn local_key() -> Result<(String, String), Error> {
-    const ID: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    const SECRET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut random = [0u8; 56];
-    getrandom::fill(&mut random)
-        .map_err(|error| Error::new(Kind::Failed, format!("No randomness for the functions' key: {error}")))?;
-    let pick = |alphabet: &[u8], bytes: &[u8]| -> String {
-        bytes.iter().map(|byte| alphabet[usize::from(*byte) % alphabet.len()] as char).collect()
-    };
-    Ok((format!("AKFF{}", pick(ID, &random[..16])), pick(SECRET, &random[16..])))
-}
-
 /// The variables FF gives a function's pod (`BE/src/storage/function-keys.service.ts`), each pointed at the front door:
 /// the region, and the endpoints of S3, SQS, SES v2 and Lambda; and, apart, its key, which `docker run` is given by name
 /// alone, out of its command line.
-fn pod_variables(endpoint: &str, key: &(String, String)) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
+fn pod_variables(endpoint: &str, key: &Key) -> (BTreeMap<String, String>, BTreeMap<String, String>) {
     let variables = ["AWS_REGION", "AWS_DEFAULT_REGION"].map(|name| (name.to_owned(), REGION.to_owned())).into_iter();
     let endpoints =
         ["S3", "SQS", "SESV2", "LAMBDA"].map(|service| (format!("AWS_ENDPOINT_URL_{service}"), endpoint.to_owned()));
-    let key = [("AWS_ACCESS_KEY_ID", &key.0), ("AWS_SECRET_ACCESS_KEY", &key.1)];
+    let key = [("AWS_ACCESS_KEY_ID", &key.id), ("AWS_SECRET_ACCESS_KEY", &key.secret)];
     (
         variables.chain(endpoints).collect(),
         key.into_iter().map(|(name, value)| (name.to_owned(), value.clone())).collect(),
@@ -227,6 +220,84 @@ fn functions(
     functions
 }
 
+/// What the front door answers of each function besides how it runs, by its name: its alias, its description and
+/// the template's variables, a secret's left out; and its asynchronous calls' retries and destinations, each within
+/// what FF takes, else a problem at its line.
+fn settings(
+    planned: &plan::Plan,
+    secrets: &BTreeMap<String, String>,
+    problems: &mut Problems,
+) -> BTreeMap<String, Settings> {
+    let mut all = BTreeMap::new();
+    for function in &planned.functions {
+        let id = &function.id;
+        let config = function.event_invoke_config.as_ref();
+        let mut bounded = |field: &str, property: &str, (least, most): (u64, u64), default: u64| {
+            let Some(value) = config.and_then(|config| config.get(field)) else { return default };
+            match value.as_u64().filter(|number| (least..=most).contains(number)) {
+                Some(number) => number,
+                None => {
+                    let message = format!(
+                        "{id}: EventInvokeConfig's {property} is a whole number from {least} to {most}, as FF takes it, not {value}"
+                    );
+                    problems.at(&format!("/Resources/{id}/Properties/EventInvokeConfig/{property}"), &message);
+                    default
+                }
+            }
+        };
+        let retries = RetryPolicy {
+            maximum_retry_attempts: bounded(
+                "maximumRetryAttempts",
+                "MaximumRetryAttempts",
+                (0, 2),
+                u64::from(LAMBDA_RETRY_POLICY.maximum_retry_attempts),
+            )
+            .try_into()
+            .unwrap_or(LAMBDA_RETRY_POLICY.maximum_retry_attempts),
+            maximum_event_age_seconds: bounded(
+                "maximumEventAgeInSeconds",
+                "MaximumEventAgeInSeconds",
+                (60, LAMBDA_RETRY_POLICY.maximum_event_age_seconds),
+                LAMBDA_RETRY_POLICY.maximum_event_age_seconds,
+            ),
+        };
+        let mut destination = |on: &str, field: &str| {
+            let pointer = format!("/destinationConfig/{on}/destination");
+            let arn = config.and_then(|config| config.pointer(&pointer)).and_then(Value::as_str)?;
+            let own = format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:{}", function.name);
+            if arn == own || arn.starts_with(&format!("{own}:")) {
+                let message =
+                    format!("{id}: a function can't be its own destination, as each record would call it again");
+                problems
+                    .at(&format!("/Resources/{id}/Properties/EventInvokeConfig/DestinationConfig/{field}"), &message);
+            }
+            Some(arn.to_owned())
+        };
+        let (on_success, on_failure) = (destination("onSuccess", "OnSuccess"), destination("onFailure", "OnFailure"));
+        let variables = function.environment.iter().filter(|(name, _)| !secrets.contains_key(*name));
+        all.insert(
+            function.name.clone(),
+            Settings {
+                alias: function.alias.clone(),
+                description: function.description.clone(),
+                variables: variables.map(|(name, value)| (name.clone(), value.clone())).collect(),
+                dead_letter: function.dead_letter.clone(),
+                retries,
+                on_success,
+                on_failure,
+            },
+        );
+    }
+    all
+}
+
+/// How long a second of an asynchronous call's waits and age lasts: a second, but in a test build, as the `ff` suite's,
+/// `FF_TEST_ASYNC_SECOND_MS`'s milliseconds, for its retries to come in its time.
+fn async_second() -> Duration {
+    let tests = if cfg!(debug_assertions) { std::env::var("FF_TEST_ASYNC_SECOND_MS").ok() } else { None };
+    tests.and_then(|milliseconds| milliseconds.parse().ok()).map_or(Duration::from_secs(1), Duration::from_millis)
+}
+
 /// The address this machine has on Docker's default network, where `host.docker.internal` leads containers on Linux;
 /// none where Docker runs in a machine of its own, as Docker Desktop does, whose name leads to this machine's 127.0.0.1.
 fn docker_gateway() -> Option<IpAddr> {
@@ -297,15 +368,17 @@ struct Prepared {
     read: Read,
     planned: plan::Plan,
     functions: Vec<LocalFunction>,
+    /// What the front door answers of each function besides how it runs.
+    settings: BTreeMap<String, Settings>,
     /// The secrets file read, if one was.
     secrets_file: Option<String>,
     /// What a secret takes the place of.
     notes: Vec<String>,
 }
 
-/// The template read as `ff deploy` reads it and planned as its app runs here, its front door on `port`: its every
-/// problem one refusal, at its line.
-fn prepared(path: &Path, options: &Options, port: u16, out: &Output) -> Result<Prepared, Error> {
+/// The template read as `ff deploy` reads it and planned as its app runs here, its front door on `port`, its functions
+/// signing with `key`: its every problem one refusal, at its line.
+fn prepared(path: &Path, options: &Options, port: u16, key: &Key, out: &Output) -> Result<Prepared, Error> {
     let read = Read::of(path, options.stack_name, options.parameter_overrides, |at| Ok(folder_stack(at)))?;
     let (values, mut problems) = read.checked(&read.given, "ff local start", NOTHING, out);
     let endpoint = format!("http://127.0.0.1:{port}");
@@ -331,15 +404,17 @@ fn prepared(path: &Path, options: &Options, port: u16, out: &Output) -> Result<P
         }
     };
     let (secrets, secrets_file) = read_secrets(options.secrets, &read.at.project)?;
-    let pod = pod_variables(&from_containers, &local_key()?);
+    let pod = pod_variables(&from_containers, key);
     let mut notes = Vec::new();
-    let functions = match &planned {
-        Some(planned) => functions(planned, &pod, &secrets, &mut problems, &mut notes),
-        None => Vec::new(),
+    let (functions, settings) = match &planned {
+        Some(planned) => {
+            (functions(planned, &pod, &secrets, &mut problems, &mut notes), settings(planned, &secrets, &mut problems))
+        }
+        None => (Vec::new(), BTreeMap::new()),
     };
     problems.refusal()?;
     let planned = planned.expect("a plan without problems");
-    Ok(Prepared { read, planned, functions, secrets_file, notes })
+    Ok(Prepared { read, planned, functions, settings, secrets_file, notes })
 }
 
 #[derive(Serialize)]
@@ -354,9 +429,19 @@ struct StartedFunction {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StartedKey {
+    access_key_id: String,
+    secret_access_key: String,
+    file: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Started {
     stack: String,
     endpoint: String,
+    region: &'static str,
+    key: StartedKey,
     functions: Vec<StartedFunction>,
     logs: String,
 }
@@ -387,7 +472,15 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     };
     let port = options.port.unwrap_or(DEFAULT_PORT);
     let endpoint = format!("http://127.0.0.1:{port}");
-    let Prepared { read, planned, functions, secrets_file, notes } = prepared(&args.path, options, port, context.out)?;
+    // The project's key, kept from a start to the next; one made is written once the start goes ahead.
+    let credentials = Location::of(&args.path).project.join(KEPT).join(CREDENTIALS);
+    let kept_key = Key::read(&credentials)?;
+    let key = match &kept_key {
+        Some(key) => key.clone(),
+        None => Key::made()?,
+    };
+    let Prepared { read, planned, functions, settings, secrets_file, notes } =
+        prepared(&args.path, options, port, &key, context.out)?;
     for note in &notes {
         context.out.warn(note);
     }
@@ -403,6 +496,10 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     let logs = kept.join("logs");
     std::fs::create_dir_all(&logs)
         .map_err(|error| Error::new(Kind::Failed, format!("Couldn't make {}: {error}", logs.display())))?;
+    let credentials = kept.join(CREDENTIALS);
+    if kept_key.is_none() {
+        key.write(&credentials)?;
+    }
     let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|error| {
         Error::new(
             Kind::Failed,
@@ -421,16 +518,14 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     let to_say = Arc::clone(&say);
     let docker = Docker { images: runtime_images, logs: logs.clone(), echo: !quiet };
     let instances = Arc::new(Instances::new(docker, functions.clone(), idle, move |line| to_say(line)));
-    let aliases = planned
-        .functions
-        .iter()
-        .filter_map(|function| function.alias.clone().map(|alias| (function.name.clone(), alias)))
-        .collect();
     let front_door: Arc<dyn http::Answers> = Arc::new(FrontDoor {
         instances: Arc::clone(&instances),
         region: REGION.to_owned(),
         account: ACCOUNT.to_owned(),
-        aliases,
+        key: key.clone(),
+        settings: Arc::new(settings),
+        started: SystemTime::now(),
+        second: async_second(),
         say,
     });
     http::serve(listener, Arc::clone(&front_door));
@@ -454,6 +549,12 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     let started = Started {
         stack: read.stack_name.clone(),
         endpoint: endpoint.clone(),
+        region: REGION,
+        key: StartedKey {
+            access_key_id: key.id.clone(),
+            secret_access_key: key.secret.clone(),
+            file: credentials.display().to_string(),
+        },
         functions: planned
             .functions
             .iter()
@@ -479,6 +580,10 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 first.name
             ));
         }
+        lines.push(format!(
+            "Its key, which a signed request is checked against, is in {}: AWS_ACCESS_KEY_ID={} AWS_SECRET_ACCESS_KEY={}, in the region {REGION}",
+            started.key.file, started.key.access_key_id, started.key.secret_access_key
+        ));
         if let Some(file) = &secrets_file {
             lines.push(format!("Their secrets are {file}'s."));
         }
@@ -508,7 +613,7 @@ pub fn reset(path: Option<&Path>, yes: bool, context: &Context) -> Result<(), Er
             format!("Nothing to reset: there is no {folder}")
         });
     }
-    let question = format!("Remove {folder}, what ff local keeps: the functions' logs?");
+    let question = format!("Remove {folder}, what ff local keeps: the functions' logs and the local key?");
     if !confirmed("ff local reset", &question, yes)? {
         return context
             .out
@@ -548,6 +653,19 @@ Resources:
     Properties:
       FunctionName: payments-fn
       CodeUri: payments/
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        MaximumEventAgeInSeconds: 600
+        DestinationConfig:
+          OnSuccess:
+            Type: Lambda
+            Destination: !GetAtt Orders.Arn
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt Jobs.Arn
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt Jobs.Arn
   Jobs:
     Type: AWS::SQS::Queue
   Uploads:
@@ -570,6 +688,10 @@ Resources:
         Options { port: None, watch: false, secrets: None, idle: None, stack_name: None, parameter_overrides: &[] }
     }
 
+    fn key() -> Key {
+        Key { id: "AKFFLOCALKEY0000TEST".into(), secret: "a-secret".into() }
+    }
+
     fn function<'a>(prepared: &'a Prepared, name: &str) -> &'a LocalFunction {
         prepared.functions.iter().find(|function| function.name == name).unwrap()
     }
@@ -579,7 +701,7 @@ Resources:
         let (_folder, project) = project(TEMPLATE);
         std::fs::write(project.join(".env.local"), "# the app's secrets\nTOKEN=from-the-file\n").unwrap();
 
-        let prepared = prepared(&project.join("template.yaml"), &options(), 3700, &Output::quiet()).unwrap();
+        let prepared = prepared(&project.join("template.yaml"), &options(), 3700, &key(), &Output::quiet()).unwrap();
 
         let names: Vec<&str> = prepared.functions.iter().map(|function| function.name.as_str()).collect();
         assert_eq!(names, ["Orders", "payments-fn"], "a logical ID, unless the template names the function");
@@ -596,33 +718,49 @@ Resources:
         }
         assert_eq!(variable("TOKEN"), None, "a secret is given by its name alone");
         assert_eq!(orders.secrets.get("TOKEN").map(String::as_str), Some("from-the-file"));
-        let key = &orders.secrets["AWS_ACCESS_KEY_ID"];
-        assert!(key.starts_with("AKFF") && key.len() == 20, "{key}");
-        assert_eq!(orders.secrets["AWS_SECRET_ACCESS_KEY"].len(), 40);
+        assert_eq!(orders.secrets["AWS_ACCESS_KEY_ID"], key().id, "the functions sign with the local key");
+        assert_eq!(orders.secrets["AWS_SECRET_ACCESS_KEY"], key().secret);
         assert_eq!(prepared.notes, ["Orders: the secret TOKEN takes the place of the template's variable"]);
         assert_eq!(prepared.secrets_file.as_deref().map(|file| file.ends_with(".env.local")), Some(true));
-        assert_eq!(prepared.planned.functions[0].alias.as_deref(), Some("live"));
         assert!(orders.reaches_this_machine);
+
+        let (orders, payments) = (&prepared.settings["Orders"], &prepared.settings["payments-fn"]);
+        assert_eq!(orders.alias.as_deref(), Some("live"));
+        assert_eq!(orders.variables["QUEUE_URL"], "http://host.docker.internal:3700/000000000000/Jobs");
+        assert!(!orders.variables.contains_key("TOKEN"), "a secret is never shown");
+        assert!(!orders.variables.contains_key("AWS_REGION"), "nor what FF gives every function");
+        assert_eq!(
+            (orders.retries, orders.on_success.as_ref(), orders.dead_letter.as_ref()),
+            (LAMBDA_RETRY_POLICY, None, None)
+        );
+        let jobs = "arn:aws:sqs:tn-tunis-1:000000000000:Jobs";
+        assert_eq!(payments.retries, RetryPolicy { maximum_retry_attempts: 1, maximum_event_age_seconds: 600 });
+        assert_eq!(payments.on_success.as_deref(), Some("arn:aws:lambda:tn-tunis-1:000000000000:function:Orders"));
+        assert_eq!((payments.on_failure.as_deref(), payments.dead_letter.as_deref()), (Some(jobs), Some(jobs)));
     }
 
     #[test]
     fn what_cant_run_here_is_refused_at_its_line() {
         let template = TEMPLATE
             .replace("CodeUri: payments/", "CodeUri: payments.zip")
-            .replace("TOKEN: from-the-template", "AWS_REGION: eu-west-1");
+            .replace("TOKEN: from-the-template", "AWS_REGION: eu-west-1")
+            .replace("MaximumRetryAttempts: 1", "MaximumRetryAttempts: 5")
+            .replace("Destination: !GetAtt Orders.Arn", "Destination: !GetAtt Payments.Arn");
         let (_folder, project) = project(&template);
         std::fs::write(project.join("payments.zip"), "PK").unwrap();
         let path = project.join("template.yaml");
 
-        let error = prepared(&path, &options(), 3700, &Output::quiet()).err().unwrap();
+        let error = prepared(&path, &options(), 3700, &key(), &Output::quiet()).err().unwrap();
 
         let file = path.display();
         assert_eq!(
             error.message,
             format!(
-                "ff local start ran nothing: the template has 2 problems\n\
+                "ff local start ran nothing: the template has 4 problems\n\
                  {file}:18: Orders: AWS_REGION is reserved: AWS Lambda or FF's runtime sets it\n\
-                 {file}:23: Payments: CodeUri names a .zip, which ff local doesn't unpack: name the folder it is made of"
+                 {file}:23: Payments: CodeUri names a .zip, which ff local doesn't unpack: name the folder it is made of\n\
+                 {file}:25: Payments: EventInvokeConfig's MaximumRetryAttempts is a whole number from 0 to 2, as FF takes it, not 5\n\
+                 {file}:28: Payments: a function can't be its own destination, as each record would call it again"
             )
         );
     }

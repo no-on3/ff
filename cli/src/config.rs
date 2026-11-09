@@ -273,19 +273,25 @@ impl ProfileFile {
         profile.is_some_and(|profile| profile.remove(key).is_some())
     }
 
-    /// Written whole, through a file next to it renamed over it: never half written. A private
-    /// file, the credentials, is readable by its owner only, in a folder only its owner opens.
+    /// Written whole; the credentials privately.
     pub fn write(&self, private: bool) -> Result<(), Error> {
-        let failed =
-            |error: io::Error| Error::new(Kind::Failed, format!("Couldn't write {}: {error}", self.path.display()));
-        let dir = self.path.parent().expect("a file in a folder");
-        create_private_dir(dir).map_err(failed)?;
-        let temporary = self.path.with_extension("toml.new");
-        let mut file = new_file(&temporary, private).map_err(failed)?;
-        file.write_all(self.document.to_string().as_bytes()).map_err(failed)?;
-        file.sync_all().map_err(failed)?;
-        fs::rename(&temporary, &self.path).map_err(failed)
+        write_whole(&self.path, &self.document.to_string(), private)
     }
+}
+
+/// A file written whole, through a file next to it renamed over it: never half written. A private file, such as
+/// credentials, is readable by its owner only, in a folder only its owner opens.
+pub fn write_whole(path: &Path, text: &str, private: bool) -> Result<(), Error> {
+    let failed = |error: io::Error| Error::new(Kind::Failed, format!("Couldn't write {}: {error}", path.display()));
+    let dir = path.parent().expect("a file in a folder");
+    create_private_dir(dir).map_err(failed)?;
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".new");
+    let temporary = PathBuf::from(temporary);
+    let mut file = new_file(&temporary, private).map_err(failed)?;
+    file.write_all(text.as_bytes()).map_err(failed)?;
+    file.sync_all().map_err(failed)?;
+    fs::rename(&temporary, path).map_err(failed)
 }
 
 #[cfg(unix)]

@@ -20,6 +20,7 @@ mod package;
 mod progress;
 mod s3;
 mod sam;
+mod sigv4;
 mod table;
 mod update;
 

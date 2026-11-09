@@ -5,10 +5,12 @@
 //! [`images`] finds its runtime's image, [`http`] serves HTTP on this machine, and [`url`] serves a
 //! function as its URL would.
 
+pub mod events;
 pub mod front_door;
 pub mod http;
 pub mod images;
 pub mod instances;
+pub mod key;
 pub mod url;
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -313,7 +315,7 @@ fn local_agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(timeout)).proxy(None).build().into()
 }
 
-/// What the runtime answered a call: its status, its headers' measures, its body.
+/// What the runtime answered a call: its status, its headers' measures, its body, and its log's last 4 KB when asked.
 pub struct Answer {
     pub status: u16,
     pub request_id: Option<String>,
@@ -321,6 +323,15 @@ pub struct Answer {
     pub memory_mb: Option<String>,
     pub function_error: bool,
     pub body: String,
+    pub log_result: Option<String>,
+}
+
+/// What a call asks of the runtime beside its event, as Lambda's `Invoke` asks it: its log's last 4 KB, given back in
+/// base64; and the caller's ClientContext, passed on as sent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Asks {
+    pub log_tail: bool,
+    pub client_context: Option<String>,
 }
 
 impl Answer {
@@ -346,23 +357,36 @@ impl Answer {
 }
 
 /// `POST /invoke` with the event to the runtime on this machine's port, as the backend calls a pod,
-/// under the request's ID when one is given, which the function's context has: waited for up to the
-/// timeout and 10 s more.
-pub fn call(port: u16, event: &serde_json::Value, request_id: Option<&str>, timeout: u32) -> Result<Answer, Error> {
+/// under the request's ID when one is given, which the function's context has, and with what the call asks: waited
+/// for up to the timeout and 10 s more.
+pub fn call(
+    port: u16,
+    event: &serde_json::Value,
+    request_id: Option<&str>,
+    asks: &Asks,
+    timeout: u32,
+) -> Result<Answer, Error> {
     let agent = local_agent(Duration::from_secs(u64::from(timeout) + 10));
     let mut request = agent.post(format!("http://127.0.0.1:{port}/invoke")).header("content-type", "application/json");
     if let Some(id) = request_id {
         request = request.header("x-ff-request-id", id);
     }
+    if asks.log_tail {
+        request = request.header("x-ff-log-type", "Tail");
+    }
+    if let Some(context) = &asks.client_context {
+        request = request.header("x-ff-client-context", context);
+    }
     let mut response = request
         .send(event.to_string())
         .map_err(|error| Error::new(Kind::Failed, format!("The function's container didn't answer: {error}")))?;
     let header = |name: &str| response.headers().get(name).and_then(|value| value.to_str().ok()).map(str::to_owned);
-    let (request_id, duration_ms, memory_mb, function_error) = (
+    let (request_id, duration_ms, memory_mb, function_error, log_result) = (
         header("x-ff-request-id"),
         header("x-ff-duration-ms"),
         header("x-ff-max-memory-used-mb"),
         header("x-ff-function-error").is_some(),
+        header("x-ff-log-result"),
     );
     let mut body = String::new();
     response
@@ -370,7 +394,15 @@ pub fn call(port: u16, event: &serde_json::Value, request_id: Option<&str>, time
         .as_reader()
         .read_to_string(&mut body)
         .map_err(|error| Error::new(Kind::Failed, format!("The function's answer was cut short: {error}")))?;
-    Ok(Answer { status: response.status().as_u16(), request_id, duration_ms, memory_mb, function_error, body })
+    Ok(Answer {
+        status: response.status().as_u16(),
+        request_id,
+        duration_ms,
+        memory_mb,
+        function_error,
+        body,
+        log_result,
+    })
 }
 
 /// How the runtime's loading of the code ended: ready, or failed with the runtime's error.

@@ -19,7 +19,8 @@ use crate::api::{Call, Client};
 use crate::error::{Error, Kind};
 use crate::md5;
 use crate::progress::Progress;
-use crate::s3::{BucketClient, Credentials};
+use crate::s3::BucketClient;
+use crate::sigv4::Credentials;
 use crate::table::{table, time};
 
 /// The content type a file gets by its name's extension, as FF's website server gives one to a
