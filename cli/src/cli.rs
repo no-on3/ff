@@ -768,8 +768,15 @@ pub enum LocalCommand {
         path: Option<PathBuf>,
     },
 
+    /// List the mail the template's functions sent, which ff local start keeps in .ff/local/mail/, never sent: each
+    /// message a file a mail reader opens, the latest last
+    Mail {
+        /// The template, or its folder [default: this folder]
+        path: Option<PathBuf>,
+    },
+
     /// Remove what ff local start keeps for a template's project, in its .ff/local/: the functions' logs, the
-    /// buckets' objects and the local key
+    /// buckets' objects, the mail kept and the local key
     Reset {
         /// The template, or its folder [default: this folder]
         path: Option<PathBuf>,

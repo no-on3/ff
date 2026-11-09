@@ -18,7 +18,7 @@ BE/src/storage/*                        static unit db l4:buckets,buckets_room,n
 BE/src/object-store/*                   static unit db l4:buckets,buckets_room,notifications,sites l5 cli:buckets,sites
 BE/src/databases/*                      static unit db l4:databases,databases_sampled l5 cli:databases,databases_used
 BE/src/caches/*                         static unit db l4:caches,caches_sampled l5 cli:small_app
-BE/src/email/*                          static unit db l4:mail,mail_sent l5 cli:small_app
+BE/src/email/*                          static unit db l4:mail,mail_sent l5 cli:small_app,local_mail
 BE/src/mail/*                           static unit db l4:mail_sent l5
 BE/src/schedules/*                      static unit db l4:schedules,schedules_ran l5 cli:schedules,schedules_ran
 BE/src/alarms/*                         static unit db l4:alarms,sites_counted,caches_sampled l5
@@ -51,12 +51,12 @@ runtimes/*                              static unit security l3 l4 l5 cli aws-to
 cli/src/commands/init.rs                static unit cli:init,local_apps aws-tools
 cli/release/*                           static unit cli:downloads
 cli/src/local/images.rs                 static unit cli:local,local_images
-cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data
-cli/src/commands/local*                 static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data
+cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail
+cli/src/commands/local*                 static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail
 cli/src/s3.rs                           static unit cli:sites,local_buckets
 cli/src/md5.rs                          static unit cli:sites,local_queues,local_buckets
-cli/src/sigv4.rs                        static unit cli:sites,local_template,local_queues,local_buckets
-cli/src/dates.rs                        static unit cli:local_template,local_queues,local_buckets
+cli/src/sigv4.rs                        static unit cli:sites,local_template,local_queues,local_buckets,local_mail
+cli/src/dates.rs                        static unit cli:local_template,local_queues,local_buckets,local_mail
 cli/src/site_files.rs                   static unit cli:sites,local_buckets,local_apps
 cli/*                                   static unit cli
 
@@ -89,7 +89,7 @@ hack/test-evidence.sh                   static l3
 hack/k8s/test-it.sh                     static l3
 hack/lib/s3-clients/*                   static l4:buckets
 hack/lib/sqs-clients/*                  static l4:queues
-hack/lib/local-functions/*              static cli:local_queues,local_buckets
+hack/lib/local-functions/*              static cli:local_queues,local_buckets,local_mail
 hack/lib/mail-receiver.mjs              static l4:mail_sent
 hack/lib/orders-app.sh                  static cli:small_app
 hack/lib/keycloak.sh                    static l5 cli:login

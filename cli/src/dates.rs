@@ -56,6 +56,11 @@ pub fn http_date(millis: i64) -> String {
     format!("{weekday}, {day:02} {} {year:04} {hour:02}:{minute:02}:{second:02} GMT", MONTHS[month as usize - 1])
 }
 
+/// Fri, 23 Oct 2026 06:00:00 +0000, a message's Date (RFC 5322), in UTC, as FF's mail writes a time.
+pub fn mail_date(millis: i64) -> String {
+    http_date(millis).replace(" GMT", " +0000")
+}
+
 /// A time HTTP's date writes, back in milliseconds; None for any other text. Only RFC 9110's preferred form is read.
 pub fn read_http_date(text: &str) -> Option<i64> {
     let (_, rest) = text.trim().split_once(", ")?;

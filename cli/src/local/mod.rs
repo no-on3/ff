@@ -4,8 +4,8 @@
 //! its code loaded, called and its log followed the same way by each of `ff local`'s commands.
 //! [`images`] finds its runtime's image, [`http`] serves HTTP on this machine, [`url`] serves a
 //! function as its URL would, [`schedules`] runs a template's schedules, [`sqs`] keeps its queues, [`mappings`]
-//! reads them for the functions whose SQS events name them, [`s3`] keeps its buckets, and [`services`] runs the
-//! PostgreSQL and the Valkey `--with` asks for.
+//! reads them for the functions whose SQS events name them, [`s3`] keeps its buckets, [`mail`] keeps the mail its
+//! functions send, and [`services`] runs the PostgreSQL and the Valkey `--with` asks for.
 
 pub mod events;
 pub mod front_door;
@@ -13,6 +13,7 @@ pub mod http;
 pub mod images;
 pub mod instances;
 pub mod key;
+pub mod mail;
 pub mod mappings;
 pub mod s3;
 pub mod schedule_expression;

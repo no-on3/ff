@@ -15,20 +15,25 @@
 //! buckets ([`super::s3`]): a request at a bucket's host, signed for S3, or unsigned and naming one of them, or the
 //! service, by its path; its body read as it streams. A write's events go where its bucket's notifications send them,
 //! as FF delivers them: to a function, an asynchronous call; to a queue, a message from the bucket. And a bucket that
-//! is a site answers a browser at `http://<bucket>.site.localhost:<port>` ([`super::s3::site`]).
+//! is a site answers a browser at `http://<bucket>.site.localhost:<port>` ([`super::s3::site`]). SES v2's `SendEmail`,
+//! signed for SES or unsigned at its path, is the template's mail's ([`super::mail`]): checked as FF checks it, kept,
+//! never sent.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use base64::engine::general_purpose::{GeneralPurpose, NO_PAD_INDIFFERENT, STANDARD};
+use base64::engine::general_purpose::STANDARD;
 use serde_json::{Value, json};
 
 use super::events::{self, Attempts, End, Outcome, RetryPolicy, Settlement};
-use super::http::{Answers, Incoming, PAYLOAD_LIMIT, Reply, Request, Response, percent_decode, request_id};
+use super::http::{
+    Answers, Incoming, PAYLOAD_LIMIT, Reply, Request, Response, lenient_base64, percent_decode, request_id,
+};
 use super::instances::{Called, Instances, Runner};
 use super::key::Key;
+use super::mail::{self, Mail};
 use super::mappings::LocalMapping;
 use super::s3::events::BucketEvent;
 use super::s3::requests::{Style, address_of, signed_service};
@@ -153,27 +158,6 @@ fn one_of<'a>(
     }
     let message = format!("{field} must be {}, not {value}.", values.join(", "));
     Err(refusal(400, "InvalidParameterValueException", &message))
-}
-
-/// Base64 as Node.js reads it, which the backend's check is: either alphabet, padding or none, up to the first `=`,
-/// what isn't base64 passed over.
-fn lenient_base64(text: &str) -> Vec<u8> {
-    let mut kept: String = text
-        .chars()
-        .take_while(|character| *character != '=')
-        .map(|character| match character {
-            '-' => '+',
-            '_' => '/',
-            other => other,
-        })
-        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '/'))
-        .collect();
-    if kept.len() % 4 == 1 {
-        kept.pop();
-    }
-    let engine =
-        GeneralPurpose::new(&base64::alphabet::STANDARD, NO_PAD_INDIFFERENT.with_decode_allow_trailing_bits(true));
-    engine.decode(kept).unwrap_or_default()
 }
 
 /// The caller's ClientContext, `X-Amz-Client-Context`, as Lambda takes it: the base64 of a JSON object, its 3583 bytes
@@ -301,6 +285,8 @@ pub struct FrontDoor<R: Runner> {
     pub queues: Arc<Queues>,
     /// The template's buckets.
     pub buckets: Arc<Buckets>,
+    /// The mail its functions send.
+    pub mail: Arc<Mail>,
 }
 
 impl<R: Runner> Clone for FrontDoor<R> {
@@ -317,6 +303,7 @@ impl<R: Runner> Clone for FrontDoor<R> {
             clock_offset: self.clock_offset,
             queues: Arc::clone(&self.queues),
             buckets: Arc::clone(&self.buckets),
+            mail: Arc::clone(&self.mail),
         }
     }
 }
@@ -845,6 +832,11 @@ impl<R: Runner> FrontDoor<R> {
         self.url_of(head).is_none() && !self.is_s3(head) && sqs::is_sqs(head)
     }
 
+    /// Whether a request is SES's, not a function URL's, nor a site's.
+    fn is_ses(&self, head: &Request) -> bool {
+        self.url_of(head).is_none() && !self.is_site(head) && mail::is_ses(head)
+    }
+
     /// Whether a request is a site's, at a host under the sites' host.
     fn is_site(&self, head: &Request) -> bool {
         site::is_site(head.header("host"))
@@ -852,9 +844,13 @@ impl<R: Runner> FrontDoor<R> {
 
     /// Whether a request is S3's: signed for S3; or unsigned, at a bucket's host, or naming one of the template's
     /// buckets by its path, or the service itself. Never a function URL's, nor a site's, nor one of SQS's JSON
-    /// protocol.
+    /// protocol, nor SES's.
     fn is_s3(&self, head: &Request) -> bool {
-        if self.url_of(head).is_some() || self.is_site(head) || head.header("x-amz-target").is_some() {
+        if self.url_of(head).is_some()
+            || self.is_site(head)
+            || head.header("x-amz-target").is_some()
+            || mail::is_ses(head)
+        {
             return false;
         }
         let (path, query) = head.target.split_once('?').unwrap_or((head.target.as_str(), ""));
@@ -919,6 +915,9 @@ impl<R: Runner> Answers for FrontDoor<R> {
         if sqs::is_sqs(request) {
             return self.sqs(request);
         }
+        if mail::is_ses(request) {
+            return self.mail.answer(request, &self.key, |key_id| self.not_the_local_key(key_id));
+        }
         let (path, query) = request.target.split_once('?').unwrap_or((request.target.as_str(), ""));
         if let Err(refused) = self.signed(request, path, query) {
             return refused;
@@ -939,7 +938,7 @@ impl<R: Runner> Answers for FrontDoor<R> {
                 400,
                 "UnknownOperationException",
                 &format!(
-                    "ff local doesn't offer {method} {path}: its front door answers Lambda's Invoke, POST /2015-03-31/functions/<name>/invocations, GetFunctionConfiguration, GET /2015-03-31/functions/<name>/configuration, SQS's JSON protocol, POST / with X-Amz-Target AmazonSQS.<operation>, and ff local run's POST /ff-local/schedules/[<function>/]<schedule>"
+                    "ff local doesn't offer {method} {path}: its front door answers Lambda's Invoke, POST /2015-03-31/functions/<name>/invocations, GetFunctionConfiguration, GET /2015-03-31/functions/<name>/configuration, SQS's JSON protocol, POST / with X-Amz-Target AmazonSQS.<operation>, SES v2's SendEmail, POST /v2/email/outbound-emails, and ff local run's POST /ff-local/schedules/[<function>/]<schedule>"
                 ),
             )),
         };
@@ -965,6 +964,9 @@ impl<R: Runner> Answers for FrontDoor<R> {
         if head.is_some_and(sqs::is_sqs) {
             return sqs::unreadable(too_large);
         }
+        if head.is_some_and(mail::is_ses) {
+            return mail::unreadable(too_large);
+        }
         match too_large {
             true => refusal(
                 413,
@@ -976,7 +978,13 @@ impl<R: Runner> Answers for FrontDoor<R> {
     }
 
     fn limit(&self, head: &Request) -> usize {
-        if self.is_sqs(head) { sqs::MAX_BODY_BYTES } else { PAYLOAD_LIMIT }
+        if self.is_sqs(head) {
+            sqs::MAX_BODY_BYTES
+        } else if self.is_ses(head) {
+            mail::MAX_BODY_BYTES
+        } else {
+            PAYLOAD_LIMIT
+        }
     }
 
     fn streams(&self, head: &Request) -> bool {
@@ -1070,7 +1078,7 @@ mod tests {
             settings: Arc::new(settings),
             started: started(),
             second: Duration::from_millis(1),
-            say,
+            say: Arc::clone(&say),
             clock_offset: 0,
             queues: Arc::new(Queues::new(
                 REGION,
@@ -1079,6 +1087,7 @@ mod tests {
                 Arc::new(|| schedules::now_ms(0)),
             )),
             buckets: Arc::new(buckets),
+            mail: Arc::new(Mail::new(&folder.path().join("mail"), Arc::new(|| schedules::now_ms(0)), say)),
         };
         Door { door, said, stand, _buckets: folder }
     }
@@ -2304,5 +2313,45 @@ mod tests {
         let time = millis(event["time"].as_str().unwrap());
         assert!((schedules::now_ms(0) - time).abs() < 5_000, "a run by hand is due now: {event}");
         assert_eq!(event["resources"], json!(["arn:aws:events:tn-tunis-1:000000000000:rule/Cleaner-Nightly"]));
+    }
+
+    #[test]
+    fn ses_is_a_request_signed_for_it_or_unsigned_at_its_path_its_mail_kept_and_said() {
+        let door = door();
+        let send = "/v2/email/outbound-emails";
+        let body = json!({
+            "FromEmailAddress": "orders@shop.example.tn",
+            "Destination": { "ToAddresses": ["client@example.tn"] },
+            "Content": { "Simple": { "Subject": { "Data": "Receipt" }, "Body": { "Text": { "Data": "Thanks" } } } }
+        })
+        .to_string();
+        let at = amz_date(SystemTime::now());
+        let other = Key { id: "AKFFOTHERKEY0000TEST".into(), secret: "another".into() };
+
+        let unsigned = door.send("POST", send, &[("Host", "127.0.0.1:3700")], body.as_bytes());
+        let with_key =
+            door.send("POST", send, &as_refs(&signed(&key(), send, body.as_bytes(), &at, "ses")), body.as_bytes());
+        let by_another =
+            door.send("POST", send, &as_refs(&signed(&other, send, body.as_bytes(), &at, "ses")), body.as_bytes());
+        assert_eq!((unsigned.status, with_key.status), (200, 200), "{}", String::from_utf8_lossy(&with_key.body));
+        assert!(refused(&by_another).1.starts_with("UnrecognizedClientException:"), "{by_another:?}");
+        let said = door.said();
+        let kept = "A message from orders@shop.example.tn to client@example.tn, \"Receipt\", kept in ";
+        assert_eq!(
+            said.iter().filter(|line| line.starts_with(kept) && line.ends_with(", not sent")).count(),
+            2,
+            "{said:?}"
+        );
+        assert!(
+            said.iter().any(|line| line.starts_with("A request signed with AKFFOTHERKEY0000TEST, not the local key"))
+        );
+
+        // Its body is SES's to read, whole, and refused in its words when over what it takes.
+        let head = head_to("POST", "127.0.0.1:3700", send, &[]);
+        assert!(!door.door.is_s3(&head) && !door.door.streams(&head));
+        assert_eq!(door.door.limit(&head), mail::MAX_BODY_BYTES);
+        let too_large = door.door.unreadable(true, Some(&head));
+        assert_eq!((too_large.status, refused(&too_large).2.as_str()), (413, "The request is over 14680064 bytes."));
+        assert_eq!(door.door.limit(&head_to("POST", "orders.fn.localhost:3700", send, &[])), PAYLOAD_LIMIT, "a URL's");
     }
 }

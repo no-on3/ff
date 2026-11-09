@@ -158,6 +158,7 @@ impl<R: Runner> FrontDoor<R> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -165,6 +166,7 @@ mod tests {
     use super::super::front_door::Settings;
     use super::super::instances::stand::{Stand, function, instances_of};
     use super::super::key::Key;
+    use super::super::mail::Mail;
     use super::super::s3::Buckets;
     use super::super::schedules;
     use super::super::sqs::{Caller, QueueSettings, Queues};
@@ -224,6 +226,8 @@ mod tests {
                 Arc::new(|| schedules::now_ms(0)),
             )),
             buckets: Arc::new(Buckets::none()),
+            // Never written: these tests send no mail.
+            mail: Arc::new(Mail::new(Path::new("unused-mail"), Arc::new(|| schedules::now_ms(0)), Arc::new(|_| {}))),
         };
         Reading { door, stand, said, stop: Arc::new(AtomicBool::new(false)) }
     }

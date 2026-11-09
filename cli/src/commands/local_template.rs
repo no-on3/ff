@@ -11,8 +11,9 @@
 //! WebsiteConfiguration makes it a site answers a browser at `http://<bucket>.site.localhost:<port>`, from a folder
 //! of this machine's when `--site <bucket>=<folder>` names one. `--with postgres` and `--with valkey` run a
 //! PostgreSQL and a Valkey beside the functions, at `DATABASE_URL` and `REDIS_URL` unless the secrets file names them,
-//! their data in Docker's volumes of the project's. `ff local reset` empties what it keeps, and `--data` removes
-//! those volumes.
+//! their data in Docker's volumes of the project's. The mail the functions send, SES v2's `SendEmail` at the front
+//! door, is kept in `.ff/local/mail/`, never sent: each message a file a mail reader opens, said as it comes, and
+//! listed by `ff local mail`. `ff local reset` empties what it keeps, and `--data` removes those volumes.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, TcpListener};
@@ -38,6 +39,7 @@ use crate::local::events::{LAMBDA_RETRY_POLICY, RetryPolicy};
 use crate::local::front_door::{FrontDoor, FunctionUrl, Settings, URL_DOMAIN};
 use crate::local::instances::{Docker, Instances};
 use crate::local::key::Key;
+use crate::local::mail::{self, KeptMessage, Mail};
 use crate::local::mappings::LocalMapping;
 use crate::local::s3::events::{Rule, Target};
 use crate::local::s3::site::{SITES_HOST, Website};
@@ -72,6 +74,8 @@ const SECRETS: &str = ".env.local";
 const CREDENTIALS: &str = "credentials";
 /// The buckets' folders, in what ff local keeps.
 const BUCKETS: &str = "buckets";
+/// The mail's folder, each message and its envelope, in what ff local keeps.
+const MAIL: &str = "mail";
 /// The front door's address while ff local start runs, in what ff local keeps, for ff local run to find it.
 const ENDPOINT: &str = "endpoint";
 /// The data services' passwords and ports, in what ff local keeps.
@@ -727,6 +731,8 @@ struct Started {
     buckets: Vec<StartedBucket>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     services: Vec<StartedService>,
+    /// The folder the mail the functions send is kept in.
+    mail: String,
     logs: String,
 }
 
@@ -832,6 +838,8 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     .map_err(|error| {
         Error::new(Kind::Failed, format!("Couldn't keep the buckets in {}: {error}", buckets_folder.display()))
     })?;
+    let mail_folder = kept.join(MAIL);
+    let mail = Mail::new(&mail_folder, Arc::new(|| schedules::now_ms(0)), Arc::clone(&say));
     let door = FrontDoor {
         instances: Arc::clone(&instances),
         region: REGION.to_owned(),
@@ -844,6 +852,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
         clock_offset: clock_offset(),
         queues: Arc::new(Queues::new(REGION, ACCOUNT, queues, Arc::new(|| schedules::now_ms(0)))),
         buckets: Arc::new(buckets),
+        mail: Arc::new(mail),
     };
     let front_door: Arc<dyn http::Answers> = Arc::new(door.clone());
     http::serve(listener, Arc::clone(&front_door));
@@ -979,6 +988,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 }
             })
             .collect(),
+        mail: mail_folder.display().to_string(),
         logs: logs.display().to_string(),
     };
     context.out.result(&started, || {
@@ -1081,6 +1091,10 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 format!("  {:width$}  {}, at {} from the functions, {variable}", service.name, service.url, service.from_functions)
             }));
         }
+        lines.push(format!(
+            "Its mail, SES v2's SendEmail at {endpoint}, is kept in {}, never sent: ff local mail lists it",
+            started.mail
+        ));
         lines.push(format!(
             "Its key, which a signed request is checked against, is in {}: AWS_ACCESS_KEY_ID={} AWS_SECRET_ACCESS_KEY={}, in the region {REGION}",
             started.key.file, started.key.access_key_id, started.key.secret_access_key
@@ -1190,7 +1204,46 @@ pub fn run(schedule: &str, path: Option<&Path>, context: &Context) -> Result<(),
     }
 }
 
-/// `ff local reset`: what ff local keeps for the template's project removed, after asking.
+#[derive(Serialize)]
+struct KeptMail {
+    folder: String,
+    /// The latest last.
+    messages: Vec<KeptMessage>,
+}
+
+/// `ff local mail`: the mail the template's functions sent, which ff local start keeps, the latest last.
+pub fn mail(path: Option<&Path>, context: &Context) -> Result<(), Error> {
+    let folder = project_of(path)?.join(KEPT).join(MAIL);
+    let messages = mail::kept_in(&folder)
+        .map_err(|error| Error::new(Kind::Failed, format!("Couldn't read {}: {error}", folder.display())))?;
+    let kept = KeptMail { folder: folder.display().to_string(), messages };
+    context.out.result(&kept, || {
+        if kept.messages.is_empty() {
+            return format!(
+                "No mail in {}: a message a function sends with SES v2's SendEmail is kept there while ff local start runs",
+                kept.folder
+            );
+        }
+        let count = match kept.messages.len() {
+            1 => "1 message".to_owned(),
+            count => format!("{count} messages"),
+        };
+        let mut lines = vec![format!("{count} kept in {}, never sent, the latest last:", kept.folder)];
+        for message in &kept.messages {
+            lines.push(format!(
+                "  {}  from {} to {}: \"{}\", {} bytes",
+                message.sent_at,
+                message.from,
+                message.recipients.join(", "),
+                message.subject,
+                message.bytes
+            ));
+            lines.push(format!("    {}", message.file));
+        }
+        lines.join("\n")
+    })
+}
+
 /// `ff local reset`: what ff local keeps for the project removed, and with `data` its data services' volumes, which
 /// Docker finds by the project's folder.
 pub fn reset(path: Option<&Path>, data: bool, yes: bool, context: &Context) -> Result<(), Error> {
@@ -1210,7 +1263,7 @@ pub fn reset(path: Option<&Path>, data: bool, yes: bool, context: &Context) -> R
     let mut what = Vec::new();
     if kept.exists() {
         what.push(format!(
-            "{folder}, what ff local keeps: the functions' logs, the buckets' objects and the local key"
+            "{folder}, what ff local keeps: the functions' logs, the buckets' objects, the mail kept and the local key"
         ));
     }
     if !volumes.is_empty() {

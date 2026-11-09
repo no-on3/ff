@@ -119,6 +119,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Local(LocalCommand::Run { schedule, path }) => {
             local_template::run(&schedule, path.as_deref(), context)
         }
+        Command::Local(LocalCommand::Mail { path }) => local_template::mail(path.as_deref(), context),
         Command::Local(LocalCommand::Reset { path, data, yes }) => {
             local_template::reset(path.as_deref(), data, yes, context)
         }

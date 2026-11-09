@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::{GeneralPurpose, NO_PAD_INDIFFERENT};
+
 /// A request, and a response, may hold 6 MB, as on Lambda.
 pub const PAYLOAD_LIMIT: usize = 6 * 1024 * 1024;
 /// The request's line and its headers together, at most.
@@ -208,6 +211,27 @@ pub fn request_id() -> String {
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+}
+
+/// Base64 as Node.js's `Buffer.from` reads it, which the backend's checks are: either alphabet, padding or none, up
+/// to the first `=`, what isn't base64 passed over.
+pub fn lenient_base64(text: &str) -> Vec<u8> {
+    let mut kept: String = text
+        .chars()
+        .take_while(|character| *character != '=')
+        .map(|character| match character {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '+' | '/'))
+        .collect();
+    if kept.len() % 4 == 1 {
+        kept.pop();
+    }
+    let engine =
+        GeneralPurpose::new(&base64::alphabet::STANDARD, NO_PAD_INDIFFERENT.with_decode_allow_trailing_bits(true));
+    engine.decode(kept).unwrap_or_default()
 }
 
 /// A query's part, or a path's, decoded as a form's: `%XX` its byte, `+` a space.

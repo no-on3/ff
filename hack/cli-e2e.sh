@@ -50,8 +50,9 @@
 # started at its first call, its variables resolved there and its secrets from .env.local, one calling another through
 # the front door, started again when its code changes and stopped when idle; ff init's SAM application and the small app
 # on it, called at their URLs, the small app's nightly run by hand and retried; a template's queues there, the AWS
-# CLI's SQS cases against them, a function sending to one, a failed call's record and dead letter in them; then a
-# release's runtime image, made, signed and put on
+# CLI's SQS cases against them, a function sending to one, a failed call's record and dead letter in them; the mail its
+# functions send, the AWS CLI's SES cases and a function's receipt, kept as files a mail reader opens, listed by ff
+# local mail, never sent; then a release's runtime image, made, signed and put on
 # a site of FF's as the release job does, ff pinned to it: pulled by its digest from the dev registry, else its archive
 # loaded from the site, verified, once, and refused when signed by another key or changed.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
@@ -2695,6 +2696,130 @@ check "ff local reset --data removes the volumes, naming them" "0 2 0" \
   "$(code) $(out | grep -o "Docker's volume ff-local-data-[0-9a-f]*-[a-z]*" | wc -l | tr -d ' ') $(volumes)"
 }
 section_def local_data section_local_data backend budget=90
+
+section_local_mail() {
+section "ff local start's mail: SES v2's SendEmail at the front door, the AWS CLI's cases of L4 and a function's, each message kept as a file a mail reader opens, its Bcc in its envelope alone, said, listed by ff local mail, refused in FF's words, never sent"
+local app="$work/mail" port starter sent_id function_id raw_id
+local simple='{"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}'
+local to_orders='{"ToAddresses": ["orders@example.tn"]}'
+leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
+# ses_cli <args...>: the AWS CLI's sesv2 with the local key's file alone, the front door its SES endpoint.
+ses_cli() {
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default \
+    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_SESV2="http://127.0.0.1:$port" "${aws_cli[@]}" sesv2 "$@"
+}
+# ses_refused <args...>: the error the CLI prints, its name and FF's words.
+ses_refused() { ses_cli "$@" >/dev/null 2>"$work/ses.err" && echo accepted || grep -m1 -oE 'An error occurred .*' "$work/ses.err"; }
+# kept <message ID> <extension>: the message's file, or its envelope's.
+kept() { printf '%s\n' "$app"/.ff/local/mail/*-"$1.$2"; }
+# read_mail <file>: the message as a mail reader shows it: its sender, its recipients, its subject decoded, its type,
+# and its text.
+read_mail() {
+  python3 -I -c 'import email, email.policy, sys
+message = email.message_from_binary_file(open(sys.argv[1], "rb"), policy=email.policy.default)
+print(message["from"], "|", message["to"], "|", message["subject"], "|", message.get_content_type(), "|", message.get_body(("plain",)).get_content().strip())' "$1"
+}
+# started: ff local start in the background, its listing waited for.
+started() {
+  "$ff_bin" local start "$app/template.yaml" --port "$port" >"$work/mail.out" 2>"$work/mail.err" &
+  starter=$!
+  for _ in $(seq 1 60); do
+    grep -F "Ctrl-C stops them" "$work/mail.out" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  grep -F "Ctrl-C stops them" "$work/mail.out" >/dev/null || fail "ff local start said nothing in 30 s: $(cat "$work/mail.err")"
+}
+stopped() {
+  kill -INT "$starter"
+  wait "$starter" 2>/dev/null || true
+}
+rm -rf "$app" && mkdir -p "$app/sender"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Sender:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: sender/
+      Runtime: python3.13
+      Handler: app.handler
+      Timeout: 10
+YAML
+# A function that sends a receipt as an SDK would, with no setting: to the SES endpoint FF gives it, signed by hand, as
+# the runtime images have no SDK.
+cp "$FF_REPO_ROOT/hack/lib/local-functions/signed.py" "$app/sender/"
+cat >"$app/sender/app.py" <<'PY'
+import json
+import os
+
+from signed import send
+
+
+def handler(event, context):
+    body = json.dumps({
+        "FromEmailAddress": "Boutique Ana <orders@shop.example.tn>",
+        "Destination": {"ToAddresses": [event["to"]]},
+        "Content": {"Simple": {"Subject": {"Data": event["subject"]},
+                               "Body": {"Text": {"Data": "Merci"}, "Html": {"Data": "<p>Merci</p>"}}}},
+    }).encode()
+    url = f"{os.environ['AWS_ENDPOINT_URL_SESV2']}/v2/email/outbound-emails"
+    with send("ses", "POST", url, body, {"content-type": "application/json"}) as answer:
+        return json.load(answer)["MessageId"]
+PY
+
+port="$(free_port)"
+started
+check "the start says where its mail is kept, never sent" true \
+  "$(grep -E "^Its mail, SES v2's SendEmail at http://127\.0\.0\.1:$port, is kept in .*/\.ff/local/mail, never sent: ff local mail lists it$" "$work/mail.out" >/dev/null && echo true || echo false)"
+
+sent_id="$(ses_cli send-email --from-email-address 'Shop <news@shop.example.tn>' \
+  --destination '{"ToAddresses": ["orders@example.tn"], "CcAddresses": ["copy@example.tn"], "BccAddresses": ["Audit@Example.TN"]}' \
+  --content "$simple" --output json | jq -r .MessageId)"
+check "the AWS CLI sends L4's message with the local key, a Cc and a Bcc: SES's MessageId" true \
+  "$([[ $sent_id =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false)"
+check "  ... kept: its envelope names its sender and each recipient, in lower case, the Bcc too; its file has no Bcc, its ID the message's" \
+  "news@shop.example.tn orders@example.tn,copy@example.tn,audit@example.tn Your order 0 true" \
+  "$(jq -r '"\(.from) \(.recipients | join(",")) \(.subject)"' "$(kept "$sent_id" json)") $(grep -c '^Bcc:' "$(kept "$sent_id" eml)" || true) \
+$(grep -F "Message-ID: <$sent_id@email.localhost>" "$(kept "$sent_id" eml)" >/dev/null && echo true || echo false)"
+check "  ... said on ff local start's stderr, with its file" true \
+  "$(grep -E "^A message from news@shop\.example\.tn to orders@example\.tn, copy@example\.tn, audit@example\.tn, \"Your order\", kept in .*/\.ff/local/mail/[0-9TZ]+-$sent_id\.eml, not sent$" "$work/mail.err" >/dev/null && echo true || echo false)"
+
+function_id="$(curl -s -d '{"to": "client@example.tn", "subject": "Votre reçu n° 42"}' "http://127.0.0.1:$port/2015-03-31/functions/Sender/invocations" | jq -r .)"
+check "a function sends a receipt at the SES endpoint FF gives it, which a mail reader opens: its subject decoded, both bodies" \
+  "Boutique Ana <orders@shop.example.tn> | client@example.tn | Votre reçu n° 42 | multipart/alternative | Merci" \
+  "$(read_mail "$(kept "$function_id" eml)" 2>&1)"
+
+printf 'From: Shop <news@shop.example.tn>\r\nTo: orders@example.tn\r\nBcc: audit@example.tn\r\nSubject: Raw\r\nMessage-ID: <raw-local@shop.example.tn>\r\n\r\nHello from a raw message.\r\n' >"$work/raw.eml"
+printf 'From: Shop <news@shop.example.tn>\r\nTo: orders@example.tn\r\nSubject: Raw\r\nMessage-ID: <raw-local@shop.example.tn>\r\n\r\nHello from a raw message.\r\n' >"$work/raw-without-bcc.eml"
+raw_id="$(ses_cli send-email --content "{\"Raw\": {\"Data\": \"$(base64 -w0 "$work/raw.eml")\"}}" --output json | jq -r .MessageId)"
+check "a raw message, its sender and recipients from its header, the Bcc's too: kept as it came but its Bcc field" \
+  "news@shop.example.tn orders@example.tn,audit@example.tn 0" \
+  "$(jq -r '"\(.from) \(.recipients | join(","))"' "$(kept "$raw_id" json)") $(cmp -s "$work/raw-without-bcc.eml" "$(kept "$raw_id" eml)"; echo $?)"
+
+check "a sender of two addresses is refused in FF's words, a template as FF refuses it, and nothing kept" \
+  "An error occurred (BadRequestException) when calling the SendEmail operation: a@shop.example.tn, b@shop.example.tn is not one address|An error occurred (NotImplemented) when calling the SendEmail operation: FF's SES endpoint doesn't send templates: send Simple or Raw content|3" \
+  "$(ses_refused send-email --from-email-address 'a@shop.example.tn, b@shop.example.tn' --destination "$to_orders" --content "$simple")|$(ses_refused send-email --from-email-address news@shop.example.tn --destination "$to_orders" --content '{"Template": {"TemplateName": "receipt"}}')|$(find "$app/.ff/local/mail" -name '*.eml' | wc -l | tr -d ' ')"
+check "FF's account's operations are FF's: ff local says so" \
+  "An error occurred (NotImplemented) when calling the GetAccount operation: ff local keeps the mail its functions send, and answers SendEmail alone: GetAccount is FF's, whose account has identities, quotas and a suppression list" \
+  "$(ses_refused get-account)"
+stopped
+
+ff local mail "$app"
+check "ff local mail lists them once the app has stopped, the latest last, each with its file" \
+  "0 3 messages kept in true|Raw" \
+  "$(code) $(out | head -1 | grep -oE '^3 messages kept in') $(out | head -1 | grep -E "/\.ff/local/mail, never sent, the latest last:$" >/dev/null && echo true || echo false)|$(out | sed -n '6s/.*: "\(.*\)", [0-9]* bytes$/\1/p')"
+ff local mail "$app/template.yaml" --output json
+check "  ... and as JSON, by the template too: each message's subject, its recipients and its file" \
+  "Your order|Votre reçu n° 42|Raw 3 true" \
+  "$(out | jq -r '[.messages[].subject] | join("|")') $(out | jq -r '.messages[0].recipients | length') $([ -f "$(out | jq -r '.messages[2].file')" ] && echo true || echo false)"
+ff local reset "$app" --yes
+ff local mail "$app"
+check "ff local reset removes the mail with what ff local keeps, and ff local mail says there is none; no container left" \
+  "0 true 0" \
+  "$(code) $(out | grep -E '^No mail in .*/\.ff/local/mail: ' >/dev/null && echo true || echo false) $(leftover)"
+}
+section_def local_mail section_local_mail backend budget=20
 
 section_local_images() {
 section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"
