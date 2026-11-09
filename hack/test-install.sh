@@ -5,8 +5,10 @@
 # when it isn't; refused, with nothing installed, for a build that differs from latest.json's checksum, a build's
 # signature or latest.json's by another key, and the repository's own copy, which names no site. Given a folder of real
 # builds, as a build job has some of the five, those are released and stand-ins for the others, and this machine's,
-# when it is there, is run once installed. Python's server serves the site, or, with --site, the command given deploys
-# it, after each change, to the address given, as the ff suite deploys it to FF. In a second or two.
+# when it is there, is run once installed. On Linux and macOS, install.sh then runs on each machine it knows, its uname
+# and sysctl stand-ins saying which, an Intel Mac's among them, which has no minisign to run this test with. Python's
+# server serves the site, or, with --site, the command given deploys it, after each change, to the address given, as
+# the ff suite deploys it to FF. In a second or two.
 #   hack/test-install.sh [<builds folder>]      stand-in builds alone without one
 #   hack/test-install.sh --site <address> --deploy '<command, given the site's folder last>' [<builds folder>]
 set -euo pipefail
@@ -100,6 +102,7 @@ install() {
   else
     local path=/usr/bin:/bin:/usr/sbin:/sbin
     [ "$1" = with ] && path="$work/with-minisign:$path"
+    [ -d "$work/machine" ] && path="$work/machine:$path" # another machine's uname and sysctl (pretend, below)
     curl -fsSL "$script" | PATH="$path" sh -s -- --prefix "$work/prefix" >"$work/out" 2>&1 || status=$?
   fi
   echo "$status $(tr -d '\r' <"$work/out" | head -1)"
@@ -150,13 +153,40 @@ publish
 check "a build signed by another key" "1 ff not installed: $build's signature isn't the release key's none" \
   "$(install with) $(installed)"
 cp "$work/genuine.minisig" "$site/$build.minisig"
+cp "$site/latest.json.minisig" "$work/genuine.minisig"
 "$minisign" -S -s "$work/other.key" -m "$site/latest.json" >/dev/null 2>&1
 publish
 check "latest.json signed by another key" "1 ff not installed: latest.json's signature isn't the release key's none" \
   "$(install with) $(installed)"
+cp "$work/genuine.minisig" "$site/latest.json.minisig"
+publish
 script=install.sh
 [ "$system" = windows ] && script=install.ps1
 check "the repository's own copy, which names no site" \
   "1 ff not installed: this copy of $script isn't the downloads site's, which names the site: give FF_DOWNLOADS_URL none" \
   "$(install without "$url/repository/$script") $(installed)"
+
+if [ "$system" != windows ]; then
+  section "each machine's own build, as install.sh names the machine"
+  # pretend <uname -s> <uname -m> <sysctl -n hw.optional.arm64>: that machine's uname and sysctl, first on the PATH.
+  pretend() {
+    mkdir -p "$work/machine"
+    printf '#!/bin/sh\ncase "$1" in -s) echo %s ;; -m) echo %s ;; *) exit 1 ;; esac\n' "$1" "$2" >"$work/machine/uname"
+    printf '#!/bin/sh\necho %s\n' "$3" >"$work/machine/sysctl"
+    chmod 755 "$work/machine/uname" "$work/machine/sysctl"
+  }
+  for machine in "Linux x86_64 0 ff-linux-x86_64" "Linux aarch64 0 ff-linux-arm64" "Darwin arm64 1 ff-macos-arm64" \
+    "Darwin x86_64 0 ff-macos-x86_64" "Darwin x86_64 1 ff-macos-arm64"; do
+    read -r name processor arm64 file <<<"$machine"
+    pretend "$name" "$processor" "$arm64"
+    said="$(install without)"
+    case "$name-$processor-$arm64" in Darwin-x86_64-1) rosetta=", in a shell Rosetta runs" ;; *) rosetta='' ;; esac
+    check "$name on $processor$rosetta: $file" "0 $(cut -d' ' -f1 "$work/release/$file.sha256")" "${said%% *} $(installed)"
+  done
+  pretend MINGW64_NT-10.0-26100 x86_64 0
+  check "Windows's Git bash: pointed to install.ps1" \
+    "1 ff not installed: on Windows, install.ps1 installs ff, in PowerShell: irm $url/install.ps1 | iex none" \
+    "$(install without) $(installed)"
+  rm -rf "$work/machine"
+fi
 checks_done install

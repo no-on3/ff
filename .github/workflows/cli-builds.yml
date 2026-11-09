@@ -71,7 +71,9 @@ jobs:
       matrix:
         include:
           - { system: windows-x86_64, runner: windows-2025, binary: ff-windows-x86_64.exe }
-          - { system: macos-x86_64, runner: macos-15-intel, binary: ff-macos-x86_64 }
+          # No install test: minisign has no build for an Intel Mac to sign the test's release with. Every Unix runner
+          # runs install.sh as an Intel Mac would, its machine's name a stand-in.
+          - { system: macos-x86_64, runner: macos-15-intel, binary: ff-macos-x86_64, minisign: none }
           - { system: linux-arm64, runner: ubuntu-24.04-arm, binary: ff-linux-arm64 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -85,18 +87,19 @@ jobs:
           pattern: cli-builds*
           merge-multiple: true
           path: dist
-      # The three steps run whatever the others' outcomes, and the last fails the job if any failed.
+      # The three steps run whatever the others' outcomes, and the last fails the job if any failed: one skipped didn't.
       - id: binary
         continue-on-error: true
         run: hack/cli-smoke.sh "dist/${{ matrix.binary }}"
       - id: install
+        if: matrix.minisign != 'none'
         continue-on-error: true
         run: hack/install-tools.sh minisign && hack/test-install.sh dist
       - id: tests
         continue-on-error: true
         working-directory: cli
         run: cargo test --locked --no-fail-fast # every test binary's failures, not the first one's alone
-      - if: steps.binary.outcome != 'success' || steps.install.outcome != 'success' || steps.tests.outcome != 'success'
+      - if: steps.binary.outcome == 'failure' || steps.install.outcome == 'failure' || steps.tests.outcome == 'failure'
         env:
           BINARY: ${{ steps.binary.outcome }}
           INSTALL: ${{ steps.install.outcome }}

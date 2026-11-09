@@ -1078,7 +1078,8 @@ section_def sites section_sites backend budget=5
 section_downloads() {
 section "the downloads site: a release signed with a throwaway key, deployed to FF by ff sites deploy, installed from it"
 # This machine's ff as its build in the release, stand-ins for the others: hack/test-install.sh installs it from the
-# site FF serves as a customer would, runs it, and is refused a changed build and signatures by another key.
+# site FF serves as a customer would, runs it, and is refused a changed build and signatures by another key; then
+# installs as each machine install.sh knows.
 local processor
 case "$(uname -m)" in x86_64 | amd64) processor=x86_64 ;; *) processor=arm64 ;; esac
 rm -rf "$work/builds" && mkdir "$work/builds"
@@ -1087,7 +1088,7 @@ ff buckets create cli-downloads
 "$FF_REPO_ROOT/hack/test-install.sh" --site "http://cli-downloads.site.localhost:$website_port" \
   --deploy "$ff_bin sites deploy cli-downloads" "$work/builds" >"$work/install.out" 2>&1 || true
 check "install.sh installs ff from the site FF serves, and refuses what changed: hack/test-install.sh's checks" \
-  "install: 9 checks passed" "$(tail -1 "$work/install.out")"
+  "install: 15 checks passed" "$(tail -1 "$work/install.out")"
 }
 section_def downloads section_downloads backend budget=5
 

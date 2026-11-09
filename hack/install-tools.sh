@@ -287,10 +287,15 @@ sam_cfn_lint_version() { # the cfn-lint the SAM CLI's installer brought, by its 
   find "$sam_dir/$SAM_VERSION" -maxdepth 6 -type d -name 'cfn_lint-*.dist-info' 2>/dev/null | head -1 | sed 's/.*cfn_lint-\(.*\)\.dist-info/\1/'
 }
 
-# minisign: Linux's and Windows's archives hold a binary for each processor, macOS's one for both.
+# minisign: Linux's and Windows's archives hold a binary for each processor, macOS's one for Apple's processors alone,
+# so none is installed on an Intel Mac.
 install_minisign() {
   local exe=''
   [ "$os" = windows ] && exe=.exe
+  if [ "$os-$arch" = darwin-amd64 ]; then
+    echo "minisign $MINISIGN_VERSION has no build for an Intel Mac, its macOS one being for Apple's processors alone" >&2
+    return 1
+  fi
   if [ -x "$bin_dir/minisign$exe" ] && "$bin_dir/minisign$exe" -v 2>/dev/null | grep -x "minisign $MINISIGN_VERSION" >/dev/null; then
     echo "minisign $MINISIGN_VERSION already installed"
     return

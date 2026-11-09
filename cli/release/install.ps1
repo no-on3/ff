@@ -42,6 +42,9 @@ function Install-Ff([string]$Prefix) {
       }
     }
     function Test-Signature([string]$Path) { # its signature, <path>.minisig, against the release's key
+      # Its exit code says it: Windows PowerShell would make minisign's refusal on stderr an error of its own under
+      # 'Stop', its message in place of this script's. 'Continue' here, in this function alone.
+      $ErrorActionPreference = 'Continue'
       & $minisign.Source -Vqm $Path -P $publicKey *> $null
       return $LASTEXITCODE -eq 0
     }
