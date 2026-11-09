@@ -64,11 +64,11 @@ sign() { # <file> <its signature>: minisign's default trusted comment, which hol
 }
 
 (cd "$folder" && sha256 "${FF_BUILDS[@]}" >"$work/made/SHA256SUMS")
-files="{}"
+files="{}" # jq -b: lines ending as Unix's on Windows too, whose jq ends them with CR LF
 for binary in "${FF_BUILDS[@]}"; do
-  files="$(jq -c --arg name "$binary" --arg sha "$(cut -d' ' -f1 "$folder/$binary.sha256")" '. + {($name): $sha}' <<<"$files")"
+  files="$(jq -bc --arg name "$binary" --arg sha "$(cut -d' ' -f1 "$folder/$binary.sha256")" '. + {($name): $sha}' <<<"$files")"
 done
-jq -n --arg version "$version" --arg commit "$commit" --argjson files "$files" \
+jq -bn --arg version "$version" --arg commit "$commit" --argjson files "$files" \
   '{version: $version, commit: $commit, files: $files}' >"$work/made/latest.json"
 
 for binary in "${FF_BUILDS[@]}"; do

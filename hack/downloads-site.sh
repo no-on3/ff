@@ -21,9 +21,10 @@ key="$(sed -n 2p "$public_key")"
 for made in latest.json latest.json.minisig SHA256SUMS; do
   [ -f "$release/$made" ] || refuse "$release has no $made: hack/release.sh makes it"
 done
-version="$(jq -r .version "$release/latest.json")"
+# jq -b: lines ending as Unix's on Windows too, whose jq ends them with CR LF.
+version="$(jq -rb .version "$release/latest.json")"
 files=() # read a line at a time, as macOS's older bash has no mapfile
-while IFS= read -r file; do files+=("$file"); done < <(jq -r '.files | keys[]' "$release/latest.json")
+while IFS= read -r file; do files+=("$file"); done < <(jq -rb '.files | keys[]' "$release/latest.json")
 [ "${#files[@]}" -gt 0 ] || refuse "latest.json names no file"
 for file in "${files[@]}"; do
   [ -f "$release/$file" ] && [ -f "$release/$file.minisig" ] || refuse "$file or its signature is missing from $release"
@@ -38,9 +39,11 @@ cp "$release/latest.json" "$release/latest.json.minisig" "$release/SHA256SUMS" "
 cp "$public_key" "$site/minisign.pub"
 for script in install.sh install.ps1; do
   text="$(<"$repo/cli/release/$script")"
-  # The replacements quoted, so that no character of theirs means anything to bash.
-  text="${text//@downloads@/"$address"}"
-  text="${text//@public-key@/"$key"}"
+  # The replacements as they are: without bash 5.2's & (the text matched), and unquoted, as macOS's bash, 3.2, would
+  # keep the quotes.
+  shopt -u patsub_replacement 2>/dev/null || true
+  text="${text//@downloads@/$address}"
+  text="${text//@public-key@/$key}"
   printf '%s\n' "$text" >"$site/$script"
 done
 

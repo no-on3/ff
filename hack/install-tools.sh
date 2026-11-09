@@ -11,7 +11,8 @@
 # hack/.zig/ (git-ignored), and cargo-zigbuild, which build ff for Linux and Windows. Each pinned to a release at
 # least two weeks old when chosen. Idempotent: tools
 # already at the pinned version are left alone, and so is a Rust at least as
-# recent where there is no rustup to pin it with. Nothing is installed system-wide.
+# recent where there is no rustup to pin it with. Nothing is installed system-wide. It runs in macOS's own bash, 3.2,
+# as a Mac's build job runs it: the checksums copied here are looked up by functions, as it has no associative arrays.
 # FF_TOOLS_BIN and FF_SAM_DIR put the binaries and the SAM CLI elsewhere, as the nightly's newest tools go into a
 # directory of their own, so that the pinned ones the other stages use stay as they are.
 #   hack/install-tools.sh [kubectl] [k3d] [rust]     (all three without an argument)
@@ -33,20 +34,24 @@ ARCHIVE_PROVIDER_VERSION="${ARCHIVE_PROVIDER_VERSION:-2.8.1}"
 SAM_VERSION="${SAM_VERSION:-1.169.0}"
 # The SAM CLI publishes its installers' checksums in its release's notes alone: copied from there, for the version
 # pinned. Another version needs SAM_SHA256, from its own release's notes.
-declare -A SAM_SHA256S=(
-  [1.169.0-linux-amd64]=3e921832e9fb39a6563380afc9855eac6dab163238ef3b2bec4a5ba223e4be8b
-  [1.169.0-linux-arm64]=a11352c4288a32cd75bb21eb9eb2cd7f23eb59384aa1224497e8de9862290d33
-)
+sam_sha256() { # <version>-<os>-<arch>
+  case "$1" in
+    1.169.0-linux-amd64) echo 3e921832e9fb39a6563380afc9855eac6dab163238ef3b2bec4a5ba223e4be8b ;;
+    1.169.0-linux-arm64) echo a11352c4288a32cd75bb21eb9eb2cd7f23eb59384aa1224497e8de9862290d33 ;;
+  esac
+}
 # zig, the C compiler and the linker of ff's builds for Linux and Windows (hack/build-cli.sh), each archive signed with
 # its project's key, ZIG_KEY, as ziglang.org/download gives it: the signature is checked at each install, and the
 # SHA-256s copied here are its index's for the version pinned. Another version or system needs ZIG_SHA256, the same
 # way. It goes into hack/.zig, a version a folder, hack/bin/zig leading to it.
 ZIG_VERSION="${ZIG_VERSION:-0.17.0}"
 ZIG_KEY=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
-declare -A ZIG_SHA256S=(
-  [0.17.0-x86_64-linux]=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
-  [0.17.0-aarch64-linux]=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
-)
+zig_sha256() { # <version>-<processor>-<system>
+  case "$1" in
+    0.17.0-x86_64-linux) echo 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;;
+    0.17.0-aarch64-linux) echo 9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8 ;;
+  esac
+}
 # cargo-zigbuild, cargo's builds with zig as their C compiler and linker; its release publishes each file's checksum.
 CARGO_ZIGBUILD_VERSION="${CARGO_ZIGBUILD_VERSION:-0.24.0}"
 # minisign publishes no checksum file, only each file's signature by its author's key,
@@ -54,11 +59,13 @@ CARGO_ZIGBUILD_VERSION="${CARGO_ZIGBUILD_VERSION:-0.24.0}"
 # the files whose signatures were checked against that key when the version was pinned. Another version needs
 # MINISIGN_SHA256, the same way.
 MINISIGN_VERSION="${MINISIGN_VERSION:-0.12}"
-declare -A MINISIGN_SHA256S=(
-  [0.12-linux]=9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
-  [0.12-darwin]=89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63
-  [0.12-windows]=37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479
-)
+minisign_sha256() { # <version>-<os>
+  case "$1" in
+    0.12-linux) echo 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73 ;;
+    0.12-darwin) echo 89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63 ;;
+    0.12-windows) echo 37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479 ;;
+  esac
+}
 bin_dir="${FF_TOOLS_BIN:-$repo_root/hack/bin}"
 sam_dir="${FF_SAM_DIR:-$repo_root/hack/.sam}"
 mkdir -p "$bin_dir"
@@ -262,7 +269,7 @@ install_sam() {
     echo "the SAM CLI $SAM_VERSION already installed"
     return
   fi
-  local expected="${SAM_SHA256:-${SAM_SHA256S[$SAM_VERSION-$os-$arch]:-}}" asset
+  local expected="${SAM_SHA256:-$(sam_sha256 "$SAM_VERSION-$os-$arch")}" asset
   [ -n "$expected" ] || { echo "no checksum for the SAM CLI $SAM_VERSION: give SAM_SHA256, from its release's notes" >&2; return 1; }
   asset="aws-sam-cli-linux-$([ "$arch" = amd64 ] && echo x86_64 || echo arm64).zip"
   curl -fsSL --retry 3 -o "$tmp/$asset" "https://github.com/aws/aws-sam-cli/releases/download/v$SAM_VERSION/$asset"
@@ -288,7 +295,7 @@ install_minisign() {
     echo "minisign $MINISIGN_VERSION already installed"
     return
   fi
-  local expected="${MINISIGN_SHA256:-${MINISIGN_SHA256S[$MINISIGN_VERSION-$os]:-}}" asset binary
+  local expected="${MINISIGN_SHA256:-$(minisign_sha256 "$MINISIGN_VERSION-$os")}" asset binary
   [ -n "$expected" ] || { echo "no checksum for minisign $MINISIGN_VERSION: give MINISIGN_SHA256, of a file whose signature you checked" >&2; return 1; }
   case "$os" in
     linux)
@@ -320,7 +327,7 @@ install_zig() {
   local system processor
   system="$([ "$os" = linux ] && echo linux || echo macos)"
   processor="$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)"
-  local expected="${ZIG_SHA256:-${ZIG_SHA256S[$ZIG_VERSION-$processor-$system]:-}}"
+  local expected="${ZIG_SHA256:-$(zig_sha256 "$ZIG_VERSION-$processor-$system")}"
   [ -n "$expected" ] || { echo "no checksum for zig $ZIG_VERSION on $processor $system: give ZIG_SHA256, from its index" >&2; return 1; }
   install_minisign >/dev/null
   local asset="zig-$processor-$system-$ZIG_VERSION.tar.xz" zig_dir="$repo_root/hack/.zig/$ZIG_VERSION"
