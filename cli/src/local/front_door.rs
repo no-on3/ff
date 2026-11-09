@@ -13,7 +13,9 @@
 //! `X-Amz-Target`, is answered by the template's queues ([`super::sqs`]), its signature checked as Lambda's is; an
 //! asynchronous call's record and its dead letter go to them as FF sends both. S3 is answered by the template's
 //! buckets ([`super::s3`]): a request at a bucket's host, signed for S3, or unsigned and naming one of them, or the
-//! service, by its path; its body read as it streams.
+//! service, by its path; its body read as it streams. A write's events go where its bucket's notifications send them,
+//! as FF delivers them: to a function, an asynchronous call; to a queue, a message from the bucket. And a bucket that
+//! is a site answers a browser at `http://<bucket>.site.localhost:<port>` ([`super::s3::site`]).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -28,8 +30,9 @@ use super::http::{Answers, Incoming, PAYLOAD_LIMIT, Reply, Request, Response, pe
 use super::instances::{Called, Instances, Runner};
 use super::key::Key;
 use super::mappings::LocalMapping;
+use super::s3::events::BucketEvent;
 use super::s3::requests::{Style, address_of, signed_service};
-use super::s3::{Buckets, OWN_HOSTS};
+use super::s3::{Buckets, OWN_HOSTS, site};
 use super::schedule_expression::Millis;
 use super::schedules::{self, LocalSchedule};
 use super::sqs::{self, Outgoing, Queues};
@@ -842,10 +845,16 @@ impl<R: Runner> FrontDoor<R> {
         self.url_of(head).is_none() && !self.is_s3(head) && sqs::is_sqs(head)
     }
 
+    /// Whether a request is a site's, at a host under the sites' host.
+    fn is_site(&self, head: &Request) -> bool {
+        site::is_site(head.header("host"))
+    }
+
     /// Whether a request is S3's: signed for S3; or unsigned, at a bucket's host, or naming one of the template's
-    /// buckets by its path, or the service itself. Never a function URL's, nor one of SQS's JSON protocol.
+    /// buckets by its path, or the service itself. Never a function URL's, nor a site's, nor one of SQS's JSON
+    /// protocol.
     fn is_s3(&self, head: &Request) -> bool {
-        if self.url_of(head).is_some() || head.header("x-amz-target").is_some() {
+        if self.url_of(head).is_some() || self.is_site(head) || head.header("x-amz-target").is_some() {
             return false;
         }
         let (path, query) = head.target.split_once('?').unwrap_or((head.target.as_str(), ""));
@@ -856,6 +865,42 @@ impl<R: Runner> FrontDoor<R> {
         address.style == Style::VirtualHosted
             || self.buckets.has(&address.bucket)
             || (head.method == "GET" && path == "/")
+    }
+
+    /// A bucket's events, delivered as FF delivers them: to a function, S3's event as an asynchronous call of what the
+    /// rule's ARN names, its alias, else `$LATEST`; to a queue, a message from the bucket. One that can't go is said and
+    /// dropped, as S3 drops what it can't deliver.
+    pub fn deliver(&self, events: Vec<BucketEvent>) {
+        for event in events {
+            let (arn, body) = (event.destination(), event.body());
+            let dropped = |why: &str| {
+                (self.say)(&format!("An event of bucket {} was not delivered to {arn}: {why}", event.bucket()))
+            };
+            if event.to_queue() {
+                let message = Outgoing {
+                    body: body.to_string(),
+                    attributes: sqs::Attributes::new(),
+                    trace_header: None,
+                    sender_id: format!("arn:aws:s3:::{}", event.bucket()),
+                    delay_seconds: None,
+                };
+                if let Err(why) = self.queues.send_as_ff(arn, message) {
+                    dropped(&why);
+                }
+                continue;
+            }
+            let target = named(arn, None);
+            let size = body.to_string().len();
+            if !self.has(&target) {
+                dropped("it is no function here");
+            } else if !self.runs_as(&target) {
+                dropped(&format!("the function has no {} here", target.qualifier.unwrap_or_default()));
+            } else if size > ASYNC_PAYLOAD_LIMIT {
+                dropped(&format!("the event is {size} bytes, over an asynchronous call's {ASYNC_PAYLOAD_LIMIT}"));
+            } else {
+                self.send(target.name, body, &request_id(), target.qualifier);
+            }
+        }
     }
 
     /// A request in SQS's JSON protocol, answered by the queues, their URLs under the address it reached: this
@@ -911,6 +956,9 @@ impl<R: Runner> Answers for FrontDoor<R> {
                 None => refused,
             };
         }
+        if head.is_some_and(|head| self.is_site(head)) {
+            return self.buckets.site_unreadable(&request_id());
+        }
         if head.is_some_and(|head| self.is_s3(head)) {
             return self.buckets.unreadable(&request_id());
         }
@@ -932,14 +980,20 @@ impl<R: Runner> Answers for FrontDoor<R> {
     }
 
     fn streams(&self, head: &Request) -> bool {
-        self.is_s3(head)
+        self.is_site(head) || self.is_s3(head)
     }
 
     fn answer_streaming(&self, head: &Request, body: &mut Incoming, request_id: &str, source_ip: &str) -> Reply {
+        if self.is_site(head) {
+            return self.buckets.site(head, request_id);
+        }
         if !self.is_s3(head) {
             return Reply::Whole(self.answer(head, request_id, source_ip));
         }
-        self.buckets.answer(head, body, &self.key, request_id, |key_id| self.not_the_local_key(key_id))
+        let (reply, events) =
+            self.buckets.answer(head, body, &self.key, request_id, source_ip, |key_id| self.not_the_local_key(key_id));
+        self.deliver(events);
+        reply
     }
 }
 
@@ -952,6 +1006,9 @@ mod tests {
     use serde::Deserialize;
 
     use super::super::instances::stand::{Stand, function, instances_of};
+    use super::super::s3::LocalBucket;
+    use super::super::s3::events::{Rule, Target};
+    use super::super::s3::site::Website;
     use super::super::sqs::QueueSettings;
     use super::super::{Answer, LocalFunction};
     use super::*;
@@ -980,6 +1037,15 @@ mod tests {
     /// The functions on the stand-in, behind a front door, each with its alias `live` and what `adjust` gives it, an
     /// asynchronous call's second a millisecond; the queues `orders`, `Done` and `Dead`; and the bucket `photos`.
     fn door_with(functions: Vec<LocalFunction>, adjust: impl Fn(&str, &mut Settings)) -> Door {
+        door_with_buckets(functions, adjust, vec![LocalBucket::named("photos")])
+    }
+
+    /// The same, with those buckets.
+    fn door_with_buckets(
+        functions: Vec<LocalFunction>,
+        adjust: impl Fn(&str, &mut Settings),
+        buckets: Vec<LocalBucket>,
+    ) -> Door {
         let said = Arc::new(Mutex::new(Vec::new()));
         let settings = functions
             .iter()
@@ -993,15 +1059,9 @@ mod tests {
         let say_to = Arc::clone(&said);
         let say: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |line| say_to.lock().unwrap().push(line.to_owned()));
         let folder = tempfile::tempdir().unwrap();
-        let buckets = Buckets::open(
-            folder.path(),
-            vec!["photos".into()],
-            REGION,
-            ACCOUNT,
-            Arc::new(|| schedules::now_ms(0)),
-            Arc::clone(&say),
-        )
-        .unwrap();
+        let buckets =
+            Buckets::open(folder.path(), buckets, REGION, ACCOUNT, Arc::new(|| schedules::now_ms(0)), Arc::clone(&say))
+                .unwrap();
         let door = FrontDoor {
             instances: Arc::new(instances),
             region: REGION.into(),
@@ -2024,6 +2084,128 @@ mod tests {
                 "A request signed with AKFFOTHERKEY0000TEST, not the local key AKFFLOCALKEY0000TEST: .ff/local/credentials holds it"
             ]
         );
+    }
+
+    /// `Orders`, its alias `live`; and `photos`, whose created images go to Orders's alias, whose removals go to the
+    /// queue `orders`, and whose other writes go to what isn't here; and `shop`, a site.
+    fn door_with_notifications() -> Door {
+        let rule = |id: &str, target: Target, arn: &str, event: &str, prefix: &str| Rule {
+            id: id.into(),
+            target,
+            arn: arn.into(),
+            events: vec![event.into()],
+            prefix: Some(prefix.into()),
+            suffix: None,
+        };
+        let function = |name: &str| format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:{name}");
+        let photos = LocalBucket {
+            notifications: vec![
+                rule("thumbs", Target::Function, &function("Orders:live"), "s3:ObjectCreated:*", "images/"),
+                rule(
+                    "removals",
+                    Target::Queue,
+                    &format!("arn:aws:sqs:{REGION}:{ACCOUNT}:orders"),
+                    "s3:ObjectRemoved:*",
+                    "",
+                ),
+                rule("gone", Target::Function, &function("Gone"), "s3:ObjectCreated:*", "gone/"),
+                rule("old", Target::Function, &function("Orders:v9"), "s3:ObjectCreated:*", "old/"),
+                rule(
+                    "nowhere",
+                    Target::Queue,
+                    &format!("arn:aws:sqs:{REGION}:{ACCOUNT}:nowhere"),
+                    "s3:ObjectCreated:*",
+                    "q/",
+                ),
+            ],
+            ..LocalBucket::named("photos")
+        };
+        let website = Website { index_document: "index.html".into(), error_document: None };
+        let shop = LocalBucket { website: Some(website), ..LocalBucket::named("shop") };
+        door_with_buckets(vec![function_of("Orders")], |_, _| {}, vec![photos, shop])
+    }
+
+    fn function_of(name: &str) -> LocalFunction {
+        function(name, "app.handler")
+    }
+
+    #[test]
+    fn a_buckets_events_go_to_a_function_as_an_asynchronous_call_and_to_a_queue_as_a_message_from_the_bucket() {
+        let door = door_with_notifications();
+        let put = |key: &str, body: &[u8]| {
+            let length = body.len().to_string();
+            streamed(&door, &head_to("PUT", "photos.localhost:3700", key, &[("Content-Length", &length)]), body).0
+        };
+
+        assert_eq!(put("/images/cat.jpg", b"meow"), 200);
+        assert!(door.until(|door| !door.stand.received.lock().unwrap().is_empty()), "{:?}", door.said());
+        let [record] = events_received(&door)[0]["Records"].as_array().unwrap().clone().try_into().unwrap();
+        assert_eq!(
+            (&record["eventName"], &record["s3"]["configurationId"], &record["s3"]["object"]["key"]),
+            (&json!("ObjectCreated:Put"), &json!("thumbs"), &json!("images%2Fcat.jpg"))
+        );
+        assert_eq!(record["s3"]["object"]["eTag"], json!(crate::md5::hex(b"meow")));
+        assert_eq!(record["requestParameters"]["sourceIPAddress"], json!("127.0.0.1"));
+        assert_eq!(record["responseElements"]["x-amz-request-id"], json!("a-request"));
+
+        let deleted = streamed(&door, &head_to("DELETE", "photos.localhost:3700", "/images/cat.jpg", &[]), b"");
+        assert_eq!(deleted.0, 204);
+        let messages = door.received_from("orders");
+        let body: Value = serde_json::from_str(messages[0]["Body"].as_str().unwrap()).unwrap();
+        assert_eq!(body["Records"][0]["eventName"], json!("ObjectRemoved:Delete"));
+        assert_eq!(messages[0]["Attributes"]["SenderId"], json!("arn:aws:s3:::photos"));
+
+        for key in ["/gone/a.txt", "/old/a.txt", "/q/a.txt"] {
+            assert_eq!(put(key, b"x"), 200);
+        }
+        let dropped: Vec<String> = door.said().into_iter().filter(|line| line.starts_with("An event")).collect();
+        assert_eq!(
+            dropped,
+            [
+                format!(
+                    "An event of bucket photos was not delivered to arn:aws:lambda:{REGION}:{ACCOUNT}:function:Gone: it is no function here"
+                ),
+                format!(
+                    "An event of bucket photos was not delivered to arn:aws:lambda:{REGION}:{ACCOUNT}:function:Orders:v9: the function has no v9 here"
+                ),
+                format!(
+                    "An event of bucket photos was not delivered to arn:aws:sqs:{REGION}:{ACCOUNT}:nowhere: arn:aws:sqs:{REGION}:{ACCOUNT}:nowhere is no queue here"
+                ),
+            ]
+        );
+
+        door.door.deliver(door.door.buckets.test_events());
+        let tested = door.received_from("orders");
+        let test: Value = serde_json::from_str(tested[1]["Body"].as_str().unwrap()).unwrap();
+        assert_eq!((&test["Event"], &test["Bucket"]), (&json!("s3:TestEvent"), &json!("photos")));
+    }
+
+    #[test]
+    fn a_site_is_a_request_at_a_host_under_site_localhost_answered_by_its_bucket_never_as_s3() {
+        let door = door_with_notifications();
+        let page = head_to(
+            "PUT",
+            "shop.localhost:3700",
+            "/index.html",
+            &[("Content-Length", "11"), ("Content-Type", "text/html")],
+        );
+        assert_eq!(streamed(&door, &page, b"<h1>Hi</h1>").0, 200);
+
+        let visit = head_to("GET", "shop.site.localhost:3700", "/", &[]);
+        assert!(door.door.streams(&visit) && !door.door.is_s3(&visit));
+        assert_eq!(streamed(&door, &visit, b""), (200, "<h1>Hi</h1>".to_owned()));
+        let (status, body) = streamed(
+            &door,
+            &head_to("PUT", "shop.site.localhost:3700", "/index.html", &[("Content-Length", "1")]),
+            b"x",
+        );
+        assert_eq!(status, 405, "never S3's PutObject: {body}");
+        let (status, body) = streamed(&door, &head_to("GET", "photos.site.localhost:3700", "/", &[]), b"");
+        assert_eq!(status, 404);
+        assert!(body.contains("<li>Code: NoSuchWebsiteConfiguration</li>"), "{body}");
+        let unreadable = door.door.unreadable(false, Some(&head_to("GET", "shop.site.localhost:3700", "/", &[])));
+        assert_eq!(unreadable.status, 400);
+        assert!(String::from_utf8(unreadable.body).unwrap().contains("<li>Code: BadRequest</li>"));
     }
 
     /// `Cleaner`, with a schedule `Nightly`; and `Reporter`, with one too, and `Weekly`, which has its own input.

@@ -22,6 +22,7 @@ mod progress;
 mod s3;
 mod sam;
 mod sigv4;
+mod site_files;
 mod table;
 mod update;
 

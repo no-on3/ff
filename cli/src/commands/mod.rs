@@ -101,6 +101,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             idle,
             stack_name,
             parameter_overrides,
+            sites,
         }) => {
             let options = local_template::Options {
                 port,
@@ -109,6 +110,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
                 idle: idle.as_deref(),
                 stack_name: stack_name.as_deref(),
                 parameter_overrides: &parameter_overrides,
+                sites: &sites,
             };
             local::start(&function, url, &options, context)
         }

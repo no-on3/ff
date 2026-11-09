@@ -12,9 +12,9 @@ docs/*                                  static
 *.md                                    static
 
 # The backend, a module at a time where its suites' sections are its own; L5 tries every route, so it runs whole.
-BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted,local_queues aws-tools
+BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted,local_queues,local_buckets aws-tools
 BE/src/event-sources/*                  static unit db l4:mappings l5 cli:event_sources,local_queues aws-tools
-BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted,local_buckets aws-tools
+BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted,local_buckets,local_apps aws-tools
 BE/src/object-store/*                   static unit db l4:buckets,buckets_room,notifications,sites l5 cli:buckets,sites
 BE/src/databases/*                      static unit db l4:databases,databases_sampled l5 cli:databases,databases_used
 BE/src/caches/*                         static unit db l4:caches,caches_sampled l5 cli:small_app
@@ -57,6 +57,7 @@ cli/src/s3.rs                           static unit cli:sites,local_buckets
 cli/src/md5.rs                          static unit cli:sites,local_queues,local_buckets
 cli/src/sigv4.rs                        static unit cli:sites,local_template,local_queues,local_buckets
 cli/src/dates.rs                        static unit cli:local_template,local_queues,local_buckets
+cli/src/site_files.rs                   static unit cli:sites,local_buckets,local_apps
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.

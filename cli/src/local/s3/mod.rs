@@ -4,23 +4,28 @@
 //! ways; multipart uploads; presigned URLs; a bucket's region, and the settings FF's buckets don't have, read as S3
 //! answers a bucket without them. A request signed with Signature Version 4, in its header or presigned, is checked
 //! against the local key, and its body as it streams, as FF checks both; an unsigned one is taken, for `curl`. The
-//! buckets are the template's: making one, deleting one, or what FF keeps of one, its tags, notifications, website,
-//! policy and public access block, is refused, saying so. Its cases are `BE/src/storage/s3-examples.json`'s, which the
-//! backend's tests read too.
+//! buckets are the template's: their notifications and websites are read as the template sets them; making one,
+//! deleting one, or changing what FF keeps of one, its tags, notifications, website, policy and public access block,
+//! is refused, saying so, and its tags, policy and public access block aren't read. A write that ended well gives the
+//! events its bucket's notifications send ([`events`]), which the front door delivers; a bucket that is a site answers
+//! a browser at its own host ([`site`]). Its cases are `BE/src/storage/s3-examples.json`'s, which the backend's tests
+//! read too.
 
 pub mod checksums;
 pub mod chunked;
 pub mod defaults;
 pub mod error;
+pub mod events;
 pub mod requests;
 pub mod signature;
+pub mod site;
 pub mod store;
 pub mod xml;
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::ops::Bound;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base64::Engine;
@@ -36,13 +41,15 @@ use self::error::{
     S3Error, error_document, incomplete_body, internal_error, invalid_access_key_id, invalid_argument, invalid_request,
     malformed_xml, no_such_bucket, no_such_key, no_such_upload, not_implemented, not_implemented_because,
 };
+use self::events::{BucketEvent, BucketFacts, Facts, ObjectFacts, Rule, Sequencer, Target, rule_for, rules_xml};
 use self::requests::{Address, KEPT_SETTINGS, Style, address_of, operation_of, parse_query};
 use self::signature::{RequestSignature, UNSIGNED_PAYLOAD, check_signature, read_signature};
+use self::site::{Website, no_such_website_configuration, website_xml};
 use self::store::{Object, Store, Upload, Writing};
 use self::xml::{
     child_text, children, document, key_text, list_buckets_document, location_document, root, text_element,
 };
-use super::http::{Incoming, Reply, Request, Response};
+use super::http::{Incoming, Reply, Request, Response, request_id};
 use super::key::Key;
 use super::schedule_expression::Millis;
 use crate::dates::{http_date, iso_millis, read_http_date};
@@ -75,11 +82,32 @@ const OVERRIDES: [(&str, &str); 6] = [
     ("response-content-encoding", "content-encoding"),
 ];
 
+/// A bucket of the template, as ff local start keeps it: its notification configurations, and its site, when its
+/// WebsiteConfiguration makes it one, a folder of this machine's when `--site` names one.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LocalBucket {
+    pub name: String,
+    pub notifications: Vec<Rule>,
+    pub website: Option<Website>,
+    pub site_folder: Option<PathBuf>,
+}
+
+impl LocalBucket {
+    /// A bucket with neither notifications nor a site.
+    #[cfg(test)]
+    pub fn named(name: &str) -> Self {
+        Self { name: name.to_owned(), ..Self::default() }
+    }
+}
+
+/// A write that ended well, for its bucket's notifications: S3's event's name, without its `s3:`, and the key.
+type Happened = (&'static str, String);
+
 /// The template's buckets, and how they answer.
 pub struct Buckets {
     store: Store,
-    /// The buckets' names, as ListBuckets lists them.
-    names: Vec<String>,
+    /// The buckets, as ListBuckets lists them.
+    buckets: Vec<LocalBucket>,
     region: String,
     account: String,
     /// When ff local start began: each bucket's CreationDate.
@@ -87,6 +115,7 @@ pub struct Buckets {
     clock: Arc<dyn Fn() -> Millis + Send + Sync>,
     /// Says what goes wrong on this machine, which a caller learns as S3's InternalError alone.
     say: Arc<dyn Fn(&str) + Send + Sync>,
+    sequencer: Sequencer,
 }
 
 /// A request, as the buckets read it.
@@ -400,15 +429,17 @@ impl Buckets {
     /// The template's buckets, under `root`, a folder each, their objects read back from what an earlier start kept.
     pub fn open(
         root: &Path,
-        names: Vec<String>,
+        buckets: Vec<LocalBucket>,
         region: &str,
         account: &str,
         clock: Arc<dyn Fn() -> Millis + Send + Sync>,
         say: Arc<dyn Fn(&str) + Send + Sync>,
     ) -> io::Result<Self> {
+        let names: Vec<String> = buckets.iter().map(|bucket| bucket.name.clone()).collect();
         let store = Store::open(root, &names, &*say)?;
         let created = clock();
-        Ok(Self { store, names, region: region.into(), account: account.into(), created, clock, say })
+        let (region, account, sequencer) = (region.into(), account.into(), Sequencer::default());
+        Ok(Self { store, buckets, region, account, created, clock, say, sequencer })
     }
 
     /// No buckets, as a template without one has: nothing on disk.
@@ -424,16 +455,22 @@ impl Buckets {
         self.store.has(bucket)
     }
 
+    fn bucket(&self, name: &str) -> Option<&LocalBucket> {
+        self.buckets.iter().find(|bucket| bucket.name == name)
+    }
+
     /// The answer to a request, its body read from `body` as it streams, signed with `key` or unsigned; a key that
-    /// isn't it given to `other_key`, which says it, as no caller learns which key ff local has.
+    /// isn't it given to `other_key`, which says it, as no caller learns which key ff local has. With it, the events
+    /// its bucket's notifications send of it, which the caller delivers, as they follow the answer.
     pub fn answer(
         &self,
         head: &Request,
         body: &mut Incoming,
         key: &Key,
         request_id: &str,
+        source_ip: &str,
         other_key: impl Fn(&str),
-    ) -> Reply {
+    ) -> (Reply, Vec<BucketEvent>) {
         let (raw_path, raw_query) = head.target.split_once('?').unwrap_or((head.target.as_str(), ""));
         let x = Exchange {
             head,
@@ -442,13 +479,71 @@ impl Buckets {
             query: parse_query(raw_query),
             address: address_of(head.header("host"), raw_path, &OWN_HOSTS),
         };
-        let mut reply =
-            self.served(&x, body, key, &other_key).unwrap_or_else(|error| self.refusal(&x, &error, request_id));
+        let mut happened = Vec::new();
+        let (mut reply, events) = match self.served(&x, body, key, &other_key, &mut happened) {
+            Ok(reply) => (reply, self.events(x.bucket(), happened, &key.id, request_id, source_ip)),
+            Err(error) => (self.refusal(&x, &error, request_id), Vec::new()),
+        };
         let headers = match &mut reply {
             Reply::Whole(response) | Reply::File { response, .. } => &mut response.headers,
         };
         headers.push(("x-amz-request-id".into(), request_id.into()));
-        reply
+        (reply, events)
+    }
+
+    /// The events a bucket's notifications send of what a request did, each by the rule it goes by: a created object's
+    /// with its size and ETag, as the bucket has them now.
+    fn events(
+        &self,
+        bucket: &str,
+        happened: Vec<Happened>,
+        principal_id: &str,
+        request_id: &str,
+        source_ip: &str,
+    ) -> Vec<BucketEvent> {
+        let Some(bucket) = self.bucket(bucket) else { return Vec::new() };
+        let mut events = Vec::new();
+        for (event_name, key) in happened {
+            let Some(rule) = rule_for(&bucket.notifications, event_name, &key) else { continue };
+            let measured = match event_name.starts_with("ObjectCreated:") {
+                true => self.store.read(&bucket.name, |objects| {
+                    objects.get(&key).map(|object| (object.size, object.etag.trim_matches('"').to_owned()))
+                }),
+                false => None,
+            };
+            let (size, e_tag) = measured.flatten().unzip();
+            let now = self.now();
+            let facts = Facts {
+                region: self.region.clone(),
+                event_name: event_name.to_owned(),
+                time: iso_millis(now),
+                principal_id: principal_id.to_owned(),
+                source_ip: source_ip.to_owned(),
+                request_id: request_id.to_owned(),
+                bucket: BucketFacts { name: bucket.name.clone(), account_id: self.account.clone() },
+                object: ObjectFacts { key, size, e_tag },
+                configuration_id: rule.id.clone(),
+                sequencer: self.sequencer.next(now),
+            };
+            let record = events::s3_event_record(&facts);
+            events.push(BucketEvent::Record { bucket: bucket.name.clone(), rule: rule.clone(), record });
+        }
+        events
+    }
+
+    /// S3's test event to each queue a bucket's configuration names, as S3 sends one when the configuration is set:
+    /// here, when ff local start begins.
+    pub fn test_events(&self) -> Vec<BucketEvent> {
+        let time = iso_millis(self.now());
+        let mut events = Vec::new();
+        for bucket in &self.buckets {
+            let id = request_id();
+            for rule in bucket.notifications.iter().filter(|rule| rule.target == Target::Queue) {
+                let body = events::test_event(&bucket.name, &id, &time);
+                events.push(BucketEvent::Test { bucket: bucket.name.clone(), queue_arn: rule.arn.clone(), body });
+            }
+        }
+        events
     }
 
     /// S3's answer to a request it couldn't read as HTTP.
@@ -517,7 +612,15 @@ impl Buckets {
         Ok(Some((signature, chain)))
     }
 
-    fn served(&self, x: &Exchange, body: &mut Incoming, key: &Key, other_key: &dyn Fn(&str)) -> Result<Reply, S3Error> {
+    /// The answer to a request; each write that ended well put in `happened`, for the bucket's notifications.
+    fn served(
+        &self,
+        x: &Exchange,
+        body: &mut Incoming,
+        key: &Key,
+        other_key: &dyn Fn(&str),
+        happened: &mut Vec<Happened>,
+    ) -> Result<Reply, S3Error> {
         let signed = self.signed(x, key, other_key)?;
         let operation =
             operation_of(&x.head.method, &x.address, &x.query, x.head.header("x-amz-copy-source").is_some());
@@ -527,14 +630,23 @@ impl Buckets {
             "ListBuckets" => {
                 let created = iso_millis(self.created);
                 let buckets: Vec<(String, String)> =
-                    self.names.iter().map(|name| (name.clone(), created.clone())).collect();
+                    self.buckets.iter().map(|bucket| (bucket.name.clone(), created.clone())).collect();
                 return Ok(self.document(list_buckets_document(&self.account, &buckets, &self.region)));
             }
             "CreateBucket" => return Err(the_templates(name)),
             _ => {}
         }
-        if !self.store.has(x.bucket()) {
+        let Some(bucket) = self.bucket(x.bucket()).filter(|_| self.store.has(x.bucket())) else {
             return Err(no_such_bucket());
+        };
+        // What the template sets of a bucket is read as FF answers it.
+        match name {
+            "GetBucketNotificationConfiguration" => return Ok(self.document(rules_xml(&bucket.notifications))),
+            "GetBucketWebsite" => {
+                let website = bucket.website.as_ref().ok_or_else(no_such_website_configuration)?;
+                return Ok(self.document(website_xml(website)));
+            }
+            _ => {}
         }
         let kept =
             KEPT_SETTINGS.iter().any(|(_, get, put, delete)| *get == name || *put == name || *delete == Some(name));
@@ -554,21 +666,25 @@ impl Buckets {
             "PUT" | "POST" => self.checks(x, signed, name)?,
             _ => Check::Unchecked,
         };
+        let mut created = |event_name: &'static str| happened.push((event_name, x.key()));
         match name {
             "ListObjects" => self.list(x, false),
             "ListObjectsV2" => self.list(x, true),
             "GetObject" | "HeadObject" => self.get(x),
-            "PutObject" => self.put(x, body, check),
-            "CopyObject" => self.copy(x, body, check),
+            "PutObject" => self.put(x, body, check).inspect(|_| created("ObjectCreated:Put")),
+            "CopyObject" => self.copy(x, body, check).inspect(|_| created("ObjectCreated:Copy")),
             "DeleteObject" => {
                 self.store.remove(x.bucket(), &x.key());
+                happened.push(("ObjectRemoved:Delete", x.key()));
                 Ok(empty(204, Vec::new()))
             }
-            "DeleteObjects" => self.delete_objects(x, body, check),
+            "DeleteObjects" => self.delete_objects(x, body, check, happened),
             "CreateMultipartUpload" => self.create_upload(x, body, check),
             "UploadPart" => self.upload_part(x, body, check),
             "UploadPartCopy" => self.upload_part_copy(x, body, check),
-            "CompleteMultipartUpload" => self.complete_upload(x, body, check),
+            "CompleteMultipartUpload" => {
+                self.complete_upload(x, body, check).inspect(|_| created("ObjectCreated:CompleteMultipartUpload"))
+            }
             "AbortMultipartUpload" => {
                 let (id, _) = self.upload_of(x)?;
                 if self.store.end_upload(&id).is_some() {
@@ -754,23 +870,40 @@ impl Buckets {
         Ok(empty(200, headers))
     }
 
-    /// GetObject and HeadObject: the object's bytes, whole, by a range or by a part, from its file as it is read; the
-    /// headers it was written with, those its query overrides, and its own; its conditions first. No checksum, as FF's
-    /// front door answers none.
+    /// GetObject and HeadObject: the object read, the headers its query overrides in place of those it was written
+    /// with. No checksum, as FF's front door answers none.
     fn get(&self, x: &Exchange) -> Result<Reply, S3Error> {
-        let key = x.key();
-        let opened = self
-            .store
-            .open_object(x.bucket(), &key)
-            .map_err(|error| self.failed(&format!("read {}/{key}", x.bucket()), &error))?;
-        let Some((object, mut file)) = opened else { return Err(no_such_key()) };
+        let what = format!("read {}/{}", x.bucket(), x.key());
+        let opened = self.store.open_object(x.bucket(), &x.key()).map_err(|error| self.failed(&what, &error))?;
+        let Some(opened) = opened else { return Err(no_such_key()) };
+        let mut reply = self.read_object(x.head, opened, x.parameter("partNumber"), &what)?;
+        if let Reply::File { response, .. } = &mut reply {
+            for (parameter, header) in OVERRIDES {
+                if let Some(value) = x.parameter(parameter) {
+                    response.headers.retain(|(name, _)| name != header);
+                    response.headers.push((header.into(), value.into()));
+                }
+            }
+        }
+        Ok(reply)
+    }
+
+    /// An object's bytes as a read asks for them, from its file as it is read: whole, by a range or by a part; the
+    /// headers it was written with, and its own; its conditions first. GetObject's, and a site's visit's.
+    fn read_object(
+        &self,
+        head: &Request,
+        (object, mut file): (Object, File),
+        part_number: Option<&str>,
+        what: &str,
+    ) -> Result<Reply, S3Error> {
         let mut headers = object.headers.clone();
-        if conditions(x.head, "", &object)? {
+        if conditions(head, "", &object)? {
             let own = [("etag", object.etag.clone()), ("last-modified", http_date(object.modified))];
             return Ok(empty(304, own.into_iter().map(|(name, value)| (name.into(), value)).collect()));
         }
-        let range = x.head.header("range");
-        let (status, start, length, parts_count) = match x.parameter("partNumber") {
+        let range = head.header("range");
+        let (status, start, length, parts_count) = match part_number {
             Some(_) if range.is_some() => {
                 return Err(invalid_request("Cannot specify both Range header and partNumber query parameter"));
             }
@@ -792,12 +925,6 @@ impl Buckets {
                 }
             },
         };
-        for (parameter, header) in OVERRIDES {
-            if let Some(value) = x.parameter(parameter) {
-                headers.retain(|(name, _)| name != header);
-                headers.push((header.into(), value.into()));
-            }
-        }
         headers.push(("etag".into(), object.etag.clone()));
         headers.push(("last-modified".into(), http_date(object.modified)));
         headers.push(("accept-ranges".into(), "bytes".into()));
@@ -807,11 +934,10 @@ impl Buckets {
         if let Some(count) = parts_count {
             headers.push(("x-amz-mp-parts-count".into(), count.to_string()));
         }
-        let file = match x.head_only() {
+        let file = match head.method == "HEAD" {
             true => None,
             false => {
-                file.seek(SeekFrom::Start(start))
-                    .map_err(|error| self.failed(&format!("read {}/{key}", x.bucket()), &error))?;
+                file.seek(SeekFrom::Start(start)).map_err(|error| self.failed(what, &error))?;
                 Some(file)
             }
         };
@@ -878,9 +1004,15 @@ impl Buckets {
         Ok(self.document(document("CopyObjectResult", &result)))
     }
 
-    /// DeleteObjects: each key of the document deleted, as S3 deletes one that isn't there too; each named in the
-    /// answer, unless it is quiet.
-    fn delete_objects(&self, x: &Exchange, body: &mut Incoming, check: Check) -> Result<Reply, S3Error> {
+    /// DeleteObjects: the document read whole, then each of its keys deleted, as S3 deletes one that isn't there too,
+    /// and put in `happened`; each named in the answer, unless it is quiet.
+    fn delete_objects(
+        &self,
+        x: &Exchange,
+        body: &mut Incoming,
+        check: Check,
+        happened: &mut Vec<Happened>,
+    ) -> Result<Reply, S3Error> {
         let text = self.read_document(x, body, check)?;
         let delete = root(&text, "Delete")?;
         let quiet = child_text(delete, "Quiet").is_some_and(|quiet| quiet.eq_ignore_ascii_case("true"));
@@ -888,10 +1020,16 @@ impl Buckets {
         if objects.is_empty() || objects.len() > MAX_LISTED {
             return Err(malformed_xml());
         }
+        let named = objects
+            .into_iter()
+            .map(|object| {
+                let versioned = child_text(object, "VersionId").is_some_and(|version| version != "null");
+                key_text(object).map(|key| (key, versioned)).ok_or_else(malformed_xml)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut result = String::new();
-        for object in objects {
-            let key = key_text(object).ok_or_else(malformed_xml)?;
-            if child_text(object, "VersionId").is_some_and(|version| version != "null") {
+        for (key, versioned) in named {
+            if versioned {
                 result.push_str(&format!(
                     "<Error>{}<Code>NoSuchVersion</Code><Message>The specified version does not exist.</Message></Error>",
                     text_element("Key", &key)
@@ -902,6 +1040,7 @@ impl Buckets {
             if !quiet {
                 result.push_str(&format!("<Deleted>{}</Deleted>", text_element("Key", &key)));
             }
+            happened.push(("ObjectRemoved:Delete", key));
         }
         Ok(self.document(document("DeleteResult", &result)))
     }
@@ -1302,7 +1441,7 @@ mod tests {
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::time::{Duration, UNIX_EPOCH};
 
-    use serde_json::Value;
+    use serde_json::{Value, json};
 
     use super::xml::escape_xml;
     use super::*;
@@ -1327,29 +1466,35 @@ mod tests {
         Key { id: "AKFFLOCALKEY0000TEST".into(), secret: "a-secret".into() }
     }
 
-    /// The table's buckets, `photos` and `exports`, their clock at `AT` until a test moves it.
+    /// The table's buckets, `photos` and `exports`, their clock at `AT` until a test moves it; the events their
+    /// notifications sent.
     struct Fixture {
         buckets: Buckets,
         now: Arc<AtomicI64>,
         said: Arc<Mutex<Vec<String>>>,
+        events: Mutex<Vec<BucketEvent>>,
         _folder: tempfile::TempDir,
     }
 
     fn fixture() -> Fixture {
+        fixture_of(vec![LocalBucket::named("photos"), LocalBucket::named("exports")])
+    }
+
+    fn fixture_of(buckets: Vec<LocalBucket>) -> Fixture {
         let folder = tempfile::tempdir().unwrap();
         let now = Arc::new(AtomicI64::new(AT));
         let said = Arc::new(Mutex::new(Vec::new()));
         let (read_now, say_to) = (Arc::clone(&now), Arc::clone(&said));
         let buckets = Buckets::open(
             folder.path(),
-            vec!["photos".into(), "exports".into()],
+            buckets,
             REGION,
             ACCOUNT,
             Arc::new(move || read_now.load(Ordering::SeqCst)),
             Arc::new(move |line: &str| say_to.lock().unwrap().push(line.to_owned())),
         )
         .unwrap();
-        Fixture { buckets, now, said, _folder: folder }
+        Fixture { buckets, now, said, events: Mutex::new(Vec::new()), _folder: folder }
     }
 
     /// An answer as the client reads it.
@@ -1469,12 +1614,13 @@ mod tests {
         /// The answer to a request, its body sent as `body`.
         fn exchange(&self, head: &Request, body: &[u8]) -> Sent {
             let (mut reader, mut continued) = (body, Vec::new());
-            let reply = {
+            let (reply, events) = {
                 let mut incoming = Incoming::of(head, &mut reader, &mut continued).unwrap();
-                self.buckets.answer(head, &mut incoming, &key(), "the-request", |key_id| {
+                self.buckets.answer(head, &mut incoming, &key(), "the-request", "203.0.113.4", |key_id| {
                     self.said.lock().unwrap().push(format!("signed with {key_id}"))
                 })
             };
+            self.events.lock().unwrap().extend(events);
             let (response, body) = match reply {
                 Reply::Whole(response) => {
                     let body = response.body.clone();
@@ -1648,6 +1794,153 @@ mod tests {
         assert_eq!(refused("DELETE", "/photos?policy"), the_templates("DeleteBucketPolicy"));
         assert_eq!(refused("GET", "/nowhere?tagging").1, "NoSuchBucket", "a bucket that isn't the template's first");
         assert_eq!(refused("GET", "/photos/a.jpg?tagging").1, "NotImplemented");
+    }
+
+    /// `photos`, whose created images go to the function `Thumbs` and whose removals to the queue `uploads`; and
+    /// `exports`, a site.
+    fn notified() -> Fixture {
+        let rule = |id: &str, target: Target, arn: &str, event: &str, prefix: Option<&str>| Rule {
+            id: id.into(),
+            target,
+            arn: arn.into(),
+            events: vec![event.into()],
+            prefix: prefix.map(str::to_owned),
+            suffix: None,
+        };
+        let photos = LocalBucket {
+            notifications: vec![
+                rule(
+                    "thumbs",
+                    Target::Function,
+                    "arn:aws:lambda:tn-tunis-1:000000000000:function:Thumbs",
+                    "s3:ObjectCreated:*",
+                    Some("images/"),
+                ),
+                rule("gone", Target::Queue, "arn:aws:sqs:tn-tunis-1:000000000000:uploads", "s3:ObjectRemoved:*", None),
+            ],
+            ..LocalBucket::named("photos")
+        };
+        let website = Website { index_document: "index.html".into(), error_document: Some("<404>.html".into()) };
+        fixture_of(vec![photos, LocalBucket { website: Some(website), ..LocalBucket::named("exports") }])
+    }
+
+    /// Each event the fixture's buckets gave: its rule, its name and its key, as S3 writes it.
+    fn events_of(fixture: &Fixture) -> Vec<(String, String, String)> {
+        let events = std::mem::take(&mut *fixture.events.lock().unwrap());
+        events
+            .iter()
+            .map(|event| {
+                let BucketEvent::Record { rule, record, .. } = event else { panic!("{event:?}") };
+                let text =
+                    |pointer: &str| record.pointer(pointer).and_then(Value::as_str).unwrap_or_default().to_owned();
+                (rule.id.clone(), text("/eventName"), text("/s3/object/key"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_write_that_ended_well_gives_the_events_its_buckets_notifications_send() {
+        let fixture = notified();
+        let event = |rule: &str, name: &str, key: &str| (rule.to_owned(), name.to_owned(), key.to_owned());
+
+        fixture.put("/photos/images/red%20cat.jpg", b"meow");
+        let events = std::mem::take(&mut *fixture.events.lock().unwrap());
+        let [BucketEvent::Record { bucket, rule, record }] = events.as_slice() else { panic!("{events:?}") };
+        let facts = Facts {
+            region: REGION.into(),
+            event_name: "ObjectCreated:Put".into(),
+            time: iso_millis(AT),
+            principal_id: key().id,
+            source_ip: "203.0.113.4".into(),
+            request_id: "the-request".into(),
+            bucket: BucketFacts { name: "photos".into(), account_id: ACCOUNT.into() },
+            object: ObjectFacts {
+                key: "images/red cat.jpg".into(),
+                size: Some(4),
+                e_tag: Some(crate::md5::hex(b"meow")),
+            },
+            configuration_id: "thumbs".into(),
+            sequencer: format!("{:018X}", AT as u64 * 65_536),
+        };
+        assert_eq!((bucket.as_str(), rule.id.as_str(), record), ("photos", "thumbs", &events::s3_event_record(&facts)));
+
+        fixture.put("/photos/docs/a.txt", b"no rule names it");
+        fixture.send(asked("PUT", "/photos/images/copy.jpg").with("x-amz-copy-source", "/photos/images/red%20cat.jpg"));
+        let created = fixture.send(asked("POST", "/photos/images/big.jpg?uploads"));
+        let id = element(&created.text(), "UploadId").unwrap();
+        let etag = fixture
+            .put(&format!("/photos/images/big.jpg?partNumber=1&uploadId={id}"), b"tiny")
+            .header("etag")
+            .unwrap()
+            .to_owned();
+        let parts = format!(
+            "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{}</ETag></Part></CompleteMultipartUpload>",
+            escape_xml(&etag)
+        );
+        assert_eq!(
+            fixture.send(asked("POST", &format!("/photos/images/big.jpg?uploadId={id}")).body(parts)).status,
+            200
+        );
+        assert_eq!(fixture.send(asked("DELETE", "/photos/docs/a.txt")).status, 204);
+        let batch = "<Delete><Quiet>true</Quiet><Object><Key>images/copy.jpg</Key></Object><Object><Key>never there</Key></Object></Delete>";
+        let md5 = STANDARD.encode(crate::md5::digest(batch.as_bytes()));
+        assert_eq!(fixture.send(asked("POST", "/photos?delete").with("Content-MD5", &md5).body(batch)).status, 200);
+        assert_eq!(
+            events_of(&fixture),
+            [
+                event("thumbs", "ObjectCreated:Copy", "images%2Fcopy.jpg"),
+                event("thumbs", "ObjectCreated:CompleteMultipartUpload", "images%2Fbig.jpg"),
+                event("gone", "ObjectRemoved:Delete", "docs%2Fa.txt"),
+                event("gone", "ObjectRemoved:Delete", "images%2Fcopy.jpg"),
+                event("gone", "ObjectRemoved:Delete", "never+there"),
+            ],
+            "a quiet batch's deletes too, and one of a key that wasn't there, as S3 sends them"
+        );
+
+        let refused = fixture
+            .send(asked("PUT", "/photos/images/bad.jpg").with("Content-MD5", "AAAAAAAAAAAAAAAAAAAAAA==").body("x"));
+        assert_eq!(refused.refused().1, "BadDigest");
+        let malformed = "<Delete><Object><Key>images/big.jpg</Key></Object><Object></Object></Delete>";
+        let md5 = STANDARD.encode(crate::md5::digest(malformed.as_bytes()));
+        assert_eq!(
+            fixture.send(asked("POST", "/photos?delete").with("Content-MD5", &md5).body(malformed)).refused().1,
+            "MalformedXML"
+        );
+        assert_eq!(fixture.get("/photos/images/big.jpg").status, 200, "a batch read whole before any key is deleted");
+        assert_eq!(events_of(&fixture), [], "a write refused sends nothing");
+    }
+
+    #[test]
+    fn a_buckets_notifications_and_website_are_read_as_the_template_sets_them_and_a_queue_named_gets_s3s_test_event() {
+        let fixture = notified();
+
+        let notifications = fixture.get("/photos?notification");
+        assert_eq!(notifications.text(), rules_xml(&fixture.buckets.buckets[0].notifications));
+        assert!(notifications.text().contains("<QueueConfiguration><Id>gone</Id>"), "{}", notifications.text());
+        let none = fixture.get("/exports?notification").text();
+        assert!(none.ends_with("<NotificationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"></NotificationConfiguration>"), "{none}");
+        assert!(
+            fixture
+                .get("/exports?website")
+                .text()
+                .contains("<ErrorDocument><Key>&#60;404&#62;.html</Key></ErrorDocument>")
+        );
+        assert_eq!(
+            fixture.get("/photos?website").refused(),
+            (
+                404,
+                "NoSuchWebsiteConfiguration".into(),
+                "The specified bucket does not have a website configuration".into()
+            )
+        );
+
+        let tests = fixture.buckets.test_events();
+        let [BucketEvent::Test { bucket, queue_arn, body }] = tests.as_slice() else { panic!("{tests:?}") };
+        assert_eq!((bucket.as_str(), queue_arn.as_str()), ("photos", "arn:aws:sqs:tn-tunis-1:000000000000:uploads"));
+        assert_eq!(
+            (&body["Event"], &body["Time"], &body["Bucket"]),
+            (&json!("s3:TestEvent"), &json!(iso_millis(AT)), &json!("photos"))
+        );
     }
 
     #[test]

@@ -313,7 +313,7 @@ fn write_head(stream: &mut impl Write, response: &Response, length: u64, request
 }
 
 /// Writes an answer, as `write_response` writes a response; a file's bytes as they are read.
-fn write_reply(stream: &mut impl Write, reply: Reply, request_id: &str, head_only: bool) -> io::Result<()> {
+pub(crate) fn write_reply(stream: &mut impl Write, reply: Reply, request_id: &str, head_only: bool) -> io::Result<()> {
     match reply {
         Reply::Whole(response) => write_response(stream, &response, request_id, head_only),
         Reply::File { response, file, length } => {

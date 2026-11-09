@@ -175,6 +175,7 @@ pub fn start(args: &LocalArgs, url: bool, options: &local_template::Options, con
         ("--idle", options.idle.is_some()),
         ("--stack-name", options.stack_name.is_some()),
         ("--parameter-overrides", !options.parameter_overrides.is_empty()),
+        ("--site", !options.sites.is_empty()),
     ]
     .into_iter()
     .filter_map(|(flag, given)| given.then_some(flag))

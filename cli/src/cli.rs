@@ -746,6 +746,11 @@ pub enum LocalCommand {
         /// With a template, its parameters' values, as `sam deploy` takes them, in place of samconfig.toml's
         #[arg(long, num_args = 1.., value_name = "KEY=VALUE")]
         parameter_overrides: Vec<String>,
+
+        /// With a template, a bucket's site answering a folder's files, as `ff sites deploy` would upload them,
+        /// without a copy; once for each site
+        #[arg(long = "site", value_name = "BUCKET=FOLDER")]
+        sites: Vec<String>,
     },
 
     /// Run a schedule of the template's app that ff local start runs, now, as it would run on time: its function

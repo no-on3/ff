@@ -2081,8 +2081,8 @@ check "ff local reset removes what ff local keeps, the logs and the key" "0 remo
 section_def local_template section_local_template backend budget=45
 
 section_local_apps() {
-section "ff local start on the applications a developer has: ff init --template sam's, and the small app, its libraries installed"
-local hello="$work/cli-local-hello" shop="$work/cli-local-shop" port starter origin=http://localhost:5173
+section "ff local start on the applications a developer has: ff init --template sam's, and the small app, its libraries installed, its page served from its folder"
+local hello="$work/cli-local-hello" shop="$work/cli-local-shop" port starter origin
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
 # started <out> <err> <args...>: ff local start in the background, its pid in $starter, until it says how to stop it.
 started() {
@@ -2123,17 +2123,25 @@ git -C "$hello" init -q
 check "  ... what ff local keeps and the secrets file stay out of git" ".gitignore README.md events/ hello-world/ samconfig.toml template.yaml tests/" \
   "$(git -C "$hello" status --porcelain --untracked-files=normal | sed 's/^?? //' | LC_ALL=C sort | paste -sd' ')"
 
-# The small app as a developer runs it here: its libraries installed, as sam build installs them for sam local, and its
-# page's origin a development server's. Its queue is ff local's next step: what goes to it is printed.
+# The small app as a developer runs it here: its libraries installed, as sam build installs them for sam local; its
+# page served from site/ itself, at its site's address, which the API's CORS lets in, config.json beside it naming the
+# API's address here, as a deploy writes it there.
 rm -rf "$shop" && cp -r "$FF_REPO_ROOT/examples/orders-app" "$shop"
 (cd "$shop" && npm ci --no-audit --no-fund --omit=dev >"$work/npm.out" 2>&1) || fail "npm ci in the small app: $(tail -5 "$work/npm.out")"
 port="$(free_port)"
-started "$work/shop.out" "$work/shop.err" "$shop/template.yaml" \
+origin="http://local-site.site.localhost:$port"
+printf '{"api": "http://shop-api.fn.localhost:%s"}\n' "$port" >"$shop/site/config.json"
+started "$work/shop.out" "$work/shop.err" "$shop/template.yaml" --site "local-site=$shop/site" \
   --parameter-overrides ReceiptsBucketName=local-receipts SiteBucketName=local-site "SiteOrigin=$origin"
-check "the small app starts, its three functions named as the stack names them, its URL and its schedule listed" "shop-api,shop-nightly,shop-receipts true true" \
+check "the small app starts, its three functions named as the stack names them, its URL, its schedule and its site listed" "shop-api,shop-nightly,shop-receipts true true true" \
   "$(sed -n 's/^  \(shop-[a-z]*\) .*/\1/p' "$work/shop.out" | LC_ALL=C sort | paste -sd,) \
 $(grep -E "^  shop-api +nodejs +128 MB, 5 s  http://shop-api.fn.localhost:$port/$" "$work/shop.out" >/dev/null && echo true || echo false) \
-$(grep -E '^  shop-nightly/EveryNight +cron\(0 2 \* \* \? \*\)  next 2026-11-11T02:00:00Z$' "$work/shop.out" >/dev/null && echo true || echo false)"
+$(grep -E '^  shop-nightly/EveryNight +cron\(0 2 \* \* \? \*\)  next 2026-11-11T02:00:00Z$' "$work/shop.out" >/dev/null && echo true || echo false) \
+$(grep -F "  local-site  $origin/, $(cd "$shop/site" && pwd -P)'s files" "$work/shop.out" >/dev/null && echo true || echo false)"
+check "  ... its page at its site's address, from site/, its config.json naming the API here, its error page for a path it hasn't" \
+  "200 text/html; charset=utf-8 <title>Orders</title> http://shop-api.fn.localhost:$port 404 text/html; charset=utf-8" \
+  "$(at "$origin/" | sed -n '1s/ .*//p') $(sed -n 's/^content-type: //Ip' "$work/at.head" | tr -d '\r') $(grep -o '<title>Orders</title>' "$work/at.body") \
+$(at "$origin/config.json" >/dev/null; jq -r .api "$work/at.body") $(at "$origin/no/such/page" | sed -n '1s/ .*//p') $(sed -n 's/^content-type: //Ip' "$work/at.head" | tr -d '\r')"
 orders_cors_check "http://shop-api.fn.localhost:$port" "$origin"
 check "  ... and its handler, loaded with its libraries, refuses a wrong order before it reaches the database" \
   "400 An order is {\"item\": \"<what>\", \"quantity\": <a whole number above 0>}, and \"email\": \"<an address>\" for its receipt $origin" \
@@ -2371,9 +2379,9 @@ check "Ctrl-C removes their containers" 0 "$(leftover)"
 section_def local_queues section_local_queues backend budget=45
 
 section_local_buckets() {
-section "ff local start's buckets: S3 at the front door, the AWS CLI's cases of L4, objects as files kept from a start to the next, a function writing to its bucket"
-local app="$work/buckets" port starter key_id described kept_file
-local photos_line="^  photos +.*/\\.ff/local/buckets/photos$"
+section "ff local start's buckets: S3 at the front door, the AWS CLI's cases of L4, objects as files kept from a start to the next, a function writing to its bucket, their events to a function and a queue, a site from its objects or a folder"
+local app="$work/buckets" port starter key_id described kept_file queue_url pages
+local photos_line="^  photos +.*/\\.ff/local/buckets/photos, its events to Uploads, Thumbs$"
 leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
 # s3_cli <args...>: the AWS CLI with the local key's file alone, the front door its S3 endpoint.
 s3_cli() {
@@ -2382,9 +2390,16 @@ s3_cli() {
 }
 # s3_refused <args...>: an AWS CLI command's error, by the code it names.
 s3_refused() { s3_cli "$@" >/dev/null 2>"$work/s3.err" && echo accepted || grep -m1 -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/s3.err"; }
-# started: ff local start in the background, its listing waited for.
+# page <path> [curl args...]: a visit to the site pages, its status and its answer; `| sed -n '1s/ .*//p'` its status alone.
+page() {
+  local path="$1"
+  shift
+  curl -s -o "$work/page.body" -w '%{http_code}' "$@" "http://pages.site.localhost:$port$path"
+  echo " $(cat "$work/page.body")"
+}
+# started [args...]: ff local start in the background, its listing waited for.
 started() {
-  "$ff_bin" local start "$app/template.yaml" --port "$port" >"$work/buckets.out" 2>"$work/buckets.err" &
+  "$ff_bin" local start "$app/template.yaml" --port "$port" "$@" >"$work/buckets.out" 2>"$work/buckets.err" &
   starter=$!
   for _ in $(seq 1 60); do
     grep -F "Ctrl-C stops them" "$work/buckets.out" >/dev/null 2>&1 && break
@@ -2403,6 +2418,19 @@ Transform: AWS::Serverless-2016-10-31
 Resources:
   Photos:
     Type: AWS::S3::Bucket
+    Properties:
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectRemoved:*
+            Queue: !GetAtt Uploads.Arn
+  Uploads:
+    Type: AWS::SQS::Queue
+  Pages:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: 404.html
   Writer:
     Type: AWS::Serverless::Function
     Properties:
@@ -2413,22 +2441,56 @@ Resources:
       Environment:
         Variables:
           BUCKET: !Ref Photos
+  Thumbs:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: writer/
+      Runtime: python3.13
+      Handler: app.seen
+      Timeout: 10
+      Environment:
+        Variables:
+          BUCKET: !Ref Photos
+      Events:
+        Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref Photos
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: images/
 YAML
 # A function that writes to its bucket as an SDK would, with no setting: at the bucket's own host under the endpoint
-# FF gives it, its request signed by hand, as the runtime images have no SDK.
+# FF gives it, its request signed by hand, as the runtime images have no SDK; and one that keeps the event an image's
+# upload sent it, in the bucket, under a prefix its notification doesn't name.
 cp "$FF_REPO_ROOT/hack/lib/local-functions/signed.py" "$app/writer/"
 cat >"$app/writer/app.py" <<'PY'
+import json
 import os
 
 from signed import send
 
 
-def handler(event, context):
+def put(key, body, content_type):
     scheme, authority = os.environ["AWS_ENDPOINT_URL_S3"].split("://")
-    url = f"{scheme}://{os.environ['BUCKET']}.{authority}/from-a-function.txt"
-    with send("s3", "PUT", url, event["body"].encode(), {"content-type": "text/plain"}) as answer:
+    url = f"{scheme}://{os.environ['BUCKET']}.{authority}/{key}"
+    return send("s3", "PUT", url, body, {"content-type": content_type})
+
+
+def handler(event, context):
+    with put("from-a-function.txt", event["body"].encode(), "text/plain") as answer:
         return {"status": answer.status, "etag": answer.headers["ETag"]}
+
+
+def seen(event, context):
+    with put("seen/event.json", json.dumps(event).encode(), "application/json") as answer:
+        return answer.status
 PY
+mkdir -p "$app/pages-folder"
+printf '<h1>From the folder</h1>' >"$app/pages-folder/index.html"
 
 port="$(free_port)"
 started
@@ -2436,8 +2498,14 @@ key_id="$(sed -n 's/^aws_access_key_id = //p' "$app/.ff/local/credentials")"
 check "the start lists the template's bucket and the folder its objects are files in" "true true" \
   "$(grep -F "Its buckets, S3's at http://127.0.0.1:$port, each object a file in its bucket's folder, kept from a start to the next:" "$work/buckets.out" >/dev/null && echo true || echo false) \
 $(grep -E "$photos_line" "$work/buckets.out" >/dev/null && echo true || echo false)"
-check "the AWS CLI lists it and finds it, with the local key" "photos accepted" \
+check "the AWS CLI lists them and finds one, with the local key" "photos pages accepted" \
   "$(s3_cli s3 ls | awk '{print $3}' | paste -sd' ') $(s3_refused s3api head-bucket --bucket photos)"
+check "aws: s3api reads a bucket's notifications and website as the template sets them, and refuses a website it hasn't" \
+  "PhotosQueue1 s3:ObjectRemoved:* ThumbsUpload arn:aws:lambda:tn-tunis-1:000000000000:function:Thumbs images/ index.html 404.html An error occurred (NoSuchWebsiteConfiguration)" \
+  "$(s3_cli s3api get-bucket-notification-configuration --bucket photos --output json \
+    | jq -r '[.QueueConfigurations[0].Id, .QueueConfigurations[0].Events[0], .LambdaFunctionConfigurations[0].Id, .LambdaFunctionConfigurations[0].LambdaFunctionArn, .LambdaFunctionConfigurations[0].Filter.Key.FilterRules[0].Value] | join(" ")') \
+$(s3_cli s3api get-bucket-website --bucket pages --output json | jq -r '"\(.IndexDocument.Suffix) \(.ErrorDocument.Key)"') \
+$(s3_refused s3api get-bucket-website --bucket photos)"
 
 head -c $((100 * 1024 * 1024)) /dev/urandom >"$work/big.bin"
 s3_cli s3 cp "$work/big.bin" s3://photos/cli/big.bin --only-show-errors
@@ -2470,6 +2538,22 @@ check "aws: an object copied, then the folder's two deleted in one request" "<h1
   "$(s3_cli s3 cp s3://photos/copied/index.html - 2>/dev/null) \
 $(s3_cli s3api delete-objects --bucket photos --delete '{"Objects": [{"Key": "site/index.html"}, {"Key": "site/css/main.css"}]}' | jq '.Deleted | length') \
 $(s3_cli s3 ls s3://photos/site/ --recursive | wc -l | tr -d ' ')"
+queue_url="http://127.0.0.1:$port/000000000000/Uploads"
+AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$app/.ff/local/credentials" AWS_PROFILE=default AWS_REGION=tn-tunis-1 \
+  AWS_ENDPOINT_URL_SQS="http://127.0.0.1:$port" "${aws_cli[@]}" sqs receive-message --queue-url "$queue_url" \
+  --max-number-of-messages 10 --attribute-names SenderId --output json >"$work/uploads.json"
+check "a removal's event goes to the queue the bucket's notification names, S3's record from the bucket, after S3's test event at the start" \
+  "ObjectRemoved:Delete site%2Fcss%2Fmain.css, ObjectRemoved:Delete site%2Findex.html, s3:TestEvent arn:aws:s3:::photos" \
+  "$(jq -r '[.Messages[].Body | fromjson | .Event // (.Records[0].eventName + " " + .Records[0].s3.object.key)] | sort | join(", ")' "$work/uploads.json") \
+$(jq -r '[.Messages[].Attributes.SenderId] | unique | join(" ")' "$work/uploads.json")"
+printf 'meow!' | s3_cli s3 cp - "s3://photos/images/red cat.jpg" --only-show-errors
+for _ in $(seq 1 60); do
+  s3_cli s3 cp s3://photos/seen/event.json "$work/seen.json" --only-show-errors 2>/dev/null && break
+  sleep 0.5
+done
+check "an image's upload calls the function its notification names, with S3's record, its key form-encoded" \
+  "ObjectCreated:Put images%2Fred+cat.jpg 5 ThumbsUpload photos" \
+  "$(jq -r '.Records[0] | "\(.eventName) \(.s3.object.key) \(.s3.object.size) \(.s3.configurationId) \(.s3.bucket.name)"' "$work/seen.json" 2>/dev/null)"
 check "aws: a wrong secret, SignatureDoesNotMatch" "An error occurred (SignatureDoesNotMatch)" \
   "$(AWS_ACCESS_KEY_ID="$key_id" AWS_SECRET_ACCESS_KEY=wrong-secret s3_refused s3 ls s3://photos)"
 AWS_ACCESS_KEY_ID=AKFFNOTTHELOCALKEY00 AWS_SECRET_ACCESS_KEY=not-the-secret AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
@@ -2488,13 +2572,26 @@ curl -s -o "$work/writer.json" -X POST "http://127.0.0.1:$port/2015-03-31/functi
 check "a function writes to its bucket with no setting, at the bucket's host under the endpoint it is given, with its key" \
   "200 from a function" \
   "$(jq -r .status "$work/writer.json") $(s3_cli s3 cp s3://photos/from-a-function.txt - 2>/dev/null)"
+printf '<h1>Pages</h1>' | s3_cli s3 cp - s3://pages/index.html --content-type text/html --only-show-errors
+printf '<h1>Not here</h1>' | s3_cli s3 cp - s3://pages/404.html --content-type text/html --only-show-errors
+check "the start lists the site at its address; a browser gets the index document there, the error document with 404, and 405 for a POST" \
+  "true 200 <h1>Pages</h1> 404 <h1>Not here</h1> 405" \
+  "$(grep -E "^  pages +http://pages\.site\.localhost:$port/, its objects$" "$work/buckets.out" >/dev/null && echo true || echo false) \
+$(page /) $(page /no/such/page) $(page / -X POST | sed -n '1s/ .*//p')"
 s3_cli s3 ls s3://photos --recursive | awk '{print $3, $4}' | sort >"$work/listed"
 stopped
-check "Ctrl-C removes the function's container" 0 "$(leftover)"
-started
+check "Ctrl-C removes the functions' containers" 0 "$(leftover)"
+started --site "pages=$app/pages-folder"
+pages="$(cd "$app/pages-folder" && pwd -P)"
 check "the objects are kept from a start to the next: listed the same, read the same" "true 0" \
   "$(s3_cli s3 ls s3://photos --recursive | awk '{print $3, $4}' | sort | cmp -s - "$work/listed" && echo true || echo false) \
 $(s3_cli s3 cp s3://photos/cli/big.bin - 2>/dev/null | cmp -s - "$work/big.bin"; echo $?)"
+first="$(page /)"
+printf '<h1>Changed in the folder</h1>' >"$app/pages-folder/index.html"
+check "--site: the site answers a folder's files, a change seen at once without a copy, the bucket's objects as they were" \
+  "true 200 <h1>From the folder</h1> 200 <h1>Changed in the folder</h1> 404 <h1>Pages</h1>" \
+  "$(grep -F "  pages  http://pages.site.localhost:$port/, $pages's files" "$work/buckets.out" >/dev/null && echo true || echo false) \
+$first $(page /) $(page /404.html | sed -n '1s/ .*//p') $(s3_cli s3 cp s3://pages/index.html - 2>/dev/null)"
 stopped
 rm -rf "$work/big.bin" "$work/big.out" "$app/.ff/local/buckets"
 }

@@ -6,7 +6,10 @@
 //! variables FF gives a pod pointed at the front door, and the secrets file's. The functions sign with the local key,
 //! which the front door checks a signed request against: made at the first start, printed at each, and kept in
 //! `.ff/local/credentials`. Its queues answer SQS at the front door, kept in memory while it runs, and its functions'
-//! SQS events read them as FF's event source mappings do. `ff local reset` empties what it keeps.
+//! SQS events read them as FF's event source mappings do. Its buckets answer S3 there, each object a file kept from a
+//! start to the next; their notifications send their events to functions and queues, and a bucket whose
+//! WebsiteConfiguration makes it a site answers a browser at `http://<bucket>.site.localhost:<port>`, from a folder
+//! of this machine's when `--site <bucket>=<folder>` names one. `ff local reset` empties what it keeps.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, TcpListener};
@@ -33,7 +36,9 @@ use crate::local::front_door::{FrontDoor, FunctionUrl, Settings, URL_DOMAIN};
 use crate::local::instances::{Docker, Instances};
 use crate::local::key::Key;
 use crate::local::mappings::LocalMapping;
-use crate::local::s3::Buckets;
+use crate::local::s3::events::{Rule, Target};
+use crate::local::s3::site::{SITES_HOST, Website};
+use crate::local::s3::{Buckets, LocalBucket};
 use crate::local::schedule_expression::{Expression, InvalidExpression, Millis};
 use crate::local::schedules::{self, LocalSchedule, Timetable};
 use crate::local::sqs::{QueueSettings, Queues};
@@ -74,6 +79,8 @@ pub struct Options<'a> {
     pub idle: Option<&'a str>,
     pub stack_name: Option<&'a str>,
     pub parameter_overrides: &'a [String],
+    /// `<bucket>=<folder>`: a site that answers a folder's files.
+    pub sites: &'a [String],
 }
 
 /// The names the template's functions, queues and buckets have here, as a deploy keeps the last one's: each one's
@@ -475,6 +482,7 @@ struct Prepared {
     functions: Vec<LocalFunction>,
     /// What the front door answers of each function besides how it runs.
     settings: BTreeMap<String, Settings>,
+    buckets: Vec<LocalBucket>,
     /// The secrets file read, if one was.
     secrets_file: Option<String>,
     /// What a secret takes the place of.
@@ -520,7 +528,65 @@ fn prepared(path: &Path, options: &Options, port: u16, key: &Key, out: &Output) 
     };
     problems.refusal()?;
     let planned = planned.expect("a plan without problems");
-    Ok(Prepared { read, planned, functions, settings, secrets_file, notes })
+    let buckets = local_buckets(&planned, options.sites)?;
+    Ok(Prepared { read, planned, functions, settings, buckets, secrets_file, notes })
+}
+
+/// The template's buckets as ff local keeps them: each one's notifications, and its site, which answers the folder
+/// `--site <bucket>=<folder>` names, the bucket the template's by its name or its logical ID, its WebsiteConfiguration
+/// making it a site.
+fn local_buckets(planned: &plan::Plan, sites: &[String]) -> Result<Vec<LocalBucket>, Error> {
+    let mut folders: BTreeMap<&str, PathBuf> = BTreeMap::new();
+    for given in sites {
+        let refused = |why: String| Error::usage(format!("--site {given}: {why}"));
+        let Some((named, folder)) =
+            given.split_once('=').filter(|(named, folder)| !named.is_empty() && !folder.is_empty())
+        else {
+            return Err(refused(
+                "a bucket of the template's and the folder its site answers, as <bucket>=<folder>".into(),
+            ));
+        };
+        let Some(bucket) = planned.buckets.iter().find(|bucket| bucket.name == named || bucket.id == named) else {
+            let names: Vec<&str> = planned.buckets.iter().map(|bucket| bucket.name.as_str()).collect();
+            let known = match names.is_empty() {
+                true => "the template has none".to_owned(),
+                false => format!("the template's are {}", names.join(", ")),
+            };
+            return Err(refused(format!("{named} is no bucket of the template's: {known}")));
+        };
+        if bucket.website.is_none() {
+            let why = format!("{} has no WebsiteConfiguration in the template, which makes a bucket a site", bucket.id);
+            return Err(refused(why));
+        }
+        let folder = std::fs::canonicalize(folder)
+            .ok()
+            .filter(|folder| folder.is_dir())
+            .ok_or_else(|| refused(format!("{folder} is no folder")))?;
+        if folders.insert(bucket.name.as_str(), folder).is_some() {
+            return Err(Error::usage(format!("--site names the bucket {} twice", bucket.name)));
+        }
+    }
+    let rule = |notification: &plan::Notification| Rule {
+        id: notification.id.clone(),
+        target: match notification.target {
+            plan::Target::Function => Target::Function,
+            plan::Target::Queue => Target::Queue,
+        },
+        arn: notification.arn.clone(),
+        events: notification.events.clone(),
+        prefix: notification.prefix.clone(),
+        suffix: notification.suffix.clone(),
+    };
+    let buckets = planned.buckets.iter().map(|bucket| LocalBucket {
+        name: bucket.name.clone(),
+        notifications: bucket.notifications.iter().map(rule).collect(),
+        website: bucket.website.as_ref().map(|website| Website {
+            index_document: website.index_document.clone(),
+            error_document: website.error_document.clone(),
+        }),
+        site_folder: folders.remove(bucket.name.as_str()),
+    });
+    Ok(buckets.collect())
 }
 
 #[derive(Serialize)]
@@ -584,6 +650,15 @@ struct StartedBucket {
     name: String,
     /// The folder its objects are files in.
     folder: String,
+    /// The functions and the queues its notifications send its events to, by name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    events_to: Vec<String>,
+    /// Its site's address, when its WebsiteConfiguration makes it one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site: Option<String>,
+    /// The folder its site answers instead of its objects, when --site names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    site_folder: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -642,7 +717,7 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
         Some(key) => key.clone(),
         None => Key::made()?,
     };
-    let Prepared { read, planned, functions, settings, secrets_file, notes } =
+    let Prepared { read, planned, functions, settings, buckets: local_buckets, secrets_file, notes } =
         prepared(&args.path, options, port, &key, context.out)?;
     for note in &notes {
         context.out.warn(note);
@@ -683,10 +758,9 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
     let instances = Arc::new(Instances::new(docker, functions.clone(), idle, move |line| to_say(line)));
     let queues = planned.queues.iter().map(|queue| (queue.name.clone(), QueueSettings::of(&queue.attributes)));
     let buckets_folder = kept.join(BUCKETS);
-    let bucket_names = planned.buckets.iter().map(|bucket| bucket.name.clone()).collect();
     let buckets = Buckets::open(
         &buckets_folder,
-        bucket_names,
+        local_buckets.clone(),
         REGION,
         ACCOUNT,
         Arc::new(|| schedules::now_ms(0)),
@@ -756,6 +830,8 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
             },
         )
     });
+    // S3's test event to each queue a bucket's notifications name, as S3 sends one when the bucket is made.
+    door.deliver(door.buckets.test_events());
     door.read_queues(&Arc::new(AtomicBool::new(false)));
     let started_mappings: Vec<StartedMapping> = door
         .settings
@@ -810,10 +886,20 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
         buckets: planned
             .buckets
             .iter()
-            .map(|bucket| StartedBucket {
+            .zip(&local_buckets)
+            .map(|(bucket, local)| StartedBucket {
                 logical_id: bucket.id.clone(),
                 name: bucket.name.clone(),
                 folder: buckets_folder.join(&bucket.name).display().to_string(),
+                events_to: bucket.notifications.iter().fold(Vec::new(), |mut names, notification| {
+                    let name = notification.destination().to_owned();
+                    if !names.contains(&name) {
+                        names.push(name);
+                    }
+                    names
+                }),
+                site: bucket.website.as_ref().map(|_| format!("http://{}.{SITES_HOST}:{port}/", bucket.name)),
+                site_folder: local.site_folder.as_ref().map(|folder| folder.display().to_string()),
             })
             .collect(),
         logs: logs.display().to_string(),
@@ -885,7 +971,25 @@ pub fn start(args: &LocalArgs, options: &Options, context: &Context) -> Result<(
                 "Its buckets, S3's at {endpoint}, each object a file in its bucket's folder, kept from a start to the next:"
             ));
             let width = started.buckets.iter().map(|bucket| bucket.name.len()).max().unwrap_or(0);
-            lines.extend(started.buckets.iter().map(|bucket| format!("  {:width$}  {}", bucket.name, bucket.folder)));
+            lines.extend(started.buckets.iter().map(|bucket| {
+                let line = format!("  {:width$}  {}", bucket.name, bucket.folder);
+                match bucket.events_to.is_empty() {
+                    true => line,
+                    false => format!("{line}, its events to {}", bucket.events_to.join(", ")),
+                }
+            }));
+        }
+        let sites: Vec<&StartedBucket> = started.buckets.iter().filter(|bucket| bucket.site.is_some()).collect();
+        if !sites.is_empty() {
+            lines.push("Its sites, each answering a browser at its address:".to_owned());
+            let width = sites.iter().map(|bucket| bucket.name.len()).max().unwrap_or(0);
+            lines.extend(sites.iter().map(|bucket| {
+                let line = format!("  {:width$}  {}", bucket.name, bucket.site.as_deref().unwrap_or_default());
+                match &bucket.site_folder {
+                    Some(folder) => format!("{line}, {folder}'s files"),
+                    None => format!("{line}, its objects"),
+                }
+            }));
         }
         lines.push(format!(
             "Its key, which a signed request is checked against, is in {}: AWS_ACCESS_KEY_ID={} AWS_SECRET_ACCESS_KEY={}, in the region {REGION}",
@@ -1079,7 +1183,15 @@ Resources:
     }
 
     fn options<'a>() -> Options<'a> {
-        Options { port: None, watch: false, secrets: None, idle: None, stack_name: None, parameter_overrides: &[] }
+        Options {
+            port: None,
+            watch: false,
+            secrets: None,
+            idle: None,
+            stack_name: None,
+            parameter_overrides: &[],
+            sites: &[],
+        }
     }
 
     fn key() -> Key {
@@ -1333,6 +1445,78 @@ Resources:
         fn unreadable(&self, _: bool, _: Option<&http::Request>) -> http::Response {
             http::Response { status: 400, headers: Vec::new(), body: Vec::new() }
         }
+    }
+
+    #[test]
+    fn a_templates_buckets_keep_their_notifications_and_a_site_answers_the_folder_site_names() {
+        let template = TEMPLATE
+            .replace(
+                "      AutoPublishAlias: live\n",
+                "      AutoPublishAlias: live\n      Events:\n        Upload:\n          Type: S3\n          Properties:\n            Bucket: !Ref Uploads\n            Events: s3:ObjectCreated:*\n",
+            )
+            .replace(
+                "  Uploads:\n    Type: AWS::S3::Bucket\n",
+                "  Uploads:\n    Type: AWS::S3::Bucket\n    Properties:\n      NotificationConfiguration:\n        QueueConfigurations:\n          - Event: s3:ObjectRemoved:*\n            Queue: !GetAtt Jobs.Arn\n  Site:\n    Type: AWS::S3::Bucket\n    Properties:\n      BucketName: shop-site\n      WebsiteConfiguration:\n        IndexDocument: index.html\n        ErrorDocument: 404.html\n",
+            );
+        let (_folder, project) = project(&template);
+        std::fs::create_dir_all(project.join("site")).unwrap();
+        let path = project.join("template.yaml");
+        let folder = project.join("site").display().to_string();
+        let given = |sites: &[String]| prepared(&path, &Options { sites, ..options() }, 3700, &key(), &Output::quiet());
+
+        let read_here = given(&[format!("Site={folder}")]).unwrap();
+
+        let rule = |id: &str, target: Target, arn: &str, event: &str| Rule {
+            id: id.into(),
+            target,
+            arn: arn.into(),
+            events: vec![event.into()],
+            prefix: None,
+            suffix: None,
+        };
+        let uploads = LocalBucket {
+            name: "uploads".into(),
+            notifications: vec![
+                rule("UploadsQueue1", Target::Queue, "arn:aws:sqs:tn-tunis-1:000000000000:Jobs", "s3:ObjectRemoved:*"),
+                rule(
+                    "OrdersUpload",
+                    Target::Function,
+                    "arn:aws:lambda:tn-tunis-1:000000000000:function:Orders:live",
+                    "s3:ObjectCreated:*",
+                ),
+            ],
+            website: None,
+            site_folder: None,
+        };
+        let site = LocalBucket {
+            name: "shop-site".into(),
+            notifications: Vec::new(),
+            website: Some(Website { index_document: "index.html".into(), error_document: Some("404.html".into()) }),
+            site_folder: Some(std::fs::canonicalize(project.join("site")).unwrap()),
+        };
+        assert_eq!(read_here.buckets, [uploads, site.clone()]);
+        assert_eq!(given(&[format!("shop-site={folder}")]).unwrap().buckets[1], site, "by its name too");
+        assert_eq!(given(&[]).unwrap().buckets[1].site_folder, None, "its objects, without --site");
+
+        let refused = |sites: &[&str]| {
+            given(&sites.iter().map(|site| (*site).to_owned()).collect::<Vec<_>>()).err().unwrap().message
+        };
+        assert_eq!(
+            refused(&["nowhere=site"]),
+            "--site nowhere=site: nowhere is no bucket of the template's: the template's are uploads, shop-site"
+        );
+        assert_eq!(
+            refused(&["Uploads=site"]),
+            "--site Uploads=site: Uploads has no WebsiteConfiguration in the template, which makes a bucket a site"
+        );
+        assert_eq!(
+            refused(&["Site"]),
+            "--site Site: a bucket of the template's and the folder its site answers, as <bucket>=<folder>"
+        );
+        let missing = project.join("missing").display().to_string();
+        assert_eq!(refused(&[&format!("Site={missing}")]), format!("--site Site={missing}: {missing} is no folder"));
+        let twice = [format!("Site={folder}"), format!("shop-site={folder}")];
+        assert_eq!(refused(&[&twice[0], &twice[1]]), "--site names the bucket shop-site twice");
     }
 
     #[test]

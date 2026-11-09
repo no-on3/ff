@@ -33,7 +33,7 @@ while read -r pattern needs; do
 done <"$suggest_map"
 check "every stage and section a line names exists" "" "${unknown# }"
 check "a path takes the first line it matches: a module's sections, then the backend whole" \
-  "static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted,local_queues aws-tools|static unit db l3 l4 l5 cli aws-tools" \
+  "static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted,local_queues,local_buckets aws-tools|static unit db l3 l4 l5 cli aws-tools" \
   "$(suggest_needs BE/src/queues/sqs-operations.ts)|$(suggest_needs BE/src/functions/functions.service.ts)"
 check "the ff command's templates are code, its guide a document" "static unit cli|static" \
   "$(suggest_needs cli/templates/README.md)|$(suggest_needs cli/README.md)"
