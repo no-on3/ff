@@ -1,0 +1,66 @@
+{
+  "about": "SQS's event as AWS Lambda gives it to a function that reads a queue, as FF builds it: the table the backend's L1 (sqs-event.spec.ts) and ff local's event source mappings read for their tests, so that both give the same event and read a call's answer alike. `records` holds messages as a queue keeps them, by sqs-examples.json's names: its row's `id`, which its receipt handle names, its `messageId`, `body`, `meta` (`senderId`, `messageAttributes`, `systemAttributes`), `sentAt`, its `receiveCount` with this receive, and `firstReceivedAt`; each with its `record` in the event of the queue `queueArn`, in `region`. `order` is Lambda's keys of a record, in its order, `md5OfMessageAttributes` only for a message with attributes. `batchResponses` holds a call's answers to a batch of the messages `batch` names, as Lambda reads a partial batch response (ReportBatchItemFailures): those that name no failure, `none`; those that name some, `named`, with the messages named, `failed`; and those Lambda can't read as one, `all`, which take the whole batch as failed. An answer of nothing, which JSON can't write, is the backend's spec's own.",
+  "queueArn": "arn:aws:sqs:tn-tunis-1:000000000001:orders",
+  "region": "tn-tunis-1",
+  "order": ["messageId", "receiptHandle", "body", "attributes", "messageAttributes", "md5OfBody", "md5OfMessageAttributes", "eventSource", "eventSourceARN", "awsRegion"],
+  "records": {
+    "asSent": {
+      "title": "SQS's system attributes as strings, the body's MD5, its receipt handle for this receive, the queue's ARN and region",
+      "message": {"id": "42", "messageId": "7e4d1c2a-0000-4000-8000-000000000001", "body": "{\"order\": 42}", "meta": {"senderId": "AKFF7Q2MLKX4RTZB3W5N"}, "sentAt": "2026-10-24T08:00:00.000Z", "receiveCount": 2, "firstReceivedAt": "2026-10-24T08:00:01.500Z"},
+      "record": {
+        "messageId": "7e4d1c2a-0000-4000-8000-000000000001",
+        "receiptHandle": "NDI6Mjo3ZTRkMWMyYS0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDE",
+        "body": "{\"order\": 42}",
+        "attributes": {"ApproximateReceiveCount": "2", "SentTimestamp": "1792828800000", "SenderId": "AKFF7Q2MLKX4RTZB3W5N", "ApproximateFirstReceiveTimestamp": "1792828801500"},
+        "messageAttributes": {},
+        "md5OfBody": "b71e9489176c82c46586e26a98a9f10f",
+        "eventSource": "aws:sqs",
+        "eventSourceARN": "arn:aws:sqs:tn-tunis-1:000000000001:orders",
+        "awsRegion": "tn-tunis-1"
+      }
+    },
+    "withAttributes": {
+      "title": "message attributes in Lambda's shape, with SQS's empty lists and their MD5, and a trace header among the system attributes",
+      "message": {"id": "42", "messageId": "7e4d1c2a-0000-4000-8000-000000000001", "body": "{\"order\": 42}", "meta": {"senderId": "AKFF7Q2MLKX4RTZB3W5N", "messageAttributes": {"item": {"DataType": "String", "StringValue": "harissa"}, "picture": {"DataType": "Binary.png", "BinaryValue": "AAEC"}}, "systemAttributes": {"AWSTraceHeader": {"DataType": "String", "StringValue": "Root=1-5759e988-bd862e3fe1be46a994272793"}}}, "sentAt": "2026-10-24T08:00:00.000Z", "receiveCount": 2, "firstReceivedAt": "2026-10-24T08:00:01.500Z"},
+      "record": {
+        "messageId": "7e4d1c2a-0000-4000-8000-000000000001",
+        "receiptHandle": "NDI6Mjo3ZTRkMWMyYS0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDE",
+        "body": "{\"order\": 42}",
+        "attributes": {"ApproximateReceiveCount": "2", "SentTimestamp": "1792828800000", "SenderId": "AKFF7Q2MLKX4RTZB3W5N", "ApproximateFirstReceiveTimestamp": "1792828801500", "AWSTraceHeader": "Root=1-5759e988-bd862e3fe1be46a994272793"},
+        "messageAttributes": {
+          "item": {"stringValue": "harissa", "stringListValues": [], "binaryListValues": [], "dataType": "String"},
+          "picture": {"binaryValue": "AAEC", "stringListValues": [], "binaryListValues": [], "dataType": "Binary.png"}
+        },
+        "md5OfBody": "b71e9489176c82c46586e26a98a9f10f",
+        "md5OfMessageAttributes": "1744f4c0e51735b13e1feb95410b7ce2",
+        "eventSource": "aws:sqs",
+        "eventSourceARN": "arn:aws:sqs:tn-tunis-1:000000000001:orders",
+        "awsRegion": "tn-tunis-1"
+      }
+    }
+  },
+  "batchResponses": {
+    "batch": ["m-1", "m-2", "m-3"],
+    "none": [
+      null,
+      {},
+      {"batchItemFailures": []},
+      {"batchItemFailures": null},
+      {"other": 1}
+    ],
+    "named": [
+      {"output": {"batchItemFailures": [{"itemIdentifier": "m-2"}, {"itemIdentifier": "m-3"}]}, "failed": ["m-2", "m-3"]}
+    ],
+    "all": [
+      "done",
+      42,
+      [{"itemIdentifier": "m-1"}],
+      {"batchItemFailures": "m-1"},
+      {"batchItemFailures": [{"itemIdentifier": ""}]},
+      {"batchItemFailures": [{"itemIdentifier": null}]},
+      {"batchItemFailures": [{"id": "m-1"}]},
+      {"batchItemFailures": [null]},
+      {"batchItemFailures": [{"itemIdentifier": "m-1"}, {"itemIdentifier": "not-in-the-batch"}]}
+    ]
+  }
+}
