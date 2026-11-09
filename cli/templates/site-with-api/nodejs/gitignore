@@ -1,0 +1,8 @@
+.aws-sam/
+node_modules/
+# The API's address, which the page reads: written for each place it runs, here or on FF, as the README says.
+site/config.json
+# ff's own: ff local's logs and key, ff package's zips.
+.ff/
+# The secrets ff local start gives the functions, KEY=value lines: never committed.
+.env.local

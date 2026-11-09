@@ -1,0 +1,80 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  {{name}}: a page on a bucket's site and its API at a function's URL, which the page finds in its config.json: a
+  guestbook, each entry kept in a second bucket. ff deploy puts it on FF, sam deploy on AWS, and ff local start runs it
+  here.
+
+Globals:
+  Function:
+    Runtime: {{runtime}}
+    CodeUri: src/
+    MemorySize: 256
+    Timeout: 10
+
+Resources:
+  # The API, which the page calls: GET /entries lists the latest, POST /entries keeps one.
+  Api:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-api"
+      Handler: app.handler
+      Environment:
+        Variables:
+          ENTRIES_BUCKET: !Ref Entries
+      FunctionUrlConfig:
+        AuthType: NONE
+        # Any page may call it, as it takes no cookie and no key: a page elsewhere does no more than curl does.
+        Cors:
+          AllowOrigins:
+            - "*"
+          AllowMethods:
+            - GET
+            - POST
+          AllowHeaders:
+            - content-type
+      # For AWS: FF's key gives the function its account's buckets.
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref Entries
+
+  # The entries, an object each, which only the API reads.
+  Entries:
+    Type: AWS::S3::Bucket
+
+  # The page: a bucket's site, its files those of site/, which ff sites deploy puts there.
+  Website:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      # For AWS, where a bucket's policy makes its site public; on FF the website configuration does, and these two
+      # are kept without effect.
+      PublicAccessBlockConfiguration:
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  WebsitePolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Website
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${Website.Arn}/*"
+
+Outputs:
+  ApiUrl:
+    Description: The API's address, which the page's site/config.json names
+    Value: !GetAtt ApiUrl.FunctionUrl
+  WebsiteBucket:
+    Description: The page's bucket, where ff sites deploy puts site/
+    Value: !Ref Website
+  WebsiteUrl:
+    Description: The page's address
+    Value: !GetAtt Website.WebsiteURL
+  EntriesBucket:
+    Description: The entries' bucket
+    Value: !Ref Entries

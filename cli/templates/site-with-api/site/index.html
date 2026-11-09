@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{name}}'s guestbook</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1>{{name}}'s guestbook</h1>
+    <form id="sign">
+      <label>Name <input name="name" required maxlength="50" autocomplete="name"></label>
+      <label>Message <textarea name="message" required maxlength="500" rows="3"></textarea></label>
+      <button>Sign</button>
+    </form>
+    <p id="said" role="status"></p>
+    <h2>The latest</h2>
+    <ol id="entries"></ol>
+  </main>
+</body>
+</html>

@@ -200,12 +200,46 @@ const QUEUE_WORKER: App = App {
     then: "its libraries installed, ff local start template.yaml here; ff deploy template.yaml on FF; sam deploy on AWS",
 };
 
+/// A page and its API: a bucket's site whose page calls a function's URL, a guestbook, each entry an object of a
+/// second bucket.
+const SITE_WITH_API: App = App {
+    files: template_files!(
+        "site-with-api",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/list-entries.json",
+            "events/post-entry.json",
+            "site/index.html",
+            "site/app.js",
+            "site/style.css",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
+    ),
+    about: "a page and its API: a bucket's site that calls a function's URL, a guestbook kept in a second bucket",
+    what: "a page and its API",
+    parts: &["api"],
+    then: "its libraries installed, site/config.json written and ff local start template.yaml --site Website=site \
+           here; ff deploy template.yaml and ff sites deploy on FF; sam deploy and aws s3 sync on AWS",
+};
+
 /// The application a template is, if it is one.
 fn app(template: Template) -> Option<&'static App> {
     match template {
         Template::RestApi => Some(&REST_API),
         Template::CronJob => Some(&CRON_JOB),
         Template::QueueWorker => Some(&QUEUE_WORKER),
+        Template::SiteWithApi => Some(&SITE_WITH_API),
         Template::Function | Template::Terraform | Template::Sam => None,
     }
 }
@@ -218,7 +252,7 @@ fn about(template: Template) -> &'static str {
             "an app's Terraform project: FF's provider block and four modules, which apply on FF and on AWS"
         }
         Template::Sam => "sam init's hello world as FF takes it: one function at its URL, as a SAM application",
-        Template::RestApi | Template::CronJob | Template::QueueWorker => {
+        Template::RestApi | Template::CronJob | Template::QueueWorker | Template::SiteWithApi => {
             app(template).map(|app| app.about).unwrap_or_default()
         }
     }
@@ -533,6 +567,7 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
         Template::RestApi => create_app(&folder, name, runtime, &REST_API)?,
         Template::CronJob => create_app(&folder, name, runtime, &CRON_JOB)?,
         Template::QueueWorker => create_app(&folder, name, runtime, &QUEUE_WORKER)?,
+        Template::SiteWithApi => create_app(&folder, name, runtime, &SITE_WITH_API)?,
     };
     let created = Created {
         name: name.to_owned(),
@@ -543,7 +578,7 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
         key_command: (template == Template::Terraform).then(|| terraform_key_command(name)),
     };
     context.out.result(&created, || match template {
-        Template::RestApi | Template::CronJob | Template::QueueWorker => {
+        Template::RestApi | Template::CronJob | Template::QueueWorker | Template::SiteWithApi => {
             let app = app(template).expect("an application's template");
             format!(
                 "created {}/, {}: template.yaml, its code in src/ with its tests in tests/, its events in events/, \
@@ -601,6 +636,7 @@ mod tests {
             ("queue-worker", QUEUE_WORKER.files),
             ("rest-api", REST_API.files),
             ("sam", SAM),
+            ("site-with-api", SITE_WITH_API.files),
             ("terraform", TERRAFORM),
         ];
         let mut folders: Vec<String> = std::fs::read_dir(&root)
@@ -1015,6 +1051,37 @@ mod tests {
             refused.message.contains("-api and aaa")
                 && refused.message.contains("-worker: letters, digits and hyphens, a letter first, 57 at most")
         );
+    }
+
+    #[test]
+    fn a_site_with_an_api_is_a_bucket_s_site_whose_page_calls_a_url_that_keeps_entries_in_a_second_bucket_planned() {
+        for (runtime, extension) in [(Runtime::Nodejs, "mjs"), (Runtime::Python, "py")] {
+            let (dir, paths, planned) = written_and_planned(&SITE_WITH_API, "Guests", runtime, &[]);
+            for path in [format!("src/app.{extension}"), "site/index.html".into(), "events/post-entry.json".into()] {
+                assert!(paths.contains(&path), "{path}: {paths:?}");
+            }
+            let page = std::fs::read_to_string(dir.path().join("Guests/site/index.html")).unwrap();
+            assert!(page.contains("<title>Guests's guestbook</title>"));
+            let readme = std::fs::read_to_string(dir.path().join("Guests/README.md")).unwrap();
+            assert!(readme.contains(r#"echo '{"api": "http://guests-api.fn.localhost:3700"}' > site/config.json"#));
+
+            let [function] = &planned.functions[..] else { panic!("one function") };
+            assert_eq!((function.name.as_str(), function.handler.as_str()), ("Guests-api", "app.handler"));
+            let url = function.url.as_ref().unwrap();
+            assert_eq!(url.auth_type, "NONE");
+            assert_eq!(url.cors.as_ref().unwrap()["allowOrigins"], serde_json::json!(["*"]));
+            // Both buckets named CloudFormation's way; the function told the entries', the page's a site.
+            let [entries, website] = &planned.buckets[..] else { panic!("two buckets") };
+            assert_eq!((entries.id.as_str(), website.id.as_str()), ("Entries", "Website"));
+            assert_eq!(function.environment.get("ENTRIES_BUCKET"), Some(&entries.name));
+            assert_eq!(
+                (entries.website.as_ref(), website.website.as_ref().map(|site| site.index_document.as_str())),
+                (None, Some("index.html"))
+            );
+            let kept: Vec<_> = planned.without_effect.iter().map(|resource| resource.logical_id.as_str()).collect();
+            assert_eq!(kept, ["WebsitePolicy"]);
+        }
+        assert_eq!(SITE_WITH_API.name_most(), 60);
     }
 
     #[test]

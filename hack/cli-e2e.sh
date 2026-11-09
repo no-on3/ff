@@ -18,8 +18,9 @@
 # a database of ff db's and called at its URL, with its CORS, each run with ff local start --with postgres; ff init's
 # cron job, the Python one deployed, a file uploaded with the AWS CLI and reported, a failed run's record in its queue,
 # each run here as its README says, its schedule by hand and a failed run tried three times; ff init's queue worker,
-# the Node.js one deployed, a job done and one dead-lettered after three tries, each the same here; folders deployed as
-# packages with their libraries (an npm library, requests, numpy's native wheels from
+# the Node.js one deployed, a job done and one dead-lettered after three tries, each the same here; ff init's site with
+# an API, the Node.js one deployed, its page by ff sites deploy and signed from its origin, each here with --site;
+# folders deployed as packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
 # ff package --compile, whose zip runs on FF as it is; the small app (examples/orders-app), its
@@ -180,15 +181,22 @@ readme_here() {
     >"$work/here.out" 2>&1 || status=$?
   echo "$status $(sed -nE 's/^(# |ℹ )pass ([0-9]+)$/\2/p; s/^Ran ([0-9]+) tests? in .*/\1/p' "$work/here.out")"
 }
-# readme_after <folder> <line> <port>: a template's README's commands after the line its pattern finds, to the end of
-# their block, as written but at ff local start's port, with the suite's ff: their exit; what they wrote in
-# $work/after.out, their stderr in $work/after.err.
+# readme_after <folder> <line> <sed script>: a template's README's commands after the line its pattern finds, to the
+# end of their block, as written but for the script's changes, ff local start's port or a placeholder's value, with
+# the suite's ff: their exit; what they wrote in $work/after.out, their stderr in $work/after.err.
 readme_after() {
   local status=0
   (cd "$1" && PATH="$(dirname "$ff_bin"):$PATH" bash -e -o pipefail -c \
-    "$(sed -n "/$2/,/^\`\`\`\$/p" README.md | sed '1d;$d;/^```bash$/d' | sed "s/:3700/:$3/g")") \
+    "$(sed -n "/$2/,/^\`\`\`\$/p" README.md | sed '1d;$d;/^```bash$/d' | sed "$3")") \
     >"$work/after.out" 2>"$work/after.err" || status=$?
   echo "$status"
+}
+# preflight <URL> <origin>: the origin a browser's preflight for a POST from it is let in as, or none.
+preflight() {
+  local allowed
+  allowed="$(curl -s -o /dev/null -D - -X OPTIONS "$1" -H "Origin: $2" -H 'Access-Control-Request-Method: POST' \
+    -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
+  echo "${allowed:-none}"
 }
 # until_found <url>: waits up to 30 s for the URL to answer 200.
 until_found() {
@@ -860,13 +868,6 @@ declare -A written=(
   [nodejs]=".gitignore README.md events/create-item.json events/list-items.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
   [python]=".gitignore README.md events/create-item.json events/list-items.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
 )
-# preflight <URL> <origin>: the origin a browser's preflight for a POST from it is let in as, or none.
-preflight() {
-  local allowed
-  allowed="$(curl -s -o /dev/null -D - -X OPTIONS "$1" -H "Origin: $2" -H 'Access-Control-Request-Method: POST' \
-    -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
-  echo "${allowed:-none}"
-}
 for runtime in python nodejs; do
   (cd "$work" && rm -rf "cli-rest-$runtime" && "$ff_bin" init "cli-rest-$runtime" --runtime "$runtime" --template rest-api >"$work/out" 2>"$work/err")
   check "ff init --template rest-api makes cli-rest-$runtime's template, code, tests, events and README, and nothing else" "${written[$runtime]}" \
@@ -1016,7 +1017,7 @@ $(grep -E "^  cli-cron-$runtime-failed-runs  http://127\.0\.0\.1:$port/000000000
 $(grep -E "^  files  $job/\.ff/local/buckets/files$" "$work/cron.out" >/dev/null && echo true || echo false)"
   check "  ... its README's commands for another terminal: a file put in the bucket by curl, today's report made by Lambda's Invoke" \
     "0 200 $today 1 $(wc -c <"$job/README.md" | tr -d ' ') incoming/README.md" \
-    "$(readme_after "$job" '^In another terminal' "$port") $(at "http://127.0.0.1:$port/files/reports/$today.json" | sed -n '1s/ .*//p') \
+    "$(readme_after "$job" '^In another terminal' "s/:3700/:$port/g") $(at "http://127.0.0.1:$port/files/reports/$today.json" | sed -n '1s/ .*//p') \
 $(jq -r '"\(.day) \(.files) \(.bytes) \(.largest.key)"' "$work/at.body")"
   until_found "http://127.0.0.1:$port/files/reports/$yesterday.json" || true
   check "  ... and ff local run EveryMorning, the schedule's run now, yesterday's report, with none of today's files" \
@@ -1099,7 +1100,7 @@ for runtime in python nodejs; do
 $(grep -E "^  cli-jobs-$runtime-worker/Jobs  cli-jobs-$runtime-jobs: batches of 10, ReportBatchItemFailures$" "$work/jobs.out" >/dev/null && echo true || echo false) \
 $(grep -E "^  cli-jobs-$runtime-jobs +http://127\.0\.0\.1:$port/000000000000/cli-jobs-$runtime-jobs, to cli-jobs-$runtime-jobs-dead-letters after 3 receives$" "$work/jobs.out" >/dev/null && echo true || echo false)"
   check "  ... its README's two curls: each job taken, 202 with its ID" "0 greet resize" \
-    "$(readme_after "$app" '^ff local start' "$port") $(jq -r .task "$work/after.out" | paste -sd' ')"
+    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g") $(jq -r .task "$work/after.out" | paste -sd' ')"
   good="$(jq -r 'select(.task == "greet") | .id' "$work/after.out")"
   bad="$(jq -r 'select(.task == "resize") | .id' "$work/after.out")"
   # The job the worker fails is received a fourth time 30 s after it came, and goes to the dead-letter queue then.
@@ -1136,6 +1137,95 @@ check "ff delete-stack deletes both functions, with the URL and the worker's rea
   "$(code) $(out | paste -sd' ')"
 }
 section_def template_queue_worker section_template_queue_worker backend budget=180
+
+section_template_site_with_api() {
+section "ff init --template site-with-api: a page on a bucket's site and its API at a function's URL, a guestbook kept in a second bucket; the Node.js one deployed on FF, its page by ff sites deploy, as its README says, and signed from its site's origin; then each runtime's run here as its README says, its page served from its folder by ff local start --site"
+local runtime app url bucket entries site deployed page base port starter id
+declare -A written=(
+  [nodejs]=".gitignore README.md events/list-entries.json events/post-entry.json samconfig.toml site/app.js site/index.html site/style.css src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/list-entries.json events/post-entry.json samconfig.toml site/app.js site/index.html site/style.css src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-guests-$runtime" && "$ff_bin" init "cli-guests-$runtime" --runtime "$runtime" --template site-with-api >"$work/out" 2>"$work/err")
+  check "ff init --template site-with-api makes cli-guests-$runtime's template, code, tests, events, page and README, and nothing else" "${written[$runtime]}" \
+    "$(template_files "$work/cli-guests-$runtime")"
+done
+
+# On FF, from the folder as ff init wrote it: ff deploy installs AWS's SDK, then the README's lines after it write the
+# page's config.json and deploy the page, its bucket the deploy's output.
+app="$work/cli-guests-nodejs"
+in_folder "$app" deploy template.yaml --output json
+url="$(out | jq -r '.outputs[] | select(.name == "ApiUrl") | .value')"
+bucket="$(out | jq -r '.outputs[] | select(.name == "WebsiteBucket") | .value')"
+entries="$(out | jq -r '.outputs[] | select(.name == "EntriesBucket") | .value')"
+site="$(out | jq -r '.outputs[] | select(.name == "WebsiteUrl") | .value')"
+check "the Node.js one deployed as the stack samconfig.toml names: its function at its URL, its two buckets named from the stack's, the page's address its bucket's site" \
+  "0 cli-guests-nodejs created cli-guests-nodejs-api true true true $(site_of "$bucket")" \
+  "$(code) $(out | jq -r '"\(.stack) \(.functions[0].action) \(.functions[0].name)"') \
+$(out | jq -r --arg url "$url" '.functions[0].url == $url and ($url | startswith("http"))') \
+$([[ $bucket =~ ^cli-guests-nodejs-website-[a-z0-9]{12}$ ]] && echo true || echo false) \
+$([[ $entries =~ ^cli-guests-nodejs-entries-[a-z0-9]{12}$ ]] && echo true || echo false) $site"
+check "  ... its README's lines after ff deploy: config.json naming the API's URL, from ff url show, and the page's four files deployed to its bucket" \
+  "0 {\"api\": \"$url\"} site deployed to $bucket: 4 files uploaded, 0 files unchanged, 0 files deleted $site" \
+  "$(readme_after "$app" '^ff deploy template.yaml' "s/<WebsiteBucket>/$bucket/g") $(cat "$app/site/config.json") \
+$(paste -sd' ' "$work/after.out")"
+check "  ... the page answers at its site's address, and its config.json there names the API" \
+  "200 true 200 $url" \
+  "$(at "$site/" | sed -n '1s/ .*//p') $(grep -F "<h1>cli-guests-nodejs's guestbook</h1>" "$work/at.body" >/dev/null && echo true || echo false) \
+$(at "$site/config.json" | sed -n '1s/ .*//p') $(jq -r .api "$work/at.body")"
+page="$(site_of "$bucket")"
+check "  ... the API's CORS lets the page's origin in, as any, without credentials" "* *" \
+  "$(preflight "${url}entries" "$page") $(curl -s -o /dev/null -D - "${url}entries" -H "Origin: $page" | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
+id="$(at "${url}entries" -H "Origin: $page" -H 'content-type: application/json' -d '{"name": " Amira ", "message": "Ahlan from Sousse!"}' >"$work/guests-post"; jq -r .id "$work/at.body")"
+check "  ... a POST from the page keeps an entry, trimmed, in the entries' bucket; GET lists it" \
+  "201 Amira 200 1 $id Ahlan from Sousse!" \
+  "$(sed -n '1s/ .*//p' "$work/guests-post") $(jq -r .name "$work/at.body") $(at "${url}entries" | sed -n '1s/ .*//p') \
+$(jq -r '"\(length) \(.[0].id) \(.[0].message)"' "$work/at.body")"
+check "  ... an entry without a message is refused with 400, another path is 404, another method 405 with Allow" \
+  "400 An entry has a message, 1 to 500 characters 404 405 GET, POST" \
+  "$(at "${url}entries" -d '{"name": "Amira"}' | sed -n '1s/ .*//p') $(jq -r .message "$work/at.body") \
+$(at "${url}items" | sed -n '1s/ .*//p') $(at "${url}entries" -X DELETE | sed -n '1s/ .*//p') $(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+in_folder "$app" delete-stack --yes
+check "ff delete-stack stops at the buckets that hold files, as its README says" "3 true" \
+  "$(code) $(err | grep -F "ff buckets delete" >/dev/null && echo true || echo false)"
+ff buckets delete "$bucket" --force --yes
+ff buckets delete "$entries" --force --yes
+in_folder "$app" delete-stack --yes
+check "  ... ff buckets delete --force deletes each with its files, then ff delete-stack the rest" \
+  "0 deleted the function cli-guests-nodejs-api (Api) deleted the bucket $entries (Entries) deleted the bucket $bucket (Website) deleted the stack cli-guests-nodejs" \
+  "$(code) $(out | paste -sd' ')"
+
+# Here, each runtime as its README says: its commands before ff local start install its library, run its tests and
+# write config.json; ff local start --site serves the page from its folder; the README's curl signs the guestbook.
+for runtime in python nodejs; do
+  app="$work/cli-guests-$runtime"
+  check "cli-guests-$runtime's README: its commands install its library, run its 6 tests, which pass, and write config.json naming the API here" \
+    "0 6 {\"api\": \"http://cli-guests-$runtime-api.fn.localhost:3700\"}" "$(readme_here "$app") $(cat "$app/site/config.json")"
+  port="$(free_port)"
+  sed -i "s/:3700/:$port/" "$app/site/config.json"
+  base="http://cli-guests-$runtime-api.fn.localhost:$port"
+  page="http://website.site.localhost:$port"
+  local_started "$work/guests.out" "$work/guests.err" "$app/template.yaml" --port "$port" --site "Website=$app/site"
+  check "  ... ff local start --site runs its API at the address its README names, its page from site/, its entries kept in .ff/local" \
+    "true true true" \
+    "$(grep -E "^  cli-guests-$runtime-api +$runtime +256 MB, 10 s  $base/$" "$work/guests.out" >/dev/null && echo true || echo false) \
+$(grep -F "  website  $page/, $(cd "$app/site" && pwd -P)'s files" "$work/guests.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  entries  $app/\.ff/local/buckets/entries$" "$work/guests.out" >/dev/null && echo true || echo false)"
+  check "  ... the page answers at the address its README names, config.json with it, and the API lets its origin in" \
+    "200 true 200 $base *" \
+    "$(at "$page/" | sed -n '1s/ .*//p') $(grep -F "<h1>cli-guests-$runtime's guestbook</h1>" "$work/at.body" >/dev/null && echo true || echo false) \
+$(at "$page/config.json" | sed -n '1s/ .*//p') $(jq -r .api "$work/at.body") $(preflight "$base/entries" "$page")"
+  check "  ... its README's curl signs the guestbook and lists the entry, kept in the entries' bucket" \
+    "0 Amira 1 Ahlan from Sousse! 1" \
+    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g") $(jq -rs '"\(.[0].name) \(.[1] | length) \(.[1][0].message)"' "$work/after.out") \
+$(find "$app/.ff/local/buckets/entries" -name '*.object.json' | wc -l | tr -d ' ')"
+  local_stopped
+  ff local reset "$app" --yes
+  check "  ... Ctrl-C leaving no container, ff local reset removing the entries, and its .gitignore leaves out config.json and what its README's commands installed: git sees ff init's files alone" \
+    "0 0 false ${written[$runtime]}" "$(leftover) $(code) $([ -e "$app/.ff/local" ] && echo true || echo false) $(git_sees "$app")"
+done
+}
+section_def template_site_with_api section_template_site_with_api backend budget=50
 
 section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"

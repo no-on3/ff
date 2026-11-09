@@ -475,6 +475,7 @@ ff init shop --template terraform --runtime nodejs   # an app's Terraform projec
 ff init items --template rest-api --runtime python  # a REST API at a function's URL, its items in PostgreSQL
 ff init daily --template cron-job --runtime nodejs  # a job on a schedule, its bucket, a queue of its failed runs
 ff init jobs --template queue-worker --runtime python  # a URL taking jobs into a queue, its worker, a dead-letter queue
+ff init guests --template site-with-api --runtime nodejs  # a page on a bucket's site, its API at a URL, a guestbook
 ff init --list                                    # the templates, each with what it makes
 ff deploy ./orders                                # a folder: packaged with its libraries, uploaded when new
 ff package ./orders                               # the same zip, for AWS Lambda too: ./orders/.ff/orders.zip

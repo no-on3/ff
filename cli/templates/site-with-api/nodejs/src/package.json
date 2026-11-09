@@ -1,0 +1,8 @@
+{
+  "name": "api",
+  "private": true,
+  "description": "A page's API, a guestbook kept in a bucket: on FF, on AWS Lambda, and here with ff local start",
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1156.0"
+  }
+}
