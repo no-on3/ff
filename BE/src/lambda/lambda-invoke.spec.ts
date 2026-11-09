@@ -4,8 +4,11 @@
  * outcome, the version that ran, the call's log when asked); Event queued,
  * DryRun checked; the payload, the headers and the function refused as
  * Lambda refuses them, and the plan's rate, the function's instances and the
- * account's credit as Lambda's throttles.
+ * account's credit as Lambda's throttles. The requests and their answers are
+ * lambda-invoke-examples.json's, which ff local's front door reads too.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { NotFoundException } from '@nestjs/common';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { InsufficientCreditException } from '../billing/credit-policy';
@@ -24,7 +27,42 @@ import { CLIENT_CONTEXT_BYTES, LambdaInvoke } from './lambda-invoke';
 import { LambdaAnswer } from './lambda-operations';
 import { ACCOUNT, REGION, lambdaCall, lambdaCaller, lambdaRefusal } from './test-fixtures';
 
-const MB = 1024 * 1024;
+/** A case of the table: a request, what its call did, and the answer or the refusal. */
+interface Example {
+  title: string;
+  versions?: boolean;
+  request: { qualifier?: string; headers?: Record<string, string>; body?: string; payloadBytes?: number };
+  ran?: { output?: string; error?: { kind?: 'timeout' | 'throttled' | 'platform'; type?: string; message: string }; logResult?: string };
+  answer?: { status: number; headers?: Record<string, string>; body?: string; document?: Record<string, unknown> };
+  refused?: { status: number; type: string; message?: string; messageStarts?: string; reason?: string };
+  payload?: unknown;
+}
+const table = JSON.parse(readFileSync(join(__dirname, 'lambda-invoke-examples.json'), 'utf8')) as Record<string, Example[]>;
+
+/** What the call did, as FunctionsService says it. */
+function outcomeOf({ output, error, logResult }: NonNullable<Example['ran']>): Partial<CallOutcome> {
+  const logged = logResult === undefined ? {} : { logResult };
+  if (output !== undefined) return { ok: true, output: JSON.parse(output) as unknown, outputJson: output, ...logged };
+  if (!error) throw new Error('A case says what its call answered, or how it failed');
+  const errors = {
+    timeout: () => new FunctionTimeoutError(error.message),
+    throttled: () => new FunctionThrottledError(error.message),
+    platform: () => new OrchestratorError(error.message),
+  };
+  return { ok: false, error: error.kind ? errors[error.kind]() : new FunctionRuntimeError(error.type ?? 'Error', error.message), ...logged };
+}
+
+/** The answer a case expects, as the handler gives it to the front door. */
+function expected({ status, headers, body, document }: NonNullable<Example['answer']>): LambdaAnswer {
+  return { status, ...(headers ? { headers } : {}), ...(body !== undefined ? { body: Buffer.from(body) } : {}), ...(document ? { document } : {}) };
+}
+
+/** The refusal a case expects: its status, its type, its message, and its Reason, as `refused` lists them. */
+function refusalOf({ status, type, message, messageStarts, reason }: NonNullable<Example['refused']>): unknown[] {
+  const said = message?.replace('{region}', REGION).replace('{account}', ACCOUNT);
+  const words = said ?? expect.stringMatching(new RegExp(`^${(messageStarts ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  return [status, type, words, ...(reason ? [reason] : [])];
+}
 
 const fn = (more: Partial<Function> = {}): Function =>
   Object.assign(new Function(), { id: 'f-orders', accountId: ACCOUNT, name: 'orders', status: FunctionStatus.ACTIVE, error: null, ...more });
@@ -33,7 +71,6 @@ const TARGETS: Record<string, CallTarget> = {
   '1': { version: Object.assign(new FunctionVersion(), { version: 1 }) },
   live: { version: Object.assign(new FunctionVersion(), { version: 3 }), alias: 'live' },
 };
-const base64Json = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64');
 const credit = () =>
   new InsufficientCreditException(
     { currency: 'TND', exponent: 3, balanceMinor: -2345n, belowBufferSince: new Date('2026-10-17T10:33:00Z') },
@@ -96,23 +133,38 @@ describe("Lambda's Invoke (L1)", () => {
 
   const callOptions = () => functions.call.mock.calls.map(([, payload, options]) => ({ payload, ...options }));
 
+  /** A case's request, its call doing what the case says. */
+  function sendExample({ request, ran }: Example): Promise<LambdaAnswer> {
+    if (ran) outcomes.push(outcomeOf(ran));
+    const body = request.payloadBytes === undefined ? request.body : `"${'a'.repeat(request.payloadBytes - 2)}"`;
+    return send({ qualifier: request.qualifier, headers: request.headers, body });
+  }
+
+  /** Each case answered, or refused, as it says. */
+  async function answersAsItSays(examples: Example[]): Promise<void> {
+    for (const example of examples) {
+      if (example.refused) expect(await refused(sendExample(example))).toEqual(refusalOf(example.refused));
+      else expect(await sendExample(example)).toEqual(expected(example.answer!));
+    }
+  }
+
   describe('RequestResponse, which waits for the call', () => {
     it("answers 200 with the function's answer as its runtime sent it, $LATEST having run it, under the request's ID", async () => {
-      outcomes.push({ ok: true, output: { n: 1 }, outputJson: '{ "n" : 1 }' });
+      const [example] = table.answered;
 
-      const answer = await send({ body: '{"order": 7}' });
+      const answer = await sendExample(example);
 
-      expect(answer).toEqual({ status: 200, body: Buffer.from('{ "n" : 1 }'), headers: { 'x-amz-executed-version': '$LATEST' } });
+      expect(answer).toEqual(expected(example.answer!));
       expect(callOptions()).toEqual([
-        { payload: { order: 7 }, source: InvocationSource.API, requestId: 'req-1', target: {}, asks: { logTail: false } },
+        { payload: JSON.parse(example.request.body!), source: InvocationSource.API, requestId: 'req-1', target: {}, asks: { logTail: false } },
       ]);
       expect(admit).toHaveBeenCalledWith(ACCOUNT);
     });
 
     it('takes any JSON value as the payload, {} for none, as Lambda gives a function called without one', async () => {
-      for (const body of ['"text"', '42', '[1,"two"]', 'null', '']) await send({ body });
+      for (const example of table.payloads) await sendExample(example);
 
-      expect(callOptions().map(({ payload }) => payload)).toEqual(['text', 42, [1, 'two'], null, {}]);
+      expect(callOptions().map(({ payload }) => payload)).toEqual(table.payloads.map(({ payload }) => payload));
     });
 
     it('names the version that ran: a version named, or an alias\'s; a version or an alias the function hasn\'t is Lambda\'s "Function not found", its ARN with it', async () => {
@@ -121,140 +173,70 @@ describe("Lambda's Invoke (L1)", () => {
 
       expect(ran).toEqual(['1', '3', '$LATEST']);
       expect(callOptions().map(({ target }) => target)).toEqual([TARGETS['1'], TARGETS.live, {}]);
-      expect(await refused(send({ qualifier: '7' }))).toEqual([
-        404,
-        'ResourceNotFoundException',
-        `Function not found: arn:aws:lambda:${REGION}:${ACCOUNT}:function:orders:7`,
-      ]);
+      await answersAsItSays(table.notFound);
     });
 
     it("asks for the call's log with LogType Tail, and gives it back as X-Amz-Log-Result; LogType None, or none, asks nothing", async () => {
-      outcomes.push({ ok: true, output: 1, outputJson: '1', logResult: 'U1RBUlQK' });
+      const answers = [];
+      for (const example of table.logs) answers.push(await sendExample(example));
 
-      const tailed = await send({ headers: { 'X-Amz-Log-Type': 'Tail' } });
-      const plain = await send({ headers: { 'X-Amz-Log-Type': 'None' } });
-
-      expect(tailed.headers).toEqual({ 'x-amz-executed-version': '$LATEST', 'x-amz-log-result': 'U1RBUlQK' });
-      expect(plain.headers).toEqual({ 'x-amz-executed-version': '$LATEST' });
-      expect(callOptions().map(({ asks }) => asks)).toEqual([{ logTail: true }, { logTail: false }]);
+      expect(answers.map(({ headers }) => headers)).toEqual(table.logs.map(({ answer }) => answer!.headers));
+      expect(callOptions().map(({ asks }) => asks)).toEqual(table.logs.map(({ request }) => ({ logTail: request.headers?.['X-Amz-Log-Type'] === 'Tail' })));
     });
 
     it("passes the caller's ClientContext on as sent, base64 of a JSON object, its padding optional", async () => {
-      const sent = base64Json({ custom: { cart: '7' } });
+      for (const example of table.clientContexts) await sendExample(example);
 
-      await send({ headers: { 'X-Amz-Client-Context': sent } });
-      await send({ headers: { 'X-Amz-Client-Context': 'e30' } });
-
-      expect(callOptions().map(({ asks }) => asks)).toEqual([
-        { logTail: false, clientContext: sent },
-        { logTail: false, clientContext: 'e30' },
-      ]);
+      expect(callOptions().map(({ asks }) => asks)).toEqual(
+        table.clientContexts.map(({ request }) => ({ logTail: false, clientContext: request.headers?.['X-Amz-Client-Context'] })),
+      );
     });
 
     it("answers a function that threw, timed out or failed to load with 200 too: FunctionError Unhandled and Lambda's error document, its log with it", async () => {
-      outcomes.push(
-        { ok: false, error: new FunctionRuntimeError('TypeError', 'bad input'), logResult: 'RU5ECg==' },
-        { ok: false, error: new FunctionTimeoutError('Task timed out after 3.00 seconds') },
-        { ok: false, error: new FunctionRuntimeError('Runtime.ImportModuleError', "Unable to import module 'index'") },
-      );
+      const answers = [];
+      for (const example of table.functionErrors) answers.push(await sendExample(example));
 
-      const answers = [await send({ headers: { 'X-Amz-Log-Type': 'Tail' } }), await send({ qualifier: '1' }), await send()];
-
-      expect(answers).toEqual([
-        {
-          status: 200,
-          document: { errorType: 'TypeError', errorMessage: 'bad input' },
-          headers: { 'x-amz-executed-version': '$LATEST', 'x-amz-log-result': 'RU5ECg==', 'x-amz-function-error': 'Unhandled' },
-        },
-        {
-          status: 200,
-          document: { errorType: 'Sandbox.Timedout', errorMessage: 'Task timed out after 3.00 seconds' },
-          headers: { 'x-amz-executed-version': '1', 'x-amz-function-error': 'Unhandled' },
-        },
-        {
-          status: 200,
-          document: { errorType: 'Runtime.ImportModuleError', errorMessage: "Unable to import module 'index'" },
-          headers: { 'x-amz-executed-version': '$LATEST', 'x-amz-function-error': 'Unhandled' },
-        },
-      ]);
+      expect(answers).toEqual(table.functionErrors.map(({ answer }) => expected(answer!)));
     });
 
     it("answers no instance free as Lambda's throttle, its Reason the function's instances; the platform's failure as ServiceException", async () => {
-      outcomes.push(
-        { ok: false, error: new FunctionThrottledError('Rate exceeded: no instance was free within 3.00 seconds') },
-        { ok: false, error: new OrchestratorError('no endpoints available for service') },
-      );
-
-      expect(await refused(send())).toEqual([
-        429,
-        'TooManyRequestsException',
-        'Rate exceeded: no instance was free within 3.00 seconds',
-        'ReservedFunctionConcurrentInvocationLimitExceeded',
-      ]);
       // The platform's details stay in the server's log.
-      expect(await refused(send())).toEqual([500, 'ServiceException', 'The AWS Lambda service encountered an internal error.']);
+      await answersAsItSays(table.throttles);
     });
   });
 
   describe('Event and DryRun', () => {
     it("keeps an Event in the function's queue, as the API's asynchronous call, with what it named, and answers 202 at once", async () => {
-      const answer = await send({ qualifier: 'live', headers: { 'X-Amz-Invocation-Type': 'Event' }, body: '{"order": 8}' });
+      const [example] = table.events;
 
-      expect(answer).toEqual({ status: 202 });
-      expect(queue).toHaveBeenCalledWith(ACCOUNT, 'f-orders', { order: 8 }, 'live');
+      expect(await sendExample(example)).toEqual(expected(example.answer!));
+      expect(queue).toHaveBeenCalledWith(ACCOUNT, 'f-orders', JSON.parse(example.request.body!), example.request.qualifier);
       // The queue checks the credit, as for the API's asynchronous calls; nothing runs now.
       expect([admit.mock.calls.length, functions.call.mock.calls.length]).toEqual([0, 0]);
     });
 
     it('checks a DryRun as a call, and answers 204, nothing run or queued', async () => {
-      expect(await send({ headers: { 'X-Amz-Invocation-Type': 'DryRun' } })).toEqual({ status: 204 });
-      expect(await refused(send({ qualifier: '7', headers: { 'X-Amz-Invocation-Type': 'DryRun' } }))).toEqual([
-        404,
-        'ResourceNotFoundException',
-        `Function not found: arn:aws:lambda:${REGION}:${ACCOUNT}:function:orders:7`,
-      ]);
+      await answersAsItSays(table.dryRuns);
       expect([queue.mock.calls.length, functions.call.mock.calls.length]).toEqual([0, 0]);
     });
   });
 
   describe('refused as Lambda refuses', () => {
     it("refuses an Event past 1 MB by Lambda's words for the operation, before anything is read; a call that waits takes it", async () => {
-      const over = `"${'a'.repeat(MB - 1)}"`;
+      const [event, waited] = table.tooLarge;
 
-      expect(await refused(send({ headers: { 'X-Amz-Invocation-Type': 'Event' }, body: over }))).toEqual([
-        413,
-        'RequestEntityTooLargeException',
-        'Request must be smaller than 1048576 bytes for the InvokeFunction operation',
-      ]);
+      expect(await refused(sendExample(event))).toEqual(refusalOf(event.refused!));
       expect(functions.callTarget).not.toHaveBeenCalled();
-      expect((await send({ body: over })).status).toBe(200);
+      expect((await sendExample(waited)).status).toBe(waited.answer!.status);
     });
 
     it("refuses a payload that isn't JSON, and an InvocationType or a LogType Lambda hasn't, naming those it has", async () => {
-      expect(await refused(send({ body: 'not json' }))).toEqual([400, 'InvalidRequestContentException', expect.stringMatching(/^Could not parse request body into json: /)]);
-      expect(await refused(send({ headers: { 'X-Amz-Invocation-Type': 'Later' } }))).toEqual([
-        400,
-        'InvalidParameterValueException',
-        'InvocationType must be RequestResponse, Event, DryRun, not Later.',
-      ]);
-      expect((await refused(send({ headers: { 'X-Amz-Log-Type': 'All' } })))[2]).toBe('LogType must be None, Tail, not All.');
+      await answersAsItSays(table.invalid);
       expect(functions.call).not.toHaveBeenCalled();
     });
 
     it(`refuses a ClientContext that isn't base64 of a JSON object, or past ${CLIENT_CONTEXT_BYTES} bytes`, async () => {
-      for (const sent of [Buffer.from('not json').toString('base64'), base64Json([1]), base64Json(null), '%%%']) {
-        expect(await refused(send({ headers: { 'X-Amz-Client-Context': sent } }))).toEqual([
-          400,
-          'InvalidRequestContentException',
-          'Client context must be a valid Base64-encoded JSON object.',
-        ]);
-      }
-      const long = base64Json({ custom: { padding: 'a'.repeat(CLIENT_CONTEXT_BYTES) } });
-      expect(await refused(send({ headers: { 'X-Amz-Client-Context': long } }))).toEqual([
-        400,
-        'InvalidParameterValueException',
-        `ClientContext must be at most ${CLIENT_CONTEXT_BYTES} bytes of base64, not ${long.length}.`,
-      ]);
+      await answersAsItSays(table.clientContextsRefused);
       expect(functions.call).not.toHaveBeenCalled();
     });
 
