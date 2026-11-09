@@ -1189,6 +1189,49 @@ Each folder has the same shape: `template.yaml`; `src/`, the functions' code, it
 
 The `ff` suite's `template_*` sections deploy each of the six on FF, call it and delete its stack, and run each here as its README says.
 
+### FF from your AI coding agent: ff mcp
+
+`ff mcp` gives an AI coding agent on your machine ff's commands as its tools, by the Model Context Protocol (version 2025-11-25) on stdin and stdout: Claude Code, Cursor, VS Code's agent and the others that run a local MCP server. Each tool runs one command with your profile's login or key, as if you typed it, and answers with the command's `--output json` document. The agent reads your functions' logs, calls and metrics, the account's usage and balance, and what `ff doctor` finds; with `--allow-write`, it deploys and calls them too. The server runs only while the agent runs it, holds nothing and opens no port.
+
+```bash
+claude mcp add ff -- ff mcp                          # Claude Code: the tools that read
+claude mcp add ff -- ff mcp --allow-write            # and those that change the account
+claude mcp add ff-work -- ff --profile work mcp      # another profile, or --account, before mcp
+claude mcp add --scope project ff -- ff mcp          # in the project's .mcp.json, for everyone working on it
+```
+
+Cursor reads `.cursor/mcp.json` in the project (or `~/.cursor/mcp.json`), and VS Code `.vscode/mcp.json`; both run the same command:
+
+```json
+{ "mcpServers": { "ff": { "command": "ff", "args": ["mcp"] } } }
+```
+
+```json
+{ "servers": { "ff": { "type": "stdio", "command": "ff", "args": ["mcp"] } } }
+```
+
+**What an agent may do:**
+
+| Tools | The commands they run |
+|---|---|
+| `ff_list_functions`, `ff_get_function`, `ff_logs`, `ff_history`, `ff_metrics` | `ff list`, `ff get`, `ff logs` (not `--follow`: a tool's call ends), `ff history`, `ff metrics` |
+| `ff_usage`, `ff_balance`, `ff_estimate` | `ff usage`, `ff balance`, `ff usage --aws` |
+| `ff_list_queues`, `ff_get_queue`, `ff_list_buckets`, `ff_get_bucket`, `ff_list_databases`, `ff_get_database`, `ff_list_caches`, `ff_get_cache` | `ff queues`, `ff buckets`, `ff db` and `ff caches`, `list` and `get` |
+| `ff_doctor` | `ff doctor`, on a folder, a file or a template, or `--deployed` |
+| **With `--allow-write`:** `ff_deploy`, `ff_invoke`, `ff_set_env`, `ff_publish`, `ff_set_alias`, `ff_send_to_queue`, `ff_deploy_site` | `ff deploy`, `ff invoke`, `ff env set`, `ff publish`, `ff alias set`, `ff queues send`, `ff sites deploy` |
+
+**Never:** a delete, a key, `ff api-keys`, `ff secrets set` and `ff login`. Those stay a person's commands, as a secret's value would pass through the agent, and an agent shouldn't delete. `ff deploy`'s `--yes` isn't among the tool's options: a deploy that would delete what a template no longer has asks first, the agent can't answer, and it stops. Without `--allow-write` the agent still sees the tools that change the account, and a call answers that `ff mcp` was started without it, so it can tell you what to add.
+
+**How a call goes:**
+
+- **A tool's arguments are its command's options,** as `--help` describes them, named as FF's JSON names them (`requestId`, `parameterOverrides`); a path is relative to the folder the agent started `ff mcp` in, which its instructions name.
+- **Its answer is the command's JSON document:** a list, or a log's lines, under a key such as `functions` or `lines`; the warnings you'd see in a terminal under `warned`. A command that fails answers with its message and exit code, as `--output json` writes them, and the session goes on.
+- **stdin belongs to the protocol** while `ff mcp` runs, so a value a command would read from stdin is refused: an event or a body is given itself or as `@file`, and a variable as `KEY=value`.
+- **The list of tools needs no login:** an agent starts before `ff login`, and a call then says to log in, as the command would.
+- **A long call,** such as a deploy that builds in a container, may outlast what an agent waits for a tool: Claude Code waits as long as `MCP_TOOL_TIMEOUT` says, in milliseconds.
+
+`cargo test` runs scripted sessions, in `ff` itself and over a pipe against a scripted API; the `ff` suite's `mcp` section runs a small client over a pipe against FF: the tools listed, a deploy refused without `--allow-write`, then allowed, called and read.
+
 ### Moving to AWS: ff export
 
 FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's, its mail SES's: an account moves to AWS with its code as it is. `ff export` writes what the move needs in a new folder, from the account's own resources, with `functions:read` and the other services' reads, and `usage:read` for its estimate:
