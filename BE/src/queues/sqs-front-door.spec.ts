@@ -271,6 +271,27 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
     await expect(client().send(new ReceiveMessageCommand({ QueueUrl: URL_ }))).resolves.toMatchObject({ $metadata: { httpStatusCode: 200 } });
   });
 
+  it("keeps the X-Amzn-Trace-Id that AWS's SDK sends inside a function with the message, in its AWSTraceHeader, as SQS does", async () => {
+    const traced = client();
+    // A function's own two lines, as FF's templates have them: Lambda's recursion detection does it on AWS.
+    const header = 'Root=1-6730a1f2-0123456789abcdef01234567;Parent=53995c3f42cd8ad8;Sampled=0';
+    traced.middlewareStack.add(
+      (next) => (args) => {
+        (args.request as { headers: Record<string, string> }).headers['x-amzn-trace-id'] = header;
+        return next(args);
+      },
+      { step: 'build' },
+    );
+
+    await traced.send(new SendMessageCommand({ QueueUrl: URL_, MessageBody: 'traced' }));
+
+    expect(queues.send).toHaveBeenCalledWith(
+      ORDERS,
+      [expect.objectContaining({ body: 'traced', meta: expect.objectContaining({ systemAttributes: { AWSTraceHeader: { DataType: 'String', StringValue: 'Root=1-6730a1f2-0123456789abcdef01234567' } } }) })],
+      expect.any(Date),
+    );
+  });
+
   it("refuses a request that isn't signed, with SQS's error and its query code in x-amzn-query-error", async () => {
     await answersAsTheTableSays('unsigned');
     const [unsigned] = table.frontDoor.unsigned;

@@ -9,6 +9,7 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { AwsEndpoint } from '../common/aws-endpoint';
 import { describeError } from '../common/describe-error';
+import { TRACE_HEADER } from '../functions/trace';
 import { BodyRefusals, readBody, requestTarget, single } from '../common/http-request';
 import { closeHttp, listenHttp } from '../common/http-server';
 import { PlansService } from '../plans/plans.service';
@@ -156,6 +157,7 @@ export class SqsFrontDoor implements OnModuleDestroy {
       actor: { id: `access_key:${key.id}`, label: `access key ${key.id}` },
       ip: request.socket.remoteAddress,
       used: (sqsOperation, queue) => this.keyUses.note({ key, service: AwsEndpoint.SQS, resource: queue, operation: sqsOperation }),
+      traceHeader: single(request.headers[TRACE_HEADER]),
     });
   }
 

@@ -369,6 +369,25 @@ describe("SQS's operations on an account's queues", () => {
       expect(await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'abcd' }, caller()))).toMatchObject({ type: 'OverLimit', status: 400 });
       expect(sent).toHaveLength(1);
     });
+
+    it("gives each message without a trace of its own the request's X-Amzn-Trace-Id, as SQS keeps it; a message's own stays", async () => {
+      const { operations, sent } = setup();
+      const traced = caller({ traceHeader: 'Root=1-6730a1f2-0123456789abcdef01234567;Parent=53995c3f42cd8ad8;Sampled=0' });
+      const own = { AWSTraceHeader: { DataType: 'String', StringValue: 'Root=1-6730a1f2-fedcba9876543210fedcba98' } };
+
+      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'a' }, traced);
+      await operations.run('SendMessageBatch', { QueueUrl: URL_, Entries: [{ Id: 'b', MessageBody: 'b' }, { Id: 'c', MessageBody: 'c', MessageSystemAttributes: own }] }, traced);
+      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'd' }, caller({ traceHeader: 'Sampled=1' }));
+      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'e' }, caller());
+
+      expect(sent.map(({ body, meta }) => [body, meta.systemAttributes?.AWSTraceHeader?.StringValue ?? null])).toEqual([
+        ['a', 'Root=1-6730a1f2-0123456789abcdef01234567'],
+        ['b', 'Root=1-6730a1f2-0123456789abcdef01234567'],
+        ['c', 'Root=1-6730a1f2-fedcba9876543210fedcba98'],
+        ['d', null],
+        ['e', null],
+      ]);
+    });
   });
 
   describe('SendMessageBatch', () => {

@@ -2,6 +2,7 @@ import { BadRequestException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { Actor } from '../common/request-context';
+import { TRACE_ATTRIBUTE, traceRoot, traceSystemAttributes } from '../functions/trace';
 import { PlanView } from '../plans/plan-limits';
 import { KeyNames, reachesQueue } from '../storage/key-reach';
 import { ChangedBy, ResourceTagsService, taggedQueue } from '../tags/resource-tags.service';
@@ -43,6 +44,8 @@ export interface Caller {
   ip?: string;
   /** What the caller's key used, by SQS's name for the operation: a queue, or '' for the account's; noted at the SQS endpoint alone. */
   used?: (operation: string, queue: string) => void;
+  /** The request's X-Amzn-Trace-Id, which each message it sends without an AWSTraceHeader of its own carries, as SQS keeps it. */
+  traceHeader?: string;
 }
 
 type Input = Record<string, unknown>;
@@ -339,6 +342,10 @@ export class SqsOperations {
     const body = checkBody(entry.MessageBody);
     const messageAttributes = checkMessageAttributes(entry.MessageAttributes);
     const systemAttributes = checkSystemAttributes(entry.MessageSystemAttributes);
+    // SQS keeps the request's trace header for each of its messages that names no trace of its own: AWS's SDKs send
+    // the header inside a function, as Lambda's recursion detection has them do.
+    const trace = systemAttributes[TRACE_ATTRIBUTE] ? undefined : traceRoot(caller.traceHeader);
+    if (trace) Object.assign(systemAttributes, traceSystemAttributes(trace));
     const sizeBytes = messageSize(body, messageAttributes);
     if (sizeBytes > queue.maximumMessageSize) {
       throw invalidParameter(`One or more parameters are invalid. Reason: Message must be shorter than ${queue.maximumMessageSize} bytes.`);
