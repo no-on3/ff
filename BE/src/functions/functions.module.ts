@@ -36,6 +36,8 @@ import { FunctionVersionsService } from './versions.service';
 import { FunctionKeyRenewal } from './key-renewal.service';
 import { FunctionPoliciesService } from './policies.service';
 import { StoppedChanges } from './stopped-changes.service';
+import { TracesController } from './traces.controller';
+import { TracesService } from './traces.service';
 
 @Module({
   imports: [
@@ -58,8 +60,8 @@ import { StoppedChanges } from './stopped-changes.service';
     StacksModule,
     TagsModule,
   ],
-  controllers: [FunctionsController, EventInvokeConfigController, FunctionVersionsController, FunctionAliasesController],
-  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionPoliciesService, FunctionKeyRenewal, StoppedChanges],
+  controllers: [FunctionsController, EventInvokeConfigController, FunctionVersionsController, FunctionAliasesController, TracesController],
+  providers: [FunctionsService, EnvironmentStore, AsyncInvocationsService, AsyncInvokeWorker, EventInvokeConfigService, FunctionVersionsService, FunctionAliasesService, FunctionPoliciesService, FunctionKeyRenewal, StoppedChanges, TracesService],
   // Lambda's endpoint reads versions and aliases, queues calls and sets their settings, as FF's API does, and keeps its permissions.
   exports: [FunctionsService, FunctionVersionsService, FunctionAliasesService, FunctionPoliciesService, AsyncInvocationsService, EventInvokeConfigService],
 })

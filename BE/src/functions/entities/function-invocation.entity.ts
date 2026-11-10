@@ -33,10 +33,25 @@ export enum InvocationSource {
   SQS = 'sqs',
 }
 
+/** What brought a call, beyond its source, as its trace shows it: each field for the source it belongs to. */
+export interface InvocationTrigger {
+  /** A schedule's run: the schedule's name. */
+  schedule?: string;
+  /** A queue's batch: the queue's name, and the message whose trace the call joined, else the batch's first. */
+  queue?: string;
+  messageId?: string;
+  /** A bucket's notification: the bucket. */
+  bucket?: string;
+  /** An asynchronous call's record, as its destination gets it: that call's request ID. */
+  recordOf?: string;
+}
+
 @Entity('function_invocations')
 // The history lists a function's invocations newest first; deleting a function finds them too.
 @Index(['functionId', 'createdAt'])
 @Index(['requestId'])
+// A trace's calls, in time order (GET /traces/:id), kept to the reader's account through their function.
+@Index(['traceId', 'createdAt'])
 export class FunctionInvocation {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -87,6 +102,17 @@ export class FunctionInvocation {
   /** The alias the call named, which chose its version: null for a call that named none. */
   @Column({ type: 'varchar', length: 128, nullable: true })
   alias: string | null;
+
+  /**
+   * The trace the call is part of, in AWS X-Ray's format (trace.ts): its caller's, else one its entry started. An
+   * asynchronous call's attempts and its destination's record keep it. Null for a call made before calls had one.
+   */
+  @Column({ type: 'varchar', length: 35, nullable: true })
+  traceId: string | null;
+
+  /** What brought it, beyond its source: a schedule's name, a queue's and its message's, a bucket's, a call's record; null when its source says all. */
+  @Column({ type: 'jsonb', nullable: true })
+  trigger: InvocationTrigger | null;
 
   @Column('float', { default: 0.0 })
   duration: number;

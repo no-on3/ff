@@ -167,8 +167,9 @@ hack/.data-db/
 hack/.cache-server/
 # hack/k8s/mail-up.sh: the development mail server's CA, for the backend
 hack/.mail-server/
-# hack/install-tools.sh: Rust, where the machine has none recent enough; Terraform's AWS provider; the SAM CLI
+# hack/install-tools.sh: Rust, where the machine has none recent enough; Terraform's AWS provider; the SAM CLI; zig
 hack/.rust/
+hack/.zig/
 hack/.terraform/
 hack/.sam/
 *.kubeconfig
@@ -194,6 +195,9 @@ hack/.spike-versions/
 hack/.spike-keys/
 # hack/spikes/sam-yaml: the reader's build, cfn-flip, sam init's templates and home, the results (step 5's spike)
 hack/.spike-sam-yaml/
+# hack/spikes/ of the developer tools' plan (hack/lib/spikes.sh): each spike's downloads, logs and results, and the
+# one folder their Rust builds share
+hack/.spikes/
 hack/.data-services-spike/
 # Downloads the end-to-end scripts keep between runs, such as a package built with npm.
 hack/.cache/

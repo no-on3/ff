@@ -1,0 +1,63 @@
+# Deploys an application to FF from GitHub Actions at each push to main: copy this file into your repository's
+# .github/workflows/, beside the template.yaml it deploys (`ff init <name> --template sam` makes one, its
+# samconfig.toml naming the stack). In the repository's settings, "Secrets and variables", then "Actions":
+#   FF_ENDPOINT        a variable: FF's API, https://api.<domain>
+#   FF_DOWNLOADS_URL   a variable: FF's downloads site, https://get.<domain>
+#   FF_TOKEN           a secret: an API key an owner of the account makes for this, with the scopes a deploy needs:
+#                        ff api-keys create --name github --expires 90d \
+#                          --scopes stacks:read,stacks:write,functions:read,functions:write
+#                      and storage:*, queues:* when the template has buckets or queues.
+# ff is installed from the downloads site, its SHA-256 checked against the release's latest.json (its signature too,
+# when minisign is on the runner). The job fails when ff does, with ff's message as the job's error: exit code 6 is
+# the account refusing (no credit, a key's scopes, the plan's rate), 4 a function that didn't become ready, 2 the
+# command or the template, 3 the rest: the settings, the connection, the API.
+name: deploy to FF
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-to-ff
+  cancel-in-progress: false # a deploy half done is worse than one that waits
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      FF_ENDPOINT: ${{ vars.FF_ENDPOINT }}
+      FF_DOWNLOADS_URL: ${{ vars.FF_DOWNLOADS_URL }}
+      FF_TOKEN: ${{ secrets.FF_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install ff
+        run: |
+          curl -fsSL "$FF_DOWNLOADS_URL/install.sh" | sh
+          echo "$HOME/.local/bin" >>"$GITHUB_PATH"
+      - name: Deploy
+        run: |
+          # --yes: what the template no longer has is deleted, as sam deploy does; --output json: the result as a
+          # document on stdout, an error as one on stderr, after ff's warnings.
+          code=0
+          ff deploy template.yaml --yes --output json >deployed.json 2>ff-errors.txt || code=$?
+          cat ff-errors.txt >&2
+          if [ "$code" -ne 0 ]; then
+            message="$(sed -n '/^{/,/^}/p' ff-errors.txt | jq -r '.error.message // "see the log"')"
+            case "$code" in
+              6) what="FF refused the account" ;;
+              4) what="A function didn't become ready" ;;
+              *) what="ff deploy failed" ;;
+            esac
+            # One line, as an annotation takes it.
+            echo "::error title=$what (exit $code)::$(printf '%s' "$message" | sed 's/%/%25/g' | tr '\n' ' ')"
+            exit "$code"
+          fi
+          jq -r '.functions[]? | "\(.action) \(.logicalId): \(.name)"' deployed.json
+          {
+            echo "### Deployed to FF"
+            jq -r '.outputs[]? | "- \(.name): \(.value)"' deployed.json
+          } >>"$GITHUB_STEP_SUMMARY"

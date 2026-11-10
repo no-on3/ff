@@ -2,22 +2,3 @@
 # until when: from that date on, the audit reports it again. Any other high or critical advisory fails the stage.
 # One line each, the comment above it saying why (hack/lib/npm-audit.py reads them):
 #   <directory> <package> <advisory> <expires>
-
-# body-parser 2.3.0, through Express 5.2.1: a compressed body with bytes after its end, a denial of service. The API
-# refuses every compressed body before any parser reads it (BE/src/app-setup.ts), and the backend's other servers
-# (function URLs, buckets, queues) read their bodies without it: nothing reaches the flaw. Fixed in 2.4.0
-# (2026-10-22), two weeks old on 2026-11-05: updated then.
-BE body-parser GHSA-27r3-jxmh-p828 2026-11-05
-
-# multer 2.4.0, which @nestjs/platform-express 12.1.2 pins: a denial of service through an asynchronous fileFilter
-# still pending when the request ends. Multer only runs behind Nest's file interceptors, which the backend uses
-# nowhere: nothing reaches it. Fixed in 2.5.0 (2026-10-22), two weeks old on 2026-11-05: an override in
-# BE/package.json then, until Nest pins it.
-BE multer GHSA-q7qp-rjg7-q26m 2026-11-05
-
-# follow-redirects 1.16.1, through axios 1.20.0, in the console and the admin app: credentials kept across a redirect
-# to another site. It is axios's adapter for Node.js's http, which axios's "browser" field swaps for nothing, so
-# neither app's build carries it (no line of it in dist/assets): nothing reaches it. Fixed in 1.16.2 (2026-10-25),
-# two weeks old on 2026-11-08: updated then.
-FE follow-redirects GHSA-mrwp-f3q8-3g9p 2026-11-08
-admin follow-redirects GHSA-mrwp-f3q8-3g9p 2026-11-08

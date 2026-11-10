@@ -20,6 +20,8 @@ type RateUnit = keyof typeof RATE_UNITS;
 /** The years EventBridge's cron takes. */
 export const FIRST_YEAR = 1970;
 export const LAST_YEAR = 2199;
+/** The end of that last year: no schedule runs after it, a rate's no more than a cron's. */
+const END_MS = Date.UTC(LAST_YEAR + 1, 0, 1);
 
 const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
 /** EventBridge's day-of-week: 1 is Sunday, 7 Saturday. */
@@ -65,7 +67,8 @@ function parseRate(body: string): ScheduleExpression {
   const value = Number(digits);
   if (!Number.isSafeInteger(value) || value < 1) fail('rate() takes a value of 1 or more');
   const unit = word.replace(/s$/, '') as RateUnit;
-  if (!(unit in RATE_UNITS)) fail(`rate() takes minute(s), hour(s) or day(s), not "${word}"`);
+  // Its own keys alone: "in" would find Object's too, and rate(5 constructors) would be taken with no interval.
+  if (!Object.hasOwn(RATE_UNITS, unit)) fail(`rate() takes minute(s), hour(s) or day(s), not "${word}"`);
   // EventBridge's own rule: the unit is singular for 1, plural above.
   if (value === 1 && word !== unit) fail(`rate(1 ${word}) must be rate(1 ${unit}): the unit is singular for 1`);
   if (value > 1 && word === unit) fail(`rate(${value} ${word}) must be rate(${value} ${unit}s): the unit is plural above 1`);
@@ -249,13 +252,15 @@ function nextCronRun(expression: Extract<ScheduleExpression, { kind: 'cron' }>, 
  * The next run strictly after `after`. A rate's runs are every interval from
  * `anchor`, its first run's time, so a late run doesn't move them: the next is
  * the first of them after `after`. A cron's, the first minute it names after.
- * Null when a cron has no run left.
+ * Null when no run is left: a cron's past its years, and either's past 2199,
+ * where a long rate's would be beyond what a Date holds.
  */
 export function nextRun(expression: ScheduleExpression, after: Date, anchor?: Date): Date | null {
   if (expression.kind === 'cron') return nextCronRun(expression, after);
   const base = (anchor ?? after).getTime();
   const steps = Math.max(1, Math.floor((after.getTime() - base) / expression.intervalMs) + 1);
-  return new Date(base + steps * expression.intervalMs);
+  const next = base + steps * expression.intervalMs;
+  return next < END_MS ? new Date(next) : null;
 }
 
 /** The next runs, for a preview: `count` of them at most. */

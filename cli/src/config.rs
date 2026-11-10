@@ -1,9 +1,9 @@
 //! Where ff finds the API, the account and the token (ADR 0002): a flag first, then an
 //! environment variable, then the profile in ff's files, then the default.
 //!
-//! The files are `config.toml`, the profiles' settings, and `credentials.toml`, their tokens,
-//! readable by their owner only. Both hold `[profiles.<name>]` tables, and are rewritten keeping
-//! the comments and order of what is already there.
+//! The files are `config.toml`, the profiles' settings, and `credentials.toml`, their tokens:
+//! an API key, or a login's. It is readable by its owner only. Both hold `[profiles.<name>]`
+//! tables, and are rewritten keeping the comments and order of what is already there.
 
 use std::fmt;
 use std::fs;
@@ -17,6 +17,7 @@ use ureq::http::Uri;
 use crate::auth::Token;
 use crate::cli::ConnectionArgs;
 use crate::error::{Error, Kind};
+use crate::login::Login;
 
 pub const DEFAULT_ENDPOINT: &str = "http://localhost:3000";
 pub const DEFAULT_PROFILE: &str = "default";
@@ -150,6 +151,8 @@ pub enum Source {
     Environment(&'static str),
     ConfigFile,
     CredentialsFile,
+    /// The profile's login, from `ff login`, in credentials.toml.
+    Login,
     Default,
 }
 
@@ -159,6 +162,7 @@ impl fmt::Display for Source {
             Source::Flag(name) | Source::Environment(name) => f.write_str(name),
             Source::ConfigFile => f.write_str("config.toml"),
             Source::CredentialsFile => f.write_str("credentials.toml"),
+            Source::Login => f.write_str("ff login"),
             Source::Default => f.write_str("default"),
         }
     }
@@ -269,19 +273,25 @@ impl ProfileFile {
         profile.is_some_and(|profile| profile.remove(key).is_some())
     }
 
-    /// Written whole, through a file next to it renamed over it: never half written. A private
-    /// file, the credentials, is readable by its owner only, in a folder only its owner opens.
+    /// Written whole; the credentials privately.
     pub fn write(&self, private: bool) -> Result<(), Error> {
-        let failed =
-            |error: io::Error| Error::new(Kind::Failed, format!("Couldn't write {}: {error}", self.path.display()));
-        let dir = self.path.parent().expect("a file in a folder");
-        create_private_dir(dir).map_err(failed)?;
-        let temporary = self.path.with_extension("toml.new");
-        let mut file = new_file(&temporary, private).map_err(failed)?;
-        file.write_all(self.document.to_string().as_bytes()).map_err(failed)?;
-        file.sync_all().map_err(failed)?;
-        fs::rename(&temporary, &self.path).map_err(failed)
+        write_whole(&self.path, &self.document.to_string(), private)
     }
+}
+
+/// A file written whole, through a file next to it renamed over it: never half written. A private file, such as
+/// credentials, is readable by its owner only, in a folder only its owner opens.
+pub fn write_whole(path: &Path, text: &str, private: bool) -> Result<(), Error> {
+    let failed = |error: io::Error| Error::new(Kind::Failed, format!("Couldn't write {}: {error}", path.display()));
+    let dir = path.parent().expect("a file in a folder");
+    create_private_dir(dir).map_err(failed)?;
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".new");
+    let temporary = PathBuf::from(temporary);
+    let mut file = new_file(&temporary, private).map_err(failed)?;
+    file.write_all(text.as_bytes()).map_err(failed)?;
+    file.sync_all().map_err(failed)?;
+    fs::rename(&temporary, path).map_err(failed)
 }
 
 #[cfg(unix)]
@@ -290,7 +300,8 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
-#[cfg(not(unix))]
+/// On Windows, a folder like any other: the credentials file has an access list of its own.
+#[cfg(windows)]
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
@@ -301,9 +312,14 @@ fn new_file(path: &Path, private: bool) -> io::Result<fs::File> {
     fs::OpenOptions::new().write(true).create(true).truncate(true).mode(if private { 0o600 } else { 0o644 }).open(path)
 }
 
-#[cfg(not(unix))]
-fn new_file(path: &Path, _private: bool) -> io::Result<fs::File> {
-    fs::File::create(path)
+/// On Windows, a private file gets an access list of its own, for its owner alone, before anything is written in it.
+#[cfg(windows)]
+fn new_file(path: &Path, private: bool) -> io::Result<fs::File> {
+    let file = fs::File::create(path)?;
+    if private {
+        crate::owner_only::restrict(path)?;
+    }
+    Ok(file)
 }
 
 /// A warning when others than its owner may read the credentials, as ssh gives for a key.
@@ -321,9 +337,18 @@ fn exposed(path: &Path) -> Option<String> {
     })
 }
 
-#[cfg(not(unix))]
-fn exposed(_path: &Path) -> Option<String> {
-    None
+/// On Windows, as OpenSSH warns for a key: others than its owner, the system and the administrators in its access list.
+#[cfg(windows)]
+fn exposed(path: &Path) -> Option<String> {
+    let others = crate::owner_only::other_readers(path).ok().filter(|others| !others.is_empty())?;
+    let you = crate::owner_only::user_name().ok()?;
+    Some(format!(
+        "{} can be read by others than you ({}): icacls \"{}\" /inheritance:r /grant:r \"{you}:F\" /remove {}",
+        path.display(),
+        others.join(", "),
+        path.display(),
+        others.iter().map(|other| format!("\"{other}\"")).collect::<Vec<_>>().join(" ")
+    ))
 }
 
 /// The settings in effect, each with where it comes from.
@@ -334,10 +359,34 @@ pub struct Settings {
     pub account: Option<Setting<String>>,
     pub dev_account: Option<Setting<String>>,
     pub token: Option<Setting<Token>>,
+    /// The profile's login, when its token is the one in effect: no FF_TOKEN, and no API key in the profile.
+    pub login: Option<Login>,
     pub allow_http: Setting<bool>,
+    /// Whether ff says when a newer version is out: `FF_NO_UPDATE_CHECK` turns it off, else the profile's
+    /// `update_check`, else on.
+    pub update_check: Setting<bool>,
     pub files: Files,
     /// What the files' owner should fix, printed before the command's output.
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+impl Settings {
+    /// For a unit test: the default profile, the API at https://api.ff.example, no account, no token.
+    pub fn example() -> Settings {
+        Settings {
+            profile: Setting { value: DEFAULT_PROFILE.into(), source: Source::Default },
+            endpoint: Setting { value: Endpoint::parse("https://api.ff.example").unwrap(), source: Source::ConfigFile },
+            account: None,
+            dev_account: None,
+            token: None,
+            login: None,
+            allow_http: Setting { value: false, source: Source::Default },
+            update_check: Setting { value: true, source: Source::Default },
+            files: Files { dir: PathBuf::from("/tmp/ff") },
+            warnings: Vec::new(),
+        }
+    }
 }
 
 /// The first of a flag, an environment variable, and the profile's value.
@@ -415,6 +464,14 @@ pub fn resolve(
         }
     };
     endpoint.value.check_tls(allow_http.value).map_err(|problem| Error::new(Kind::Failed, problem))?;
+    let update_check = if env("FF_NO_UPDATE_CHECK").is_some_and(|value| !value.is_empty()) {
+        Setting { value: false, source: Source::Environment("FF_NO_UPDATE_CHECK") }
+    } else {
+        match config.boolean(name, "update_check")? {
+            Some(value) => Setting { value, source: Source::ConfigFile },
+            None => Setting { value: true, source: Source::Default },
+        }
+    };
 
     let account = account_setting(
         first(
@@ -430,7 +487,9 @@ pub fn resolve(
         "dev_account",
     )?;
 
+    // FF_TOKEN, then the profile's API key, then its login: a key given to a CI keeps working whatever a login says.
     let mut warnings = Vec::new();
+    let mut login = None;
     let token = match env("FF_TOKEN").and_then(|value| Token::new(&value)) {
         Some(token) => Some(Setting { value: token, source: Source::Environment("FF_TOKEN") }),
         None => match credentials.string(name, "token")? {
@@ -438,11 +497,21 @@ pub fn resolve(
                 warnings.extend(exposed(&credentials.path));
                 Token::new(&value).map(|token| Setting { value: token, source: Source::CredentialsFile })
             }
-            None => None,
+            None => {
+                // A login that can't be read is none, said, so that `ff login` can make another.
+                match Login::read(credentials, name) {
+                    Ok(found) => login = found,
+                    Err(broken) => warnings.push(broken.message),
+                }
+                if login.is_some() {
+                    warnings.extend(exposed(&credentials.path));
+                }
+                login.as_ref().map(|login| Setting { value: login.access_token.clone(), source: Source::Login })
+            }
         },
     };
 
-    Ok(Settings { profile, endpoint, account, dev_account, token, allow_http, files, warnings })
+    Ok(Settings { profile, endpoint, account, dev_account, token, login, allow_http, update_check, files, warnings })
 }
 
 /// The settings in effect for this process: its flags, its environment, its files.

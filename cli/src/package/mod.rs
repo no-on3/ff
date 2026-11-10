@@ -4,7 +4,7 @@
 //! same way each time, so that the same folder gives the same SHA-256 and a deploy can say "no
 //! changes".
 
-mod ignore;
+pub mod ignore;
 mod project;
 mod zip;
 
@@ -89,15 +89,27 @@ impl Drop for Staging {
     }
 }
 
+/// Whether a file is a program, which Lambda's zip keeps at 0755: on Unix, as its mode says.
 #[cfg(unix)]
-fn is_executable(metadata: &std::fs::Metadata) -> bool {
+fn is_executable(path: &Path) -> io::Result<bool> {
     use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode() & 0o111 != 0
+    Ok(std::fs::metadata(path)?.permissions().mode() & 0o111 != 0)
 }
 
+/// Elsewhere, which keeps no such mode, by how the file starts.
 #[cfg(not(unix))]
-fn is_executable(_metadata: &std::fs::Metadata) -> bool {
-    false
+fn is_executable(path: &Path) -> io::Result<bool> {
+    use std::io::Read;
+    let mut start = Vec::with_capacity(4);
+    std::fs::File::open(path)?.take(4).read_to_end(&mut start)?;
+    Ok(starts_a_program(&start))
+}
+
+/// A script, which starts with `#!`, or a Linux program, which starts with ELF's mark, as a build in a container
+/// installs them (esbuild's, Prisma's engines).
+#[cfg(any(not(unix), test))]
+fn starts_a_program(start: &[u8]) -> bool {
+    start.starts_with(b"#!") || start.starts_with(b"\x7fELF")
 }
 
 /// What a package left out that one may have meant to put in, said once.
@@ -195,7 +207,7 @@ fn collect(
             && !name.starts_with("node_modules/")
             && [".ts", ".mts", ".cts"].iter().any(|extension| name.ends_with(extension));
         if !rules.excludes(&name, false) && !typescript {
-            let executable = is_executable(&std::fs::metadata(&source)?);
+            let executable = is_executable(&source)?;
             files.push(zip::Entry { name, source, executable });
         }
     }
@@ -212,14 +224,27 @@ pub struct FolderFile {
 
 /// The folder's files as its package holds them before a build: what the package's rules leave
 /// out left out, `.env` files too, links followed to the folder's own files.
-pub fn folder_files(root: &Path) -> Result<Vec<FolderFile>, Error> {
+fn unbuilt_entries(root: &Path) -> Result<Vec<zip::Entry>, Error> {
     let unreadable = |error: io::Error| failed(format!("Couldn't read {}: {error}", root.display()));
     let resolved = std::fs::canonicalize(root).map_err(unreadable)?;
     let mut entries = Vec::new();
     collect(&resolved, &resolved, &Ignore::of(&resolved)?, false, &mut entries, &mut Vec::new()).map_err(unreadable)?;
-    Ok(entries
+    entries.retain(|entry| !is_env_file(entry.name.rsplit('/').next().unwrap_or_default()));
+    Ok(entries)
+}
+
+/// The folder as its package would hold it unbuilt, zipped: the size and the SHA-256 in base64, as AWS Lambda's
+/// CodeSize and CodeSha256 say them, of what a function runs from it on this machine.
+pub fn unbuilt_code(root: &Path) -> Result<(u64, String), Error> {
+    let zip = zip::write(unbuilt_entries(root)?)
+        .map_err(|error| failed(format!("Couldn't zip {}: {error}", root.display())))?;
+    Ok((zip.len() as u64, STANDARD.encode(ring::digest::digest(&ring::digest::SHA256, &zip))))
+}
+
+/// The folder's files as its package holds them before a build.
+pub fn folder_files(root: &Path) -> Result<Vec<FolderFile>, Error> {
+    Ok(unbuilt_entries(root)?
         .into_iter()
-        .filter(|entry| !is_env_file(entry.name.rsplit('/').next().unwrap_or_default()))
         .map(|entry| FolderFile {
             size: std::fs::metadata(&entry.source).map_or(0, |metadata| metadata.len()),
             name: entry.name,
@@ -324,6 +349,8 @@ fn run_steps(
         let mut command = Command::new("docker");
         command.args(["run", "--rm", "--platform", BUILD_PLATFORM, "-v"]);
         command.arg(format!("{}:/build", staging.display())).args(["-w", "/build", "-e", "HOME=/tmp"]);
+        // On Unix, as the folder's owner. On Windows, Docker Desktop gives what a container writes in a folder it
+        // mounts to the machine's user, whoever writes it.
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -548,28 +575,47 @@ mod tests {
         assert_eq!(build(dir.path(), &AS_IT_IS, &Output::quiet()).unwrap().files, ["index.js", "orders.zip"]);
     }
 
+    /// A link at `at` to `target`, a folder's or a file's, which Windows tells apart.
     #[cfg(unix)]
+    fn link(target: &Path, at: &Path, _folder: bool) {
+        std::os::unix::fs::symlink(target, at).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn link(target: &Path, at: &Path, folder: bool) {
+        let made = if folder {
+            std::os::windows::fs::symlink_dir(target, at)
+        } else {
+            std::os::windows::fs::symlink_file(target, at)
+        };
+        made.expect("Windows lets an administrator make a link, or anyone in its Developer Mode");
+    }
+
+    /// The same on Windows, whose links Rust reads as Unix's.
     #[test]
     fn follows_links_to_files_inside_the_package_and_leaves_out_the_others() {
         let dir = folder(&[("index.js", "exports.handler = 1;\n"), ("lib/real.js", "x\n")]);
         let outside = tempfile::TempDir::new().unwrap();
         std::fs::write(outside.path().join("secret"), "hunter2").unwrap();
-        std::os::unix::fs::symlink("lib/real.js", dir.path().join("alias.js")).unwrap();
-        std::os::unix::fs::symlink(outside.path().join("secret"), dir.path().join("leak")).unwrap();
-        std::os::unix::fs::symlink("lib", dir.path().join("lib-again")).unwrap();
-        std::os::unix::fs::symlink("gone.js", dir.path().join("broken.js")).unwrap();
+        link(&Path::new("lib").join("real.js"), &dir.path().join("alias.js"), false);
+        link(&outside.path().join("secret"), &dir.path().join("leak"), false);
+        link(Path::new("lib"), &dir.path().join("lib-again"), true);
+        link(Path::new("gone.js"), &dir.path().join("broken.js"), false);
 
         let package = build(dir.path(), &AS_IT_IS, &Output::quiet()).unwrap();
 
         assert_eq!(package.files, ["alias.js", "index.js", "lib/real.js"]);
     }
 
-    #[cfg(unix)]
+    /// On Unix by its mode; on Windows, which has none, by its `#!`.
     #[test]
     fn keeps_what_runs_runnable() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = folder(&[("index.js", "exports.handler = 1;\n"), ("bin/tool", "#!/bin/sh\n")]);
-        std::fs::set_permissions(dir.path().join("bin/tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path().join("bin/tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let package = build(dir.path(), &AS_IT_IS, &Output::quiet()).unwrap();
 
@@ -577,6 +623,12 @@ mod tests {
         let directory = package.zip.windows(4).position(|window| window == [0x50, 0x4b, 0x01, 0x02]).unwrap();
         let attributes = u32::from_le_bytes(package.zip[directory + 38..directory + 42].try_into().unwrap());
         assert_eq!(attributes >> 16, 0o100755);
+    }
+
+    #[test]
+    fn a_program_is_known_by_how_it_starts_where_the_system_keeps_no_mode() {
+        assert!(starts_a_program(b"#!/bin/sh\n") && starts_a_program(b"\x7fELF\x02\x01"));
+        assert!(!starts_a_program(b"exports.handler = 1;\n") && !starts_a_program(b"#") && !starts_a_program(b""));
     }
 
     #[test]

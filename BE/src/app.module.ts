@@ -8,6 +8,7 @@ import { AdminModule } from './admin/admin.module';
 import { ApiKeysModule } from './api-keys/api-keys.module';
 import { AuditModule } from './audit/audit.module';
 import { AuthGuard } from './auth/auth.guard';
+import { LoginController } from './auth/login.controller';
 import { TokenVerifier } from './auth/token-verifier';
 import { ApiExceptionFilter } from './common/api-exception.filter';
 import { RequestIdInterceptor } from './common/request-context';
@@ -76,7 +77,7 @@ import { StorageModule } from './storage/storage.module';
     StacksModule,
     StorageModule,
   ],
-  controllers: [HealthController],
+  controllers: [HealthController, LoginController],
   providers: [
     // Every route needs a valid token unless it is @Public(), or development mode is on (D4).
     TokenVerifier,

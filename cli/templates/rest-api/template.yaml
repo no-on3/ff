@@ -1,0 +1,50 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  {{name}}: a REST API at a function's URL, its routes by method and path, its items kept in PostgreSQL, and CORS for
+  the one origin whose pages call it. ff deploy puts it on FF, sam deploy on AWS, and ff local start runs it here.
+  The database is made apart (ff db create on FF, --with postgres here, RDS on AWS), as no resource of SAM's makes
+  one; its address is the function's DATABASE_URL, a secret on FF, which stays out of the template.
+
+Parameters:
+  AllowedOrigin:
+    Type: String
+    Default: http://localhost:5173
+    Description: >-
+      The one origin whose pages may call the API from a browser: a development server's by default, your site's
+      once it has one
+
+Globals:
+  Function:
+    Runtime: {{runtime}}
+    CodeUri: src/
+    MemorySize: 256
+    Timeout: 10
+
+Resources:
+  # GET /items, POST /items, GET /items/<id> and DELETE /items/<id>, at the function's URL.
+  Api:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-api"
+      Handler: app.handler
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins:
+            - !Ref AllowedOrigin
+          AllowMethods:
+            - GET
+            - POST
+            - DELETE
+          AllowHeaders:
+            - content-type
+          MaxAge: 300
+
+Outputs:
+  ApiUrl:
+    Description: The API's address, its function's URL
+    Value: !GetAtt ApiUrl.FunctionUrl
+  Api:
+    Description: The API's function
+    Value: !GetAtt Api.Arn

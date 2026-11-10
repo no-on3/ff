@@ -643,6 +643,51 @@ describe('KubernetesOrchestrator', () => {
       await expect(orchestrator.waitUntilReady(fn, 100)).resolves.toBeUndefined();
     });
 
+    describe('the pods it replaced, which go on answering for a few seconds once told to stop', () => {
+      const podsPath = `/api/v1/namespaces/${ns}/pods`;
+      const pod = (name: string, phase: string, toldToStop: boolean) => ({
+        metadata: { name, creationTimestamp: '2026-11-09T10:00:00Z', ...(toldToStop ? { deletionTimestamp: '2026-11-09T10:01:00Z' } : {}) },
+        status: { phase },
+      });
+      /** An orchestrator that takes a pod told to stop as answering for `stopAnsweringMs` from when it sees it told. */
+      const stoppingIn = (stopAnsweringMs: number) => new KubernetesOrchestrator(settings(), api, 5, 3000, 5000, stopAnsweringMs);
+
+      it('waits until one told to stop no longer answers: a call after an update runs what it made', async () => {
+        orchestrator = stoppingIn(200);
+        api.objects.set(deploymentPath, rolledOut(1));
+        api.lists.set(podsPath, [pod('fn-new', 'Running', false), pod('fn-old', 'Running', true)]);
+
+        const started = Date.now();
+        await orchestrator.waitUntilReady(fn, 100);
+
+        expect(Date.now() - started).toBeGreaterThanOrEqual(190);
+        expect(api.listed).toEqual([{ path: podsPath, selector: `ff.dev/function-id=${fn.id}` }]);
+      });
+
+      it("doesn't wait when a call can't tell them from the new ones, as at a key's renewal", async () => {
+        orchestrator = stoppingIn(60_000);
+        api.objects.set(deploymentPath, rolledOut(1));
+        api.lists.set(podsPath, [pod('fn-new', 'Running', false), pod('fn-old', 'Running', true)]);
+
+        const started = Date.now();
+        await orchestrator.waitUntilReady(fn, 100, { replacedMayAnswer: true });
+
+        expect(Date.now() - started).toBeLessThan(1_000);
+        expect(api.listed).toEqual([]);
+      });
+
+      it("doesn't wait when none was told to stop, nor for one whose runtime ended or never started", async () => {
+        orchestrator = stoppingIn(60_000);
+        api.objects.set(deploymentPath, rolledOut(1));
+        api.lists.set(podsPath, [pod('fn-new', 'Running', false), pod('fn-ended', 'Succeeded', true), pod('fn-unstarted', 'Pending', true)]);
+
+        const started = Date.now();
+        await orchestrator.waitUntilReady(fn, 100);
+
+        expect(Date.now() - started).toBeLessThan(1_000);
+      });
+    });
+
     const crashLooping = () => {
       api.objects.set(deploymentPath, { ...rolledOut(1), status: { observedGeneration: 1, replicas: 1, updatedReplicas: 1, availableReplicas: 0 } });
       api.lists.set(`/api/v1/namespaces/${ns}/pods`, [
@@ -922,15 +967,16 @@ describe('KubernetesOrchestrator', () => {
     });
 
     describe("what a caller of Lambda's Invoke asks for", () => {
-      it("asks the runtime for the call's log and passes the caller's client context on, and neither when not asked", async () => {
+      it("asks the runtime for the call's log and passes the caller's client context and the call's trace on, and none when not asked", async () => {
         api.objects.set(deploymentPath, rolledOut(1));
         api.responses.push({ status: 200, headers: { 'x-ff-log-result': 'U1RBUlQK' }, body: '{ "spaced" : 1 }' }, { status: 200, headers: {}, body: '' });
 
-        const asked = await orchestrator.invoke(fn, {}, { requestId: 'inv-1', logTail: true, clientContext: 'e30=' });
+        const traceId = '1-6730a1f2-0123456789abcdef01234567';
+        const asked = await orchestrator.invoke(fn, {}, { requestId: 'inv-1', traceId, logTail: true, clientContext: 'e30=' });
         const plain = await orchestrator.invoke(fn, {}, { requestId: 'inv-2' });
 
         expect(api.requests.map((request) => request.options?.headers)).toEqual([
-          { 'x-ff-request-id': 'inv-1', 'x-ff-log-type': 'Tail', 'x-ff-client-context': 'e30=' },
+          { 'x-ff-request-id': 'inv-1', 'x-ff-trace-id': traceId, 'x-ff-log-type': 'Tail', 'x-ff-client-context': 'e30=' },
           { 'x-ff-request-id': 'inv-2' },
         ]);
         // The answer as the runtime sent it, its spacing kept; an empty one is null, as its output.

@@ -28,4 +28,21 @@ printf '{"api": "%s"}\n' "$(ff url show shop-api --output json | jq -r .url.func
 ff sites deploy shop-site site
 ```
 
+On this machine, `ff local start` runs it in Docker as FF runs it, once its libraries are installed, as `sam build` installs them for `sam local`. `--with postgres,valkey` runs its database and its cache beside it, the functions' `DATABASE_URL` and `REDIS_URL`, their data kept from a start to the next; other secrets come from `.env.local`, which git leaves out, as it does `.ff/`, where `ff local` keeps its logs, its key and its mail. `shop-api` answers at its URL, its CORS the template's, the schedule runs on time, or now with `ff local run`, and the queue of new orders is kept there, answering SQS at the same port, where `shop-receipts` reads it in batches as on FF, writes each receipt to the bucket, a file of `.ff/local/buckets/shop-receipts/`, and e-mails it from `ReceiptsFrom`: the mail is kept, never sent, each message a file of `.ff/local/mail/` that a mail reader opens and `ff local mail` lists. The page is served from `site/` itself by `--site`, at the site's address, which `SiteOrigin` lets in, a change to it seen at the next reload; its `config.json` names the API here:
+
+```bash
+npm ci --omit=dev
+printf '{"api": "http://shop-api.fn.localhost:3700"}\n' > site/config.json
+ff local start template.yaml --with postgres,valkey --site shop-site=site \
+  --parameter-overrides ReceiptsBucketName=shop-receipts SiteBucketName=shop-site \
+  SiteOrigin=http://shop-site.site.localhost:3700 ReceiptsFrom=receipts@shop.example.tn
+curl -d '{"item": "tea", "quantity": 2, "email": "me@example.tn"}' http://shop-api.fn.localhost:3700/orders
+curl http://shop-api.fn.localhost:3700/orders                   # the latest, from the cache the second time
+ff local mail                                                   # the order's receipt, e-mailed, kept
+ff local run EveryNight                                         # shop-nightly's run, now, as its schedule calls it
+ff local reset --data --yes                                     # all of it gone, the database's and the cache's data too
+```
+
+Open http://shop-site.site.localhost:3700 in a browser: an order made there is in the list, and its receipt a moment later. A database of your own works here too: its address as `DATABASE_URL` in `.env.local`, reached from the containers at `host.docker.internal`, takes the place of `--with postgres`'s.
+
 FF's database, the cache, the buckets, the queue and the mail are reached whatever the account's internet access. A database of your own elsewhere works too, through the same secret, once FF's operator turns the account's internet access on. On AWS Lambda, with an RDS database, an ElastiCache cache and SES beside it, `sam deploy` takes the template `ff export` writes from the stack, which adds `DATABASE_URL` and `REDIS_URL` as parameters CloudFormation doesn't show back; this one passes `sam validate --lint` as it is, each function's `Policies` giving its role what it uses, and once FF has an AWS account, `hack/e2e-aws.sh` deploys it there each month, without a database. A receipt is read without one. The export kit's [`data/sqs.md`](../../cli/templates/export/data/sqs.md) has the queue and the mapping, [`data/s3-website.md`](../../cli/templates/export/data/s3-website.md) the page, [`data/elasticache.md`](../../cli/templates/export/data/elasticache.md) the cache and [`data/ses.md`](../../cli/templates/export/data/ses.md) the mail. `test/handlers.test.js` tries each handler's paths with its clients stubbed, no database or cache needed: `node --test test/handlers.test.js`, the ones FF can't show, such as a cache that can't be reached or SES refusing an e-mail. `.ffignore` leaves this README, the template, `samconfig.toml`, `events/`, `site/` and `test/` out of the package.

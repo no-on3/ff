@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -15,7 +16,7 @@ use tempfile::TempDir;
 pub const KEY: &str = "ffk_0123456789ab_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_aBcDe";
 
 /// `ff` with its settings in `dir`, and none of the environment's: no token, endpoint, account,
-/// profile or proxy.
+/// profile or proxy, and none of the update notice's settings, so that it never shows but where a test asks for it.
 pub fn ff(dir: &TempDir) -> Command {
     let mut command = Command::cargo_bin("ff").expect("the ff binary is built");
     command.env("FF_CONFIG_DIR", dir.path());
@@ -25,6 +26,9 @@ pub fn ff(dir: &TempDir) -> Command {
         "FF_ACCOUNT",
         "FF_PROFILE",
         "NO_COLOR",
+        "FF_DOWNLOADS_URL",
+        "FF_TEST_RELEASE_KEY",
+        "FF_NO_UPDATE_CHECK",
         "ALL_PROXY",
         "all_proxy",
         "HTTPS_PROXY",
@@ -47,14 +51,86 @@ pub fn settings(config: &str, credentials: &str) -> TempDir {
     }
     if !credentials.is_empty() {
         std::fs::write(dir.path().join("credentials.toml"), credentials).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(dir.path().join("credentials.toml"), std::fs::Permissions::from_mode(0o600))
-                .unwrap();
-        }
+        owner_alone(&dir.path().join("credentials.toml"));
     }
     dir
+}
+
+/// Makes a file its owner's alone, as ff makes its credentials: mode 0600 on Unix; on Windows, an access list of its
+/// own for the user running the tests, inherited from no folder, and without the entries for the system and its
+/// administrators that a file made in some folders holds of its own (GitHub's Windows runners' temporary folder).
+pub fn owner_alone(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        // The system and the administrators by their SIDs, which no language renames.
+        let made = std::process::Command::new("icacls")
+            .arg(path)
+            .args(["/inheritance:r", "/grant:r"])
+            .arg(format!("{}:F", windows_user()))
+            .args(["/remove", "*S-1-5-18", "*S-1-5-32-544"])
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stdout));
+    }
+}
+
+/// That only its owner may read the file, as its system says: its mode on Unix; on Windows its access list, which
+/// must hold the user running the tests alone, inherited from no folder.
+pub fn assert_owner_alone(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600, "{}", path.display());
+    }
+    #[cfg(windows)]
+    {
+        let (entries, user) = (access_list(path), windows_user());
+        assert!(
+            entries.len() == 1 && entries[0].eq_ignore_ascii_case(&format!("{user}:(F)")),
+            "{entries:?}, the user being {user}"
+        );
+    }
+}
+
+/// The user running the tests as icacls names it, `DOMAIN\name`.
+#[cfg(windows)]
+pub fn windows_user() -> String {
+    let variable = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("Windows sets {name}"));
+    format!("{}\\{}", variable("USERDOMAIN"), variable("USERNAME"))
+}
+
+/// A file's access list as icacls lists it: an entry a line, `DOMAIN\name:(rights)`, `(I)` marking an inherited one.
+#[cfg(windows)]
+pub fn access_list(path: &Path) -> Vec<String> {
+    let listed = std::process::Command::new("icacls").arg(path).output().unwrap();
+    let text = String::from_utf8_lossy(&listed.stdout).into_owned();
+    let shown = path.display().to_string();
+    text.lines()
+        .take_while(|line| !line.trim().is_empty())
+        .map(|line| line.strip_prefix(shown.as_str()).unwrap_or(line).trim().to_owned())
+        .collect()
+}
+
+/// The realm's issuer, when the scripted server answers as the API and as its realm.
+pub fn issuer(url: &str) -> String {
+    format!("{url}/realms/ff")
+}
+
+/// A profile calling `url`, with a login whose access token ends at `expires_at`, and maybe an API key.
+pub fn logged_in(url: &str, expires_at: &str, key: bool) -> TempDir {
+    let key = if key { format!("token = \"{KEY}\"\n") } else { String::new() };
+    settings(
+        &format!("[profiles.default]\nendpoint = \"{url}\"\n"),
+        &format!(
+            "[profiles.default]\n{key}issuer = \"{}\"\naccess_token = \"old-access\"\nrefresh_token = \"old-refresh\"\nexpires_at = \"{expires_at}\"\n",
+            issuer(url)
+        ),
+    )
 }
 
 /// A profile that calls `url` with the test key.

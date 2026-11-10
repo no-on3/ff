@@ -1,0 +1,13 @@
+# FF's development server updating itself (update.sh, beside this file), each time ff-updater.timer says;
+# server.sh installs both in /etc/systemd/system. Its output: journalctl -u ff-updater.
+[Unit]
+Description=FF's development server: master's newest commit that passed, installed at night
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+ExecStart=/bin/bash /data/ff/src/deploy/dev-server/updater/update.sh
+# An update takes 10 minutes or so; one still going after 3 hours is ended, and the next round reports it.
+TimeoutStartSec=3h

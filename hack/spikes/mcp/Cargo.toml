@@ -1,0 +1,10 @@
+# The developer tools' spike of `ff mcp`: an MCP server on stdio with serde_json alone, which ff has already, in a crate
+# of its own, so that ff takes on nothing before the spike says how clients speak to it.
+[package]
+name = "mcp-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde_json = "1"

@@ -1,0 +1,8 @@
+{
+  "name": "api",
+  "private": true,
+  "description": "A REST API at a function's URL, its items in PostgreSQL: on FF, on AWS Lambda, and here with ff local start",
+  "dependencies": {
+    "pg": "8.23.1"
+  }
+}

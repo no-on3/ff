@@ -9,23 +9,23 @@ use crate::error::Error;
 
 pub fn run(context: &Context) -> Result<(), Error> {
     let settings = context.settings()?;
-    let client = Client::new(&settings)?;
-    // The API's answer is printed as it came for scripts; read here for people.
-    let answer: serde_json::Value = client.json(&Call::get("/me"))?;
-    let me: Me = serde_json::from_value(answer.clone()).map_err(|error| {
-        Error::new(crate::error::Kind::Failed, format!("The API's answer to GET /me isn't what ff expects: {error}"))
-    })?;
+    let (answer, me) = ask(&Client::new(&settings)?)?;
     context.out.result(&answer, || text(&me, &settings))
 }
 
-fn account_line(account: &Account) -> String {
-    format!("account {} \"{}\" ({}, plan {})", account.id, account.name, account.status, account.plan.name)
+/// `GET /me`: the API's answer as it came, printed so for scripts, and read for people.
+pub(super) fn ask(client: &Client) -> Result<(serde_json::Value, Me), Error> {
+    let answer: serde_json::Value = client.json(&Call::get("/me"))?;
+    let me = serde_json::from_value(answer.clone()).map_err(|error| {
+        Error::new(crate::error::Kind::Failed, format!("The API's answer to GET /me isn't what ff expects: {error}"))
+    })?;
+    Ok((answer, me))
 }
 
-fn text(me: &Me, settings: &Settings) -> String {
+pub(super) fn text(me: &Me, settings: &Settings) -> String {
     let api = format!("API: {}", settings.endpoint.value);
     if let Some(key) = &me.key {
-        let account = me.accounts.first().map(account_line).unwrap_or_default();
+        let account = me.accounts.first().map(Account::line).unwrap_or_default();
         let role = me.accounts.first().map(|account| account.role.as_str()).unwrap_or("?");
         return format!(
             "API key \"{}\" (ffk_{}_…) on {account}\nscopes: {}, within its creator's role: {role}\n{api}",
@@ -35,7 +35,7 @@ fn text(me: &Me, settings: &Settings) -> String {
         );
     }
     let Some(user) = &me.user else {
-        let account = me.accounts.first().map(account_line).unwrap_or_default();
+        let account = me.accounts.first().map(Account::line).unwrap_or_default();
         return format!("Development mode, as the owner of {account}\n{api}");
     };
     let who = match &user.name {
@@ -46,7 +46,7 @@ fn text(me: &Me, settings: &Settings) -> String {
     let mut lines = vec![who];
     for account in &me.accounts {
         let chosen = current == Some(account.id.as_str()) || (current.is_none() && me.accounts.len() == 1);
-        lines.push(format!("{} {}, as {}", if chosen { "*" } else { " " }, account_line(account), account.role));
+        lines.push(format!("{} {}, as {}", if chosen { "*" } else { " " }, account.line(), account.role));
     }
     if current.is_none() && me.accounts.len() > 1 {
         lines.push("Several accounts: name one with --account, FF_ACCOUNT or `ff config set account <ID>`".to_owned());
@@ -57,21 +57,13 @@ fn text(me: &Me, settings: &Settings) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::config::{Endpoint, Files, Setting, Source};
+    use crate::config::{Setting, Source};
 
     fn settings(account: Option<&str>) -> Settings {
         Settings {
-            profile: Setting { value: "default".into(), source: Source::Default },
-            endpoint: Setting { value: Endpoint::parse("https://api.ff.example").unwrap(), source: Source::ConfigFile },
             account: account.map(|account| Setting { value: account.into(), source: Source::Flag("--account") }),
-            dev_account: None,
-            token: None,
-            allow_http: Setting { value: false, source: Source::Default },
-            files: Files { dir: PathBuf::from("/tmp/ff") },
-            warnings: Vec::new(),
+            ..Settings::example()
         }
     }
 

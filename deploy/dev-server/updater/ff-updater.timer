@@ -1,0 +1,10 @@
+# Every 10 minutes, FF's development server asks GitHub for master's newest commit that passed (ff-updater.service).
+# A failed update stops it until someone looks; server.sh, run by hand, starts it again.
+[Unit]
+Description=FF's development server asking GitHub for master's newest commit, every 10 minutes
+
+[Timer]
+OnCalendar=*:0/10
+
+[Install]
+WantedBy=timers.target

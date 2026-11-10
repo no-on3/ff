@@ -1,16 +1,26 @@
-# Vulnerabilities hack/ci.sh's image scans accept, each in the one binary named, with why, and until when:
+# Vulnerabilities hack/ci.sh's image scans accept, each in the one binary or package named, with why, and until when:
 # from expired_at on, the scan reports it again. Anything else, anywhere, fails the scan.
 vulnerabilities:
-  - id: CVE-2026-111181
-    paths: [app/node_modules/body-parser/package.json]
+  - id: CVE-2026-78661
+    paths: [usr/local/bin/wal-g]
     statement: >-
-      body-parser 2.3.0, through Express 5.2.1, in the backend's image: a denial of service through a compressed request body. The API refuses every compressed body before any parser reads it (BE/src/app-setup.ts), and the backend's other servers (function URLs, buckets, queues) read their bodies without it: nothing reaches the flaw. Fixed in 2.4.0 (2026-10-22), two weeks old on 2026-11-05: updated then. .npmauditignore accepts the same advisory, GHSA-27r3-jxmh-p828.
-    expired_at: 2026-11-05
-  - id: CVE-2026-113872
-    paths: [app/node_modules/multer/package.json]
+      WAL-G v3.0.9, the latest release (2026-08-20), was built with golang.org/x/net v0.58.0: a denial of service in x/net/html's parser. Here WAL-G reaches the second site's S3 and serves nothing, parsing no HTML: accepted, as its other advisories are, until a release built with v0.62.0 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
+    expired_at: 2026-11-20
+  - id: CVE-2026-85091
+    purls: [pkg:apk/alpine/zlib@1.3.2-r0]
     statement: >-
-      multer 2.4.0, which @nestjs/platform-express 12.1.2 pins, in the backend's image: a denial of service through an asynchronous file filter still pending when the request ends. Multer only runs behind Nest's file interceptors, which the backend uses nowhere: nothing reaches it. Fixed in 2.5.0 (2026-10-22), two weeks old on 2026-11-05: an override in BE/package.json then. .npmauditignore accepts the same advisory, GHSA-q7qp-rjg7-q26m.
-    expired_at: 2026-11-05
+      Alpine's zlib 1.3.2-r0 in the backend's image (node:24.21.0-alpine3.24) and the cache's (valkey/valkey:9.1.2-alpine3.24): a heap overflow in gz_vacate, one of zlib's gzFile functions, which read and write .gz files. In the backend's, apk alone links it, and apk never runs once built (Node.js carries its own zlib); in the cache's, Alpine's Node.js links it for the agent, which compresses nothing, and Node.js's zlib module calls deflate and inflate, never a gzFile: nothing reaches it. Fixed in 1.3.2-r1, in alpine:3.24.3, which the images on plain Alpine moved to; Alpine's repository has 1.4-r0 now (2026-11-06), two weeks old on 2026-11-20, and Node.js's image with the fix, node:24.22.2-alpine3.24 (2026-11-05), on 2026-11-19: one or the other then.
+    expired_at: 2026-11-20
+  - id: CVE-2026-85091
+    purls: [pkg:deb/debian/zlib1g@1.3.dfsg+really1.3.1-1+b1]
+    statement: >-
+      Debian's zlib1g 1:1.3.dfsg+really1.3.1-1+b1 in the runtimes' images (node:24-trixie-slim, python:3.13-slim): a heap overflow in gz_vacate when gzprintf follows a stalled write, one of zlib's gzFile functions, which write .gz files. Node.js carries its own zlib, and Python's zlib and gzip modules call deflate and inflate, never a gzFile: only a customer's own native module that writes .gz files through the system's zlib could reach it, inside that customer's sandbox. Accepted, not shown harmless, until the fix, 1:1.3.dfsg+really1.3.1-1+deb13u1 (Debian's security archive, 2026-11-07), is two weeks old on 2026-11-21: the runtimes' images upgrade zlib1g then, unless their base images carry it. CVE-2026-76844 is the same package's, beside it.
+    expired_at: 2026-11-21
+  - id: CVE-2026-76844
+    purls: [pkg:deb/debian/zlib1g@1.3.dfsg+really1.3.1-1+b1]
+    statement: >-
+      Debian's zlib1g 1:1.3.dfsg+really1.3.1-1+b1 in the runtimes' images: a heap overflow when a gzFile write follows one whose write() failed. As CVE-2026-85091 beside it, in zlib's gzFile functions, which Node.js's and Python's zlib never call: accepted, not shown harmless, until the same fix is two weeks old on 2026-11-21.
+    expired_at: 2026-11-21
   - id: CVE-2026-111943
     paths: [usr/local/bin/wal-g]
     statement: >-

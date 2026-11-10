@@ -1,0 +1,8 @@
+{
+  "name": "payments",
+  "private": true,
+  "description": "Orders paid through Konnect, its notifications received right: on FF, on AWS Lambda, and here with ff local start",
+  "dependencies": {
+    "pg": "8.23.1"
+  }
+}

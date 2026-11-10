@@ -378,6 +378,20 @@ curl -s "$FF/schedules/next-runs?expression=rate(15%20minutes)" | jq -c .runs   
 - **In the console**, a function's Schedules tab lists its schedules, with when each runs next and how its last run went, in your time and in UTC, the last run's request ID, and what it runs when it names a version or an alias (`Runs alias live`). It makes one, choosing what it runs once the function has a version or an alias, showing the next five runs as you type the expression, or what is wrong in it, with a few examples to start from; it changes one, disables and enables it, and deletes it. Every member sees them; owners and developers change them. With `ff`, `ff schedule set … --qualifier live` (a version's number, or `latest` for the function as it is) says what one runs, a change without it keeping it, and `ff schedule list` says what each runs.
 - **The rest.** `GET /functions/<id>/schedules` lists them with their next run; `PUT …/schedules/<scheduleId>` changes what you send (`"enabled": false` stops the runs, `true` starts them again from now); `DELETE` removes one, and deleting the function removes them all. Names are unique within a function: letters, digits, `.`, `-` and `_`, as EventBridge rules'. The plan limits how many an account has (20 on the beta plan). Only functions with AWS Lambda's event can have schedules.
 
+**Follow one request.** Every call is part of a trace, as AWS X-Ray names one, `1-<the time in 8 hex digits>-<24 random hex digits>`: the trace its caller's `X-Amzn-Trace-Id` names (`Root=1-…`), as the AWS SDKs send it from inside a Lambda function, else a new one. FF's invoke, Lambda's `Invoke` and a function's URL give it back in that header on every answer, and an `Event`'s 202 names it as `traceId`. A schedule's run and a bucket's notification start a trace each; a queue's batch joins the trace of its first message that carries one in `AWSTraceHeader`, as Lambda's does, a message sent through the SQS endpoint without its own taking the request's `X-Amzn-Trace-Id`, as SQS keeps it; an asynchronous call's attempts keep its trace, and so do its record, the call of a destination function or the message of a destination queue (in its `AWSTraceHeader`), and its dead letter. `GET /traces/<id>` gives the account's calls in a trace, in time order:
+
+```bash
+TRACE="1-$(printf '%08x' "$(date +%s)")-$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+curl -s -X POST "$FF/functions/$ID/invoke" -H 'content-type: application/json' -H "X-Amzn-Trace-Id: Root=$TRACE" \
+  -d '{"input": {"name": "trace"}}' -D - -o /dev/null | grep -i '^x-amzn-trace-id'   # x-amzn-trace-id: Root=1-…, the same
+curl -s "$FF/traces/$TRACE" | jq -c '.calls[] | {functionName, source, trigger, status, duration}'
+# {"functionName":"hello","source":"api","trigger":null,"status":"COMPLETED","duration":12}
+```
+
+- **Each call** in it says how it came (`source`), what brought it beyond that (`trigger`: a schedule's name; a queue, and the message whose trace the batch joined, else its first; a bucket; the call whose record it is), its function, the version and the alias that ran, its attempt, its status and its duration. The history's rows have `traceId` and `trigger` too; a call made before traces has none. A trace's answer holds its first 1,000 calls, `truncated` saying when there are more, and keeps them as long as the history does.
+- **Inside the function.** The call runs with `_X_AMZN_TRACE_ID` set, as Lambda sets it: `Root=<the trace>;Parent=<16 hex digits>;Sampled=0`, so that code and tools that read it there read it here. AWS's SDKs pass it on in `X-Amzn-Trace-Id` when told to, so that a call the function makes joins the trace: [Following one request](#following-one-request-ff-trace), below, shows the two lines. The runtime's JSON lines of a call, an error or a timeout, name its `traceId` beside its `requestId`.
+- **Who reads it.** Every member, and API keys with `logs:read`. A trace's ID is its caller's to choose, so two accounts' calls can share one: each reads its own, and a trace with none of the account's calls is a 404. The ID can be given as the header gives it, `Root=1-…`.
+
 **Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, handler, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
 
 ```bash
@@ -430,7 +444,7 @@ ff deploy .                       # pip's wheels for the runtime; the handler is
 
 - **The handler** is `--handler` if you name one (`--handler src/handlers/orders.create`), else the function's while the package has its file, else `function.handler` where ff's own `function.*` is, then AWS Lambda's defaults, `index.handler` for Node.js and `lambda_function.lambda_handler` for Python. The Node.js runtime loads `.js`, `.mjs` (an ES module), `.cjs` or `.ts`, and a `.js` as an ES module where its `package.json` says `"type": "module"`, as Lambda's does.
 - **ff builds in a copy of the folder,** never in it: `npm ci` (`npm install` without a lockfile), the `build` script if there is one, then `npm prune --omit=dev`; for Python, pip's wheels for the runtimes' platform, Linux x86_64 with glibc 2.28 or older and CPython 3.13, whatever your machine is. npm 11.19 doesn't run the install scripts of dependencies that `package.json`'s `allowScripts` doesn't allow, and ff says which it skipped: `npm install-scripts approve <package>` in the folder allows one.
-- **Native libraries** (bcrypt, numpy) need the runtimes' platform: Linux x86_64 with glibc 2.41, Debian 13's, for both runtimes. Built as AWS Lambda's builds are, they load: npm's prebuilt `linux-x64-glibc` binaries, pip's manylinux wheels. npm installs your machine's binaries, the right ones on Linux x86_64; elsewhere, or for a Python library published as source alone, `--container` builds in the runtime's base image, in Docker.
+- **Native libraries** (bcrypt, numpy) need the runtimes' platform: Linux x86_64 with glibc 2.41, Debian 13's, for both runtimes. Built as AWS Lambda's builds are, they load: npm's prebuilt `linux-x64-glibc` binaries, pip's manylinux wheels. npm installs your machine's binaries, the right ones on Linux x86_64; elsewhere, or for a Python library published as source alone, `--container` builds in the runtime's base image, in Docker: on macOS and Windows, Docker Desktop, which `ff local` needs too. `ff init --template image-resize`, whose sharp and Pillow are native, deploys with `--container` for that reason, and its README installs npm's Linux builds for `ff local` with `npm ci --os=linux --cpu=x64 --libc=glibc`.
 - **Left out of the package:** version control, `__pycache__`, `.env` files, which usually hold secrets (ff says so: `ff secrets set` gives a function its secrets), and what a `.ffignore` names, in `.gitignore`'s syntax without `!`. `--no-build` packages the folder as it is, its `node_modules` included.
 - **For AWS Lambda too:** `ff package` writes the same zip to the folder's `.ff/<name>.zip` and prints its SHA-256, Lambda's `CodeSha256`; `aws lambda create-function --zip-file fileb://.ff/orders.zip --handler index.handler --runtime nodejs24.x …` takes it. FF runs `.ts` files as they are, Lambda doesn't: `ff package --compile` runs the project's own `tsc` and leaves the TypeScript out. [`cli/README.md`](../cli/README.md#packages) has the details.
 
@@ -472,6 +486,13 @@ ff delete hello --yes
 ff local invoke examples/hello.py --data '{"name": "here"}'   # on this machine, in Docker, as FF runs it
 ff init orders --runtime python                   # a new function's folder: its handler and an event
 ff init shop --template terraform --runtime nodejs   # an app's Terraform project, for FF and, its provider changed, AWS
+ff init items --template rest-api --runtime python  # a REST API at a function's URL, its items in PostgreSQL
+ff init daily --template cron-job --runtime nodejs  # a job on a schedule, its bucket, a queue of its failed runs
+ff init jobs --template queue-worker --runtime python  # a URL taking jobs into a queue, its worker, a dead-letter queue
+ff init guests --template site-with-api --runtime nodejs  # a page on a bucket's site, its API at a URL, a guestbook
+ff init photos --template image-resize --runtime python  # an image put in a bucket makes its thumbnail beside it
+ff init shop --template webhook --runtime nodejs  # orders paid through Konnect, its notifications received right
+ff init --list                                    # the templates, each with what it makes
 ff deploy ./orders                                # a folder: packaged with its libraries, uploaded when new
 ff package ./orders                               # the same zip, for AWS Lambda too: ./orders/.ff/orders.zip
 ff account                                        # its plan's limits, and whether functions reach the internet
@@ -480,7 +501,44 @@ ff usage --aws                                    # the last three months at AWS
 ff metrics hello --since 6h                       # its invocations, errors, durations, a row a minute
 ```
 
-On an FF with logins, an owner of the account makes an API key in the console's API keys page, with the scopes the commands need (`functions:read`, `functions:write`, `functions:invoke`, `logs:read`; `usage:read` for `ff usage` and `ff balance`, `metrics:read` for `ff metrics`), and `ff config set-token` saves it without showing it; `ff config set endpoint https://api.<domain>` names the API. A script reads `--output json`, and the exit codes: 4 a deploy that never became ready, 5 a call that failed, 6 the account refusing (credit, scopes, the plan's rate). [`cli/README.md`](../cli/README.md) has every command, setting and code; `hack/build-cli.sh` makes the static Linux binary, with its SHA-256.
+**The developer's tools, in one place:** installing `ff`, logging in and `ff` in your CI, just below; [the whole app on your laptop](#the-whole-app-on-your-laptop-ff-local), with `ff local`; [the templates](#templates), with `ff init`; [FF from your AI coding agent](#ff-from-your-ai-coding-agent-ff-mcp), with `ff mcp`; [following one request](#following-one-request-ff-trace), with `ff trace`; and the status page, in section 6's "Is it FF?". [`cli/README.md`](../cli/README.md) has every command, and [Les outils du développeur](fr/outils.md) says the same in French, for customers.
+
+**Installing `ff`.** Here it is built from the checkout, as above. Elsewhere, once FF publishes releases ("A release of `ff`", below), it installs from the downloads site: the script picks the build for the system and the processor, checks its SHA-256 against the site's `latest.json` and, when [minisign](https://jedisct1.github.io/minisign/) is on the machine, its signature against the release's key, and installs nothing when a check fails.
+
+```bash
+curl -fsSL https://get.<domain>/install.sh | sh   # Linux and macOS, into ~/.local/bin; sh -s -- --prefix <folder> elsewhere
+irm https://get.<domain>/install.ps1 | iex        # Windows, in PowerShell
+ff version --verbose                              # … release key <ID>: the downloads page's, the same
+```
+
+The release key's ID is on the downloads page, and `ff version --verbose` prints the one the build trusts; the first release writes it here too. A release's `ff local` runs the release's runtime images, pinned by digest: pulled from `ghcr.io`, or, when Docker can't reach it, loaded from the downloads site once their signature is checked; a build from the checkout runs the images built here. Once a day at most, after a command that reached the API, a release's `ff` says on stderr when a newer one is out, with the line that installs it; `FF_NO_UPDATE_CHECK=1` or `ff config set update_check false` turns it off ([`cli/README.md`](../cli/README.md)'s "Install").
+
+**Logging in.** On an FF with logins, name the API, then log in with your browser: `ff login` asks the API where its login is, prints an address and the code it shows, opens the browser when there is one, and waits while you sign in and approve this device. The login lasts while `ff` is used, renewed by each command, and `ff logout` revokes it where it was made, so that a copy of its token stops working too. With several accounts, `ff` lists them with your role in each and stops until one is named, by `--account` or `ff config set account <ID>`. A script or a CI calls with an API key instead, which an owner makes with the scopes it needs: `functions:read`, `functions:write`, `functions:invoke`, `logs:read`; `usage:read` for `ff usage` and `ff balance`, `metrics:read` for `ff metrics`. The key is printed once; the CI's `FF_TOKEN` holds it, or `ff config set-token` saves it without showing it, and it comes before a login. A development backend started with `FF_AUTH_MODE=oidc` logs in at the local Keycloak the same way, as a user the console's sign-up made.
+
+```bash
+ff config set endpoint https://api.<domain>
+ff login                                          # open the address it prints, check the code, sign in, approve
+ff whoami                                         # you, and your accounts, your role in each
+ff api-keys create --name ci --expires 90d --scopes functions:read,functions:write,functions:invoke,logs:read
+ff api-keys list                                  # each key's scopes, whether it works, when it was last used
+ff logout                                         # the login revoked, its tokens removed from this machine
+```
+
+A script reads `--output json`, and the exit codes: 4 a deploy that never became ready, 5 a call that failed, 6 the account refusing (credit, scopes, the plan's rate). [`cli/README.md`](../cli/README.md) has every command, setting and code; `hack/build-cli.sh [<target>]` builds it for Linux, Windows or, on a Mac, macOS, with its SHA-256.
+
+**`ff` in your CI.** [`examples/ci/`](../examples/ci/), which the downloads site serves under `ci/` too, holds a job for GitHub Actions (`github-actions.yml`, for `.github/workflows/`) and one for GitLab CI (`gitlab-ci.yml`, as `.gitlab-ci.yml`), each deploying a repository's `template.yaml` at each push to its main branch. Each installs `ff` from the downloads site, its SHA-256 checked (and its signature where minisign is, as GitLab's job installs it), then runs `ff deploy template.yaml --yes --output json` with three settings: `FF_ENDPOINT`, the API; `FF_DOWNLOADS_URL`, the site; `FF_TOKEN`, a secret, an API key an owner makes for it with a deploy's scopes. The job fails with `ff`'s exit code and its message as the job's error, so that a 6, the account refusing, reads as such rather than as the application's fault; GitHub's job lists the stack's outputs, its functions' URLs among them, in its summary. The `ff` suite's `ci` section runs both jobs' own lines against the development stack, a release of `ff` on a site FF serves, with a deploy's key and then with a reader's, which is refused.
+
+```bash
+ff api-keys create --name github --expires 90d --scopes stacks:read,stacks:write,functions:read,functions:write
+gh secret set FF_TOKEN                                        # in the application's repository: asks for the key
+gh variable set FF_ENDPOINT --body https://api.<domain>
+gh variable set FF_DOWNLOADS_URL --body https://get.<domain>
+curl -fsSL --create-dirs -o .github/workflows/deploy-to-ff.yml https://get.<domain>/ci/github-actions.yml
+```
+
+A template with buckets or queues needs `storage:read` and `storage:write`, or `queues:read` and `queues:write`, beside them.
+
+**A template's whole app on this machine:** `ff local start template.yaml` runs it in Docker, as FF runs it, its functions, queues, buckets, sites, schedules and mail, and a database and a cache when asked: [The whole app on your laptop](#the-whole-app-on-your-laptop-ff-local), below.
 
 ### A database
 
@@ -884,6 +942,64 @@ hack/k8s/app-database.sh down                               # afterwards: the da
 
 **In production** the database, the cache, the queue, the buckets and the mail are FF's, as here, or a database of yours on the internet, with TLS (`sslmode=require` in its address) and the account's internet access on; the receipts go from a domain of yours, proved by its records, once FF's operator lets the account out of the sandbox. The same folder runs on AWS Lambda with an RDS database, an ElastiCache cache, an SQS queue, S3 buckets and SES, its page on S3 behind CloudFront: its `template.yaml` passes `sam validate --lint` as it is, and `sam deploy` takes the one `ff export` writes from the stack, which adds the secrets, `DATABASE_URL` and `REDIS_URL`, as parameters CloudFormation doesn't show back, each function's role giving the clients their credentials; and the export kit has the queue and its mapping ([`data/sqs.md`](../cli/templates/export/data/sqs.md)), the page ([`data/s3-website.md`](../cli/templates/export/data/s3-website.md)), the cache ([`data/elasticache.md`](../cli/templates/export/data/elasticache.md)) and the mail ([`data/ses.md`](../cli/templates/export/data/ses.md)).
 
+### The whole app on your laptop: `ff local`
+
+`ff local start template.yaml` runs the app a SAM template describes on this machine, in Docker, as FF runs it ([ADR 0017](adr/0017-ff-local.md)): each function in its runtime's container, from the image FF runs, and one front door on one port that answers Lambda, SQS, S3 and SES v2 as FF's front doors answer them, with the same checks and the same refusals, in the same words. It needs `ff` and Docker, and no account: nothing leaves the machine, the mail neither. What it answers is held to what FF answers. Each front door reads the tables of requests and answers that sit beside the backend's code and that the backend's own tests read, so that a case added on one side fails on the other until both answer alike; and the `ff` suite runs the AWS CLI's cases of L4 and the small app against it. What it is, and what only FF does:
+
+| | On this machine, with `ff local` | On FF alone |
+|---|---|---|
+| Functions | Each in its runtime's image, with a pod's hardening (a read-only root, no capability), its memory, CPU and timeout; started at its first call, stopped after `--idle`, started again by `--watch` when its code changes | gVisor around each; instances added as calls come, and kept warm by `ff scale --min`; versions and aliases (here an alias is a name for the function as it is) |
+| Calls | Lambda's `Invoke`, waiting, or `Event` with its retries and destinations, or `DryRun`; `GetFunctionConfiguration` | Lambda's other operations, which make and change functions (here the template makes them); the plan's rate and concurrency; the account's credit |
+| Logs | On stderr after the function's name, and in `.ff/local/logs/` | The log store, `ff logs` and `ff history`; a request followed across its functions, `ff trace`; metrics and alarms |
+| URLs and sites | `http://<function>.fn.localhost:3700` and `http://<bucket>.site.localhost:3700`; CORS and `AWS_IAM` as on FF | HTTPS, custom domains, a site's visits counted |
+| Schedules | Run on time while `ff local start` runs; `ff local run` runs one now | Run at their time whether or not your laptop is on |
+| Queues | In memory, with SQS's operations, delays, visibility, retention and dead-letter queue; a function's `SQS` event, one batch at a time | Messages kept in FF's database for their retention, whatever stops; up to the event's `MaximumConcurrency` batches at once |
+| Buckets | Folders under `.ff/local/buckets/`, with S3's operations, notifications and sites; `--site` serves a folder as a site | Keys that name one bucket; what a bucket holds measured and billed |
+| Mail | `SendEmail` checked and kept as a `.eml` file, never sent, from any sender | Sending; proved identities, the sandbox, quotas, the suppression list, bounces and complaints |
+| Database and cache | `--with postgres,valkey`: the images FF's servers are built on, without TLS, the data in Docker volumes | TLS; `ff db` and `ff caches`, their metrics and their bill |
+| Keys | One local key; a signed request is checked against it, an unsigned one taken | Logins and API keys, their scopes, keys that name one queue or bucket; an unsigned call to Lambda, SQS, S3 or SES refused |
+| The account | None | Its plan, limits, usage, bill and credit; its internet access, off until FF's operator turns it on (here a function reaches what your machine reaches) |
+| What FF doesn't offer | Refused as FF refuses it, in the service's words | The same |
+
+**A template's app on this machine.** `ff local start template.yaml` reads a SAM template as `ff deploy` does, with the same refusals, and answers Lambda's `Invoke` and `GetFunctionConfiguration` for its functions on one port, `127.0.0.1:3700` unless `--port` says, as FF's front door answers them ([ADR 0017](adr/0017-ff-local.md)). A call that doesn't wait (`Event`) is retried as FF retries one, after a minute then two when the function fails, as many times as its `EventInvokeConfig` says, and its record goes to its destination: another function of the template is called with it, a queue of the template gets it as a message from the function, and a failed call's event goes to its `DeadLetterQueue` with its request ID, its status and its error beside it, as Lambda sends one. A request signed by AWS's SDKs or CLI is checked against the local key, as FF checks its keys, so a wrong key shows here; one unsigned is taken, for `curl`. The key is made at the first start, printed at each, and kept in `.ff/local/credentials`, an AWS credentials file only you can read; the functions sign with it too. Each function runs in its runtime's container, started at its first call and kept, stopped after `--idle` (10 minutes) without one, started again by `--watch` when its code changes. A function's name is its logical ID unless the template names it, as `sam local` names it; its variables are the template's, a queue's `!Ref` or a function's `!GetAtt … .Arn` resolved to what they are here, with the variables FF gives a pod: the region, and the endpoints of S3, SQS, SES and Lambda pointed at the front door, so a function's SDK calls another through it. Secrets come from `.env.local` in the project's folder, or `--secrets FILE`, never from the template. A function's folder runs as it is: its libraries are installed first, as `sam build` installs them for `sam local`: `npm ci --os=linux --cpu=x64 --libc=glibc`, Linux's builds of a library with native code (sharp's, for one) whatever this machine is; for Python, `pip install -r requirements.txt -t .`, the container's wheels whatever this machine is (`--platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64 --implementation cp --python-version 3.13 --only-binary=:all:`), as the container is Linux and CPython 3.13. Each function's log is on stderr after its name and in `.ff/local/logs/`; `ff local reset` removes them and the key. `.ff/` has a `.gitignore` of its own, made with it, so that what `ff` keeps there never shows in git, and `ff init`'s `.gitignore` lists it and `.env.local`.
+
+**A function's URL here** is its name under `fn.localhost`, on the same port: `http://orders.fn.localhost:3700/` for `Orders`, printed at the start beside it; browsers and curl take every name under `.localhost` to your machine, and a host's case doesn't count, so two functions whose names differ only by it are refused. It answers as FF's gateway answers ("A web address for a function", above): the function gets the same event, its value is the response by the same rules, and what the gateway answers itself (404 for a host that names no URL, 502, 429, 413 over 6 MB) it answers in the same words. The template's `FunctionUrlConfig` `Cors` is applied as FF applies it, a browser's preflight answered without a call, and refused at its line where FF would refuse it. A URL with `AuthType: AWS_IAM` takes a request signed for `lambda` with the local key (`curl --aws-sigv4`), the function seeing who signed, as on FF, and refuses an unsigned one with FF's 403; FF's API keys don't exist here.
+
+**A function's schedules here** run on time while `ff local start` runs, as FF's scheduler runs them: each `Schedule` and `ScheduleV2` event read by FF's reader of EventBridge's expressions, ported (the same runs, and the same refusals, at their line); a rate's runs counted from the start; a run due while the machine slept made once on waking, then the expression followed; each run an asynchronous call of the function, retried and handed to its destinations as an `Event` is, with EventBridge's Scheduled Event or the schedule's `Input`. The start lists each with its next run, or `disabled` (`Enabled: false`, `State: DISABLED`). `ff local run <schedule>` runs one now, a disabled one too, in the running app, its log the start's: name it alone, or `<function>/<schedule>` when two functions have one so named.
+
+**A template's queues here** are kept in memory while `ff local start` runs, each `AWS::SQS::Queue` with its settings, and answer SQS at the front door as FF's SQS endpoint does ([ADR 0010](adr/0010-queue.md)), in the JSON protocol AWS's SDKs and CLI speak: `SendMessage` and `SendMessageBatch`, `ReceiveMessage` with its long poll, `DeleteMessage`, `ChangeMessageVisibility` and their batches, `GetQueueUrl`, `ListQueues`, `GetQueueAttributes` and `PurgeQueue`, with FF's checks and refusals in its words. A message waits for its delay, is hidden for the visibility timeout once received, and is kept for its queue's retention; one received as often as its queue's `RedrivePolicy` allows goes to its dead-letter queue. A queue's URL is `http://127.0.0.1:3700/000000000000/<name>` from your machine and `http://host.docker.internal:3700/…` from a function, whose `!Ref` gives it that one; the start lists each. With the AWS CLI: `AWS_SHARED_CREDENTIALS_FILE=.ff/local/credentials AWS_REGION=tn-tunis-1 aws --endpoint-url http://127.0.0.1:3700 sqs receive-message --queue-url …`. The queues are the template's: making, changing, tagging or deleting one is refused, and what they hold goes when the start stops. A function's `SQS` event reads its queue as FF's event source mapping does: a long poll for a batch's first message, then receives until the batch has its `BatchSize` or its `MaximumBatchingWindowInSeconds` ends, never past an event of 6 MB; the function called with SQS's event as Lambda gives it, each message's record with its attributes, receive count and trace header; then the batch deleted when the call succeeds, or, with `ReportBatchItemFailures`, all but the messages its answer names, which come back after the queue's visibility timeout, as a failed call's whole batch does, said on stderr in FF's words; each receive counts towards the queue's dead-letter queue. A mapping's batches are called one at a time, as a function here runs in one container, where FF calls up to its `MaximumConcurrency` at once; a queue that hides a message for less than its function's timeout is refused at its line, as FF refuses it, and an event naming a queue the template hasn't is noted and read by nothing. The start lists each event, its queue and its settings.
+
+**A template's buckets here** are folders, `.ff/local/buckets/<bucket>/`, kept from a start to the next, and answer S3 at the front door as FF's S3 endpoint does ([ADR 0009](adr/0009-buckets.md)): `PutObject`, `GetObject` and `HeadObject` with a range, conditions and `response-*` overrides, `CopyObject`, `DeleteObject` and `DeleteObjects`, `ListObjectsV2` and `ListObjects`, the multipart upload with `UploadPartCopy`, `ListParts` and `ListMultipartUploads`, `HeadBucket`, `ListBuckets` and `GetBucketLocation`, and presigned URLs, with FF's checks and refusals in its words. A body is checked as it comes in, as FF checks one: its SHA-256, its `Content-MD5` and its checksum, an `aws-chunked` body's signatures and trailer, up to 5 GiB; `PutObject` gives the checksum back, as S3 does. Each object is a file named at random with its key's extension, so that it opens in what opens its kind, and beside it `<file>.object.json` holds its key and what a read answers of it; a read under way goes on reading what it began with when the object is written again. A bucket is `http://127.0.0.1:3700/<bucket>` from your machine, or `http://<bucket>.s3.localhost:3700`, and `http://<bucket>.host.docker.internal:3700` from a function, whose SDK takes the bucket's own host under the endpoint it is given, as AWS's SDKs do. With the AWS CLI: `AWS_SHARED_CREDENTIALS_FILE=.ff/local/credentials AWS_REGION=tn-tunis-1 aws --endpoint-url http://127.0.0.1:3700 s3 cp photo.jpg s3://photos/`. The buckets are the template's: making or deleting one, or changing its settings, is refused (501 `NotImplemented`), and a read of a setting FF's buckets don't have is answered as S3 answers a bucket without it. The start lists each with its folder; `ff local reset` removes them. A bucket's `NotificationConfiguration`, and a function's `S3` event, send S3's event as FF's do ([ADR 0009](adr/0009-buckets.md)): an object made or removed by a request that ended well, its event's name and key matched against the rules, goes to a function as an asynchronous call, or to a queue as a message from `arn:aws:s3:::<bucket>`, which gets S3's test event at the start; one that can't be delivered is said on stderr; `GetBucketNotificationConfiguration` answers the template's. A bucket with a `WebsiteConfiguration` is a site, as on FF ([ADR 0011](adr/0011-static-sites.md)), at `http://<bucket>.site.localhost:3700`: its index document for a folder's path, a path without its slash sent to it with 302, its error document with 404, as FF's website server answers. `--site <bucket>=<folder>` serves a folder's files there instead of the bucket's objects, as `ff sites deploy` would upload them (their content type and cache by name, a dotfile hidden but `.well-known`), without a copy, a change seen at the next request; the bucket's S3 keeps its objects. The start lists each site at its address.
+
+**The mail its functions send here** is kept, never sent. SES v2's `SendEmail` answers at the front door as FF's SES endpoint does ([ADR 0012](adr/0012-customer-mail.md)), a request signed for SES or unsigned at its path: checked in FF's order and refused in its words; a simple message made as FF makes it, MIME, its subject and names in another alphabet encoded, both bodies as alternatives; a raw one taken as it came, its sender and recipients read from its header when the request doesn't name them. Each message is then a file, `.ff/local/mail/<time>-<id>.eml`, that a mail reader opens, and beside it `<time>-<id>.json`, its envelope: its sender, and each recipient once, in lower case, a Bcc's too, which the envelope alone names, as the message's Bcc field is taken out. Each is said on stderr as it comes. FF's checks of the account are FF's: here any sender goes, without its address or its domain proved, as out of the sandbox, without quotas or a suppression list, and `GetAccount`, the identities and the suppression list are refused (501 `NotImplemented`), saying so. A function's SDK reaches it at the endpoint FF gives it, `AWS_ENDPOINT_URL_SESV2`. `ff local mail` lists what is kept, the latest last, each message with its file, once the app has stopped too; `ff local reset` removes it.
+
+**A database and a cache here,** when asked: `--with postgres`, `--with valkey`, or both, `--with postgres,valkey`. Each is a container of the image FF's server is built on, pinned by digest (PostgreSQL 18.6 on Debian, as customers' databases; Valkey 9.1.2, as their caches), pulled once; its data in a Docker volume of the project's, kept from a start to the next. Every function finds them at `DATABASE_URL` and `REDIS_URL`, as FF's secrets name a database and a cache, `postgresql://app:…@postgres:5432/app` and `redis://default:…@valkey:6379`, without TLS, unless the secrets file names that variable, which then stays its own. The start lists each at its URL from your machine, `127.0.0.1` on a port kept from a start to the next, for `psql` or a migration tool; their passwords are made at the first start and kept in `.ff/local/services.json`, readable by its owner alone, and set again at each start, so that `ff local reset` leaves the data, which the next start reaches with new ones. `ff local reset --data` removes the volumes too. A second start of the project is refused while the first runs its data.
+
+**A payment provider here: `ff local konnect`.** Konnect's sandbox comes with a merchant's onboarding, which asks for a company's documents, and Konnect's own calls can't reach your machine. `ff local konnect` stands in for it on `127.0.0.1:3800` until Ctrl-C, nothing paid, its payments kept in memory. Its API is Konnect's, as Konnect's documentation describes it: `POST /api/v2/payments/init-payment` with the key in `x-api-key`, its fields checked as the documentation's table says, answering `payUrl` and `paymentRef`; and `GET /api/v2/payments/<ref>`, the payment `pending` or `completed`, as Konnect's are, a failed try leaving it `pending`. Each payment's `payUrl` is a page with Pay and Fail: either calls the shop's `webhook` with `?payment_ref=<ref>`, as Konnect does, a host under `.localhost` reached on your machine, then sends the browser there. Its smaller buttons send the faults a webhook must survive: the notification twice, before the payment is completed, or for a payment that doesn't exist; `--delay 6s` makes Konnect slow. Each answer names, in `x-ff-konnect-source`, the section of Konnect's documentation it follows, or says the documentation is silent there. It prints its address for `ff local start`'s functions, `http://host.docker.internal:3800/api/v2`, its key, `ff-local-konnect`, and its wallet, the same at each start, so that a project's `.env.local` and parameters name them once: the `webhook` template's README runs it so.
+
+```bash
+cd my-app && echo 'API_TOKEN=…' >.env.local     # the functions' secrets, which ff init's .gitignore leaves out
+ff local start template.yaml --watch            # each function's name and settings, then its log as it comes
+curl -d '{"name": "here"}' http://127.0.0.1:3700/2015-03-31/functions/Orders/invocations
+curl http://orders.fn.localhost:3700/items?id=7  # its URL, when the template gives it FunctionUrlConfig
+ff local run Nightly                            # a schedule run now, in the app ff local start runs
+AWS_SHARED_CREDENTIALS_FILE=.ff/local/credentials AWS_REGION=tn-tunis-1 aws --endpoint-url http://127.0.0.1:3700 \
+  s3 cp photo.jpg s3://photos/                                       # a file of .ff/local/buckets/photos/
+AWS_SHARED_CREDENTIALS_FILE=.ff/local/credentials AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL=http://127.0.0.1:3700 \
+  aws lambda get-function-configuration --function-name Orders      # signed with the local key
+AWS_SHARED_CREDENTIALS_FILE=.ff/local/credentials AWS_REGION=tn-tunis-1 aws --endpoint-url http://127.0.0.1:3700 \
+  sesv2 send-email --from-email-address shop@example.tn --destination ToAddresses=me@example.tn \
+  --content '{"Simple": {"Subject": {"Data": "Hi"}, "Body": {"Text": {"Data": "Kept"}}}}'   # kept, not sent
+ff local mail                                   # what was kept in .ff/local/mail/, each message a .eml file
+ff local start template.yaml --with postgres,valkey   # DATABASE_URL and REDIS_URL for each function, data kept
+ff local reset --yes                            # .ff/local/ removed, the key and the mail with it; --data, the volumes too
+ff local konnect                                # Konnect's stand-in on 127.0.0.1:3800: its API, its pages, nothing paid
+```
+
+**The small app here.** [`examples/orders-app`](../examples/orders-app/README.md) runs whole: its libraries installed (`npm ci --omit=dev`), `ff local start template.yaml --with postgres,valkey --site shop-site=site` with its parameters, as its README writes it. Its page is at `http://shop-site.site.localhost:3700`; an order made there is kept in the database, the latest are listed from the cache, and its receipt is made through the queue into the bucket and e-mailed, kept; `ff local mail` lists it, and `ff local run EveryNight` runs the nightly report now.
+
+The `ff` suite's `local_template` section runs what runs here; `local_queues` the queues, with the AWS CLI and a function reading one; `local_buckets` the buckets, with the AWS CLI's cases of L4, a function writing to one, their events to a function and a queue, and a site from its objects and from a folder; `local_data` the database and the cache, from a function and from this machine, kept from a start to the next and removed; `local_mail` the mail, the AWS CLI's cases of L4 and a function's receipt read as a mail reader reads it; `local_apps` `ff init --template sam`'s application and the small app, its page served from `site/` by `--site`; and `local_small_app` the small app whole, with its database and its cache, an order through to its e-mail and the nightly removing an old one.
+
 ### The way out
 
 Leaving FF for AWS changes settings, not code. FF's functions are AWS Lambda's, its buckets S3's, its queues SQS's and its mail SES's, and AWS's own tools reach each one with only the endpoint changed. This section is the map; the sections after it give each part in full. In French: [Fonctions, comme AWS Lambda](fr/fonctions.md) and [Partir vers AWS](fr/partir-vers-aws.md).
@@ -1069,6 +1185,121 @@ ff delete-stack shop --yes                    # the stack, with what it made, as
 **A function's name** is its `FunctionName`, else the one the stack's last deploy gave it, else one made CloudFormation's way, the stack's name, the logical ID and 12 random letters and digits, within Lambda's 64 characters. A function of that name in no stack, or in another, is refused: `ff deploy` doesn't take it over.
 
 **Every problem first,** in one refusal that changes nothing: the template's, each at its line; its parameters'; a value that can't be known before the deploy, such as a function's URL in a variable; a variable with the name of one of the function's secrets, which stay with `ff secrets`, out of the template; a handler the code hasn't; a schedule's expression FF's parser wouldn't take; a queue or a function the account hasn't and the template doesn't make; two notifications of a bucket that could both take one event; a queue or a bucket of the template's name that the account has outside the stack. When the template no longer has what the stack's last deploy made, `ff deploy` then asks before deleting it, and a script says `--yes`. The template's buckets are made or changed first, with their sites, then its queues, each dead-letter queue before the queues that use it; then each function is created or updated with what changed, as `ff deploy` does one, then its instances, its alias, its URL, its asynchronous calls' settings, its schedules and the queues it reads; then each bucket's notifications; what the template no longer has is deleted last, the buckets after the functions and the queues after them, as CloudFormation cleans up, a bucket with files stopping the deploy there, saying how to empty it. The stack is saved as the deploy goes: one stopped halfway leaves what it made in the stack, and the next updates it. `ff get` names a function's stack, and the console says it on the function's page, since a change made elsewhere the next deploy undoes. `--output json` gives each bucket's, queue's and function's action and changes, each site's address, each function's version and URL, what was deleted, and the outputs.
+
+### Templates
+
+`ff init <name> --template <template> --runtime nodejs|python` writes an app to start from, the same in Node.js and in Python; `ff init --list` names them, each with what it makes. Each is a SAM template inside FF's subset, so that the same folder runs here with `ff local start`, on FF with `ff deploy` and on AWS with `sam deploy`, its code unchanged:
+
+| Template | What it makes | What of SAM it uses |
+|---|---|---|
+| `sam` | `sam init`'s hello world, as FF takes it | One function and its URL |
+| `rest-api` | A REST API at a function's URL, its items in PostgreSQL | A URL with CORS for one origin, a parameter |
+| `cron-job` | A job each morning, reporting what its bucket got the day before | A `Schedule` event, a bucket, a queue of its failed runs by `EventInvokeConfig` |
+| `queue-worker` | A URL taking jobs into a queue, a worker reading it in batches | An `SQS` event, a dead-letter queue by `RedrivePolicy`, a parameter |
+| `site-with-api` | A page on a bucket's site, its API at a function's URL, a guestbook | A URL open to any page, a bucket for its entries, a bucket that is a site |
+| `image-resize` | An image put in a bucket makes a WebP thumbnail beside it | An `S3` event filtered by prefix, `sharp` and Pillow, native |
+| `webhook` | Orders paid through Konnect, its notifications received right | A URL, three parameters, two secrets out of the template |
+
+Each folder has the same shape: `template.yaml`; `src/`, the functions' code, its libraries pinned; `tests/`, outside `src/` so that they aren't deployed, with stand-ins for the database, the buckets, the queues or Konnect, run with `node --test` or `python3 -m unittest` and nothing else running; `events/`, the events the functions get, for `ff invoke --data @events/…` and `sam local invoke --event`; `samconfig.toml`, which names the stack; a `.gitignore`; and a README whose three sections, "Here", "On FF" and "On AWS", give the commands for each place. [SAM templates on FF](sam-templates.md) lists them with what of the subset each uses.
+
+- **Their libraries here** are installed for Linux, as Lambda's and FF's runtimes are: `npm ci --os=linux --cpu=x64 --libc=glibc` in Node.js, whatever this machine is, so that `ff local start` loads them in its containers. `image-resize`'s `sharp` and Pillow are native: `ff deploy --container` builds them in the runtime's image and `samconfig.toml`'s `use_container` has `sam build` do the same; on macOS and Windows that needs Docker Desktop.
+- **A database and a key are secrets on FF,** never in the template: `ff db create <name> --secret-for <function>` sets `DATABASE_URL`, and `ff secrets set <function> KONNECT_API_KEY` Konnect's key. Here they come from `--with postgres` and `.env.local`; on AWS they are parameters CloudFormation doesn't show back, as each README shows.
+- **`queue-worker`'s API passes its call's trace on** with each job, its SDK's client sending `X-Amzn-Trace-Id`, which SQS keeps with the message, so that the worker's call joins the API's trace and `ff trace` shows a job from one to the other ([Following one request](#following-one-request-ff-trace)).
+- **`webhook` receives a payment provider's notification as it should be received:** each one kept as it came, the payment asked of Konnect itself, never the notification's or the browser's word, and each order paid once, by its reference. Its README says why each rule is there. Here it runs against `ff local konnect`, its order paid at the stand-in's page and its webhook tried against each fault.
+
+The `ff` suite's `template_*` sections deploy each of the six after `sam` on FF, call it and delete its stack, and run each here as its README says.
+
+### FF from your AI coding agent: ff mcp
+
+`ff mcp` gives an AI coding agent on your machine ff's commands as its tools, by the Model Context Protocol (version 2025-11-25) on stdin and stdout: Claude Code, Cursor, VS Code's agent and the others that run a local MCP server. Each tool runs one command with your profile's login or key, as if you typed it, and answers with the command's `--output json` document. The agent reads your functions' logs, calls and metrics, the account's usage and balance, and what `ff doctor` finds; with `--allow-write`, it deploys and calls them too. The server runs only while the agent runs it, holds nothing and opens no port.
+
+```bash
+claude mcp add ff -- ff mcp                          # Claude Code: the tools that read
+claude mcp add ff -- ff mcp --allow-write            # and those that change the account
+claude mcp add ff-work -- ff --profile work mcp      # another profile, or --account, before mcp
+claude mcp add --scope project ff -- ff mcp          # in the project's .mcp.json, for everyone working on it
+```
+
+Cursor reads `.cursor/mcp.json` in the project (or `~/.cursor/mcp.json`), and VS Code `.vscode/mcp.json`; both run the same command:
+
+```json
+{ "mcpServers": { "ff": { "command": "ff", "args": ["mcp"] } } }
+```
+
+```json
+{ "servers": { "ff": { "type": "stdio", "command": "ff", "args": ["mcp"] } } }
+```
+
+**What an agent may do:**
+
+| Tools | The commands they run |
+|---|---|
+| `ff_list_functions`, `ff_get_function`, `ff_logs`, `ff_history`, `ff_trace`, `ff_metrics` | `ff list`, `ff get`, `ff logs` (not `--follow`: a tool's call ends), `ff history`, `ff trace`, `ff metrics` |
+| `ff_usage`, `ff_balance`, `ff_estimate` | `ff usage`, `ff balance`, `ff usage --aws` |
+| `ff_list_queues`, `ff_get_queue`, `ff_list_buckets`, `ff_get_bucket`, `ff_list_databases`, `ff_get_database`, `ff_list_caches`, `ff_get_cache` | `ff queues`, `ff buckets`, `ff db` and `ff caches`, `list` and `get` |
+| `ff_doctor` | `ff doctor`, on a folder, a file or a template, or `--deployed` |
+| **With `--allow-write`:** `ff_deploy`, `ff_invoke`, `ff_set_env`, `ff_publish`, `ff_set_alias`, `ff_send_to_queue`, `ff_deploy_site` | `ff deploy`, `ff invoke`, `ff env set`, `ff publish`, `ff alias set`, `ff queues send`, `ff sites deploy` |
+
+**Never:** a delete, a key, `ff api-keys`, `ff secrets set` and `ff login`. Those stay a person's commands, as a secret's value would pass through the agent, and an agent shouldn't delete. `ff deploy`'s `--yes` isn't among the tool's options: a deploy that would delete what a template no longer has asks first, the agent can't answer, and it stops. Without `--allow-write` the agent still sees the tools that change the account, and a call answers that `ff mcp` was started without it, so it can tell you what to add.
+
+**How a call goes:**
+
+- **A tool's arguments are its command's options,** as `--help` describes them, named as FF's JSON names them (`requestId`, `parameterOverrides`); a path is relative to the folder the agent started `ff mcp` in, which its instructions name.
+- **Its answer is the command's JSON document:** a list, or a log's lines, under a key such as `functions` or `lines`; the warnings you'd see in a terminal under `warned`. A command that fails answers with its message and exit code, as `--output json` writes them, and the session goes on.
+- **stdin belongs to the protocol** while `ff mcp` runs, so a value a command would read from stdin is refused: an event or a body is given itself or as `@file`, and a variable as `KEY=value`.
+- **The list of tools needs no login:** an agent starts before `ff login`, and a call then says to log in, as the command would.
+- **A long call,** such as a deploy that builds in a container, may outlast what an agent waits for a tool: Claude Code waits as long as `MCP_TOOL_TIMEOUT` says, in milliseconds.
+
+`cargo test` runs scripted sessions, in `ff` itself and over a pipe against a scripted API; the `ff` suite's `mcp` section runs a small client over a pipe against FF: the tools listed, a deploy refused without `--allow-write`, then allowed, called and read.
+
+### Following one request: ff trace
+
+A request often runs more than one function: a function's URL takes a job into a queue, a worker reads it, and the worker calls another. Each call is part of a trace, as AWS X-Ray names one ("Follow one request", above, says where a trace starts and what joins it), and `ff` shows a trace's calls together, whichever functions they ran:
+
+```bash
+ff history orders-api                                  # each call with its trace, in the TRACE column
+ff trace 1-6912b0a3-5f1e2d3c4b5a69788796a5b4           # the trace's calls as a timeline
+ff logs --trace 1-6912b0a3-5f1e2d3c4b5a69788796a5b4    # their lines, across the functions, each named
+ff logs orders-worker --trace 1-6912b0a3-5f1e2d3c4b5a69788796a5b4    # one function's lines of it
+```
+
+A job's trail: the API's call at its URL, through the alias `live`; the worker's first try, which failed; its second, once the queue's visibility timeout gave the job back; and the e-mail the worker then asked for, calling `orders-mailer` with `InvocationType: Event`:
+
+```text
+Trace 1-6912b0a3-5f1e2d3c4b5a69788796a5b4: 4 calls of 3 functions, from 2026-11-10 09:15:03 UTC, over 12.13 s
+
+AT        TIMELINE                  FUNCTION         SOURCE                  STATUS     DURATION  REQUEST ID
++0 ms     █                         orders-api:live  url                     COMPLETED  84 ms     3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f
++120 ms   ███                       orders-worker    sqs, queue orders-jobs  ERROR      1.21 s    7d1e5c1a-0b2c-4d3e-8f9a-0b1c2d3e4f5a
++11.40 s                        ██  orders-worker    sqs, queue orders-jobs  COMPLETED  640 ms    9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
++12.10 s                         █  orders-mailer    async, attempt 1        COMPLETED  35 ms     1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e
+```
+
+- **The timeline** has a row a call: its start after the first call's, its bar on the trace's span, the function with the alias or the version that ran, how it came (a queue's batch, an asynchronous call's attempt, a schedule, a bucket, or the call whose record it is), its status, its duration and its request ID. The ID is taken as `ff history` shows it, or as the header gives it, `Root=1-…;Parent=…`. A trace of more than 1,000 calls shows its first, with a warning; `--output json` gives the API's answer.
+- **A trace's logs** are each call's lines, read by its request ID, by time, each naming its function; `--grep` narrows them, and a function's name keeps its lines alone. The trace's calls choose the window, so `--tail`, `--since`, `--start`, `--end`, `--all` and `--follow` don't go with `--trace`.
+- **In the console,** a call in a function's history has a "Trace" link beside "Its logs", to the trace's page: its calls by time, each with its bar, its status, its function, how it came, its duration, and a link to its logs.
+- **For `ff mcp`,** `ff_trace` reads a trace, and `ff_logs` takes `trace`.
+
+**A function's own calls join its trace** when they send it in `X-Amzn-Trace-Id`. AWS's SDKs do that on AWS Lambda, where `AWS_LAMBDA_FUNCTION_NAME` is set, but not on FF, so the function tells its client, in two lines: SQS keeps the header with the message as its `AWSTraceHeader`, and the worker's call joins the trace, on FF as on AWS. The same lines on a Lambda client have a function called with `Invoke` join it. The `queue-worker` template has them, each with its test:
+
+```js
+// Node.js, AWS's SDK v3: a middleware on the client, reading the call's trace at each request.
+sqs.middlewareStack.add((next) => (args) => {
+  if (process.env._X_AMZN_TRACE_ID) args.request.headers['X-Amzn-Trace-Id'] ??= process.env._X_AMZN_TRACE_ID;
+  return next(args);
+}, { step: 'build', name: 'passTraceOn' });
+```
+
+```python
+# Python, boto3: botocore's event hook, reading the call's trace at each request.
+def add_trace(params, **_):
+    if os.environ.get("_X_AMZN_TRACE_ID"):
+        params["headers"].setdefault("X-Amzn-Trace-Id", os.environ["_X_AMZN_TRACE_ID"])
+
+sqs.meta.events.register("before-call", add_trace)
+```
+
+On AWS Lambda the SDK's own header comes first and these leave it as it is, so the code is the same in both places. `cargo test` runs `ff trace` and `ff logs --trace` against a scripted API; the `ff` suite's `template_queue_worker` section follows a job of the deployed template from the API's call to the worker's, in `ff history`, `ff trace` and `ff logs --trace`.
 
 ### Moving to AWS: ff export
 
@@ -1634,15 +1865,17 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
 (cd cli && cargo test --locked)                          # the ff command: unit tests, then its binary against a scripted API, seconds
 hack/test-sam-fixtures.sh                                # every SAM template kept as a fixture, which sam validate --lint takes (hack/install-tools.sh sam), about 20 s
+hack/test-updater.sh                                     # the development server's updater against a stand-in for GitHub, seconds
+hack/test-status.sh                                      # the status page: its probe against a stand-in for FF behind the server's proxy, then the page, seconds
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 6 min
 hack/k8s/test-logging-filter.sh                          # the log collector's configuration and filter, in its image, seconds
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions
-hack/e2e.sh                                              # the whole stack through the API, about 20 min
+hack/e2e.sh                                              # the whole stack through the API, about 20 min; 25 with Docker's data on a spinning disk
 hack/e2e.sh --only queues                                # one of its sections, after what it needs; --list names them, --from runs on from one, in each of the three
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 7 min
 hack/cli-e2e.sh                                          # the ff command on the stack, and in Docker, about 15 min
 hack/e2e-aws-tools.sh                                    # ff init's Terraform project applied by OpenTofu and Terraform's CLI, about 11 min
-hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
+hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, and the status page's web server, about 3 min
 hack/k8s/test-platform-manifests.sh                      # deploy/k8s/platform checked without deploying it, about 1 min
 hack/e2e-platform.sh                                     # FF deployed from deploy/k8s on a cluster of its own, through its edge, about 15 min
 hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, the packages, about 2 min
@@ -1673,7 +1906,7 @@ hack/ci.sh suggest           # runs nothing: what the working tree's changes nee
 
 `security` fails on a high or critical vulnerability that has a fix. One that can't be fixed yet, or whose fix is less than two weeks old, is accepted for a while, with why and until when, and on that date it is reported again: in an image, in `.trivyignore.yaml`, for the one binary it is in; in what a Node.js package ships, in `.npmauditignore`, for that directory and package (`hack/lib/npm-audit.py` reads npm audit's report against it, and `hack/test-npm-audit.sh` tests it). A gitleaks finding that isn't a secret goes in `.gitleaksignore`, by its fingerprint.
 
-**On GitHub,** a push to `master` and a pull request run every stage but `platform`: the cluster's `l3`, `l4`, `l5`, `cli` and `aws-tools` at once, each on a runner of its own, so that a push is answered in about 25 minutes, a failure in any of them known within that stage's own time; and `images` in the `security` job, after the scans, on the images they built, which Docker's build cache keeps. Each job installs only what its stages use (`deps`), and keeps npm's downloads and, where it builds the `ff` command, Cargo's and its build between runs (`.github/actions/setup`, each job's setup). A push or a pull request that changes only documents (`docs/` and `*.md` files, but the `ff` command's templates, which it embeds) runs `static` alone, which checks them and every commit's secrets, about 4 minutes in all: a first job, `changes`, compares the commits (`hack/lib/changes.sh`, which `hack/test-changes.sh` tests). The nightly run (02:17 UTC) runs `platform`; `advisories`, which checks the branch's last SBOMs and the lockfiles again with the day's advisories (`hack/lib/last-sboms.sh` fetches them, `hack/test-last-sboms.sh` tests it); and `tools`, which tries the latest release of each tool the tests pin: the AWS CLI, the SDK for JavaScript, boto3, OpenTofu, Terraform and its AWS provider, and the SAM CLI through the Lambda spike's flows, whose requests and steps are compared with the pinned versions' recordings (`hack/spikes/lambda/compare.py`, which `hack/test-tools-compare.sh` tests), and Rust's stable release through the `ff` command's lints and tests. The other jobs ran on the commit when it was pushed, but an image or a package unchanged since can have an advisory published the next day, and a tool a new release. A run started by hand names its jobs: `gh workflow run ci.yml --ref <branch> -f jobs=platform` runs that one alone, `-f jobs=static,unit` those two, `-f jobs=l4,cli` two of the cluster's stages, `cluster` its five, `security` or `images` the job that runs both, `all` every one, and `nightly` what the schedule runs, with its issue. **A red nightly run is seen:** it opens one issue, "The nightly run is red", with the run's page and the lines of the failed jobs' logs that say what failed, or comments on the one already open; the next green nightly closes it (`hack/lib/nightly-issue.sh`, which `hack/test-nightly-issue.sh` tests in `static` against a stand-in `gh`).
+**On GitHub,** a push to `master` and a pull request run every stage but `platform`: the cluster's `l3`, `l4`, `l5`, `cli` and `aws-tools` at once, each on a runner of its own, so that a push is answered in about 25 minutes, a failure in any of them known within that stage's own time; and `images` in the `security` job, after the scans, on the images they built, which Docker's build cache keeps. Each job installs only what its stages use (`deps`), and keeps npm's downloads and, where it builds the `ff` command, Cargo's and its build between runs (`.github/actions/setup`, each job's setup). `ff`'s five builds run in a run started by hand, `gh workflow run ci.yml --ref <branch> -f jobs=cli-builds`: Linux's two and Windows's on a Linux runner with zig, macOS's two on an arm64 Mac, each binary then run on its own system (`hack/cli-smoke.sh`) and `ff`'s tests with it, on Windows, both Macs and both Linux processors, about 25 runner-minutes. A push or a pull request that changes only documents (`docs/` and `*.md` files, but the `ff` command's templates, which it embeds) runs `static` alone, which checks them and every commit's secrets, about 4 minutes in all: a first job, `changes`, compares the commits (`hack/lib/changes.sh`, which `hack/test-changes.sh` tests). The nightly run (02:17 UTC) runs `platform`; `advisories`, which checks the branch's last SBOMs and the lockfiles again with the day's advisories (`hack/lib/last-sboms.sh` fetches them, `hack/test-last-sboms.sh` tests it), after `security` in a run that has it, as one of every job started by hand does, so that it reads that run's own; and `tools`, which tries the latest release of each tool the tests pin: the AWS CLI, the SDK for JavaScript, boto3, OpenTofu, Terraform and its AWS provider, and the SAM CLI through the Lambda spike's flows, whose requests and steps are compared with the pinned versions' recordings (`hack/spikes/lambda/compare.py`, which `hack/test-tools-compare.sh` tests), and Rust's stable release through the `ff` command's lints and tests. The other jobs ran on the commit when it was pushed, but an image or a package unchanged since can have an advisory published the next day, and a tool a new release. A run started by hand names its jobs: `gh workflow run ci.yml --ref <branch> -f jobs=platform` runs that one alone, `-f jobs=static,unit` those two, `-f jobs=l4,cli` two of the cluster's stages, `cluster` its five, `security` or `images` the job that runs both, `all` every one, and `nightly` what the schedule runs, with its issue. **A red nightly run is seen:** it opens one issue, "The nightly run is red", with the run's page and the lines of the failed jobs' logs that say what failed, or comments on the one already open; the next green nightly closes it (`hack/lib/nightly-issue.sh`, which `hack/test-nightly-issue.sh` tests in `static` against a stand-in `gh`).
 
 **Once a month, on AWS itself** (`.github/workflows/aws.yml`, the 1st at 04:41 UTC, or by hand once it is on `master`): `hack/e2e-aws.sh` deploys the small app's `template.yaml` with `sam deploy`, as it is, then checks there what FF reads and leaves to AWS: the page synced to its bucket and served by the bucket's policy, the function URL's CORS for the page's origin, and an order put in the queue, its receipt written by the queue's reader through its mapping and its role and read back at the URL by the API's role. Then it deletes the stack, its buckets emptied first. The page's and the CORS's checks are the ff suite's own (`hack/lib/orders-app.sh`). No database or cache is made, so the orders' own paths are left to the ff suite. Every other run checks the way out offline (`sam validate --lint`, cfn-lint and `tofu validate`). The job is skipped until the repository has an AWS account's role, as the decision log's 63 waits for that account. To turn it on:
 
@@ -1682,6 +1915,29 @@ hack/ci.sh suggest           # runs nothing: what the working tree's changes nee
 3. In the repository's settings, set the variable `FF_AWS_ROLE_ARN` to the role's ARN, and `FF_AWS_REGION` if not `eu-west-3`. No secret is kept: each run exchanges GitHub's OIDC token for an hour's credentials.
 
 A run stays within AWS's free tier: three functions called a few times, a queue, two buckets and a rule, for minutes. SAM's bucket for the code, which the first run makes, keeps a few megabytes.
+
+**A release of `ff`** (`.github/workflows/release.yml`) starts at a tag `ff-v<version>` pushed on a commit of `master`, `cli/Cargo.toml`'s version being the tag's, which it checks first. It builds the five as a run by hand does (`.github/workflows/cli-builds.yml`), each tested on its own system; then `hack/release.sh` checks each against its SHA-256, signs it with minisign, and writes `SHA256SUMS` and `latest.json` (the version, the commit, each file's SHA-256), signed too, then verifies every signature against `cli/release/minisign.pub`, the public key `ff` trusts, before anything is published. `hack/downloads-site.sh` makes the downloads site of them, with the install scripts (`cli/release/install.sh` and `install.ps1`, the site's address and the public key put in) and a page saying how to install, and the Linux build deploys it with `ff sites deploy`. GitHub's release holds a copy. Before building, the job checks the tag, the public key and the settings below. `hack/test-release.sh`, in `static`, runs the signing with a throwaway key; `hack/test-install.sh` runs this system's install script against a copy of the site served here, as a customer runs it (`curl … | sh`, or `irm … | iex` on Windows): installed, then refused a changed build and signatures by another key, nothing installed. It runs in `static` with stand-in builds, in each build job with the real ones, and in the `ff` suite's `downloads` section against the site deployed to FF. Before the builds, `hack/runtime-images.sh` builds the two runtime images for the release, `ghcr.io/<owner>/ff-runtime-<runtime>:<the repository's tag>-ff-<version>`, pushes them with the run's own token and saves each as an archive; the five are built with their digests (`FF_BUILD_RUNTIME_IMAGES`), and the archives are signed with the builds and served by the site under `images/`, for a machine whose Docker can't pull them. The `ff` suite's `local_images` section runs these steps against the development stack, the dev registry in `ghcr.io`'s place. The signing key's secret half and its password are the job's two secrets, and they can sign a release and nothing else; the key is yours to make, once:
+
+```bash
+hack/install-tools.sh minisign
+hack/bin/minisign -G -p cli/release/minisign.pub -s ~/.minisign/ff-release.key   # asks for its password
+gh secret set FF_RELEASE_KEY < ~/.minisign/ff-release.key
+gh secret set FF_RELEASE_KEY_PASSWORD                                             # asks for it
+git add cli/release/minisign.pub                                                  # committed: ff and the install scripts trust it
+```
+
+Your copy and GitHub's secret are the only two. A new key means every `ff` installed trusts the old one: a new install by the script, which the downloads page says, with the key's fingerprint.
+
+The downloads site is yours to set up too, once: an FF account of its own whose one bucket holds the site, served at `get.<domain>` by a certificate browsers trust (`ff sites domains add`), and an API key of that account with the scopes `storage:read` and `storage:write` alone:
+
+```bash
+gh variable set FF_DOWNLOADS_URL --body https://get.<domain>          # the site's address: the install lines, the update notice
+gh variable set FF_DOWNLOADS_ENDPOINT --body https://api.<domain>     # the API ff sites deploy calls
+gh variable set FF_DOWNLOADS_BUCKET --body <bucket>
+gh secret set FF_DOWNLOADS_KEY                                         # asks for the key
+```
+
+To release, raise the version in `cli/Cargo.toml` on `master`, with `cli/Cargo.lock`, which `cargo check` updates, then `git tag ff-v<version> && git push origin ff-v<version>`. After the first release, see that the two packages it made on `ghcr.io`, `ff-runtime-nodejs` and `ff-runtime-python`, are public (the package's settings on GitHub, "Change visibility"): a private one refuses customers' pulls, and their `ff local` then downloads the archive from the site instead.
 
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
 
@@ -1701,6 +1957,8 @@ docker compose down -v
 ```
 
 ## 6. When something goes wrong
+
+**Is it FF?** On FF's development server, its status page says: `https://status.dev.ffunc.cloud` shows each piece of FF as a customer meets it (the API, the console, the login, the Lambda, S3, SQS and SES endpoints, function URLs and sites), probed every minute, its last 90 days and the incidents ([the server's README](../deploy/dev-server/README.md#the-status-page)).
 
 **Where the logs are.** Look there first: most problems name themselves.
 

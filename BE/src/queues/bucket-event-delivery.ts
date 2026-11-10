@@ -3,9 +3,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { Repository } from 'typeorm';
 import { parseFunctionArn } from '../functions/arns';
-import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES, qualifierAttributes } from '../functions/async-invoke';
+import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES, notificationAttributes, qualifierAttributes } from '../functions/async-invoke';
 import { Function } from '../functions/entities/function.entity';
 import { hasQualifier, qualifierText } from '../functions/qualifier';
+import { newTraceId, traceAttributes } from '../functions/trace';
 import { PlansService } from '../plans/plans.service';
 import { BucketEvent, BucketEvents } from '../storage/bucket-events';
 import { CustomerQueues } from './customer-queues';
@@ -73,7 +74,10 @@ export class BucketEventDelivery implements OnModuleInit, OnModuleDestroy {
     if (!(await hasQualifier(this.functions.manager, fn.id, named?.qualifier))) return dropped(`the function has no ${qualifierText(named?.qualifier)} any more`);
     if (size > MAX_ASYNC_INPUT_BYTES) return dropped(`the event is ${size} bytes, over an asynchronous call's ${MAX_ASYNC_INPUT_BYTES}`);
     const expiresAt = new Date(Date.now() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
-    // A call that doesn't wait of what the rule's ARN names, as S3 calls Lambda: a version or an alias, else $LATEST.
-    await this.store.sendEvent(fn, randomUUID(), body, expiresAt, { attributes: qualifierAttributes(named?.qualifier) });
+    // A call that doesn't wait of what the rule's ARN names, as S3 calls Lambda: a version or an alias, else $LATEST; a
+    // trace of its own, as S3's notifications start one, which its attempts keep.
+    await this.store.sendEvent(fn, randomUUID(), body, expiresAt, {
+      attributes: { ...qualifierAttributes(named?.qualifier), ...notificationAttributes(event.bucket), ...traceAttributes(newTraceId()) },
+    });
   }
 }

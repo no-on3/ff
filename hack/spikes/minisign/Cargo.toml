@@ -1,0 +1,20 @@
+# The developer tools' spike of minisign's signatures verified in Rust, as `ff` will verify its update notice's manifest
+# and the runtime images' archives it loads: Ed25519 by ring, which `ff` has already, over a BLAKE2b-512 prehash, from
+# the blake2 crate or written by hand from RFC 7693. A crate of its own, outside the ff command's, so that the command
+# takes on no dependency before the spike chooses one.
+[package]
+name = "minisign-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = ["blake2-crate"]
+# The blake2 crate beside the hand-written BLAKE2b, compared by the tests; without it, the hand-written one alone, so
+# that the build without it measures what the crate adds.
+blake2-crate = ["dep:blake2"]
+
+[dependencies]
+base64 = "0.23"
+blake2 = { version = "0.11", optional = true }
+ring = "0.17"

@@ -14,7 +14,8 @@
  * at once; a schedule's run, the schedule's call; an event through an alias
  * run as its version, leased for the longest timeout of the function and its
  * versions, and dropped once its alias is gone; the counts of Lambda's
- * metrics of them. Each run works in a scratch database, dropped afterwards.
+ * metrics of them; each call's trace, which its retries, its record and the
+ * record's call keep. Each run works in a scratch database, dropped afterwards.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
@@ -90,7 +91,8 @@ run('asynchronous calls, in the database (L2)', () => {
       { count: () => undefined } as never,
       asyncCounts,
     );
-  const send = (fn: Function, requestId: string, body = '{"order":1}', expiresAt = new Date(Date.now() + 7 * HOUR)) => queues.sendEvent(fn, requestId, body, expiresAt);
+  const send = (fn: Function, requestId: string, body = '{"order":1}', expiresAt = new Date(Date.now() + 7 * HOUR), attributes?: Record<string, string>) =>
+    queues.sendEvent(fn, requestId, body, expiresAt, { attributes });
   /** A function's asynchronous calls as counted for Lambda's metrics, once the counts are written: an attempt's age past three minutes the oldest. */
   const asyncCountsOf = async (functionId: string) => {
     await asyncCounts.flush();
@@ -255,10 +257,11 @@ run('asynchronous calls, in the database (L2)', () => {
 
     expect(attempts).toEqual([2]);
     const kept = await message(uuid(200));
-    // Its second failure, the lost one first: retried two minutes after.
+    // Its second failure, the lost one first: retried two minutes after, in the trace its first claim gave it.
     expect([kept.receive_count, kept.attributes, kept.visible_at.getTime() - afterLease.getTime()]).toEqual([
       2,
       {
+        trace: expect.stringMatching(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/),
         failures: 2,
         throttles: 0,
         settled: 2,
@@ -299,6 +302,9 @@ run('asynchronous calls, in the database (L2)', () => {
     // The first attempt is the invocation of the request's ID; each retry an invocation of its own.
     expect(history[0].id).toBe(requestId);
     expect(new Set(history.map(({ id }) => id)).size).toBe(3);
+    // In one trace: the event, kept without one as before calls had traces, was given one at its first claim, which
+    // its retries keep.
+    expect([...new Set(history.map(({ traceId }) => traceId))]).toEqual([expect.stringMatching(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/)]);
     expect(await db.dataSource.query(`SELECT status, billed_ms FROM usage_records WHERE request_id = $1 ORDER BY started_at`, [requestId])).toEqual([
       { status: 'error', billed_ms: 12 },
       { status: 'error', billed_ms: 12 },
@@ -338,8 +344,8 @@ run('asynchronous calls, in the database (L2)', () => {
     const calls = new AsyncInvocationsService(functions, { admit: async () => undefined } as never, onePlan(), queues);
     const w = worker();
 
-    const { requestId } = await calls.queue(ACCOUNT, fn.id, { order: 7 }, 'live');
-    expect((await message(requestId)).attributes).toEqual({ qualifier: 'live' });
+    const { requestId, traceId } = await calls.queue(ACCOUNT, fn.id, { order: 7 }, 'live');
+    expect((await message(requestId)).attributes).toEqual({ qualifier: 'live', trace: traceId });
     await w.tick(new Date(Date.now() + 1000));
     await w.settled();
 
@@ -423,7 +429,7 @@ run('asynchronous calls, in the database (L2)', () => {
     const [orders, failed] = [await newFunction(), await newFunction()];
     await configs.put(ACCOUNT, orders.id, { maximumRetryAttempts: 0, destinationConfig: { onFailure: { destination: configs.arnOf(failed) } } });
     const requestId = uuid(800);
-    await send(orders, requestId, '{"order":8}');
+    await send(orders, requestId, '{"order":8}', undefined, { trace: '1-5759e988-bd862e3fe1be46a994272793' });
     invoke.mockImplementation(async (fn) => {
       if (fn.id === orders.id) throw new FunctionRuntimeError('TypeError', 'x is undefined', { durationMs: 2 });
       return { output: 'recorded', durationMs: 1 };
@@ -454,6 +460,9 @@ run('asynchronous calls, in the database (L2)', () => {
       InvocationStatus.COMPLETED,
       requestId,
     ]);
+    // In the call's trace, naming the call whose record it ran.
+    const called = await db.dataSource.getRepository(FunctionInvocation).findOneByOrFail({ requestId });
+    expect([called.traceId, called.trigger, ran.traceId, ran.trigger]).toEqual(['1-5759e988-bd862e3fe1be46a994272793', null, '1-5759e988-bd862e3fe1be46a994272793', { recordOf: requestId }]);
     invoke.mockReset();
   });
 
@@ -462,7 +471,7 @@ run('asynchronous calls, in the database (L2)', () => {
     const { queue: failed } = await customerQueues.create(ACCOUNT, `failed-${++n}`, {}, { limit: 10, name: 'Beta' }, 'tn-tunis-1');
     await configs.put(ACCOUNT, orders.id, { maximumRetryAttempts: 0, destinationConfig: { onFailure: { destination: queueArn('tn-tunis-1', ACCOUNT, failed.name) } } });
     const requestId = uuid(850);
-    await send(orders, requestId, '{"order":85}');
+    await send(orders, requestId, '{"order":85}', undefined, { trace: '1-5759e988-bd862e3fe1be46a994272793' });
     invoke.mockRejectedValue(new FunctionRuntimeError('TypeError', 'x is undefined', { durationMs: 2 }));
     const w = worker();
 
@@ -477,7 +486,8 @@ run('asynchronous calls, in the database (L2)', () => {
       requestPayload: { order: 85 },
       responsePayload: { errorType: 'TypeError', errorMessage: 'x is undefined' },
     });
-    expect(received.meta).toEqual({ senderId: configs.arnOf(orders) });
+    // The call's trace, as SQS keeps a message's AWSTraceHeader.
+    expect(received.meta).toEqual({ senderId: configs.arnOf(orders), systemAttributes: { AWSTraceHeader: { DataType: 'String', StringValue: 'Root=1-5759e988-bd862e3fe1be46a994272793' } } });
     expect(await db.dataSource.query(`SELECT size_bytes::int AS size FROM queues WHERE id = $1`, [failed.id])).toEqual([{ size: Buffer.byteLength(received.body) }]);
     // Its retention is the queue's, from when the record was sent.
     const [{ kept }] = await db.dataSource.query<Array<{ kept: number }>>(`SELECT extract(epoch FROM expires_at - sent_at)::int AS kept FROM queue_messages WHERE queue_id = $1`, [failed.id]);

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The SBOMs the last security run on a branch wrote (its "sbom" artifact), for the nightly's advisories job, which
-# scans them again with the day's advisories: an image unchanged since its push can have a new advisory, and the
-# nightly no longer builds the images. The newest artifact of the branch's runs that GitHub still keeps; none, an error.
+# The SBOMs the last security run on a branch wrote (its "sbom" artifact), for the advisories job, which scans them
+# again with the day's advisories: an image unchanged since its push can have a new advisory, and the nightly no
+# longer builds the images; a run that builds them waits for its security job, so that its own are the newest. The
+# newest artifact of the branch's runs that GitHub still keeps; none, an error.
 #   GH_TOKEN, GH_REPO   for gh, allowed actions: read
 #   hack/lib/last-sboms.sh <branch> <directory>
 set -euo pipefail

@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nest
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { AccountStatus } from '../accounts/entities/account.entity';
-import { Function, FunctionStatus } from '../functions/entities/function.entity';
+import { Function, FunctionStatus, UpdateStatus } from '../functions/entities/function.entity';
 import { describeError } from '../common/describe-error';
 import { ORCHESTRATOR, Orchestrator, WorkloadInstances } from '../orchestrator/orchestrator.types';
 import { PlansService } from '../plans/plans.service';
@@ -228,7 +228,10 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Scaled ${describeWorkload(running)} from ${own} to ${target} instances (at most ${peakConcurrency} calls at once in the last minute)`);
   }
 
-  /** Scales eligible functions' $LATEST (scaleToZero, minInstances 0) to zero after their account's plan's idle window. */
+  /**
+   * Scales eligible functions' $LATEST (scaleToZero, minInstances 0) to zero after their account's plan's idle window,
+   * unless a change of the function is rolling out.
+   */
   async sweepIdleFunctions(nowMs = Date.now()): Promise<void> {
     const candidates = await this.functionRepository.find({
       where: { status: FunctionStatus.ACTIVE, scaleToZero: true, minInstances: 0 },
@@ -239,6 +242,8 @@ export class MetricsService implements OnModuleInit, OnModuleDestroy {
     for (const function_ of candidates) {
       const idleSeconds = plans.get(function_.accountId)?.limits.idleSeconds;
       if (idleSeconds === undefined) continue; // no account (it can't happen: a foreign key): leave it running
+      // A change rolling out: at zero, its rollout would end without an instance to try its code, and pass.
+      if (function_.updateStatus === UpdateStatus.IN_PROGRESS) continue;
       const key = workloadKey(function_);
       if (this.concurrency.current(key) > 0) continue; // a call is running
       // Without a recorded invocation (e.g. after a restart), count from boot or the last change.

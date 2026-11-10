@@ -3,7 +3,8 @@
 
 use std::fmt;
 
-use crate::config::Settings;
+use crate::api::types::MeAccount;
+use crate::config::{Setting, Settings};
 use crate::error::{Error, Kind};
 
 /// A bearer token. Never printed whole, not even in debug output.
@@ -63,11 +64,11 @@ impl fmt::Debug for Token {
     }
 }
 
-/// The headers that say who calls, and for which account.
-pub fn identity_headers(settings: &Settings) -> Vec<(&'static str, String)> {
+/// The headers that say who calls, with this token, and for which account.
+pub fn identity_headers(settings: &Settings, token: Option<&Token>) -> Vec<(&'static str, String)> {
     let mut headers = Vec::new();
-    if let Some(token) = &settings.token {
-        headers.push(("authorization", format!("Bearer {}", token.value.secret())));
+    if let Some(token) = token {
+        headers.push(("authorization", format!("Bearer {}", token.secret())));
     }
     if let Some(account) = &settings.account {
         headers.push(("x-ff-account", account.value.clone()));
@@ -78,6 +79,22 @@ pub fn identity_headers(settings: &Settings) -> Vec<(&'static str, String)> {
     headers
 }
 
+/// What a login with several accounts and none named is told: how to name one, then each of them.
+pub fn several_accounts(accounts: &[MeAccount]) -> String {
+    let mut text = "Your login has several accounts: name the one to act for with --account, FF_ACCOUNT or \
+                    `ff config set account <ID>`"
+        .to_owned();
+    for account in accounts {
+        text.push_str(&format!("\n  {}, as {}", account.line(), account.role));
+    }
+    text
+}
+
+/// What a login is told of an account named that it doesn't belong to.
+pub fn not_a_member(account: &Setting<String>) -> String {
+    format!("You don't belong to account {} (from {}): `ff accounts` lists yours", account.value, account.source)
+}
+
 /// Before any call: a token, or for a development stack, the account to act as.
 pub fn require_identity(settings: &Settings) -> Result<(), Error> {
     if settings.token.is_some() || settings.dev_account.is_some() {
@@ -86,9 +103,10 @@ pub fn require_identity(settings: &Settings) -> Result<(), Error> {
     Err(Error::new(
         Kind::Failed,
         format!(
-            "There is no token to call {} with. An owner of the account makes an API key in the console's API keys page, \
-             with the scopes you need; then `ff config set-token` saves it without showing it, or FF_TOKEN holds it. \
-             For a development stack (FF_AUTH_MODE=dev), name the account to act as instead: `ff config set dev_account <12 digits>`",
+            "There is no token to call {} with: `ff login` logs you in with your browser. For a script or a CI, an \
+             owner of the account makes an API key with the scopes it needs, by `ff api-keys create` or in the \
+             console's API keys page; then `ff config set-token` saves it without showing it, or FF_TOKEN holds it. For a development stack \
+             (FF_AUTH_MODE=dev), name the account to act as instead: `ff config set dev_account <12 digits>`",
             settings.endpoint.value
         ),
     ))
@@ -96,25 +114,10 @@ pub fn require_identity(settings: &Settings) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-    use crate::config::{Endpoint, Files, Setting, Source};
+    use crate::config::{Setting, Source};
 
     const KEY: &str = "ffk_0123456789ab_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_aBcDe";
-
-    fn settings() -> Settings {
-        Settings {
-            profile: Setting { value: "default".into(), source: Source::Default },
-            endpoint: Setting { value: Endpoint::parse("https://api.ff.example").unwrap(), source: Source::ConfigFile },
-            account: None,
-            dev_account: None,
-            token: None,
-            allow_http: Setting { value: false, source: Source::Default },
-            files: Files { dir: PathBuf::from("/tmp/ff") },
-            warnings: Vec::new(),
-        }
-    }
 
     #[test]
     fn an_api_key_has_the_shape_the_api_gives_it_and_shows_only_its_id() {
@@ -137,15 +140,14 @@ mod tests {
 
     #[test]
     fn the_headers_carry_the_token_and_the_accounts_set_and_nothing_else() {
-        let mut settings = settings();
-        assert!(identity_headers(&settings).is_empty());
+        let mut settings = Settings::example();
+        assert!(identity_headers(&settings, None).is_empty());
 
-        settings.token = Some(Setting { value: Token::new(KEY).unwrap(), source: Source::CredentialsFile });
         settings.account = Some(Setting { value: "111111111111".into(), source: Source::Flag("--account") });
         settings.dev_account = Some(Setting { value: "222222222222".into(), source: Source::ConfigFile });
 
         assert_eq!(
-            identity_headers(&settings),
+            identity_headers(&settings, Some(&Token::new(KEY).unwrap())),
             [
                 ("authorization", format!("Bearer {KEY}")),
                 ("x-ff-account", "111111111111".into()),
@@ -155,13 +157,15 @@ mod tests {
     }
 
     #[test]
-    fn without_a_token_or_a_development_account_it_says_how_to_get_a_key_before_calling() {
-        let mut settings = settings();
+    fn without_a_token_or_a_development_account_it_says_how_to_log_in_before_calling() {
+        let mut settings = Settings::example();
 
         let refused = require_identity(&settings).unwrap_err();
         assert_eq!(refused.exit_code(), 3);
         assert!(
-            refused.message.starts_with("There is no token to call https://api.ff.example with."),
+            refused.message.starts_with(
+                "There is no token to call https://api.ff.example with: `ff login` logs you in with your browser."
+            ),
             "{}",
             refused.message
         );

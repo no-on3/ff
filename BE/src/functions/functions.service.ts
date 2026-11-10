@@ -45,7 +45,7 @@ import { ListInvocationsQuery } from './dto/list-invocations.dto';
 import { UpdateFunctionDto } from './dto/update-function.dto';
 import { ScalingConfig, UpdateScalingConfigDto } from './dto/update-scaling-config.dto';
 import { SecretsView } from './dto/secrets.dto';
-import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
+import { FunctionInvocation, InvocationSource, InvocationStatus, InvocationTrigger } from './entities/function-invocation.entity';
 import { awsEndpointsOf } from '../common/aws-endpoint';
 import { EventFormat, Function, FunctionStatus, PackageType, Runtime, UpdateStatus } from './entities/function.entity';
 import {
@@ -95,6 +95,7 @@ import { logsQuery } from './logs-window';
 import { MAX_INPUT_BYTES } from './limits';
 import { functionNotFound, noSuchAlias, noSuchVersion } from './function-not-found';
 import { callsKept, drawVersion, parseQualifier } from './qualifier';
+import { newTraceId } from './trace';
 
 /** Fields whose change requires rolling out a new version of the function; so does a change of its environment. */
 const ROLLOUT_FIELDS = ['code', 'codeSha256', 'runtime', 'handler', 'memory', 'timeout', 'eventFormat', 'awsEndpoints'] as const;
@@ -1253,9 +1254,10 @@ export class FunctionsService {
   /** Calls the function with `input` as its event, any JSON value, as AWS Lambda's Invoke does; {} when there is none. */
   /**
    * Calls the function, or what `qualifier` names, as Lambda's Invoke with its Qualifier: a version, or an alias, whose
-   * share is drawn for the call. A version runs whatever $LATEST's state, as a rollback needs.
+   * share is drawn for the call. A version runs whatever $LATEST's state, as a rollback needs. `traceId` is the
+   * caller's trace, else the call starts one.
    */
-  async invoke(accountId: string, id: string, input?: unknown, qualifier?: string): Promise<FunctionInvocation> {
+  async invoke(accountId: string, id: string, input?: unknown, qualifier?: string, traceId?: string): Promise<FunctionInvocation> {
     const payload = input === undefined ? {} : input;
     // As AWS Lambda refuses a synchronous call's payload over 6 MB, with its words and its exception's name.
     const size = jsonBytes(payload);
@@ -1274,7 +1276,7 @@ export class FunctionsService {
     // 402 once the balance has been below the buffer for the grace period. A refused call leaves no record.
     await this.credit.admit(accountId);
 
-    const outcome = await this.call(function_, payload, { source: InvocationSource.API, target });
+    const outcome = await this.call(function_, payload, { source: InvocationSource.API, target, traceId });
     // A call that failed is named, as the history keeps it: its ID finds its logs, its status says how it ended.
     if (!outcome.ok) {
       const { id: invocationId, status, duration, memoryUsed } = outcome.invocation;
@@ -1295,18 +1297,30 @@ export class FunctionsService {
    * itself: a URL's, without its callers' credentials. `requestId` is the
    * request's ID when the caller chose it first: a URL's event names it, and
    * an asynchronous call's attempts keep it, each with its `attempt`. `asks`
-   * is what Lambda's Invoke asks of the runtime.
+   * is what Lambda's Invoke asks of the runtime. `traceId` is the trace the
+   * call is part of, which its way in found or started; a new one when none
+   * did. `trigger` is what brought it, beyond its source.
    */
   async call(
     function_: Function,
     payload: unknown,
-    options: { source: InvocationSource; history?: unknown; requestId?: string; attempt?: number; target?: CallTarget; asks?: CallAsks },
+    options: {
+      source: InvocationSource;
+      history?: unknown;
+      requestId?: string;
+      attempt?: number;
+      target?: CallTarget;
+      asks?: CallAsks;
+      traceId?: string;
+      trigger?: InvocationTrigger;
+    },
   ): Promise<CallOutcome> {
     const { version, alias } = options.target ?? {};
     const running: Running = version ? versionRun(function_, version) : function_;
     // The history keeps a capped copy of the input, output and error (P-45); the caller gets them whole.
     const keptInput = keptJson(options.history === undefined ? payload : options.history);
     const requestId = options.requestId ?? randomUUID();
+    const traceId = options.traceId ?? newTraceId();
     const attempt = options.attempt ?? 1;
     const invocation = this.invocationsRepository.create({
       // A request's first attempt is the invocation of its ID, as every call before retries was; a retry is an invocation of its own.
@@ -1317,6 +1331,8 @@ export class FunctionsService {
       source: options.source,
       version: running.version ?? null,
       alias: alias ?? null,
+      traceId,
+      trigger: options.trigger ?? null,
       input: keptInput.value,
       inputTruncated: keptInput.truncated,
       status: InvocationStatus.RUNNING,
@@ -1337,7 +1353,7 @@ export class FunctionsService {
       // A version's first call, or its first since it went idle, makes its pods of its workload whole; $LATEST at
       // zero starts with a fresh key when its key is due a renewal.
       const start = version ? () => this.versionWorkload(running, version.version) : () => this.withFreshKey(function_.id);
-      const result = await this.orchestrator.invoke(running, payload, { requestId: invocation.requestId, start, ...options.asks });
+      const result = await this.orchestrator.invoke(running, payload, { requestId: invocation.requestId, traceId, start, ...options.asks });
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)

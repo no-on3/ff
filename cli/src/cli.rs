@@ -93,23 +93,28 @@ pub enum Format {
 #[derive(Subcommand)]
 pub enum Command {
     /// Make a function's folder: its handler, an event to call it with, and a README; or an app's Terraform project, or
-    /// a SAM application
+    /// a SAM application, sam init's hello world or an app to start from; --list names them
     Init {
         /// The function's name, and its folder's; a Terraform project's, which names its resources; a SAM
         /// application's, its stack's
-        name: String,
+        #[arg(required_unless_present = "list")]
+        name: Option<String>,
 
         /// Its runtime; a Terraform project's or a SAM application's functions'
-        #[arg(long, value_enum)]
-        runtime: Runtime,
+        #[arg(long, value_enum, required_unless_present = "list")]
+        runtime: Option<Runtime>,
 
         /// What to make: a function's folder; a Terraform project, FF's provider block with the endpoints of the FF
         /// logged in to and four modules (a function with its URL, a queue worker, a bucket that runs a function, a
-        /// site), which apply on FF and, with only the provider block changed, on AWS; or a SAM application, a
-        /// template of one function with its alias and its URL and samconfig.toml naming the stack, which ff deploy
-        /// puts on FF and sam deploy on AWS
+        /// site), which apply on FF and, with only the provider block changed, on AWS; or a SAM application, which
+        /// ff deploy puts on FF, sam deploy on AWS and ff local start here: sam init's hello world, or an app to start
+        /// from
         #[arg(long, value_enum, default_value = "function")]
         template: Template,
+
+        /// Name the templates, with what each makes, and make nothing
+        #[arg(long, conflicts_with_all = ["name", "runtime"])]
+        list: bool,
     },
 
     /// Create a function from a file or a folder, or update the function of that name with what changed; or deploy a SAM
@@ -131,10 +136,11 @@ pub enum Command {
         name: String,
     },
 
-    /// Show a function's log lines: the newest of a window, every page of it, or the live tail
+    /// Show a function's log lines: the newest of a window, every page of it, or the live tail; or a trace's, across
+    /// the functions it called
     Logs(LogsArgs),
 
-    /// Show a function's recent calls, newest first, with their request IDs
+    /// Show a function's recent calls, newest first, with their request IDs and their traces
     History {
         /// The function's name
         name: String,
@@ -142,6 +148,13 @@ pub enum Command {
         /// How many calls
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
+    },
+
+    /// Show one request's trail as a timeline: the account's calls in a trace, by time, across its functions
+    Trace {
+        /// The trace's ID, as ff history, the console and an answer's X-Amzn-Trace-Id name it: 1-<time>-<random>, or
+        /// the header's Root=1-…
+        id: String,
     },
 
     /// Set how many instances a function keeps running when idle, and runs at most
@@ -279,6 +292,25 @@ pub enum Command {
     /// buckets, each function's code as Lambda runs it, a page for each kind of resource, and MIGRATION.md
     Export(ExportArgs),
 
+    /// Log in with your browser, by OAuth's device flow: the login kept for the profile, renewed as it is used
+    Login {
+        /// Remove the API key the profile holds, which ff would use before the login
+        #[arg(long)]
+        replace: bool,
+
+        /// Print the address to open, without opening a browser
+        #[arg(long)]
+        no_browser: bool,
+    },
+
+    /// Log out: the login revoked where it was made, then its tokens removed from the profile
+    Logout {
+        /// Remove the tokens without revoking the login, when its server can't be reached: a copy of them then works
+        /// until it goes unused for as long as the server allows, 30 days by default
+        #[arg(long)]
+        no_revoke: bool,
+    },
+
     /// Say who the token is, an API key or a user, and the account it acts for
     Whoami,
 
@@ -287,6 +319,11 @@ pub enum Command {
 
     /// Show the current account: its status, the role in it, its plan's limits, its internet access
     Account,
+
+    /// The account's API keys, for a script or a CI to call FF with: each with its scopes, made and revoked by an
+    /// owner's login, never by a key
+    #[command(subcommand)]
+    ApiKeys(ApiKeysCommand),
 
     /// Show a month's usage per function, with its estimated cost; with --aws, the last months at AWS's prices
     Usage {
@@ -340,6 +377,17 @@ pub enum Command {
     Completion {
         /// The shell
         shell: Shell,
+    },
+
+    /// Serve ff's commands to an AI coding agent as the Model Context Protocol's tools, on stdin and stdout: the
+    /// functions, their logs, calls and metrics, usage, balance, the cost on AWS, queues, buckets, databases, caches
+    /// and doctor, each run with this profile's login or key and answered with its JSON document; with
+    /// --allow-write, deploy, invoke, env set, publish, alias set, queues send and sites deploy too
+    Mcp {
+        /// Run the tools that change the account, which are refused without it; still none that deletes, nor keys,
+        /// secrets or the login
+        #[arg(long)]
+        allow_write: bool,
     },
 }
 
@@ -490,8 +538,8 @@ pub enum AliasCommand {
         /// The alias's name: letters, digits, - and _, not digits alone
         alias: String,
 
-        /// The version its calls go to: its number, or $LATEST (latest), the function as it is. Its own name, as clap
-        /// keeps `version` for --version
+        /// The version its calls go to: its number, or $LATEST (latest), the function as it is
+        // Its id is its own, as clap keeps `version` for --version.
         #[arg(id = "to", value_name = "VERSION")]
         version: String,
 
@@ -525,7 +573,7 @@ pub enum AliasCommand {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, ValueEnum)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum)]
 pub enum Runtime {
     Nodejs,
     Python,
@@ -554,6 +602,12 @@ pub enum Template {
     Function,
     Terraform,
     Sam,
+    RestApi,
+    CronJob,
+    QueueWorker,
+    SiteWithApi,
+    ImageResize,
+    Webhook,
 }
 
 impl Template {
@@ -562,6 +616,12 @@ impl Template {
             Template::Function => "function",
             Template::Terraform => "terraform",
             Template::Sam => "sam",
+            Template::RestApi => "rest-api",
+            Template::CronJob => "cron-job",
+            Template::QueueWorker => "queue-worker",
+            Template::SiteWithApi => "site-with-api",
+            Template::ImageResize => "image-resize",
+            Template::Webhook => "webhook",
         }
     }
 }
@@ -633,8 +693,9 @@ pub struct AsyncConfigArgs {
 
 #[derive(Args)]
 pub struct LogsArgs {
-    /// The function's name
-    pub name: String,
+    /// The function's name; with --trace, its lines of the trace alone
+    #[arg(required_unless_present = "trace")]
+    pub name: Option<String>,
 
     /// How many lines: the newest of the window
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
@@ -671,6 +732,11 @@ pub struct LogsArgs {
     /// With --follow, ask every 2 s rather than hold a stream open, through a proxy that holds streams back
     #[arg(long, requires = "follow")]
     pub poll: bool,
+
+    /// Every line of one request's trail, by time, across the functions it called, each line naming its function: the
+    /// trace's ID, as ff trace takes it
+    #[arg(long, conflicts_with_all = ["tail", "since", "start", "end", "request_id", "all", "follow"])]
+    pub trace: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -689,28 +755,107 @@ pub enum LocalCommand {
         raw: bool,
     },
 
-    /// Keep it running on a port of this machine, its log as it comes, until Ctrl-C
+    /// Keep it running on a port of this machine, its log as it comes, until Ctrl-C; or a SAM template's app, each
+    /// function started at its first call through one front door
     Start {
         #[command(flatten)]
         function: LocalArgs,
 
-        /// The port on 127.0.0.1 [default: any free one]
+        /// The port on 127.0.0.1 [default: any free one; a template's front door 3700]
         #[arg(long)]
         port: Option<u16>,
 
-        /// Start it again when its code changes
+        /// Start it again when its code changes; with a template, a running function whose code changed
         #[arg(long)]
         watch: bool,
 
         /// Serve it as its URL would: any request calls it with AWS Lambda's URL event, its answer the response
         #[arg(long)]
         url: bool,
+
+        /// With a template, the secrets every function gets, KEY=value lines [default: .env.local beside it, if there]
+        #[arg(long, value_name = "FILE")]
+        secrets: Option<PathBuf>,
+
+        /// With a template, how long a function is kept without a call before it stops [default: 10m]
+        #[arg(long, value_name = "DURATION")]
+        idle: Option<String>,
+
+        /// With a template, its stack's name, which AWS::StackName gives [default: samconfig.toml's, else the folder's]
+        #[arg(long, value_name = "NAME")]
+        stack_name: Option<String>,
+
+        /// With a template, its parameters' values, as `sam deploy` takes them, in place of samconfig.toml's
+        #[arg(long, num_args = 1.., value_name = "KEY=VALUE")]
+        parameter_overrides: Vec<String>,
+
+        /// With a template, a bucket's site answering a folder's files, as `ff sites deploy` would upload them,
+        /// without a copy; once for each site
+        #[arg(long = "site", value_name = "BUCKET=FOLDER")]
+        sites: Vec<String>,
+
+        /// With a template, a PostgreSQL or a Valkey beside its functions, at DATABASE_URL or REDIS_URL unless the
+        /// secrets file names them, their data kept in Docker's volumes of the project's
+        #[arg(long = "with", value_enum, value_delimiter = ',', value_name = "SERVICE")]
+        with: Vec<crate::local::services::Service>,
+    },
+
+    /// Run a schedule of the template's app that ff local start runs, now, as it would run on time: its function
+    /// called without waiting, with EventBridge's Scheduled Event or the schedule's input; its log is ff local start's
+    Run {
+        /// The schedule: its name, or <function>/<name> when two functions have one so named
+        schedule: String,
+
+        /// The template, or its folder [default: this folder]
+        path: Option<PathBuf>,
+    },
+
+    /// List the mail the template's functions sent, which ff local start keeps in .ff/local/mail/, never sent: each
+    /// message a file a mail reader opens, the latest last
+    Mail {
+        /// The template, or its folder [default: this folder]
+        path: Option<PathBuf>,
+    },
+
+    /// Remove what ff local start keeps for a template's project, in its .ff/local/: the functions' logs, the
+    /// buckets' objects, the mail kept and the local key
+    Reset {
+        /// The template, or its folder [default: this folder]
+        path: Option<PathBuf>,
+
+        /// Remove the data of its --with services too, Docker's volumes of the project's
+        #[arg(long)]
+        data: bool,
+
+        /// Don't ask first
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Answer as Konnect's API does, on a port of this machine, until Ctrl-C: a shop's payments made, their pages paid
+    /// or failed with a button, the shop's webhook called; nothing paid, the payments kept while it runs
+    Konnect {
+        /// The port on 127.0.0.1, and on Docker's gateway for ff local start's functions; 0 for any free one
+        #[arg(long, default_value_t = crate::local::konnect::DEFAULT_PORT)]
+        port: u16,
+
+        /// The key it takes in x-api-key, the same at each start unless this says
+        #[arg(long, default_value = crate::local::konnect::DEFAULT_KEY)]
+        key: String,
+
+        /// The ID of its one wallet, which receiverWalletId must name
+        #[arg(long, default_value = crate::local::konnect::DEFAULT_WALLET)]
+        wallet: String,
+
+        /// How long each answer of its API waits first, a slow Konnect: a duration, such as 2s or 500ms
+        #[arg(long, value_name = "DURATION")]
+        delay: Option<String>,
     },
 }
 
 #[derive(Args)]
 pub struct LocalArgs {
-    /// The function's file, or its folder with a function.ts, .js, .mjs, .cjs or .py
+    /// The function's file, or its folder with a function.ts, .js, .mjs, .cjs or .py; or, to start, a SAM template
     pub path: PathBuf,
 
     /// Its name, as its context gives it, else the file's or the folder's
@@ -721,13 +866,13 @@ pub struct LocalArgs {
     #[arg(long, value_enum)]
     pub runtime: Option<Runtime>,
 
-    /// Memory in MB, the container's limit
-    #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u32).range(128..=10240))]
-    pub memory: u32,
+    /// Memory in MB, the container's limit [default: 128]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(128..=10240))]
+    pub memory: Option<u32>,
 
-    /// Timeout in seconds
-    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u32).range(1..=900))]
-    pub timeout: u32,
+    /// Timeout in seconds [default: 5]
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=900))]
+    pub timeout: Option<u32>,
 
     /// Environment variables for the run, KEY=value, repeated
     #[arg(long = "env", value_name = "KEY=value")]
@@ -1154,6 +1299,63 @@ pub enum KeysCommand {
         yes: bool,
     },
 }
+
+#[derive(Subcommand)]
+pub enum ApiKeysCommand {
+    /// List the account's API keys, newest first: each one's scopes, whether it works, when it was last used; never
+    /// the key itself
+    List,
+
+    /// Make an API key: the key printed this once, for FF_TOKEN or `ff config set-token` where it is used
+    Create {
+        /// What it is for, e.g. "CI deploys": 1 to 100 characters
+        #[arg(long)]
+        name: String,
+
+        /// What it may do, within its creator's role; a list, or again for each
+        #[arg(long = "scopes", value_delimiter = ',', value_name = "SCOPE,...", required = true,
+              value_parser = clap::builder::PossibleValuesParser::new(API_KEY_SCOPES))]
+        scopes: Vec<String>,
+
+        /// When it stops working: in a while, as 90d, 12h or 2w, or at a time, as 2027-01-31T00:00:00Z [default: never]
+        #[arg(long, value_name = "WHEN")]
+        expires: Option<String>,
+    },
+
+    /// Revoke an API key: whatever uses it is refused at once
+    Revoke {
+        /// The key ID, 12 hex characters, or the name of the one working key of that name
+        key: String,
+
+        /// Don't ask first: a script must say it
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+/// What an API key may do, as the API names it.
+pub const API_KEY_SCOPES: [&str; 20] = [
+    "functions:read",
+    "functions:write",
+    "functions:invoke",
+    "logs:read",
+    "metrics:read",
+    "alarms:read",
+    "alarms:write",
+    "usage:read",
+    "databases:read",
+    "databases:write",
+    "storage:read",
+    "storage:write",
+    "queues:read",
+    "queues:write",
+    "caches:read",
+    "caches:write",
+    "email:read",
+    "email:write",
+    "stacks:read",
+    "stacks:write",
+];
 
 #[derive(Args)]
 pub struct NewKeyArgs {
@@ -1702,7 +1904,7 @@ pub enum ScheduleCommand {
 pub enum ConfigCommand {
     /// Set one of the profile's settings
     Set {
-        /// endpoint (the API's address), account (for a login with several), dev_account (the account a development stack acts as) or allow_http (true for plain http to a development stack)
+        /// endpoint (the API's address), account (for a login with several), dev_account (the account a development stack acts as), allow_http (true for plain http to a development stack) or update_check (false for no notice of a newer ff)
         key: ConfigKey,
         value: String,
     },
@@ -1724,6 +1926,7 @@ pub enum ConfigKey {
     Account,
     DevAccount,
     AllowHttp,
+    UpdateCheck,
     Token,
 }
 
@@ -1735,6 +1938,7 @@ impl ConfigKey {
             ConfigKey::Account => "account",
             ConfigKey::DevAccount => "dev_account",
             ConfigKey::AllowHttp => "allow_http",
+            ConfigKey::UpdateCheck => "update_check",
             ConfigKey::Token => "token",
         }
     }

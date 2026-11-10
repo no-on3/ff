@@ -1,0 +1,11 @@
+# Every minute, at its start, the status page's probe (ff-status-probe.service).
+[Unit]
+Description=FF's status probe, every minute
+
+[Timer]
+OnCalendar=*:*:00
+# At the minute's start, which its line in the minutes names, rather than anywhere in it, as systemd would.
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,371 @@
+{
+  "about": "A bucket's site as S3's website endpoint answers it, which website-server.spec.ts and website.spec.ts read, and ff local's sites too (cli/src/local/s3/site.rs). The bucket shop is a site, its objects these, each stored with its type; private is a bucket without a website configuration. The visits are in groups, one for each test of the backend's that plays them. A visit's host is under the sites' host, written {sites}, unless it names another; its configuration is shop's, changed by what it gives. Its answer: the status, the body whole or what it includes, the headers it has and those it hasn't; asked, the store's requests it made, for the backend, whose store is a stand-in. A revisit is made with If-None-Match, the ETag of a first visit to the same path.",
+  "objects": {
+    "index.html": {
+      "body": "<title>index</title>",
+      "type": "text/html"
+    },
+    "docs/index.html": {
+      "body": "<title>docs</title>",
+      "type": "text/html"
+    },
+    "404.html": {
+      "body": "<title>error page</title>",
+      "type": "text/html"
+    },
+    "assets/app.js": {
+      "body": "console.log(\"app\")",
+      "type": "text/javascript"
+    },
+    "untyped.css": {
+      "body": "body { color: navy }",
+      "type": "binary/octet-stream"
+    },
+    "a b/c.txt": {
+      "body": "spaced",
+      "type": "text/plain"
+    }
+  },
+  "website": {
+    "indexDocument": "index.html",
+    "errorDocument": "404.html",
+    "singlePageApp": false
+  },
+  "visits": [
+    {
+      "group": "the index document",
+      "visits": [
+        {
+          "name": "the index document at the site's root, its type as stored, never to be sniffed, its validators passed on",
+          "path": "/",
+          "status": 200,
+          "body": "<title>index</title>",
+          "headers": {
+            "content-type": "text/html",
+            "x-content-type-options": "nosniff"
+          },
+          "present": [
+            "etag",
+            "last-modified",
+            "x-amz-request-id"
+          ],
+          "absent": [
+            "set-cookie"
+          ],
+          "asked": [
+            "GET index.html"
+          ]
+        }
+      ]
+    },
+    {
+      "group": "a folder",
+      "visits": [
+        {
+          "name": "a folder's index document",
+          "path": "/docs/",
+          "status": 200,
+          "body": "<title>docs</title>"
+        },
+        {
+          "name": "a folder named without its slash, redirected to it, its query kept",
+          "path": "/docs?from=nav",
+          "status": 302,
+          "headers": {
+            "location": "/docs/?from=nav"
+          },
+          "asked": [
+            "GET docs",
+            "HEAD docs/index.html"
+          ]
+        }
+      ]
+    },
+    {
+      "group": "escapes",
+      "visits": [
+        {
+          "name": "a path's escapes read, as a browser sends a name with a space",
+          "path": "/a%20b/c.txt",
+          "status": 200,
+          "body": "spaced"
+        }
+      ]
+    },
+    {
+      "group": "a path with no file",
+      "visits": [
+        {
+          "name": "a path with no file: the error document, with 404",
+          "path": "/no/such/page.html",
+          "status": 404,
+          "body": "<title>error page</title>"
+        },
+        {
+          "name": "a path with no file and no error document: a page of the site's own naming the key",
+          "website": {
+            "errorDocument": null
+          },
+          "path": "/no/such/page.html",
+          "status": 404,
+          "headers": {
+            "content-type": "text/html; charset=utf-8"
+          },
+          "includes": [
+            "<li>Code: NoSuchKey</li>",
+            "<li>Key: no/such/page.html</li>"
+          ]
+        }
+      ]
+    },
+    {
+      "group": "a single-page app",
+      "visits": [
+        {
+          "name": "a single-page app's route: its index document, with 200",
+          "website": {
+            "singlePageApp": true
+          },
+          "path": "/orders/42",
+          "status": 200,
+          "body": "<title>index</title>"
+        },
+        {
+          "name": "a single-page app's file, as it is",
+          "website": {
+            "singlePageApp": true
+          },
+          "path": "/assets/app.js",
+          "status": 200,
+          "body": "console.log(\"app\")"
+        }
+      ]
+    },
+    {
+      "group": "types, conditions and ranges",
+      "visits": [
+        {
+          "name": "a file stored without a type, typed by its name",
+          "path": "/untyped.css",
+          "status": 200,
+          "headers": {
+            "content-type": "text/css; charset=utf-8"
+          }
+        },
+        {
+          "name": "a revisit with the ETag of the first: 304, without a body or a type",
+          "path": "/assets/app.js",
+          "revisit": true,
+          "status": 304,
+          "body": "",
+          "present": [
+            "etag"
+          ],
+          "absent": [
+            "content-type"
+          ]
+        },
+        {
+          "name": "a range",
+          "path": "/assets/app.js",
+          "request": {
+            "range": "bytes=0-6"
+          },
+          "status": 206,
+          "body": "console",
+          "headers": {
+            "content-range": "bytes 0-6/18"
+          }
+        },
+        {
+          "name": "a condition that doesn't hold: 412, without a body or a type",
+          "path": "/assets/app.js",
+          "request": {
+            "if-match": "\"another\""
+          },
+          "status": 412,
+          "body": "",
+          "headers": {
+            "content-length": "0"
+          },
+          "absent": [
+            "content-type"
+          ]
+        },
+        {
+          "name": "a range past the file: 416, without a body or a type",
+          "path": "/assets/app.js",
+          "request": {
+            "range": "bytes=100-200"
+          },
+          "status": 416,
+          "body": "",
+          "headers": {
+            "content-length": "0"
+          },
+          "absent": [
+            "content-type"
+          ]
+        }
+      ]
+    },
+    {
+      "group": "methods",
+      "visits": [
+        {
+          "name": "HEAD, without a body",
+          "method": "HEAD",
+          "path": "/assets/app.js",
+          "status": 200,
+          "body": "",
+          "headers": {
+            "content-length": "18"
+          }
+        },
+        {
+          "name": "another method: 405, naming the two a site takes",
+          "method": "POST",
+          "path": "/",
+          "status": 405,
+          "headers": {
+            "allow": "GET, HEAD"
+          },
+          "includes": [
+            "Code: MethodNotAllowed"
+          ]
+        }
+      ]
+    },
+    {
+      "group": "paths out of the site",
+      "visits": [
+        {
+          "name": "a path climbing out of the site",
+          "path": "/../private/index.html",
+          "status": 400,
+          "includes": [
+            "Code: InvalidURI"
+          ],
+          "asked": []
+        },
+        {
+          "name": "a path climbing out of the site, escaped",
+          "path": "/%2e%2e/private/index.html",
+          "status": 400,
+          "includes": [
+            "Code: InvalidURI"
+          ],
+          "asked": []
+        },
+        {
+          "name": "a path climbing out of the site, escaped in capitals",
+          "path": "/docs/%2E%2E/%2E%2E/x",
+          "status": 400,
+          "includes": [
+            "Code: InvalidURI"
+          ],
+          "asked": []
+        },
+        {
+          "name": "a path naming the site's folder itself",
+          "path": "/./index.html",
+          "status": 400,
+          "includes": [
+            "Code: InvalidURI"
+          ],
+          "asked": []
+        },
+        {
+          "name": "a path naming a control character",
+          "path": "/a%00b",
+          "status": 400,
+          "includes": [
+            "Code: InvalidURI"
+          ],
+          "asked": []
+        },
+        {
+          "name": "a path whose escape isn't one",
+          "path": "/%zz",
+          "status": 400,
+          "includes": [
+            "Code: InvalidURI"
+          ],
+          "asked": []
+        }
+      ]
+    },
+    {
+      "group": "hosts that are no site",
+      "visits": [
+        {
+          "name": "a host naming no bucket",
+          "host": "nowhere.{sites}",
+          "path": "/",
+          "status": 404,
+          "includes": [
+            "Code: NoSuchBucket"
+          ],
+          "asked": []
+        },
+        {
+          "name": "a host naming a bucket without a website configuration",
+          "host": "private.{sites}",
+          "path": "/",
+          "status": 404,
+          "includes": [
+            "Code: NoSuchWebsiteConfiguration"
+          ],
+          "asked": []
+        },
+        {
+          "name": "a host two labels under the sites' host",
+          "host": "a.shop.{sites}",
+          "path": "/",
+          "status": 404,
+          "includes": [
+            "Code: NoSuchBucket"
+          ],
+          "asked": []
+        },
+        {
+          "name": "a host outside the sites' host",
+          "host": "example.test",
+          "path": "/",
+          "status": 404,
+          "asked": []
+        }
+      ]
+    }
+  ],
+  "keys": [
+    {
+      "path": "/a/b/",
+      "key": "a/b/index.html"
+    },
+    {
+      "path": "/a..b/c",
+      "key": "a..b/c"
+    }
+  ],
+  "documents": [
+    {
+      "name": "GetBucketWebsite's answer, its names escaped",
+      "website": {
+        "indexDocument": "index.html",
+        "errorDocument": "<404>&.html",
+        "singlePageApp": true
+      },
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<WebsiteConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><IndexDocument><Suffix>index.html</Suffix></IndexDocument><ErrorDocument><Key>&#60;404&#62;&#38;.html</Key></ErrorDocument></WebsiteConfiguration>"
+    },
+    {
+      "name": "GetBucketWebsite's answer without an error document",
+      "website": {
+        "indexDocument": "index.html",
+        "errorDocument": null,
+        "singlePageApp": false
+      },
+      "xml": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<WebsiteConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><IndexDocument><Suffix>index.html</Suffix></IndexDocument></WebsiteConfiguration>"
+    }
+  ]
+}

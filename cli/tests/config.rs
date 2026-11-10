@@ -79,11 +79,15 @@ fn a_saved_key_is_read_from_stdin_kept_for_its_owner_only_and_never_shown_whole(
     assert!(!text.contains(KEY));
     let saved = std::fs::read_to_string(dir.join("credentials.toml")).unwrap();
     assert_eq!(saved, format!("[profiles.default]\ntoken = \"{KEY}\"\n"));
+    common::assert_owner_alone(&dir.join("credentials.toml"));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        assert_eq!((mode(&dir.join("credentials.toml")), mode(&dir)), (0o600, 0o700));
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700,
+            "a folder its owner alone opens"
+        );
     }
 }
 
@@ -183,5 +187,27 @@ fn credentials_others_can_read_are_used_with_a_warning() {
             "warning: {} can be read by others than you (mode 644): chmod 600",
             dir.path().join("credentials.toml").display()
         )));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let credentials = dir.path().join("credentials.toml");
+        // Everyone, by its SID, which no language renames.
+        let granted =
+            std::process::Command::new("icacls").arg(&credentials).args(["/grant", "*S-1-1-0:(R)"]).output().unwrap();
+        assert!(granted.status.success(), "{}", String::from_utf8_lossy(&granted.stdout));
+        let warnings = || {
+            String::from_utf8(ff(&dir).args(["config", "show"]).assert().success().get_output().stderr.clone()).unwrap()
+        };
+        let warned = warnings();
+        let warning = format!("warning: {} can be read by others than you (Everyone): icacls ", credentials.display());
+        let fix =
+            warned.lines().find_map(|line| line.strip_prefix(warning.as_str())).unwrap_or_else(|| panic!("{warned}"));
+
+        // The command it gives, as cmd runs it, makes the file its owner's alone.
+        let fixed = std::process::Command::new("cmd").raw_arg(format!("/C icacls {fix}")).output().unwrap();
+        assert!(fixed.status.success(), "{}", String::from_utf8_lossy(&fixed.stdout));
+        common::assert_owner_alone(&credentials);
+        assert!(!warnings().contains("can be read by others"));
     }
 }

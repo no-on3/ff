@@ -4,7 +4,7 @@ between the two processes. Runtime protocol v3.
 Messages are JSON arrays sent over a socket pair, each prefixed by its length
 as a 4-byte big-endian integer:
 
-  main -> worker: ["invoke", request_id, event, deadline_ms, client_context]
+  main -> worker: ["invoke", request_id, event, deadline_ms, client_context, trace_id]
   worker -> main: ["ready"] | ["init_error", type, message]
                   | ["result", json_text] | ["error", type, message]
 
@@ -14,8 +14,11 @@ on both with END_OF_CALL, the call's request ID, and a newline.
 """
 import json
 import os
+import re
+import secrets
 import select
 import struct
+import time
 from datetime import datetime, timezone
 
 # AWS Lambda's synchronous request and response limit.
@@ -69,6 +72,26 @@ def write_lines_with(write_line):
 def log(**fields):
     """Writes one JSON log line. Never pass environment values."""
     _write_line(json.dumps({"time": datetime.now(timezone.utc).isoformat(), **fields}))
+
+
+TRACE_ID = re.compile(r"1-[0-9a-f]{8}-[0-9a-f]{24}")
+
+
+def trace_id_of(given, now=None):
+    """The call's trace: the ID given, in AWS X-Ray's format, else a new one, 1-<the time, 8 hex digits>-<24 random ones>.
+
+    The backend names a call's trace in X-FF-Trace-Id; a call that came without, as `ff local`'s do, starts one.
+    """
+    if given and TRACE_ID.fullmatch(given):
+        return given
+    seconds = int(time.time() if now is None else now) & 0xFFFFFFFF
+    return f"1-{seconds:08x}-{secrets.token_hex(12)}"
+
+
+def lambda_trace_header(trace_id):
+    """_X_AMZN_TRACE_ID for a call in the trace, as Lambda sets it for a call X-Ray doesn't sample: the trace's Root, a
+    Parent of the call's own, and Sampled=0. The AWS SDKs pass the whole of it on in X-Amzn-Trace-Id."""
+    return f"Root={trace_id};Parent={secrets.token_hex(8)};Sampled=0"
 
 
 def proc_status_kb(field, pid="self"):

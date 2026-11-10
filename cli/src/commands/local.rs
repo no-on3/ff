@@ -3,7 +3,6 @@
 
 use std::net::TcpListener;
 use std::path::Path;
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
@@ -16,11 +15,16 @@ use serde_json::{Value, json};
 use super::Context;
 use super::deploy::{name_of, runtime_of};
 use super::invoke::input_of;
+use super::local_template;
+use super::template::is_template;
 use crate::cli::{Format, LocalArgs, Runtime};
 use crate::error::{Error, Kind};
-use crate::local::{self, Answer, Code, Container, LocalFunction, Readiness};
-use crate::local_url;
+use crate::local::{self, Answer, Code, Container, LocalFunction, images, url as local_url};
 use crate::progress::Progress;
+
+/// A function's memory in MB and its timeout in seconds, unless given.
+const DEFAULT_MEMORY: u32 = 128;
+const DEFAULT_TIMEOUT: u32 = 5;
 
 /// The function a path holds: a file, its runtime from its extension; or a folder, its runtime
 /// from the `function.*` file in it. Its name is the file's or the folder's, unless named.
@@ -43,10 +47,13 @@ pub fn local_function(args: &LocalArgs) -> Result<LocalFunction, Error> {
     Ok(LocalFunction {
         name: name_of(&path, args.name.as_deref())?,
         runtime,
-        memory: args.memory,
-        timeout: args.timeout,
+        memory: args.memory.unwrap_or(DEFAULT_MEMORY),
+        timeout: args.timeout.unwrap_or(DEFAULT_TIMEOUT),
         code,
+        handler: "function.handler".to_owned(),
         environment,
+        secrets: Default::default(),
+        hosts: Vec::new(),
     })
 }
 
@@ -70,15 +77,13 @@ pub fn answer_error(answer: &Answer) -> Option<Error> {
     if answer.status == 200 {
         return None;
     }
+    if let Some((error_type, message)) = answer.function_error() {
+        return Some(Error::new(Kind::InvocationFailed, format!("{error_type}: {message}")));
+    }
     let body: Value = serde_json::from_str(&answer.body).unwrap_or_default();
     let error_type = body["errorType"].as_str().unwrap_or("Runtime.Unknown");
     let message = body["errorMessage"].as_str().unwrap_or(answer.body.trim());
-    let the_functions =
-        answer.function_error || matches!(error_type, "Sandbox.Timedout" | "Runtime.OutOfMemory" | "Runtime.ExitError");
-    Some(Error::new(
-        if the_functions { Kind::InvocationFailed } else { Kind::Failed },
-        format!("{error_type}: {message}"),
-    ))
+    Some(Error::new(Kind::Failed, format!("{error_type}: {message}")))
 }
 
 fn print_log(context: &Context, log: &str) {
@@ -104,28 +109,28 @@ fn started(function: &LocalFunction, image: &str, port: Option<u16>, context: &C
         context.out,
         &format!("starting {} ({}, {} MB) in {image}", function.name, function.runtime.as_str(), function.memory),
     );
-    let started = Container::start(function, image, port).and_then(|container| {
-        let readiness = local::wait_until_ready(&container, function.timeout)?;
-        Ok((container, readiness))
-    });
+    let mut failed_log = String::new();
+    let started = Container::start_loaded(function, image, port, |log| failed_log = log.to_owned());
     progress.stop();
-    let (container, readiness) = started?;
-    if let Readiness::Failed { error_type, message } = readiness {
-        print_log(context, &container.logs());
-        return Err(Error::new(Kind::DeployFailed, format!("The function failed to load: {error_type}: {message}")));
-    }
-    Ok(container)
+    print_log(context, &failed_log);
+    started
 }
 
 pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context) -> Result<(), Error> {
+    if is_template(&args.path) {
+        return Err(Error::usage(format!(
+            "ff local invoke runs a function's file or folder: a template's functions run with `ff local start {}`, each called through its front door",
+            args.path.display()
+        )));
+    }
     let function = local_function(args)?;
     let event = input_of(data)?.unwrap_or_else(|| json!({}));
-    let image = local::image(function.runtime, &|name| std::env::var(name).ok());
-    local::check_docker(&image)?;
+    local::check_docker()?;
+    let image = images::for_runtime(function.runtime, context.out)?;
     local::remove_on_interrupt();
 
     let container = started(&function, &image, None, context)?;
-    let answer = local::invoke(&container, &event, function.timeout)?;
+    let answer = local::call(container.port, &event, None, &local::Asks::default(), function.timeout)?;
     let log = container.logs();
     drop(container);
     print_log(context, &log);
@@ -155,10 +160,41 @@ pub fn invoke(args: &LocalArgs, data: Option<&str>, raw: bool, context: &Context
     })
 }
 
-pub fn start(args: &LocalArgs, port: Option<u16>, watch: bool, url: bool, context: &Context) -> Result<(), Error> {
+/// `ff local start`: a template's app, or one function.
+pub fn start(args: &LocalArgs, url: bool, options: &local_template::Options, context: &Context) -> Result<(), Error> {
+    if is_template(&args.path) {
+        if url {
+            return Err(Error::usage(
+                "--url is for a function's file or folder: a template's functions answer at its front door",
+            ));
+        }
+        return local_template::start(args, options, context);
+    }
+    let template_flags: Vec<&str> = [
+        ("--secrets", options.secrets.is_some()),
+        ("--idle", options.idle.is_some()),
+        ("--stack-name", options.stack_name.is_some()),
+        ("--parameter-overrides", !options.parameter_overrides.is_empty()),
+        ("--site", !options.sites.is_empty()),
+        ("--with", !options.with.is_empty()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, given)| given.then_some(flag))
+    .collect();
+    if !template_flags.is_empty() {
+        return Err(Error::usage(format!(
+            "{} {} for a SAM template, a .yaml or .yml file: a function's file or folder runs alone",
+            template_flags.join(", "),
+            if template_flags.len() == 1 { "is" } else { "are" }
+        )));
+    }
+    start_function(args, options.port, options.watch, url, context)
+}
+
+fn start_function(args: &LocalArgs, port: Option<u16>, watch: bool, url: bool, context: &Context) -> Result<(), Error> {
     let function = local_function(args)?;
-    let image = local::image(function.runtime, &|name| std::env::var(name).ok());
-    local::check_docker(&image)?;
+    local::check_docker()?;
+    let image = images::for_runtime(function.runtime, context.out)?;
     local::remove_on_interrupt();
 
     // As its URL: a front on the port asked for, calling the container wherever it runs, a restart's too.
@@ -208,15 +244,7 @@ pub fn start(args: &LocalArgs, port: Option<u16>, watch: bool, url: bool, contex
             }
         })?;
         // Its log as it comes, on stderr, until the container goes, or a file changes: stdout has the address alone.
-        let mut logs = Command::new("docker")
-            .args(["logs", "--follow", &container.name])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .spawn()
-            .map_err(|error| Error::new(Kind::Failed, format!("Couldn't follow the function's log: {error}")))?;
-        if let Some(mut lines) = logs.stdout.take() {
-            std::thread::spawn(move || std::io::copy(&mut lines, &mut std::io::stderr()));
-        }
+        let mut logs = container.follow_log(std::io::stderr())?;
         if !watch {
             let _ = logs.wait();
             return Ok(());
@@ -275,7 +303,7 @@ mod tests {
     use super::*;
 
     fn args(path: &Path) -> LocalArgs {
-        LocalArgs { path: path.to_owned(), name: None, runtime: None, memory: 128, timeout: 5, env: Vec::new() }
+        LocalArgs { path: path.to_owned(), name: None, runtime: None, memory: None, timeout: None, env: Vec::new() }
     }
 
     #[test]
@@ -306,7 +334,15 @@ mod tests {
     }
 
     fn answer(status: u16, function_error: bool, body: &str) -> Answer {
-        Answer { status, request_id: None, duration_ms: None, memory_mb: None, function_error, body: body.into() }
+        Answer {
+            status,
+            request_id: None,
+            duration_ms: None,
+            memory_mb: None,
+            function_error,
+            body: body.into(),
+            log_result: None,
+        }
     }
 
     #[test]

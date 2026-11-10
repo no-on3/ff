@@ -6,7 +6,8 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use serde_json::{Map, Value, json};
 
 use super::Context;
-use crate::api::types::{Function, FunctionView, Invocation, InvocationPage, Scaling, function_named};
+use super::trace::how_it_came;
+use crate::api::types::{Function, FunctionView, InvocationPage, Scaling, function_named};
 use crate::api::{Call, Client};
 use crate::error::{Error, Kind};
 use crate::table::{first_line, table, time};
@@ -106,14 +107,6 @@ fn code(function: &Function) -> String {
     }
 }
 
-/// What brought a call, an asynchronous call's attempt with its number: `async, attempt 2`.
-fn source_text(call: &Invocation) -> String {
-    match (call.source.as_deref(), call.attempt) {
-        (Some("async"), Some(attempt)) => format!("async, attempt {attempt}"),
-        (source, _) => source.unwrap_or_default().to_owned(),
-    }
-}
-
 pub fn history(name: &str, limit: u32, context: &Context) -> Result<(), Error> {
     let client = client(context)?;
     let function = function_named(&client, name)?;
@@ -130,15 +123,19 @@ pub fn history(name: &str, limit: u32, context: &Context) -> Result<(), Error> {
                 vec![
                     time(&call.created_at),
                     call.request_id.clone().unwrap_or_else(|| call.id.clone()),
+                    call.trace_id.clone().unwrap_or_default(),
                     call.status.clone(),
                     call.duration.map(|duration| format!("{duration} ms")).unwrap_or_default(),
-                    source_text(call),
+                    how_it_came(call.source.as_deref().unwrap_or_default(), call.attempt, call.trigger.as_ref()),
                     call.error.as_deref().map(|error| first_line(error, 60)).unwrap_or_default(),
                 ]
             })
             .collect();
         let shown = format!("{} of {} calls, newest first", page.invocations.len(), page.total);
-        format!("{}\n{shown}", table(&["TIME (UTC)", "REQUEST ID", "STATUS", "DURATION", "SOURCE", "ERROR"], &rows))
+        let headers = ["TIME (UTC)", "REQUEST ID", "TRACE", "STATUS", "DURATION", "SOURCE", "ERROR"];
+        let traced = page.invocations.iter().any(|call| call.trace_id.is_some());
+        let hint = if traced { "\nff trace <trace> shows a call's trail across the functions it reached" } else { "" };
+        format!("{}\n{shown}{hint}", table(&headers, &rows))
     })
 }
 
@@ -166,6 +163,12 @@ pub fn scale(name: &str, min: Option<u32>, max: Option<u32>, context: &Context) 
 pub fn confirmed(command: &str, question: &str, yes: bool) -> Result<bool, Error> {
     if yes {
         return Ok(true);
+    }
+    if crate::stdin::held() {
+        return Err(Error::usage(format!(
+            "{command} asks first, \"{question}\", and under ff mcp, whose stdin is its protocol, no one can answer: \
+             the developer runs it in a terminal"
+        )));
     }
     if !io::stdin().is_terminal() {
         return Err(Error::usage(format!("{command} asks first, and there is no terminal to ask in: say --yes")));
@@ -198,5 +201,18 @@ mod tests {
     fn instances_say_whether_any_keep_running() {
         assert_eq!(instances(0, 3, true), "0 to 3, to zero when idle");
         assert_eq!(instances(2, 5, false), "2 to 5, 2 kept running");
+    }
+
+    #[test]
+    fn a_question_isn_t_asked_while_ff_mcp_holds_stdin_and_yes_still_goes_on() {
+        let _held = crate::stdin::hold();
+        let refused = confirmed("ff deploy", "Delete Orders, which the template no longer has?", false).unwrap_err();
+        assert_eq!(
+            refused.message,
+            "ff deploy asks first, \"Delete Orders, which the template no longer has?\", and under ff mcp, whose stdin \
+             is its protocol, no one can answer: the developer runs it in a terminal"
+        );
+        assert_eq!(refused.exit_code(), 2);
+        assert!(confirmed("ff deploy", "Delete Orders?", true).unwrap());
     }
 }

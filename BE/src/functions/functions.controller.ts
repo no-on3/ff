@@ -24,6 +24,7 @@ import { sendEvents } from './event-stream';
 import { AsyncInvocationsService } from './async-invocations.service';
 import { EventInvokeConfigService } from './event-invoke-config.service';
 import { FunctionView, FunctionsService, LambdaFields, StartedChange } from './functions.service';
+import { TRACE_HEADER, rootHeader, traceOf } from './trace';
 
 const INVOCATION_TYPES = Object.values(InvocationType) as string[];
 
@@ -218,9 +219,11 @@ export class FunctionsController {
       "Event keeps it in the function's queue and answers 202 with its request ID at once, then runs it, retried twice on the function's " +
       'failure (a minute, then two minutes later), with a backoff when throttled, for six hours at most, each attempt in the history under ' +
       'that request ID; DryRun only checks, and answers 204. qualifier names what runs, for each type: $LATEST, a version, or an alias; ' +
-      '404 for one the function hasn\'t.',
+      '404 for one the function hasn\'t. The call is part of the trace X-Amzn-Trace-Id names, as X-Ray writes one, else of a new one: ' +
+      'every answer gives it back in that header, and GET /traces/:id finds its calls.',
   })
   @ApiHeader({ name: 'X-Amz-Invocation-Type', required: false, enum: InvocationType })
+  @ApiHeader({ name: 'X-Amzn-Trace-Id', required: false, description: "The trace the call is part of, as AWS X-Ray writes one: Root=1-<time>-<random>" })
   @ApiResponse({ status: 201, description: 'Function invoked successfully', type: FunctionInvocation })
   @ApiResponse({ status: 202, description: "Event: the call is kept, and runs without waiting; its attempts are in the function's history", type: AsyncInvocationView })
   @ApiResponse({ status: 204, description: 'DryRun: the call could be made; nothing ran' })
@@ -234,13 +237,17 @@ export class FunctionsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() invokeFunctionDto: InvokeFunctionDto,
     @Headers('x-amz-invocation-type') invocationType: string | undefined,
+    @Headers(TRACE_HEADER) traceHeader: string | undefined,
     @Principal() principal: Principal,
     @Res({ passthrough: true }) response: Response,
   ): Promise<FunctionInvocation | AsyncInvocationView | void> {
     const type = invocationTypeOf(invocationType, invokeFunctionDto.invocationType);
     const { qualifier } = invokeFunctionDto;
+    const traceId = traceOf(traceHeader);
+    // Set before the call, so that a refusal or a failure gives the trace back too.
+    response.setHeader(TRACE_HEADER, rootHeader(traceId));
     if (type === InvocationType.EVENT) {
-      const queued = await this.asyncInvocations.queue(principal.accountId, id, invokeFunctionDto.input, qualifier);
+      const queued = await this.asyncInvocations.queue(principal.accountId, id, invokeFunctionDto.input, qualifier, traceId);
       response.status(202);
       return queued;
     }
@@ -249,7 +256,7 @@ export class FunctionsController {
       response.status(204);
       return;
     }
-    return this.functionsService.invoke(principal.accountId, id, invokeFunctionDto.input, qualifier);
+    return this.functionsService.invoke(principal.accountId, id, invokeFunctionDto.input, qualifier, traceId);
   }
 
   @Get(':id/invocations')

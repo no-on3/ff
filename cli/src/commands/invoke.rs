@@ -17,43 +17,38 @@ use crate::error::{Error, Kind};
 /// The event: inline JSON, `@file`, or `-` for stdin; none sends `{}`, as the API does.
 pub fn input_of(data: Option<&str>) -> Result<Option<Value>, Error> {
     let Some(data) = data else { return Ok(None) };
-    let (text, from) = match data {
-        "-" => {
-            let mut text = String::new();
-            std::io::stdin()
-                .read_to_string(&mut text)
-                .map_err(|error| Error::usage(format!("Couldn't read the event from stdin: {error}")))?;
-            (text, "stdin".to_owned())
-        }
-        _ => match data.strip_prefix('@') {
-            Some(path) => {
-                let text = std::fs::read_to_string(path)
-                    .map_err(|error| Error::usage(format!("Couldn't read {path}: {error}")))?;
-                (text, path.to_owned())
-            }
-            None => (data.to_owned(), "--data".to_owned()),
-        },
-    };
-    serde_json::from_str(&text)
+    let (bytes, from) = given(data, "event")?;
+    serde_json::from_slice(&bytes)
         .map(Some)
         .map_err(|error| Error::usage(format!("The event in {from} isn't JSON: {error}")))
 }
 
 /// A request's body, as given: inline text, `@file`, or `-` for stdin, not necessarily JSON.
 pub fn raw_data(data: &str) -> Result<Vec<u8>, Error> {
-    match data {
-        "-" => {
-            let mut bytes = Vec::new();
-            std::io::stdin()
-                .read_to_end(&mut bytes)
-                .map_err(|error| Error::usage(format!("Couldn't read the body from stdin: {error}")))?;
-            Ok(bytes)
-        }
-        _ => match data.strip_prefix('@') {
-            Some(path) => std::fs::read(path).map_err(|error| Error::usage(format!("Couldn't read {path}: {error}"))),
-            None => Ok(data.as_bytes().to_vec()),
-        },
+    given(data, "body").map(|(bytes, _)| bytes)
+}
+
+/// What an argument gives, itself, from `@file`, or from `-`, stdin; and where it came from, for a message. Under
+/// `ff mcp`, stdin is the protocol's, so `-` is refused there.
+fn given(data: &str, what: &str) -> Result<(Vec<u8>, String), Error> {
+    if data != "-" {
+        return match data.strip_prefix('@') {
+            Some(path) => std::fs::read(path)
+                .map(|bytes| (bytes, path.to_owned()))
+                .map_err(|error| Error::usage(format!("Couldn't read {path}: {error}"))),
+            None => Ok((data.as_bytes().to_vec(), "--data".to_owned())),
+        };
     }
+    if crate::stdin::held() {
+        return Err(Error::usage(format!(
+            "The {what} can't come from stdin under ff mcp, whose stdin is its protocol: give the {what} itself, or @<file>"
+        )));
+    }
+    let mut bytes = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut bytes)
+        .map_err(|error| Error::usage(format!("Couldn't read the {what} from stdin: {error}")))?;
+    Ok((bytes, "stdin".to_owned()))
 }
 
 /// How long the answer may take: a wait for a free instance and the call, each up to the
@@ -178,6 +173,14 @@ mod tests {
         let refused = input_of(Some("{name: x}")).unwrap_err();
         assert_eq!(refused.exit_code(), 2);
         assert!(refused.message.starts_with("The event in --data isn't JSON: "), "{}", refused.message);
+
+        let _held = crate::stdin::hold();
+        let refused = input_of(Some("-")).unwrap_err();
+        assert_eq!(
+            refused.message,
+            "The event can't come from stdin under ff mcp, whose stdin is its protocol: give the event itself, or @<file>"
+        );
+        assert_eq!(raw_data("{}").unwrap(), b"{}", "what isn't stdin is still read");
     }
 
     #[test]

@@ -1,0 +1,6 @@
+# The suites' stack (hack/lib/e2e-stack.sh) on top of docker-compose.yml: its PostgreSQL is thrown away after the run,
+# so no commit waits for the disk, which on a spinning one holds every call's records up. A developer's database,
+# docker-compose.yml's alone, keeps every commit.
+services:
+  postgres:
+    command: [postgres, -c, fsync=off, -c, synchronous_commit=off, -c, full_page_writes=off]

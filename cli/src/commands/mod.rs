@@ -1,6 +1,7 @@
 //! One file per command.
 
 mod account;
+mod api_keys;
 mod async_config;
 mod bucket_notifications;
 mod buckets;
@@ -20,6 +21,9 @@ mod init;
 mod invoke;
 mod keys;
 mod local;
+mod local_konnect;
+mod local_template;
+mod login;
 mod logs;
 mod package;
 mod queues;
@@ -27,10 +31,14 @@ mod schedule;
 mod secrets;
 mod sites;
 mod stack;
+mod template;
+mod trace;
 mod url;
 mod version;
 mod versions;
 mod whoami;
+
+use std::io;
 
 use crate::cli::{
     AliasCommand, BucketsCommand, CachesCommand, Command, ConnectionArgs, DbCommand, DomainsCommand, EmailCommand,
@@ -60,7 +68,13 @@ impl Context<'_> {
 
 pub fn run(command: Command, context: &Context) -> Result<(), Error> {
     match command {
-        Command::Init { name, runtime, template } => init::run(&name, runtime, template, context),
+        Command::Init { list: true, .. } => init::list(context),
+        Command::Init { name, runtime, template, .. } => {
+            let (Some(name), Some(runtime)) = (name, runtime) else {
+                unreachable!("clap requires both without --list")
+            };
+            init::run(&name, runtime, template, context)
+        }
         Command::Deploy(args) => deploy::run(args, context),
         Command::Package(args) => package::run(args, context),
         Command::Doctor(args) => doctor::run(args, context),
@@ -71,6 +85,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Get { name } => functions::get(&name, context),
         Command::Logs(args) => logs::run(args, context),
         Command::History { name, limit } => functions::history(&name, limit, context),
+        Command::Trace { id } => trace::run(&id, context),
         Command::Scale { name, min, max } => functions::scale(&name, min, max, context),
         Command::Delete { name, yes } => functions::delete(&name, yes, context),
         Command::DeleteStack { name, yes } => stack::delete_stack(name.as_deref(), yes, context),
@@ -88,8 +103,39 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Local(LocalCommand::Invoke { function, data, raw }) => {
             local::invoke(&function, data.as_deref(), raw, context)
         }
-        Command::Local(LocalCommand::Start { function, port, watch, url }) => {
-            local::start(&function, port, watch, url, context)
+        Command::Local(LocalCommand::Start {
+            function,
+            port,
+            watch,
+            url,
+            secrets,
+            idle,
+            stack_name,
+            parameter_overrides,
+            sites,
+            with,
+        }) => {
+            let options = local_template::Options {
+                port,
+                watch,
+                secrets: secrets.as_deref(),
+                idle: idle.as_deref(),
+                stack_name: stack_name.as_deref(),
+                parameter_overrides: &parameter_overrides,
+                sites: &sites,
+                with: &with,
+            };
+            local::start(&function, url, &options, context)
+        }
+        Command::Local(LocalCommand::Run { schedule, path }) => {
+            local_template::run(&schedule, path.as_deref(), context)
+        }
+        Command::Local(LocalCommand::Mail { path }) => local_template::mail(path.as_deref(), context),
+        Command::Local(LocalCommand::Reset { path, data, yes }) => {
+            local_template::reset(path.as_deref(), data, yes, context)
+        }
+        Command::Local(LocalCommand::Konnect { port, key, wallet, delay }) => {
+            local_konnect::start(port, key, wallet, delay.as_deref(), context)
         }
         Command::Env(EnvCommand::List { name, show }) => env::list(&name, show, context),
         Command::Env(EnvCommand::Set { name, variables }) => env::set(&name, &variables, context),
@@ -298,9 +344,12 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
             event_sources::update(&uuid, &settings, context)
         }
         Command::EventSources(EventSourcesCommand::Remove { uuid, yes }) => event_sources::remove(&uuid, yes, context),
+        Command::Login { replace, no_browser } => login::login(replace, no_browser, context),
+        Command::Logout { no_revoke } => login::logout(no_revoke, context),
         Command::Whoami => whoami::run(context),
         Command::Accounts => account::accounts(context),
         Command::Account => account::account(context),
+        Command::ApiKeys(command) => api_keys::run(command, context),
         Command::Usage { aws: true, months, without, .. } => account::aws_estimate(months, &without, context),
         // Clap takes a flag's default as given, so it can't say these two need --aws.
         Command::Usage { months, without, .. } if months.is_some() || !without.is_empty() => {
@@ -311,6 +360,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Metrics { name, period, since } => account::metrics(name.as_deref(), period, &since, context),
         Command::Config(command) => config::run(command, context),
         Command::Version => version::run(context.out),
-        Command::Completion { shell } => completion::run(shell),
+        Command::Completion { shell } => completion::run(shell, context.out),
+        Command::Mcp { allow_write } => crate::mcp::serve(io::stdin().lock(), io::stdout(), allow_write, context),
     }
 }

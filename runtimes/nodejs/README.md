@@ -45,7 +45,7 @@ Loading the code must fit in the start-up limit, 10 s (or the function's timeout
 |---|---|
 | `GET /healthz` | `200 {"status":"ok"}` while the main thread is alive (liveness probe) |
 | `GET /readyz` | `200 {"status":"ready"}` once user code is loaded. Otherwise `503 {"status":"starting"}`, or `503 {"status":"failed","error":{errorType,errorMessage}}` (readiness probe) |
-| `POST /invoke` | Body = JSON payload (empty means `{}`). Optional headers: `X-FF-Request-Id`; `X-FF-Log-Type: Tail`, for the call's log (see [Logs](#logs)); `X-FF-Client-Context`, Lambda's `ClientContext`, the base64 of a JSON object, which the handler gets as `context.clientContext`. Returns `200` with the handler's return value as JSON (`null` for `undefined`). |
+| `POST /invoke` | Body = JSON payload (empty means `{}`). Optional headers: `X-FF-Request-Id`; `X-FF-Trace-Id`, the call's trace, which the handler gets in `_X_AMZN_TRACE_ID` (see [Environment](#environment)); `X-FF-Log-Type: Tail`, for the call's log (see [Logs](#logs)); `X-FF-Client-Context`, Lambda's `ClientContext`, the base64 of a JSON object, which the handler gets as `context.clientContext`. Returns `200` with the handler's return value as JSON (`null` for `undefined`). |
 
 **Response headers:** `X-FF-Request-Id`, `X-FF-Duration-Ms`, `X-FF-Max-Memory-Used-Mb`, `X-FF-Log-Result` when the call's log was asked for, and `X-FF-Function-Error: Unhandled` on function errors.
 
@@ -118,6 +118,8 @@ A function made from a package, a zip as AWS Lambda takes one (`ff deploy <folde
 | `PORT` | `8080` | HTTP port |
 | `FF_EVENT_FORMAT` | `lambda` | `lambda`: the payload is the event; `wrapped`: FF's original wrapper around it. Anything else stops the runtime at start, with `unknown FF_EVENT_FORMAT` |
 
+**A call's trace.** Each call runs with `_X_AMZN_TRACE_ID` set, as Lambda sets it: `Root=<the trace>;Parent=<16 hex digits of the call's own>;Sampled=0`, the trace the backend sends in `X-FF-Trace-Id`, else a new one, in AWS X-Ray's format (`1-<the time, 8 hex digits>-<24 random ones>`), for a call that came without, as `ff local`'s do. The worker sets it in `process.env` before the handler runs; a thread runs one call at a time. AWS's SDKs pass the whole of it on in `X-Amzn-Trace-Id` when told to, so that the call the function makes joins its trace. Each JSON line of a call names its `traceId` after its `requestId`.
+
 ### Buckets, with AWS's SDK
 
 A function's pods get a key to its account's buckets in their environment, as AWS Lambda gives a function its role's credentials: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` and `AWS_DEFAULT_REGION`, and `AWS_ENDPOINT_URL_S3`, FF's S3 endpoint inside the cluster, an IP address. AWS's SDK for JavaScript v3 reads all of them, so `new S3Client({})` reaches the account's buckets as it is, path-style, as the SDK addresses an IP address by itself ([ADR 0009](../../docs/adr/0009-buckets.md)). The key is the function's own, made at its first deploy (an older function gets its own the next time an update rolls it out) and revoked when it is deleted; it reaches every bucket of the account, read-write, and its requests are checked as any key's. FF sets these names: a function's own variables can't.
@@ -157,7 +159,7 @@ REPORT RequestId: <id>	Duration: 12.34 ms	Billed Duration: 13 ms	Memory Size: 12
 An error thrown by the handler is also logged, before `END`, as one JSON line, the same as the Python runtime writes:
 
 ```json
-{"time":"…","level":"error","msg":"function error","requestId":"…","errorType":"TypeError","errorMessage":"bad input","stackTrace":["at handler (/var/task/function.ts:2:9)"]}
+{"time":"…","level":"error","msg":"function error","requestId":"…","traceId":"1-…","errorType":"TypeError","errorMessage":"bad input","stackTrace":["at handler (/var/task/function.ts:2:9)"]}
 ```
 
 The stack trace points at the lines of the TypeScript source (source maps are on), and leaves out the runtime's own frames and Node's internals. Platform events (start, initialization, timeouts, restarts) are one-line JSON too. A call's own events, a timeout (`task timed out; restarting worker`) or a crash, come before its `END`, as in the Python runtime, so the logs give them its request ID. **Environment variables are never logged.**
@@ -185,6 +187,8 @@ Protocol v3 (2026-10-21, step-1 plan U-03, [ADR 0007](../../docs/adr/0007-functi
 The backend tells each function's pods which format they get. Every function made before v3 is `wrapped`, and gets from v3 the same event as from v2.
 
 Two optional headers came later in v3 (2026-11-03), for Lambda's `Invoke`: `X-FF-Log-Type: Tail`, answered with `X-FF-Log-Result`, and `X-FF-Client-Context`. A runtime built before them ignores both, and gives back no log.
+
+`X-FF-Trace-Id` came later still in v3 (2026-11-10): the call's trace, which the function gets in `_X_AMZN_TRACE_ID`. A runtime built before it ignores it, and sets no `_X_AMZN_TRACE_ID`.
 
 ## What changed in v2
 

@@ -291,7 +291,8 @@ export class StandInCluster {
       },
       deployVersion: async (fn: FunctionWorkload) => this.hold(fn),
       labelLatest: async () => undefined,
-      waitUntilReady: async (fn: FunctionWorkload) => void this.asked.push(`wait ${StandInCluster.nameOf(fn)}`),
+      waitUntilReady: async (fn: FunctionWorkload, _timeoutMs: number, options?: { replacedMayAnswer?: boolean }) =>
+        void this.asked.push(`wait ${StandInCluster.nameOf(fn)}${options?.replacedMayAnswer ? ', the pods replaced answering on' : ''}`),
       workloads: async (fn?: FunctionRef) => [...this.deployments.values()].filter((held) => !fn || held.functionId === fn.id),
       scale: async (fn: FunctionWorkload, instances: number) => {
         const held = this.of(fn);

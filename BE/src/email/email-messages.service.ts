@@ -83,9 +83,10 @@ export class EmailMessagesService {
     if (!fromText) throw new SendRefusal('invalid', 'FromEmailAddress is required, unless the raw message has a From header');
     const from = senderOf(fromText);
     if (!from) throw new SendRefusal('invalid', `${fromText} is not one address`);
+    // The request's lists, else the raw message's fields: each read alike, and the one that holds no address named.
     const named = request.to.length + request.cc.length + request.bcc.length > 0;
     const given = named ? [...request.to, ...request.cc, ...request.bcc] : [...(parties?.to ?? []), ...(parties?.cc ?? []), ...(parties?.bcc ?? [])];
-    const listed = given.flatMap((text) => (named ? addressesOf(text) : [text]));
+    const listed = given.flatMap(addressesOf);
     if (listed.includes(null)) throw new SendRefusal('invalid', `Illegal address: ${given.find((text) => addressesOf(text).includes(null))}`);
     const recipients = [...new Set(listed as string[])];
     if (recipients.length === 0) throw new SendRefusal('invalid', "A message needs a recipient: Destination's ToAddresses, CcAddresses or BccAddresses");

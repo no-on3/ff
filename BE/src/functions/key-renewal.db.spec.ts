@@ -128,7 +128,12 @@ run("the renewal of functions' keys (L2)", () => {
       { id: old.id, replaced: true, revoked: false, life: expect.any(Number) },
       { id: expect.not.stringMatching(old.id), replaced: false, revoked: false, life: 12 * 3600 },
     ]);
-    expect(cluster.asked).toEqual([`renew ${fn.id}`, `wait ${fn.id}`, `renew ${fn.id}-v1`, `wait ${fn.id}-v1`]);
+    expect(cluster.asked).toEqual([
+      `renew ${fn.id}`,
+      `wait ${fn.id}, the pods replaced answering on`,
+      `renew ${fn.id}-v1`,
+      `wait ${fn.id}-v1, the pods replaced answering on`,
+    ]);
     expect([heldKey(fn), heldKey({ id: fn.id, version: 1 })]).toEqual([current.id, current.id]);
     // Its environment and code as they were: only the key changed.
     expect(cluster.of(fn)?.revision?.split('.')[0]).toMatch(/^[0-9a-f]{16}$/);
@@ -193,7 +198,7 @@ run("the renewal of functions' keys (L2)", () => {
       { id: old.id, replaced: true, revoked: false, life: null },
       { id: expect.not.stringMatching(old.id), replaced: false, revoked: false, life: 12 * 3600 },
     ]);
-    expect(cluster.asked).toEqual([`renew ${fn.id}`, `wait ${fn.id}`]);
+    expect(cluster.asked).toEqual([`renew ${fn.id}`, `wait ${fn.id}, the pods replaced answering on`]);
     expect([heldKey(fn), cluster.of(fn)?.desired]).toEqual([current.id, 0]);
 
     expect(await renewal.renewDue()).toEqual({ rolled: 0, revoked: 1, waiting: 0, failures: 0 });

@@ -1,4 +1,4 @@
-import type { Function, FunctionUpdate, InvocationSource, InvocationStatus, PlanLimits, ScalingLimits } from '../services/api';
+import type { Function, FunctionUpdate, InvocationSource, InvocationStatus, InvocationTrigger, PlanLimits, ScalingLimits } from '../services/api';
 
 /**
  * AWS Lambda's rule for a function's name, which the API applies, as an HTML
@@ -106,11 +106,18 @@ export function stackText(func: Pick<Function, 'stack'>): string | undefined {
  */
 export const TRUNCATED_NOTE = 'Truncated: the history keeps the first 64 KiB.';
 
-/** What brought a call, as the history says it. */
-export const sourceText = (source: InvocationSource, attempt = 1): string =>
-  source === 'async'
-    ? `asynchronously, attempt ${attempt}`
-    : (({ api: 'through the API', url: 'through its URL', schedule: 'by a schedule', sqs: 'with a batch of a queue it reads' })[source] ?? source);
+/** What brought a call, as the history and a trace say it: its source, and the schedule, queue, bucket or call it came from. */
+export function sourceText(source: InvocationSource, attempt = 1, trigger?: InvocationTrigger | null): string {
+  if (source === 'schedule' && trigger?.schedule) return `by the schedule ${trigger.schedule}`;
+  if (source === 'sqs' && trigger?.queue) return `with a batch of the queue ${trigger.queue}`;
+  const text =
+    source === 'async'
+      ? `asynchronously, attempt ${attempt}`
+      : (({ api: 'through the API', url: 'through its URL', schedule: 'by a schedule', sqs: 'with a batch of a queue it reads' })[source] ?? source);
+  if (trigger?.bucket) return `${text}, for a notification of the bucket ${trigger.bucket}`;
+  if (trigger?.recordOf) return `${text}, with the record of request ${trigger.recordOf}`;
+  return text;
+}
 
 /** What the console says of an asynchronous call, kept: its request ID, and what happens next. */
 export const keptCallText = (requestId: string): string =>

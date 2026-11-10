@@ -174,6 +174,15 @@ pub struct Build {
     pub container: bool,
 }
 
+/// The Linux platforms a wheel pip installs on this machine may be built for: glibc 2.28, then each older one, as a
+/// library publishes a wheel for the oldest glibc it supports. pip takes a platform it is given as it is written, so
+/// each is named: manylinux_2_28 alone found no wheel of psycopg's, built for glibc 2.17 (manylinux2014, which pip
+/// widens to manylinux2010 and manylinux1 itself).
+fn wheel_platforms() -> String {
+    let named: Vec<String> = (17..=28).rev().map(|glibc| format!("--platform manylinux_2_{glibc}_x86_64")).collect();
+    format!("{} --platform manylinux2014_x86_64", named.join(" "))
+}
+
 /// The commands that install a project's libraries into its copy, as a shell runs them there.
 /// npm installs the build's tools too, runs the build script and, asked to, the project's own
 /// TypeScript compiler, then drops them. On this machine, pip takes only wheels for the
@@ -202,11 +211,11 @@ pub fn build_steps(project: &Project, build: Build) -> Vec<Vec<String>> {
         Libraries::Requirements | Libraries::Pyproject(_) if build.container => vec![words(
             "python3 -m pip install --quiet --disable-pip-version-check --no-compile --target . --upgrade -r requirements.txt",
         )],
-        Libraries::Requirements | Libraries::Pyproject(_) => vec![words(
-            "python3 -m pip install --quiet --disable-pip-version-check --no-compile --target . \
-             --platform manylinux_2_28_x86_64 --implementation cp --python-version 3.13 --only-binary=:all: \
-             --upgrade -r requirements.txt",
-        )],
+        Libraries::Requirements | Libraries::Pyproject(_) => vec![words(&format!(
+            "python3 -m pip install --quiet --disable-pip-version-check --no-compile --target . {} \
+             --implementation cp --python-version 3.13 --only-binary=:all: --upgrade -r requirements.txt",
+            wheel_platforms()
+        ))],
         Libraries::None => Vec::new(),
     }
 }
@@ -327,7 +336,8 @@ mod tests {
         let step = build_steps(&project, Build::default()).remove(0).join(" ");
 
         for flag in [
-            "--platform manylinux_2_28_x86_64",
+            "--platform manylinux_2_28_x86_64 --platform manylinux_2_27_x86_64",
+            "--platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 --implementation cp",
             "--python-version 3.13",
             "--only-binary=:all:",
             "--target .",
@@ -335,6 +345,7 @@ mod tests {
         ] {
             assert!(step.contains(flag), "{step}");
         }
+        assert_eq!(step.matches("--platform ").count(), 13, "{step}");
 
         // A container of the runtime's base is that platform: pip takes what it finds there.
         let step = build_steps(&project, Build { container: true, ..Build::default() }).remove(0).join(" ");

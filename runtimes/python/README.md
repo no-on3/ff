@@ -40,7 +40,7 @@ Kubernetes stops the runtime to replace or remove its pod: at a deploy's rollout
 |---|---|
 | `GET /healthz` | `200 {"status": "ok"}` while the main process is alive (liveness probe) |
 | `GET /readyz` | `200 {"status": "ready"}` once user code is loaded. Otherwise `503 {"status": "starting"}`, or `503 {"status": "failed", "error": {"errorType": …, "errorMessage": …}}` (readiness probe) |
-| `POST /invoke` | Body = JSON payload (empty means `{}`; `Content-Length` or chunked). Optional headers: `X-FF-Request-Id`; `X-FF-Log-Type: Tail`, for the call's log (see [Logs](#logs)); `X-FF-Client-Context`, Lambda's `ClientContext`, the base64 of a JSON object, which the handler gets as `context.client_context`. Returns `200` with the handler's return value as JSON (`null` for `None`). |
+| `POST /invoke` | Body = JSON payload (empty means `{}`; `Content-Length` or chunked). Optional headers: `X-FF-Request-Id`; `X-FF-Trace-Id`, the call's trace, which the handler gets in `_X_AMZN_TRACE_ID` (see [Environment](#environment)); `X-FF-Log-Type: Tail`, for the call's log (see [Logs](#logs)); `X-FF-Client-Context`, Lambda's `ClientContext`, the base64 of a JSON object, which the handler gets as `context.client_context`. Returns `200` with the handler's return value as JSON (`null` for `None`). |
 
 **Response headers:** `X-FF-Request-Id`, `X-FF-Duration-Ms`, `X-FF-Max-Memory-Used-Mb`, `X-FF-Log-Result` when the call's log was asked for, and `X-FF-Function-Error: Unhandled` on function errors.
 
@@ -135,6 +135,8 @@ On Kubernetes the container's memory limit equals the function's memory, as on L
 
 The function's own environment variables reach user code unchanged.
 
+**A call's trace.** Each call runs with `_X_AMZN_TRACE_ID` set, as Lambda sets it: `Root=<the trace>;Parent=<16 hex digits of the call's own>;Sampled=0`, the trace the backend sends in `X-FF-Trace-Id`, else a new one, in AWS X-Ray's format (`1-<the time, 8 hex digits>-<24 random ones>`), for a call that came without, as `ff local`'s do. The worker sets it in `os.environ` before the handler runs; the worker runs one call at a time. AWS's SDKs pass the whole of it on in `X-Amzn-Trace-Id` when told to, so that the call the function makes joins its trace. Each JSON line of a call names its `traceId` after its `requestId`.
+
 `os.cpu_count()` reports the node's CPUs, not the function's CPU share (8 in a container limited to half a CPU). Libraries that size thread pools from it, such as numpy's OpenBLAS, then start more threads than the function can use. Set `OPENBLAS_NUM_THREADS` or `OMP_NUM_THREADS` in the function's environment.
 
 ## Logs
@@ -150,7 +152,7 @@ REPORT RequestId: <id>	Duration: 12.34 ms	Billed Duration: 13 ms	Memory Size: 12
 `Max Memory Used` is the peak resident memory of the main process plus the worker. Platform events (start, initialization, timeouts, restarts) are one-line JSON, written by `json.dumps`, so with a space after each `:` and `,`. An exception from the handler is also logged as one JSON line, the same as the Node.js runtime writes:
 
 ```json
-{"time": "…", "level": "error", "msg": "function error", "requestId": "…", "errorType": "ValueError", "errorMessage": "…", "stackTrace": ["  File \"/var/task/function.py\", line 3, in handler\n    raise ValueError(\"…\")"]}
+{"time": "…", "level": "error", "msg": "function error", "requestId": "…", "traceId": "1-…", "errorType": "ValueError", "errorMessage": "…", "stackTrace": ["  File \"/var/task/function.py\", line 3, in handler\n    raise ValueError(\"…\")"]}
 ```
 
 A worker replaced after `Runtime.OutOfMemory` is logged as `function worker crashed; restarting`, with the request ID, as on the Node.js runtime. **Environment variables are never logged.**
@@ -169,6 +171,8 @@ A worker replaced after `Runtime.OutOfMemory` is logged as `function worker cras
 Protocol v3 (2026-10-21, step-1 plan U-03, [ADR 0007](../../docs/adr/0007-function-events.md)) changes the event, as for Node.js, and nothing else: the handler gets the payload itself, any JSON value, unless `FF_EVENT_FORMAT=wrapped`, which every function made before v3 has, and which builds v2's wrapper. The startup line says `"protocol": 3`, with `"eventFormat"`, and the server header `ff-runtime-python/3`.
 
 Two optional headers came later in v3 (2026-11-03), for Lambda's `Invoke`: `X-FF-Log-Type: Tail`, answered with `X-FF-Log-Result`, and `X-FF-Client-Context`. A runtime built before them ignores both, and gives back no log.
+
+`X-FF-Trace-Id` came later still in v3 (2026-11-10): the call's trace, which the function gets in `_X_AMZN_TRACE_ID`. A runtime built before it ignores it, and sets no `_X_AMZN_TRACE_ID`.
 
 ## What changed in v2
 

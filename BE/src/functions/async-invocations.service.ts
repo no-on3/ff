@@ -9,6 +9,7 @@ import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY, MAX_ASYNC_INPUT_BYTES, quali
 import { FunctionStatus } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 import { MAX_INPUT_BYTES } from './limits';
+import { newTraceId, traceAttributes } from './trace';
 
 /** A megabyte, as the plans count what messages hold. */
 const MB = 1024 * 1024;
@@ -43,12 +44,13 @@ export class AsyncInvocationsService {
   /**
    * Keeps the call for the worker, and answers its request ID: the request's
    * own, which the answer's x-ff-request-id names too, and which every attempt
-   * keeps. The account's messages may hold the plan's queueStorageMb together,
+   * keeps; and its trace, the caller's `traceId` or a new one, which every
+   * attempt and its destination's record keep too. The account's messages may hold the plan's queueStorageMb together,
    * this event included; past it, 429 until some are handled. A refused call
    * keeps nothing: 404 for a version or an alias the function hasn't, 400 for
    * $LATEST while the function isn't ACTIVE, as a call that waits.
    */
-  async queue(accountId: string, id: string, input?: unknown, qualifier?: string): Promise<{ requestId: string }> {
+  async queue(accountId: string, id: string, input?: unknown, qualifier?: string, traceId = newTraceId()): Promise<{ requestId: string; traceId: string }> {
     const body = JSON.stringify(input === undefined ? {} : input);
     const size = Buffer.byteLength(body);
     refuseOver(MAX_ASYNC_INPUT_BYTES, size);
@@ -72,9 +74,9 @@ export class AsyncInvocationsService {
     }
     const requestId = currentRequestId() ?? randomUUID();
     const expiresAt = new Date(Date.now() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
-    // What the call named, which each attempt runs.
-    await this.queues.sendEvent(function_, requestId, body, expiresAt, { attributes: qualifierAttributes(qualifier) });
-    return { requestId };
+    // What the call named, which each attempt runs, and its trace.
+    await this.queues.sendEvent(function_, requestId, body, expiresAt, { attributes: { ...qualifierAttributes(qualifier), ...traceAttributes(traceId) } });
+    return { requestId, traceId };
   }
 
   /**

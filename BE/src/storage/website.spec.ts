@@ -1,5 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { S3Error } from './s3-error';
 import { WebsiteConfiguration, siteUrl, websiteFromJson, websiteFromXml, websiteJson, websiteXml } from './website';
+
+/** GetBucketWebsite's answers, website-examples.json's, which ff local's buckets answer too. */
+const documents = (JSON.parse(readFileSync(join(__dirname, 'website-examples.json'), 'utf8')) as { documents: Array<{ website: WebsiteConfiguration; xml: string }> })
+  .documents;
 
 /** The S3 error a call throws: its status and code, or 'none'. */
 function refusal(call: () => unknown): string {
@@ -47,10 +53,8 @@ describe("a bucket's website configuration, as S3's", () => {
   });
 
   it("answers GetBucketWebsite in S3's XML, its names escaped, without an error document when it has none", () => {
-    expect(websiteXml({ indexDocument: 'index.html', errorDocument: '<404>&.html', singlePageApp: true })).toBe(
-      document('<IndexDocument><Suffix>index.html</Suffix></IndexDocument><ErrorDocument><Key>&#60;404&#62;&#38;.html</Key></ErrorDocument>'),
-    );
-    expect(websiteXml({ indexDocument: 'index.html', errorDocument: null, singlePageApp: false })).toBe(document('<IndexDocument><Suffix>index.html</Suffix></IndexDocument>'));
+    expect(documents.map(({ website }) => websiteXml(website))).toEqual(documents.map(({ xml }) => xml));
+    expect(documents).toHaveLength(2);
   });
 
   it("reads and answers FF's API in S3's JSON names, the single-page setting off unless asked, and checks it as S3 does", () => {

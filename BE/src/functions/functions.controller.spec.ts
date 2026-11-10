@@ -24,6 +24,8 @@ import { of } from 'rxjs';
 
 const ACCOUNT = '000000000001';
 const ID = '3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f';
+/** A trace the call started, as AWS X-Ray writes one. */
+const NEW_TRACE = expect.stringMatching(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/);
 
 /**
  * The controller over HTTP, its services the given stand-ins, set up as main.ts and app.module.ts set the API up: the
@@ -110,13 +112,16 @@ describe('FunctionsController route rules (L1, P-12, P-13)', () => {
 
 describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", () => {
   const functions = { invoke: jest.fn(async (..._call: unknown[]) => ({ id: 'inv-1', status: 'COMPLETED', output: 1 })) };
-  const asyncInvocations = { queue: jest.fn(async (..._call: unknown[]) => ({ requestId: 'req-1' })), dryRun: jest.fn(async (..._call: unknown[]) => undefined) };
+  const asyncInvocations = {
+    queue: jest.fn(async (...call: unknown[]) => ({ requestId: 'req-1', traceId: call[4] })),
+    dryRun: jest.fn(async (..._call: unknown[]) => undefined),
+  };
   let app: INestApplication;
   let baseUrl: string;
-  const invoke = (body: object, type?: string) =>
+  const invoke = (body: object, type?: string, headers: Record<string, string> = {}) =>
     fetch(`${baseUrl}/functions/${ID}/invoke`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(type === undefined ? {} : { 'X-Amz-Invocation-Type': type }) },
+      headers: { 'content-type': 'application/json', ...(type === undefined ? {} : { 'X-Amz-Invocation-Type': type }), ...headers },
       body: JSON.stringify(body),
     });
 
@@ -133,8 +138,8 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
 
     expect([plain.status, named.status]).toEqual([201, 201]);
     expect(functions.invoke.mock.calls).toEqual([
-      [ACCOUNT, ID, { a: 1 }, undefined],
-      [ACCOUNT, ID, 2, undefined],
+      [ACCOUNT, ID, { a: 1 }, undefined, NEW_TRACE],
+      [ACCOUNT, ID, 2, undefined, NEW_TRACE],
     ]);
     expect(asyncInvocations.queue).not.toHaveBeenCalled();
   });
@@ -158,8 +163,8 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
 
     expect([event.status, dryRun.status, latest.status]).toEqual([202, 204, 202]);
     expect(asyncInvocations.queue.mock.calls).toEqual([
-      [ACCOUNT, ID, undefined, 'prod'],
-      [ACCOUNT, ID, undefined, '$LATEST'],
+      [ACCOUNT, ID, undefined, 'prod', NEW_TRACE],
+      [ACCOUNT, ID, undefined, '$LATEST', NEW_TRACE],
     ]);
     expect(asyncInvocations.dryRun.mock.calls).toEqual([[ACCOUNT, ID, undefined, '2']]);
   });
@@ -168,12 +173,25 @@ describe("POST /functions/:id/invoke's invocation types, as AWS Lambda's (L1)", 
     const byHeader = await invoke({ input: { a: 1 } }, 'Event');
     const byBody = await invoke({ input: 'x', invocationType: 'Event' });
 
-    expect([byHeader.status, await byHeader.json(), byBody.status]).toEqual([202, { requestId: 'req-1' }, 202]);
+    expect([byHeader.status, await byHeader.json(), byBody.status]).toEqual([202, { requestId: 'req-1', traceId: NEW_TRACE }, 202]);
     expect(asyncInvocations.queue.mock.calls).toEqual([
-      [ACCOUNT, ID, { a: 1 }, undefined],
-      [ACCOUNT, ID, 'x', undefined],
+      [ACCOUNT, ID, { a: 1 }, undefined, NEW_TRACE],
+      [ACCOUNT, ID, 'x', undefined, NEW_TRACE],
     ]);
     expect(functions.invoke).not.toHaveBeenCalled();
+  });
+
+  it("makes each call part of its caller's trace, X-Amzn-Trace-Id's Root, or of a new one, and gives it back in that header", async () => {
+    const traced = await invoke({}, undefined, { 'X-Amzn-Trace-Id': 'Parent=53995c3f42cd8ad8;Root=1-5759E988-BD862E3FE1BE46A994272793;Sampled=1' });
+    const started = await invoke({});
+    const queued = await invoke({}, 'Event', { 'X-Amzn-Trace-Id': 'Root=1-5759e988-bd862e3fe1be46a994272793' });
+    const unreadable = await invoke({}, undefined, { 'X-Amzn-Trace-Id': 'Root=1-not-a-trace' });
+
+    const given = [functions.invoke.mock.calls[0][4], functions.invoke.mock.calls[1][4], asyncInvocations.queue.mock.calls[0][4], functions.invoke.mock.calls[2][4]];
+    expect(given).toEqual(['1-5759e988-bd862e3fe1be46a994272793', NEW_TRACE, '1-5759e988-bd862e3fe1be46a994272793', NEW_TRACE]);
+    expect([given[1], given[3]]).not.toContain('1-5759e988-bd862e3fe1be46a994272793');
+    expect([traced, started, queued, unreadable].map((res) => res.headers.get('x-amzn-trace-id'))).toEqual(given.map((traceId) => `Root=${String(traceId)}`));
+    expect(await queued.json()).toEqual({ requestId: 'req-1', traceId: '1-5759e988-bd862e3fe1be46a994272793' });
   });
 
   it('only checks a DryRun: 204, with no body', async () => {

@@ -143,6 +143,8 @@ export const INVOCATION_FIELDS = [
   'source',
   'version',
   'alias',
+  'traceId',
+  'trigger',
   'duration',
   'memoryUsed',
   'error',
@@ -152,6 +154,22 @@ export const INVOCATION_FIELDS = [
   'createdAt',
   'updatedAt',
 ] as const satisfies ReadonlyArray<keyof FunctionInvocation>;
+
+/** What brought an invocation, beyond its source: the API's fields, which contract.test.ts checks. */
+export const INVOCATION_TRIGGER_FIELDS = ['schedule', 'queue', 'messageId', 'bucket', 'recordOf'] as const satisfies ReadonlyArray<keyof InvocationTrigger>;
+
+/** What brought an invocation, beyond its source: each field for the source it belongs to. */
+export interface InvocationTrigger {
+  /** A schedule's run: the schedule's name. */
+  schedule?: string;
+  /** A queue's batch: the queue's name, and the message whose trace the call joined, else the batch's first. */
+  queue?: string;
+  messageId?: string;
+  /** A bucket's notification: the bucket. */
+  bucket?: string;
+  /** An asynchronous call's record, as its destination gets it: that call's request ID. */
+  recordOf?: string;
+}
 
 /** An invocation, as the API returns it: from POST /functions/:id/invoke, and in the history. */
 export interface FunctionInvocation {
@@ -172,6 +190,10 @@ export interface FunctionInvocation {
   version: number | null;
   /** The alias the call named, which chose its version: null for none. */
   alias: string | null;
+  /** The trace the call is part of, as AWS X-Ray writes one (1-<time>-<random>): null for a call made before calls had one. */
+  traceId: string | null;
+  /** What brought it, beyond its source: null when its source says all. */
+  trigger: InvocationTrigger | null;
   /** Milliseconds, as the runtime measured it. */
   duration: number;
   /** MB: the runtime's peak memory. */
@@ -191,10 +213,11 @@ type UnlistedInvocationField = Exclude<keyof FunctionInvocation, (typeof INVOCAT
 const everyInvocationFieldListed: [UnlistedInvocationField] extends [never] ? true : never = true;
 void everyInvocationFieldListed;
 
-/** The answer to an asynchronous call, 202: its request ID, which each of its attempts keeps. contract.test.ts checks it. */
-export const ASYNC_INVOCATION_FIELDS = ['requestId'] as const satisfies ReadonlyArray<keyof AsyncInvocation>;
+/** The answer to an asynchronous call, 202: its request ID and its trace, which each of its attempts keeps. contract.test.ts checks it. */
+export const ASYNC_INVOCATION_FIELDS = ['requestId', 'traceId'] as const satisfies ReadonlyArray<keyof AsyncInvocation>;
 export interface AsyncInvocation {
   requestId: string;
+  traceId: string;
 }
 
 /** One page of GET /functions/:id/invocations, newest first. */
@@ -202,6 +225,54 @@ export interface InvocationPage {
   invocations: FunctionInvocation[];
   total: number;
 }
+
+/** A call of a trace, as GET /traces/:id gives it: contract.test.ts checks these names against the API's. */
+export const TRACE_CALL_FIELDS = [
+  'id',
+  'requestId',
+  'attempt',
+  'functionId',
+  'functionName',
+  'source',
+  'trigger',
+  'version',
+  'alias',
+  'status',
+  'duration',
+  'createdAt',
+] as const satisfies ReadonlyArray<keyof TraceCall>;
+export interface TraceCall {
+  id: string;
+  /** The request's ID, which its log lines name: an asynchronous call's attempts share their first's. */
+  requestId: string;
+  attempt: number;
+  functionId: string;
+  functionName: string;
+  source: InvocationSource;
+  trigger: InvocationTrigger | null;
+  /** The version that ran it: null for $LATEST. */
+  version: number | null;
+  /** The alias the call named: null for none. */
+  alias: string | null;
+  status: InvocationStatus;
+  /** Milliseconds, as the runtime measured it. */
+  duration: number;
+  createdAt: string;
+}
+
+/** One request's trail, GET /traces/:id: the account's calls in a trace, oldest first. contract.test.ts checks the names. */
+export const TRACE_FIELDS = ['traceId', 'calls', 'truncated'] as const satisfies ReadonlyArray<keyof Trace>;
+export interface Trace {
+  traceId: string;
+  calls: TraceCall[];
+  /** Whether the trace has more calls than these, its first. */
+  truncated: boolean;
+}
+
+/** GET /traces/:id: a trace's ID, or a header naming it (`Root=1-…`). */
+export const tracesApi = {
+  get: (id: string) => api.get<Trace>(`/traces/${encodeURIComponent(id)}`),
+};
 
 /**
  * A function's secret, as the API says it: its name, and when its value was set. The value never comes back.

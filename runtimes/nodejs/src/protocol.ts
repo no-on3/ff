@@ -42,6 +42,8 @@ export interface InvokeMessage {
   type: 'invoke';
   id: number;
   requestId: string;
+  /** The call's trace, in AWS X-Ray's format, which the worker gives the handler in _X_AMZN_TRACE_ID (trace.ts). */
+  traceId: string;
   /** The payload itself, or the wrapper around it (EventFormat). */
   event: unknown;
   /** Epoch milliseconds at which the invocation times out. */

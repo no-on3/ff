@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  {{name}}: orders paid through Konnect, at a function's URL, and Konnect's notifications received right: each kept
+  as it came, the payment asked of Konnect itself, each order paid once. ff deploy puts it on FF, sam deploy on AWS,
+  and ff local start runs it here. The orders are kept in PostgreSQL, made apart (ff db create on FF, --with postgres
+  here, RDS on AWS). The database's address, DATABASE_URL, and Konnect's key, KONNECT_API_KEY, are the function's
+  secrets on FF, which stay out of the template.
+
+Parameters:
+  KonnectApiUrl:
+    Type: String
+    Default: https://api.sandbox.konnect.network/api/v2
+    Description: >-
+      Konnect's API: its sandbox's by default, where nothing is really paid; https://api.konnect.network/api/v2 for
+      real payments
+  KonnectWalletId:
+    Type: String
+    Default: ""
+    Description: The ID of the Konnect wallet the payments go to, from Konnect's dashboard
+  ReturnUrl:
+    Type: String
+    Default: ""
+    Description: >-
+      The shop's page the payer's browser goes to after paying, given ?order=<id>, which reads the order from
+      GET /orders/<id>; none by default, a short text then
+
+Globals:
+  Function:
+    Runtime: {{runtime}}
+    CodeUri: src/
+    MemorySize: 256
+    Timeout: 15
+
+Resources:
+  # POST /orders, GET /orders/<id> and GET /webhooks/konnect, at the function's URL, which Konnect calls.
+  Payments:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-payments"
+      Handler: app.handler
+      Environment:
+        Variables:
+          KONNECT_API_URL: !Ref KonnectApiUrl
+          KONNECT_WALLET_ID: !Ref KonnectWalletId
+          RETURN_URL: !Ref ReturnUrl
+      FunctionUrlConfig:
+        AuthType: NONE
+
+Outputs:
+  PaymentsUrl:
+    Description: The payments' address, its function's URL; Konnect's notifications come to its /webhooks/konnect
+    Value: !GetAtt PaymentsUrl.FunctionUrl
+  Payments:
+    Description: The payments' function
+    Value: !GetAtt Payments.Arn

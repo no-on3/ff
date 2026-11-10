@@ -1,0 +1,11 @@
+.aws-sam/
+__pycache__/
+# The libraries pip installs beside the code for ff local start, each a folder in src/ but typing_extensions, a file,
+# which psycopg needs on a Python older than 3.13, and pip installs when it runs on one: ff deploy and sam build
+# install their own. A package of yours in src/ needs a line of its own here, !src/<package>/.
+src/*/
+src/typing_extensions.py
+# ff's own: ff local's logs and key, ff package's zips.
+.ff/
+# The secrets ff local start gives the functions, KEY=value lines: never committed.
+.env.local

@@ -16,78 +16,346 @@ use crate::cli::{Runtime, Template};
 use crate::config::is_function_name;
 use crate::error::{Error, Kind};
 
-const FUNCTION_TS: &str = include_str!("../../templates/function.ts");
-const FUNCTION_PY: &str = include_str!("../../templates/function.py");
-const EVENT: &str = include_str!("../../templates/event.json");
-const README: &str = include_str!("../../templates/README.md");
+/// A template's files, each by its path in the template's folder under `cli/templates/` and its text: those under
+/// `nodejs/` and `python/` are that runtime's alone, written without that folder; the others are both runtimes'. A
+/// `gitignore` is written as `.gitignore`, which in this repository would apply to the repository itself.
+type Files = &'static [(&'static str, &'static str)];
 
-/// A Terraform project's files, by their path in it, but its code's.
-const TERRAFORM: [(&str, &str); 18] = [
-    ("providers.tf", include_str!("../../templates/terraform/providers.tf")),
-    ("main.tf", include_str!("../../templates/terraform/main.tf")),
-    ("README.md", include_str!("../../templates/terraform/README.md")),
-    (".gitignore", include_str!("../../templates/terraform/gitignore")),
-    ("modules/function/main.tf", include_str!("../../templates/terraform/modules/function/main.tf")),
-    ("modules/function/variables.tf", include_str!("../../templates/terraform/modules/function/variables.tf")),
-    ("modules/function/outputs.tf", include_str!("../../templates/terraform/modules/function/outputs.tf")),
-    ("modules/queue-worker/main.tf", include_str!("../../templates/terraform/modules/queue-worker/main.tf")),
-    ("modules/queue-worker/variables.tf", include_str!("../../templates/terraform/modules/queue-worker/variables.tf")),
-    ("modules/queue-worker/outputs.tf", include_str!("../../templates/terraform/modules/queue-worker/outputs.tf")),
-    ("modules/bucket-function/main.tf", include_str!("../../templates/terraform/modules/bucket-function/main.tf")),
-    (
+/// The files of the template whose folder is named, in the order they are written.
+macro_rules! template_files {
+    ($folder:literal, [$($path:literal),* $(,)?]) => {
+        &[$(($path, include_str!(concat!("../../templates/", $folder, "/", $path)))),*]
+    };
+}
+
+/// A function's folder: its handler in the runtime's language, an event to call it with, and a README.
+const FUNCTION: Files =
+    template_files!("function", ["nodejs/function.ts", "python/function.py", "events/event.json", "README.md"]);
+
+/// A Terraform project: FF's provider block, the app's four modules, its site, and its three functions' handlers.
+const TERRAFORM: Files = template_files!(
+    "terraform",
+    [
+        "providers.tf",
+        "main.tf",
+        "README.md",
+        "gitignore",
+        "modules/function/main.tf",
+        "modules/function/variables.tf",
+        "modules/function/outputs.tf",
+        "modules/queue-worker/main.tf",
+        "modules/queue-worker/variables.tf",
+        "modules/queue-worker/outputs.tf",
+        "modules/bucket-function/main.tf",
         "modules/bucket-function/variables.tf",
-        include_str!("../../templates/terraform/modules/bucket-function/variables.tf"),
-    ),
-    (
         "modules/bucket-function/outputs.tf",
-        include_str!("../../templates/terraform/modules/bucket-function/outputs.tf"),
+        "modules/site/main.tf",
+        "modules/site/variables.tf",
+        "modules/site/outputs.tf",
+        "site/index.html",
+        "site/404.html",
+        "nodejs/src/api.mjs",
+        "nodejs/src/worker.mjs",
+        "nodejs/src/uploads.mjs",
+        "python/src/api.py",
+        "python/src/worker.py",
+        "python/src/uploads.py",
+    ]
+);
+
+/// A SAM application, `sam init`'s hello world as FF takes it: its template, samconfig.toml naming its stack, a
+/// function URL's request as its event, and a README; its code in each runtime's language, in the folder and with the
+/// handler `sam init`'s has, and the handler's test.
+const SAM: Files = template_files!(
+    "sam",
+    [
+        "template.yaml",
+        "samconfig.toml",
+        "README.md",
+        "gitignore",
+        "events/event.json",
+        "nodejs/hello-world/app.mjs",
+        "nodejs/hello-world/package.json",
+        "nodejs/tests/unit/test-handler.mjs",
+        "python/hello_world/__init__.py",
+        "python/hello_world/app.py",
+        "python/hello_world/requirements.txt",
+        "python/tests/__init__.py",
+        "python/tests/unit/__init__.py",
+        "python/tests/unit/test_handler.py",
+    ]
+);
+
+/// An application of SAM's that `ff init` writes for both runtimes: `template.yaml`, its code in `src/`, its tests
+/// outside it in `tests/`, its events in `events/`, `samconfig.toml` naming its stack, a `.gitignore`, and a README
+/// for here, FF and AWS. Each function is named after the stack, `<name>-<part>`.
+struct App {
+    files: Files,
+    /// What it is, as `ff init --list` says it.
+    about: &'static str,
+    /// What it is, in a sentence about it.
+    what: &'static str,
+    /// Its functions' parts of their names, after the stack's.
+    parts: &'static [&'static str],
+    /// What its README's lines do, said after `cd <name>`.
+    then: &'static str,
+    /// What a bucket named after its stack adds to the name, before the account's ID, if it names one so.
+    bucket: Option<&'static str>,
+}
+
+/// An account's ID, on FF as on AWS: 12 digits.
+const ACCOUNT_DIGITS: usize = 12;
+
+impl App {
+    /// The longest name it takes: its functions' names hold Lambda's 64 characters, and its bucket's, if named after
+    /// it, S3's 63.
+    fn name_most(&self) -> usize {
+        let functions = 64 - 1 - self.parts.iter().map(|part| part.len()).max().unwrap_or_default();
+        match self.bucket {
+            Some(after) => functions.min(63 - after.len() - ACCOUNT_DIGITS),
+            None => functions,
+        }
+    }
+}
+
+/// A REST API at a function's URL: its routes by method and path, its items in PostgreSQL through `DATABASE_URL`,
+/// CORS for one origin.
+const REST_API: App = App {
+    files: template_files!(
+        "rest-api",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/list-items.json",
+            "events/create-item.json",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
     ),
-    ("modules/site/main.tf", include_str!("../../templates/terraform/modules/site/main.tf")),
-    ("modules/site/variables.tf", include_str!("../../templates/terraform/modules/site/variables.tf")),
-    ("modules/site/outputs.tf", include_str!("../../templates/terraform/modules/site/outputs.tf")),
-    ("site/index.html", include_str!("../../templates/terraform/site/index.html")),
-    ("site/404.html", include_str!("../../templates/terraform/site/404.html")),
-];
+    about: "a REST API at a function's URL: its routes by method and path, its items in PostgreSQL, CORS for one origin",
+    what: "a REST API",
+    parts: &["api"],
+    then: "its libraries installed, ff local start template.yaml --with postgres here; ff deploy template.yaml and ff \
+           db create on FF; sam deploy on AWS",
+    bucket: None,
+};
 
-/// A Terraform project's code: its three functions' handlers, in each runtime.
-const TERRAFORM_NODEJS: [(&str, &str); 3] = [
-    ("src/api.mjs", include_str!("../../templates/terraform/src/api.mjs")),
-    ("src/worker.mjs", include_str!("../../templates/terraform/src/worker.mjs")),
-    ("src/uploads.mjs", include_str!("../../templates/terraform/src/uploads.mjs")),
-];
-const TERRAFORM_PYTHON: [(&str, &str); 3] = [
-    ("src/api.py", include_str!("../../templates/terraform/src/api.py")),
-    ("src/worker.py", include_str!("../../templates/terraform/src/worker.py")),
-    ("src/uploads.py", include_str!("../../templates/terraform/src/uploads.py")),
-];
+/// A job on a schedule: each morning, the report of the day before, from the files that arrived in its bucket to a
+/// report beside them; a run that fails tried twice more, then its event in a queue of failed runs.
+const CRON_JOB: App = App {
+    files: template_files!(
+        "cron-job",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/scheduled.json",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
+    ),
+    about: "a job on a schedule: a report of the day before written to a bucket, its failed runs kept in a queue",
+    what: "a cron job",
+    parts: &["report"],
+    then: "its libraries installed, ff local start template.yaml and ff local run EveryMorning here; ff deploy \
+           template.yaml on FF; sam deploy on AWS",
+    bucket: None,
+};
 
-/// A SAM application's files, by their path in it, but its code's: `sam init`'s hello world as FF takes it, its
-/// template, samconfig.toml naming its stack, a function URL's request as its event, and a README.
-const SAM: [(&str, &str); 5] = [
-    ("template.yaml", include_str!("../../templates/sam/template.yaml")),
-    ("samconfig.toml", include_str!("../../templates/sam/samconfig.toml")),
-    ("README.md", include_str!("../../templates/sam/README.md")),
-    (".gitignore", include_str!("../../templates/sam/gitignore")),
-    ("events/event.json", include_str!("../../templates/sam/event.json")),
-];
-/// Its code in each runtime's language, in the folder and with the handler `sam init`'s has, and the handler's test.
-const SAM_NODEJS: [(&str, &str); 3] = [
-    ("hello-world/app.mjs", include_str!("../../templates/sam/nodejs/hello-world/app.mjs")),
-    ("hello-world/package.json", include_str!("../../templates/sam/nodejs/hello-world/package.json")),
-    ("tests/unit/test-handler.mjs", include_str!("../../templates/sam/nodejs/tests/unit/test-handler.mjs")),
-];
-const SAM_PYTHON: [(&str, &str); 6] = [
-    ("hello_world/__init__.py", ""),
-    ("hello_world/app.py", include_str!("../../templates/sam/python/hello_world/app.py")),
-    ("hello_world/requirements.txt", include_str!("../../templates/sam/python/hello_world/requirements.txt")),
-    ("tests/__init__.py", ""),
-    ("tests/unit/__init__.py", ""),
-    ("tests/unit/test_handler.py", include_str!("../../templates/sam/python/tests/unit/test_handler.py")),
-];
+/// A queue and its worker: a URL that takes jobs into the queue, a worker reading it in batches that names the jobs
+/// it failed, and a dead-letter queue for those that failed three times.
+const QUEUE_WORKER: App = App {
+    files: template_files!(
+        "queue-worker",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/post-job.json",
+            "events/batch.json",
+            "nodejs/gitignore",
+            "nodejs/src/api.mjs",
+            "nodejs/src/worker.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/api.test.mjs",
+            "nodejs/tests/worker.test.mjs",
+            "python/gitignore",
+            "python/src/api.py",
+            "python/src/worker.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_api.py",
+            "python/tests/test_worker.py",
+        ]
+    ),
+    about: "a queue and its worker: a URL that takes jobs, a worker reading them in batches, a dead-letter queue",
+    what: "a queue worker",
+    parts: &["api", "worker"],
+    then: "its libraries installed, ff local start template.yaml here; ff deploy template.yaml on FF; sam deploy on AWS",
+    bucket: None,
+};
+
+/// A page and its API: a bucket's site whose page calls a function's URL, a guestbook, each entry an object of a
+/// second bucket.
+const SITE_WITH_API: App = App {
+    files: template_files!(
+        "site-with-api",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/list-entries.json",
+            "events/post-entry.json",
+            "site/index.html",
+            "site/app.js",
+            "site/style.css",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
+    ),
+    about: "a page and its API: a bucket's site that calls a function's URL, a guestbook kept in a second bucket",
+    what: "a page and its API",
+    parts: &["api"],
+    then: "its libraries installed, site/config.json written and ff local start template.yaml --site Website=site \
+           here; ff deploy template.yaml and ff sites deploy on FF; sam deploy and aws s3 sync on AWS",
+    bucket: None,
+};
+
+/// Thumbnails: an image put in a bucket under `uploads/` makes its thumbnail under `thumbnails/`, through an image
+/// library whose code is native, built for Linux.
+const IMAGE_RESIZE: App = App {
+    files: template_files!(
+        "image-resize",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/upload.json",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
+    ),
+    about: "thumbnails: an image put in a bucket makes its thumbnail beside it, sharp or Pillow built for Linux",
+    what: "an image resizer",
+    parts: &["resize"],
+    then: "its libraries installed, ff local start template.yaml here; ff deploy template.yaml --container on FF; sam \
+           deploy on AWS",
+    bucket: Some("-images-"),
+};
+
+/// Orders paid through a payment provider, Konnect, and its notifications received right: each kept as it came, the
+/// payment asked of the provider itself, each order paid once.
+const WEBHOOK: App = App {
+    files: template_files!(
+        "webhook",
+        [
+            "template.yaml",
+            "samconfig.toml",
+            "README.md",
+            "events/create-order.json",
+            "events/notification.json",
+            "nodejs/gitignore",
+            "nodejs/src/app.mjs",
+            "nodejs/src/package.json",
+            "nodejs/src/package-lock.json",
+            "nodejs/tests/app.test.mjs",
+            "python/gitignore",
+            "python/src/app.py",
+            "python/src/requirements.txt",
+            "python/tests/__init__.py",
+            "python/tests/test_app.py",
+        ]
+    ),
+    about: "orders paid through Konnect: each notification kept, the payment asked of Konnect, each order paid once",
+    what: "a payment provider's webhook",
+    parts: &["payments"],
+    then: "its libraries installed, ff local start template.yaml --with postgres here; ff deploy template.yaml, ff db \
+           create and ff secrets set on FF; sam deploy on AWS",
+    bucket: None,
+};
+
+/// The application a template is, if it is one.
+fn app(template: Template) -> Option<&'static App> {
+    match template {
+        Template::RestApi => Some(&REST_API),
+        Template::CronJob => Some(&CRON_JOB),
+        Template::QueueWorker => Some(&QUEUE_WORKER),
+        Template::SiteWithApi => Some(&SITE_WITH_API),
+        Template::ImageResize => Some(&IMAGE_RESIZE),
+        Template::Webhook => Some(&WEBHOOK),
+        Template::Function | Template::Terraform | Template::Sam => None,
+    }
+}
+
+/// What a template makes, as `ff init --list` says it.
+fn about(template: Template) -> &'static str {
+    match template {
+        Template::Function => "a function's folder: its handler, an event to call it with, and a README (the default)",
+        Template::Terraform => {
+            "an app's Terraform project: FF's provider block and four modules, which apply on FF and on AWS"
+        }
+        Template::Sam => "sam init's hello world as FF takes it: one function at its URL, as a SAM application",
+        Template::RestApi
+        | Template::CronJob
+        | Template::QueueWorker
+        | Template::SiteWithApi
+        | Template::ImageResize
+        | Template::Webhook => app(template).map(|app| app.about).unwrap_or_default(),
+    }
+}
+
+/// A template's files for a runtime, each by the path it is written at, with its text.
+fn files_for(files: Files, runtime: Runtime) -> impl Iterator<Item = (&'static str, &'static str)> {
+    files.iter().filter_map(move |&(path, text)| {
+        let (own, other) = match runtime {
+            Runtime::Nodejs => ("nodejs/", "python/"),
+            Runtime::Python => ("python/", "nodejs/"),
+        };
+        let written = match path.strip_prefix(own) {
+            Some(rest) => rest,
+            None if path.starts_with(other) => return None,
+            None => path,
+        };
+        Some((if written == "gitignore" { ".gitignore" } else { written }, text))
+    })
+}
 
 /// A SAM application's function in a runtime's language, as `sam init`'s hello world has it.
 struct SamCode {
-    files: &'static [(&'static str, &'static str)],
     /// The folder of its code, its CodeUri.
     code_uri: &'static str,
     handler: &'static str,
@@ -97,15 +365,10 @@ struct SamCode {
 
 const fn sam_code(runtime: Runtime) -> SamCode {
     match runtime {
-        Runtime::Nodejs => {
-            SamCode { files: &SAM_NODEJS, code_uri: "hello-world/", handler: "app.lambdaHandler", test: "node --test" }
+        Runtime::Nodejs => SamCode { code_uri: "hello-world/", handler: "app.lambdaHandler", test: "node --test" },
+        Runtime::Python => {
+            SamCode { code_uri: "hello_world/", handler: "app.lambda_handler", test: "python3 -m unittest" }
         }
-        Runtime::Python => SamCode {
-            files: &SAM_PYTHON,
-            code_uri: "hello_world/",
-            handler: "app.lambda_handler",
-            test: "python3 -m unittest",
-        },
     }
 }
 
@@ -122,12 +385,72 @@ pub fn sam_files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
             // The README's command, its comment in the column of the others'.
             .replace("{{test}}", &format!("{:<41}", code.test))
     };
-    SAM.iter().chain(code.files).map(|(path, template)| (*path, fill(template))).collect()
+    files_for(SAM, runtime).map(|(path, template)| (path, fill(template))).collect()
+}
+
+/// The files of a new application, by their path in it: its name, its stack's, in them, and its code in the
+/// runtime's language, with the commands that install its libraries and run its tests.
+fn app_files(app: &App, name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
+    let (language, extension, install, test) = match runtime {
+        Runtime::Nodejs => (
+            "JavaScript, for Node.js",
+            "mjs",
+            "# its libraries, Linux's builds, for ff local start: ff deploy and sam build install their own\n\
+             (cd src && npm ci --os=linux --cpu=x64 --libc=glibc)",
+            "node --test",
+        ),
+        Runtime::Python => (
+            "Python",
+            "py",
+            "# its libraries, Linux's builds, beside the code for ff local start: ff deploy and sam build install their \
+             own\npython3 -m pip install -r src/requirements.txt -t src/ --only-binary=:all: \\\n  \
+             --implementation cp --python-version 3.13 --platform manylinux_2_28_x86_64 --platform manylinux2014_x86_64",
+            "python3 -m unittest",
+        ),
+    };
+    let fill = |template: &str| {
+        template
+            .replace("{{name}}", name)
+            .replace("{{name_lower}}", &name.to_lowercase())
+            .replace("{{runtime}}", runtime.lambda())
+            .replace("{{language}}", language)
+            .replace("{{extension}}", extension)
+            .replace("{{install}}", install)
+            // The README's command, its comment in the column of the others'.
+            .replace("{{test}}", &format!("{test:<49}"))
+    };
+    files_for(app.files, runtime).map(|(path, template)| (path, fill(template))).collect()
+}
+
+/// Writes an application's folder, which must not exist yet, or be empty.
+fn create_app(folder: &Path, name: &str, runtime: Runtime, app: &App) -> Result<Vec<PathBuf>, Error> {
+    let most = app.name_most();
+    let lowercase = app.bucket.is_none() || !name.bytes().any(|byte| byte.is_ascii_uppercase());
+    if !super::template::is_stack_name(name) || name.len() > most || !lowercase {
+        let functions: Vec<String> = app.parts.iter().map(|part| format!("{name}-{part}")).collect();
+        return Err(Error::usage(match app.bucket {
+            None => format!(
+                "\"{name}\" can't name {}, which names its stack and its functions, {}: letters, digits and hyphens, a \
+                 letter first, {most} at most, as Lambda's function names are 64 at most",
+                app.what,
+                functions.join(" and ")
+            ),
+            Some(after) => format!(
+                "\"{name}\" can't name {}, which names its stack, its functions, {}, and its bucket, \
+                 {name}{after}<account>: lowercase letters, digits and hyphens, a letter first, {most} at most, as a \
+                 bucket's name is lowercase and 63 characters at most",
+                app.what,
+                functions.join(" and ")
+            ),
+        }));
+    }
+    new_folder(folder, "ff init makes a new folder")?;
+    write_folder(folder, app_files(app, name, runtime))
 }
 
 /// Writes a SAM application's folder, which must not exist yet, or be empty.
 fn create_sam(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf>, Error> {
-    if !super::stack::is_stack_name(name) {
+    if !super::template::is_stack_name(name) {
         return Err(Error::usage(format!(
             "\"{name}\" can't name a SAM application, which names its stack: letters, digits and hyphens, a letter \
              first, 128 at most, as CloudFormation's"
@@ -139,14 +462,14 @@ fn create_sam(folder: &Path, name: &str, runtime: Runtime) -> Result<Vec<PathBuf
 
 /// The files of a new function's folder, by their path in it, with the function's name in them.
 pub fn files(name: &str, runtime: Runtime) -> Vec<(&'static str, String)> {
-    let (file, handler, language, extension) = match runtime {
-        Runtime::Nodejs => ("function.ts", FUNCTION_TS, "TypeScript, for Node.js", "ts"),
-        Runtime::Python => ("function.py", FUNCTION_PY, "Python", "py"),
+    let (language, extension) = match runtime {
+        Runtime::Nodejs => ("TypeScript, for Node.js", "ts"),
+        Runtime::Python => ("Python", "py"),
     };
     let fill = |template: &str| {
         template.replace("{{name}}", name).replace("{{language}}", language).replace("{{extension}}", extension)
     };
-    vec![(file, fill(handler)), ("events/event.json", EVENT.to_owned()), ("README.md", fill(README))]
+    files_for(FUNCTION, runtime).map(|(path, template)| (path, fill(template))).collect()
 }
 
 /// The longest name of a Terraform project: its buckets and queues are named after it, and the longest of them,
@@ -210,9 +533,9 @@ pub fn terraform_files(
 ) -> Result<Vec<(&'static str, String)>, Error> {
     let endpoints = endpoints_block(aws)?;
     let key = terraform_key_command(name);
-    let (code, language) = match runtime {
-        Runtime::Nodejs => (&TERRAFORM_NODEJS, "JavaScript, for Node.js"),
-        Runtime::Python => (&TERRAFORM_PYTHON, "Python"),
+    let language = match runtime {
+        Runtime::Nodejs => "JavaScript, for Node.js",
+        Runtime::Python => "Python",
     };
     let fill = |template: &str| {
         template
@@ -224,7 +547,7 @@ pub fn terraform_files(
             .replace("{{language}}", language)
             .replace("{{key}}", &key)
     };
-    Ok(TERRAFORM.iter().chain(code.iter()).map(|(path, template)| (*path, fill(template))).collect())
+    Ok(files_for(TERRAFORM, runtime).map(|(path, template)| (path, fill(template))).collect())
 }
 
 #[derive(Serialize)]
@@ -296,12 +619,47 @@ fn create_terraform(folder: &Path, name: &str, runtime: Runtime, context: &Conte
     write_folder(folder, terraform_files(name, runtime, &chosen.id, aws)?)
 }
 
+#[derive(Serialize)]
+struct Listed {
+    name: &'static str,
+    about: &'static str,
+    runtimes: [&'static str; 2],
+}
+
+/// `ff init --list`: each template, with what it makes; each for both runtimes.
+pub fn list(context: &Context) -> Result<(), Error> {
+    use clap::ValueEnum;
+    let templates: Vec<Listed> = Template::value_variants()
+        .iter()
+        .map(|&template| Listed {
+            name: template.as_str(),
+            about: about(template),
+            runtimes: [Runtime::Nodejs.as_str(), Runtime::Python.as_str()],
+        })
+        .collect();
+    let widest = templates.iter().map(|template| template.name.len()).max().unwrap_or_default();
+    context.out.result(&serde_json::json!({ "templates": &templates }), || {
+        let lines: Vec<String> =
+            templates.iter().map(|template| format!("  {:<widest$}  {}", template.name, template.about)).collect();
+        format!(
+            "ff init <name> --runtime nodejs|python --template <template>, each for both runtimes:\n{}",
+            lines.join("\n")
+        )
+    })
+}
+
 pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) -> Result<(), Error> {
     let folder = PathBuf::from(name);
     let written = match template {
         Template::Function => create(&folder, name, runtime)?,
         Template::Terraform => create_terraform(&folder, name, runtime, context)?,
         Template::Sam => create_sam(&folder, name, runtime)?,
+        Template::RestApi => create_app(&folder, name, runtime, &REST_API)?,
+        Template::CronJob => create_app(&folder, name, runtime, &CRON_JOB)?,
+        Template::QueueWorker => create_app(&folder, name, runtime, &QUEUE_WORKER)?,
+        Template::SiteWithApi => create_app(&folder, name, runtime, &SITE_WITH_API)?,
+        Template::ImageResize => create_app(&folder, name, runtime, &IMAGE_RESIZE)?,
+        Template::Webhook => create_app(&folder, name, runtime, &WEBHOOK)?,
     };
     let created = Created {
         name: name.to_owned(),
@@ -312,6 +670,21 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
         key_command: (template == Template::Terraform).then(|| terraform_key_command(name)),
     };
     context.out.result(&created, || match template {
+        Template::RestApi
+        | Template::CronJob
+        | Template::QueueWorker
+        | Template::SiteWithApi
+        | Template::ImageResize
+        | Template::Webhook => {
+            let app = app(template).expect("an application's template");
+            format!(
+                "created {}/, {}: template.yaml, its code in src/ with its tests in tests/, its events in events/, \
+                 samconfig.toml naming the stack {name}\nthen: cd {name}, and README.md's lines: {}",
+                folder.display(),
+                app.what,
+                app.then
+            )
+        }
         Template::Function => format!(
             "created {}\nthen: cd {name} && ff local invoke . --data @events/event.json, and ff deploy function.{} to put it on FF",
             created.files.join(", "),
@@ -337,6 +710,53 @@ pub fn run(name: &str, runtime: Runtime, template: Template, context: &Context) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The files under a folder, by their path in it, with `/` between its parts.
+    fn files_under(folder: &Path, prefix: &str, found: &mut Vec<String>) {
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let entry = entry.unwrap();
+            let path = format!("{prefix}{}", entry.file_name().to_string_lossy());
+            if entry.file_type().unwrap().is_dir() {
+                files_under(&entry.path(), &format!("{path}/"), found);
+            } else {
+                found.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn each_template_s_folder_is_written_whole_as_its_list_names_every_file_once() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let templates = [
+            ("cron-job", CRON_JOB.files),
+            ("function", FUNCTION),
+            ("image-resize", IMAGE_RESIZE.files),
+            ("queue-worker", QUEUE_WORKER.files),
+            ("rest-api", REST_API.files),
+            ("sam", SAM),
+            ("site-with-api", SITE_WITH_API.files),
+            ("terraform", TERRAFORM),
+            ("webhook", WEBHOOK.files),
+        ];
+        let mut folders: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "export")
+            .collect();
+        folders.sort();
+        assert_eq!(folders, templates.map(|(folder, _)| folder), "a template's folder that ff init doesn't know");
+        for (folder, files) in templates {
+            let mut found = Vec::new();
+            files_under(&root.join(folder), "", &mut found);
+            found.sort();
+            let mut listed: Vec<String> = files.iter().map(|(path, _)| path.to_string()).collect();
+            listed.sort();
+            assert_eq!(listed, found, "{folder}");
+        }
+        let written: Vec<&str> = files_for(SAM, Runtime::Python).map(|(path, _)| path).collect();
+        assert_eq!(written[..5], ["template.yaml", "samconfig.toml", "README.md", ".gitignore", "events/event.json"]);
+        assert!(written.contains(&"hello_world/app.py") && !written.iter().any(|path| path.ends_with(".mjs")));
+    }
 
     #[test]
     fn a_python_function_has_its_handler_an_event_and_a_readme_with_its_name() {
@@ -555,5 +975,324 @@ mod tests {
             assert_eq!(crate::package::handler_problem(&files, &function.handler, runtime), None);
         }
         assert_eq!(create_sam(&PathBuf::from("2shop"), "2shop", Runtime::Nodejs).unwrap_err().exit_code(), 2);
+    }
+
+    /// An application as `ff init` writes it, in a folder of its own, every placeholder filled, and its template as
+    /// `ff deploy` plans it there, in FF's subset: its stack the one samconfig.toml names, its parameters
+    /// samconfig.toml's and those given, each function's handler a module of `src/`. The folder, the files' paths in
+    /// order, and the plan.
+    fn written_and_planned(
+        app: &App,
+        name: &str,
+        runtime: Runtime,
+        given: &[(&str, &str)],
+    ) -> (tempfile::TempDir, Vec<String>, crate::sam::plan::Plan) {
+        use crate::sam::{parameters, plan, subset};
+        let dir = tempfile::TempDir::new().unwrap();
+        let folder = dir.path().join(name);
+        let written = create_app(&folder, name, runtime, app).unwrap();
+        let mut paths: Vec<String> =
+            written.iter().map(|path| path.strip_prefix(&folder).unwrap().display().to_string()).collect();
+        paths.sort();
+        let files = app_files(app, name, runtime);
+        assert!(!files.iter().any(|(_, text)| text.contains("{{")), "every placeholder is filled");
+
+        let read = |file: &str| std::fs::read_to_string(folder.join(file)).unwrap();
+        let template = crate::sam::read(&read("template.yaml")).unwrap();
+        let config = parameters::samconfig(&read("samconfig.toml")).unwrap();
+        assert_eq!(config.stack_name.as_deref(), Some(name));
+        let mut overrides = config.parameter_overrides;
+        overrides.extend(given.iter().map(|(key, value)| (key.to_string(), value.to_string())));
+        let values = parameters::values(&template, &overrides);
+        assert_eq!((values.refused.clone(), values.missing.clone()), (vec![], vec![]));
+        assert_eq!(subset::check(&template, &values.values), []);
+        let place = plan::Place {
+            stack: name,
+            region: "tn-tunis-1",
+            account: "000000000001",
+            sqs_endpoint: "https://sqs.ffunc.cloud",
+            sqs_function_endpoint: "http://10.43.0.251:3003",
+            s3_endpoint: "https://s3.ffunc.cloud",
+        };
+        let planned =
+            plan::plan(&template, &values.values, &place, &[], &folder, &mut || "ABCDEFGHIJKL".into()).unwrap();
+        let code: Vec<String> = paths.iter().filter_map(|path| path.strip_prefix("src/")).map(String::from).collect();
+        for function in &planned.functions {
+            assert_eq!(function.code, folder.join("src/"));
+            assert_eq!(
+                crate::package::handler_problem(&code, &function.handler, runtime),
+                None,
+                "{}",
+                function.handler
+            );
+        }
+        (dir, paths, planned)
+    }
+
+    #[test]
+    fn a_rest_api_is_one_function_at_its_url_with_cors_for_one_origin_in_ffs_subset_which_ff_deploy_plans() {
+        for (runtime, code) in [
+            (Runtime::Nodejs, ["app.mjs", "package.json", "package-lock.json"].as_slice()),
+            (Runtime::Python, &["app.py", "requirements.txt"]),
+        ] {
+            let (dir, paths, planned) = written_and_planned(&REST_API, "Shop-2", runtime, &[]);
+            let mut expected: Vec<String> = [
+                "template.yaml",
+                "samconfig.toml",
+                "README.md",
+                ".gitignore",
+                "events/list-items.json",
+                "events/create-item.json",
+            ]
+            .map(String::from)
+            .into();
+            expected.extend(code.iter().map(|file| format!("src/{file}")));
+            expected.extend(match runtime {
+                Runtime::Nodejs => vec!["tests/app.test.mjs".to_owned()],
+                Runtime::Python => ["tests/__init__.py", "tests/test_app.py"].map(String::from).into(),
+            });
+            expected.sort();
+            assert_eq!(paths, expected);
+            let readme = std::fs::read_to_string(dir.path().join("Shop-2/README.md")).unwrap();
+            assert!(readme.contains("ff db create shop-2 --secret-for Shop-2-api"));
+            assert!(readme.contains("http://shop-2-api.fn.localhost:3700/items"));
+
+            let [function] = &planned.functions[..] else { panic!("one function") };
+            assert_eq!((function.name.as_str(), function.runtime, function.timeout), ("Shop-2-api", runtime, 10));
+            let url = function.url.as_ref().unwrap();
+            assert_eq!(url.auth_type, "NONE");
+            assert_eq!(url.cors.as_ref().unwrap()["allowOrigins"], serde_json::json!(["http://localhost:5173"]));
+        }
+        assert_eq!(REST_API.name_most(), 60);
+        for name in ["2shop", "shop_api", &"a".repeat(REST_API.name_most() + 1)] {
+            assert_eq!(create_app(&PathBuf::from(name), name, Runtime::Nodejs, &REST_API).unwrap_err().exit_code(), 2);
+        }
+    }
+
+    #[test]
+    fn a_cron_job_is_a_function_on_a_schedule_with_its_bucket_and_a_queue_for_its_failed_runs_which_ff_deploy_plans() {
+        for (runtime, extension) in [(Runtime::Nodejs, "mjs"), (Runtime::Python, "py")] {
+            let (_dir, paths, planned) = written_and_planned(&CRON_JOB, "Reports", runtime, &[]);
+            for path in [format!("src/app.{extension}"), "events/scheduled.json".into(), ".gitignore".into()] {
+                assert!(paths.contains(&path), "{path}: {paths:?}");
+            }
+
+            let [function] = &planned.functions[..] else { panic!("one function") };
+            assert_eq!(
+                (function.name.as_str(), function.handler.as_str(), function.memory, function.timeout),
+                ("Reports-report", "app.handler", 256, 60)
+            );
+            let [schedule] = &function.schedules[..] else { panic!("one schedule") };
+            assert_eq!(
+                (schedule.name.as_str(), schedule.expression.as_str(), schedule.input.as_ref(), schedule.enabled),
+                ("EveryMorning", "cron(0 6 * * ? *)", None, true)
+            );
+            // The bucket named CloudFormation's way, as a bucket's name is unique across FF; the function told it.
+            let [bucket] = &planned.buckets[..] else { panic!("one bucket") };
+            assert_eq!(bucket.name, "reports-files-abcdefghijkl");
+            assert_eq!(function.environment.get("BUCKET"), Some(&bucket.name));
+            let [queue] = &planned.queues[..] else { panic!("one queue") };
+            assert_eq!(
+                (queue.name.as_str(), &queue.attributes["messageRetentionPeriod"]),
+                ("Reports-failed-runs", &serde_json::json!(1_209_600))
+            );
+            assert_eq!(
+                function.event_invoke_config,
+                Some(serde_json::json!({
+                    "maximumRetryAttempts": 2,
+                    "destinationConfig": { "onFailure": { "destination": "arn:aws:sqs:tn-tunis-1:000000000001:Reports-failed-runs" } }
+                }))
+            );
+        }
+        assert_eq!(CRON_JOB.name_most(), 57);
+    }
+
+    #[test]
+    fn a_queue_worker_is_a_url_that_sends_jobs_a_worker_reading_them_in_batches_and_a_dead_letter_queue_planned() {
+        for (runtime, extension) in [(Runtime::Nodejs, "mjs"), (Runtime::Python, "py")] {
+            let (_dir, paths, planned) = written_and_planned(&QUEUE_WORKER, "Jobs-2", runtime, &[]);
+            for path in [format!("src/api.{extension}"), format!("src/worker.{extension}"), "events/batch.json".into()]
+            {
+                assert!(paths.contains(&path), "{path}: {paths:?}");
+            }
+
+            let [api, worker] = &planned.functions[..] else { panic!("two functions") };
+            assert_eq!((api.name.as_str(), api.handler.as_str()), ("Jobs-2-api", "api.handler"));
+            assert_eq!(api.url.as_ref().map(|url| url.auth_type.as_str()), Some("NONE"));
+            assert_eq!(
+                api.environment.get("JOBS_QUEUE_URL").map(String::as_str),
+                Some("http://10.43.0.251:3003/000000000001/Jobs-2-jobs")
+            );
+            assert_eq!(
+                (worker.name.as_str(), worker.handler.as_str(), worker.timeout),
+                ("Jobs-2-worker", "worker.handler", 10)
+            );
+            let [mapping] = &worker.mappings[..] else { panic!("one SQS event") };
+            assert_eq!(
+                (mapping.queue(), mapping.batch_size, mapping.report_batch_item_failures, mapping.enabled),
+                ("Jobs-2-jobs", 10, true, true)
+            );
+            // The dead-letter queue made first; the jobs' hidden for the parameter's seconds, 60 unless given.
+            let [dead_letters, jobs] = &planned.queues[..] else { panic!("two queues") };
+            assert_eq!((dead_letters.name.as_str(), jobs.name.as_str()), ("Jobs-2-jobs-dead-letters", "Jobs-2-jobs"));
+            assert_eq!(jobs.dead_letter(), Some("Jobs-2-jobs-dead-letters"));
+            assert_eq!(jobs.attributes["redrivePolicy"]["maxReceiveCount"], 3);
+            assert_eq!(jobs.attributes["visibilityTimeout"], 60);
+        }
+        let (_dir, _, planned) =
+            written_and_planned(&QUEUE_WORKER, "jobs", Runtime::Nodejs, &[("JobsVisibilityTimeout", "10")]);
+        assert_eq!(planned.queues[1].attributes["visibilityTimeout"], 10);
+        assert_eq!(QUEUE_WORKER.name_most(), 57);
+        let refused =
+            create_app(&PathBuf::from("a".repeat(58)), &"a".repeat(58), Runtime::Python, &QUEUE_WORKER).unwrap_err();
+        assert!(refused.message.contains("which names its stack and its functions, aaa"), "{}", refused.message);
+        assert!(
+            refused.message.contains("-api and aaa")
+                && refused.message.contains("-worker: letters, digits and hyphens, a letter first, 57 at most")
+        );
+    }
+
+    #[test]
+    fn a_site_with_an_api_is_a_bucket_s_site_whose_page_calls_a_url_that_keeps_entries_in_a_second_bucket_planned() {
+        for (runtime, extension) in [(Runtime::Nodejs, "mjs"), (Runtime::Python, "py")] {
+            let (dir, paths, planned) = written_and_planned(&SITE_WITH_API, "Guests", runtime, &[]);
+            for path in [format!("src/app.{extension}"), "site/index.html".into(), "events/post-entry.json".into()] {
+                assert!(paths.contains(&path), "{path}: {paths:?}");
+            }
+            let page = std::fs::read_to_string(dir.path().join("Guests/site/index.html")).unwrap();
+            assert!(page.contains("<title>Guests's guestbook</title>"));
+            let readme = std::fs::read_to_string(dir.path().join("Guests/README.md")).unwrap();
+            assert!(readme.contains(r#"echo '{"api": "http://guests-api.fn.localhost:3700"}' > site/config.json"#));
+
+            let [function] = &planned.functions[..] else { panic!("one function") };
+            assert_eq!((function.name.as_str(), function.handler.as_str()), ("Guests-api", "app.handler"));
+            let url = function.url.as_ref().unwrap();
+            assert_eq!(url.auth_type, "NONE");
+            assert_eq!(url.cors.as_ref().unwrap()["allowOrigins"], serde_json::json!(["*"]));
+            // Both buckets named CloudFormation's way; the function told the entries', the page's a site.
+            let [entries, website] = &planned.buckets[..] else { panic!("two buckets") };
+            assert_eq!((entries.id.as_str(), website.id.as_str()), ("Entries", "Website"));
+            assert_eq!(function.environment.get("ENTRIES_BUCKET"), Some(&entries.name));
+            assert_eq!(
+                (entries.website.as_ref(), website.website.as_ref().map(|site| site.index_document.as_str())),
+                (None, Some("index.html"))
+            );
+            let kept: Vec<_> = planned.without_effect.iter().map(|resource| resource.logical_id.as_str()).collect();
+            assert_eq!(kept, ["WebsitePolicy"]);
+        }
+        assert_eq!(SITE_WITH_API.name_most(), 60);
+    }
+
+    #[test]
+    fn an_image_resizer_is_a_function_its_bucket_calls_for_uploads_the_bucket_named_after_the_stack_in_lowercase() {
+        for (runtime, library) in [(Runtime::Nodejs, "src/package.json"), (Runtime::Python, "src/requirements.txt")] {
+            let (dir, paths, planned) = written_and_planned(&IMAGE_RESIZE, "photos-2", runtime, &[]);
+            assert!(paths.contains(&library.to_owned()) && paths.contains(&"events/upload.json".to_owned()));
+            let libraries = std::fs::read_to_string(dir.path().join("photos-2").join(library)).unwrap();
+            assert!(libraries.contains("\"sharp\": \"0.35.5\"") || libraries.contains("pillow==13.0.0"), "{libraries}");
+            let readme = std::fs::read_to_string(dir.path().join("photos-2/README.md")).unwrap();
+            assert!(readme.contains("http://127.0.0.1:3700/photos-2-images-000000000000/uploads/photo.jpg"));
+            let install =
+                if runtime == Runtime::Nodejs { "npm ci --os=linux --cpu=x64 --libc=glibc" } else { "--platform" };
+            assert!(readme.contains(install), "{readme}");
+
+            let [function] = &planned.functions[..] else { panic!("one function") };
+            assert_eq!(
+                (function.name.as_str(), function.handler.as_str(), function.memory, function.timeout),
+                ("photos-2-resize", "app.handler", 512, 30)
+            );
+            // The bucket named as the policy names it, the function told of each upload under uploads/ alone.
+            let [bucket] = &planned.buckets[..] else { panic!("one bucket") };
+            assert_eq!(bucket.name, "photos-2-images-000000000001");
+            let [notification] = &bucket.notifications[..] else { panic!("one notification") };
+            assert_eq!(
+                (notification.events.clone(), notification.prefix.as_deref(), notification.suffix.as_deref()),
+                (vec!["s3:ObjectCreated:*".to_owned()], Some("uploads/"), None)
+            );
+        }
+        // A bucket's name holds to S3's 63 characters, and to its lowercase.
+        assert_eq!(IMAGE_RESIZE.name_most(), 43);
+        let dir = tempfile::TempDir::new().unwrap();
+        let longest = "a".repeat(43);
+        assert!(create_app(&dir.path().join(&longest), &longest, Runtime::Nodejs, &IMAGE_RESIZE).is_ok());
+        for name in ["Photos", &"a".repeat(44)] {
+            let refused = create_app(&PathBuf::from(name), name, Runtime::Python, &IMAGE_RESIZE).unwrap_err();
+            assert_eq!(refused.exit_code(), 2);
+            assert!(
+                refused
+                    .message
+                    .contains(&format!("its functions, {name}-resize, and its bucket, {name}-images-<account>"))
+                    && refused.message.contains("lowercase letters, digits and hyphens, a letter first, 43 at most"),
+                "{}",
+                refused.message
+            );
+        }
+    }
+
+    #[test]
+    fn a_webhook_is_one_function_at_its_url_given_konnect_s_settings_its_two_secrets_out_of_the_template() {
+        for (runtime, library) in [(Runtime::Nodejs, "\"pg\": \"8.23.1\""), (Runtime::Python, "psycopg[binary]==3.3.6")]
+        {
+            let (dir, paths, planned) = written_and_planned(&WEBHOOK, "Shop-2", runtime, &[]);
+            for path in ["events/create-order.json", "events/notification.json", ".gitignore"] {
+                assert!(paths.contains(&path.to_owned()), "{path}: {paths:?}");
+            }
+            let folder = dir.path().join("Shop-2");
+            let code = std::fs::read_dir(folder.join("src")).unwrap().map(|entry| entry.unwrap().path());
+            let libraries: String = code.map(|path| std::fs::read_to_string(path).unwrap()).collect();
+            assert!(libraries.contains(library));
+            let readme = std::fs::read_to_string(folder.join("README.md")).unwrap();
+            for line in [
+                "ff db create shop-2 --secret-for Shop-2-payments",
+                "ff secrets set Shop-2-payments KONNECT_API_KEY",
+                "http://shop-2-payments.fn.localhost:3700/orders",
+            ] {
+                assert!(readme.contains(line), "{line}");
+            }
+
+            let [function] = &planned.functions[..] else { panic!("one function") };
+            assert_eq!(
+                (function.name.as_str(), function.handler.as_str(), function.memory, function.timeout),
+                ("Shop-2-payments", "app.handler", 256, 15)
+            );
+            let url = function.url.as_ref().unwrap();
+            assert_eq!((url.auth_type.as_str(), url.cors.is_none()), ("NONE", true));
+            // Konnect's sandbox until a deploy says otherwise; the key and the database are secrets, never variables.
+            let environment: Vec<(&str, &str)> =
+                function.environment.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+            assert_eq!(
+                environment,
+                [
+                    ("KONNECT_API_URL", "https://api.sandbox.konnect.network/api/v2"),
+                    ("KONNECT_WALLET_ID", ""),
+                    ("RETURN_URL", "")
+                ]
+            );
+        }
+        let (_dir, _paths, planned) = written_and_planned(
+            &WEBHOOK,
+            "shop",
+            Runtime::Python,
+            &[("KonnectWalletId", "5f7a209aeb3f76490ac4a3d1"), ("ReturnUrl", "https://shop.example.tn/paid")],
+        );
+        let environment = &planned.functions[0].environment;
+        assert_eq!(
+            (
+                environment.get("KONNECT_WALLET_ID").map(String::as_str),
+                environment.get("RETURN_URL").map(String::as_str)
+            ),
+            (Some("5f7a209aeb3f76490ac4a3d1"), Some("https://shop.example.tn/paid"))
+        );
+        assert_eq!(WEBHOOK.name_most(), 55);
+    }
+
+    #[test]
+    fn the_list_names_every_template_as_its_flag_takes_it_with_what_it_makes() {
+        use clap::ValueEnum;
+        for &template in Template::value_variants() {
+            let flag = template.to_possible_value().unwrap();
+            assert_eq!(flag.get_name(), template.as_str());
+            assert!(!about(template).is_empty() && about(template).len() <= 110, "{}", template.as_str());
+        }
     }
 }

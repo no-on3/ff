@@ -8,7 +8,7 @@ use serde::Serialize;
 use super::Context;
 use crate::cli::PackageArgs;
 use crate::error::{Error, Kind};
-use crate::package::{self, Options, Package};
+use crate::package::{self, Options, Package, ignore};
 
 /// A size as the console says it: bytes, KB or MB, by thousands.
 pub fn size(bytes: u64) -> String {
@@ -44,11 +44,7 @@ pub fn handler_of(package: &Package, named: Option<&str>) -> Result<Option<Strin
 fn write(zip: &Path, bytes: &[u8]) -> Result<(), Error> {
     let failed = |error: std::io::Error| Error::new(Kind::Failed, format!("Couldn't write {}: {error}", zip.display()));
     if let Some(folder) = zip.parent().filter(|folder| !folder.as_os_str().is_empty()) {
-        let made = !folder.exists();
-        std::fs::create_dir_all(folder).map_err(failed)?;
-        if made && folder.file_name().is_some_and(|name| name == ".ff") {
-            std::fs::write(folder.join(".gitignore"), "# ff's own: the zips ff package makes\n*\n").map_err(failed)?;
-        }
+        ignore::make_folder(folder).map_err(failed)?;
     }
     std::fs::write(zip, bytes).map_err(failed)
 }
@@ -68,7 +64,7 @@ struct Packaged<'a> {
 
 pub fn run(args: PackageArgs, context: &Context) -> Result<(), Error> {
     let name = folder_name(&args.folder)?;
-    let zip = args.zip.unwrap_or_else(|| args.folder.join(".ff").join(format!("{name}.zip")));
+    let zip = args.zip.unwrap_or_else(|| args.folder.join(ignore::FF_FOLDER).join(format!("{name}.zip")));
     let options = Options {
         runtime: args.runtime,
         container: args.build.container,
@@ -125,6 +121,13 @@ mod tests {
         std::fs::create_dir(dir.path().join("orders-api")).unwrap();
 
         assert_eq!(folder_name(&dir.path().join("orders-api/.")).unwrap(), "orders-api");
-        assert_eq!(folder_name(&dir.path().join("orders-api/sub/..")).map_err(|error| error.kind), Err(Kind::Usage));
+        // Unix reads the disk for `..`, and finds no `sub`; Windows takes `..` by its text, before the disk, and finds
+        // the folder meant.
+        let through_a_missing_folder = folder_name(&dir.path().join("orders-api/sub/..")).map_err(|error| error.kind);
+        if cfg!(windows) {
+            assert_eq!(through_a_missing_folder, Ok("orders-api".to_owned()));
+        } else {
+            assert_eq!(through_a_missing_folder, Err(Kind::Usage));
+        }
     }
 }

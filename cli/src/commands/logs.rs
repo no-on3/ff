@@ -1,8 +1,8 @@
 //! `ff logs <name>`: a function's lines from the log store, the newest of a window, every page of
-//! it, or the live tail as lines come.
+//! it, or the live tail as lines come; `ff logs --trace <id>`, a trace's lines across its functions.
 
 use std::collections::{HashSet, VecDeque};
-use std::io::{self, Write};
+use std::io;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::Context;
 use crate::api::events::Event;
-use crate::api::types::function_named;
+use crate::api::types::{TraceCall, function_named};
 use crate::api::{Call, Client};
 use crate::cli::{Format, LogsArgs};
 use crate::error::{Error, Kind};
@@ -34,6 +34,14 @@ pub struct Line {
     pub request_id: Option<String>,
     pub stream: Option<String>,
     pub message: String,
+}
+
+/// A line of a trace's, with the function whose it is.
+#[derive(Serialize)]
+struct TracedLine<'a> {
+    function: &'a str,
+    #[serde(flatten)]
+    line: &'a Line,
 }
 
 #[derive(Deserialize)]
@@ -81,17 +89,19 @@ fn narrowing(args: &LogsArgs) -> Vec<(&'static str, String)> {
 }
 
 /// `2026-10-17 10:00:00.123 [x2x9q] message`: the time to the millisecond, the instance by the end
-/// of its pod's name; with `--verbose`, the call's request ID before the message.
-pub fn text(line: &Line, verbose: bool) -> String {
+/// of its pod's name; a trace's line names its function before it, `orders [x2x9q]`; with
+/// `--verbose`, the call's request ID before the message.
+pub fn text(line: &Line, function: Option<&str>, verbose: bool) -> String {
     let time = match (line.time.get(..10), line.time.get(11..23)) {
         (Some(date), Some(clock)) => format!("{date} {clock}"),
         _ => line.time.clone(),
     };
     let instance = line.instance.as_deref().map(|pod| pod.rsplit('-').next().unwrap_or(pod)).unwrap_or("-");
+    let whose = function.map(|function| format!("{function} ")).unwrap_or_default();
     if verbose {
-        format!("{time} [{instance}] {} {}", line.request_id.as_deref().unwrap_or("-"), line.message)
+        format!("{time} {whose}[{instance}] {} {}", line.request_id.as_deref().unwrap_or("-"), line.message)
     } else {
-        format!("{time} [{instance}] {}", line.message)
+        format!("{time} {whose}[{instance}] {}", line.message)
     }
 }
 
@@ -110,6 +120,11 @@ impl<'a> Printer<'a> {
     }
 
     fn print(&mut self, line: &Line) -> Result<(), Error> {
+        self.print_of(line, None)
+    }
+
+    /// A line, with the function whose it is when it is a trace's.
+    fn print_of(&mut self, line: &Line, function: Option<&str>) -> Result<(), Error> {
         let key = (line.time.clone(), line.instance.clone(), line.message.clone());
         if !self.seen.insert(key.clone()) {
             return Ok(());
@@ -121,11 +136,15 @@ impl<'a> Printer<'a> {
         }
         self.last_time = Some(line.time.clone());
         if self.out.format == Format::Json {
-            writeln!(io::stdout().lock(), "{}", serde_json::to_string(line).expect("a line serializes"))?;
+            let json = match function {
+                Some(function) => serde_json::to_string(&TracedLine { function, line }),
+                None => serde_json::to_string(line),
+            };
+            self.out.line(&json.expect("a line serializes"))?;
         } else if line.stream.as_deref() == Some("ff") {
             self.out.warn(&line.message);
         } else {
-            writeln!(io::stdout().lock(), "{}", text(line, self.out.verbose))?;
+            self.out.line(&text(line, function, self.out.verbose))?;
         }
         Ok(())
     }
@@ -142,10 +161,83 @@ fn page(client: &Client, path: &str, query: &[(&str, String)], cursor: Option<&s
     client.json(&call)
 }
 
+/// Every page of a window, the oldest page last.
+fn pages(client: &Client, path: &str, query: &[(&str, String)]) -> Result<Vec<Line>, Error> {
+    let mut lines = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = page(client, path, query, cursor.as_deref())?;
+        lines.extend(page.lines);
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => return Ok(lines),
+        }
+    }
+}
+
+/// The calls of a trace whose lines to read, one for each of its requests: an asynchronous call's attempts share
+/// their request's ID, which the first names; with `name`, that function's alone.
+fn requests<'a>(calls: &'a [TraceCall], name: Option<&str>) -> Vec<&'a TraceCall> {
+    let mut requests: Vec<&TraceCall> = Vec::new();
+    for call in calls.iter().filter(|call| name.is_none_or(|name| call.function_name == name)) {
+        if !requests.iter().any(|seen| seen.function_id == call.function_id && seen.request_id == call.request_id) {
+            requests.push(call);
+        }
+    }
+    requests
+}
+
+/// How long before a call's start its lines are looked for: the log store's clock is its node's, not the backend's.
+const CLOCKS_APART: Duration = Duration::from_secs(60);
+
+/// A request's lines, from its START to its REPORT, as the log store finds them by its ID, from its first call on.
+fn request_query(call: &TraceCall, phrase: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut query = vec![("limit", "1000".to_owned()), ("requestId", call.request_id.clone())];
+    if let Some(start) =
+        humantime::parse_rfc3339_weak(&call.created_at).ok().and_then(|at| at.checked_sub(CLOCKS_APART))
+    {
+        query.push(("start", humantime::format_rfc3339_millis(start).to_string()));
+    }
+    if let Some(phrase) = phrase {
+        query.push(("q", phrase.to_owned()));
+    }
+    query
+}
+
+/// `ff logs --trace <id> [name]`: the lines of each of a trace's requests, by time, each naming its function.
+fn trace_lines(id: &str, args: &LogsArgs, context: &Context) -> Result<(), Error> {
+    let client = Client::new(&context.settings()?)?;
+    let trace = super::trace::fetch(&client, id)?;
+    if trace.truncated {
+        context.out.warn(&super::trace::truncated(&trace));
+    }
+    let requests = requests(&trace.calls, args.name.as_deref());
+    if let (Some(name), true) = (&args.name, requests.is_empty()) {
+        return Err(Error::new(Kind::Failed, format!("Trace {} has no call of {name}", trace.trace_id)));
+    }
+    let mut lines: Vec<(&str, Line)> = Vec::new();
+    for call in requests {
+        let path = format!("/functions/{}/logs", call.function_id);
+        let query = request_query(call, args.grep.as_deref());
+        lines.extend(pages(&client, &path, &query)?.into_iter().map(|line| (call.function_name.as_str(), line)));
+    }
+    // By time, as each request's lines came: a time the store writes in another form keeps its place.
+    lines.sort_by_cached_key(|(_, line)| humantime::parse_rfc3339_weak(&line.time).ok());
+    let mut printer = Printer::new(context.out);
+    for (function, line) in &lines {
+        printer.print_of(line, Some(function))?;
+    }
+    Ok(())
+}
+
 pub fn run(args: LogsArgs, context: &Context) -> Result<(), Error> {
+    if let Some(trace) = &args.trace {
+        return trace_lines(trace, &args, context);
+    }
     let query = window(&args)?;
     let client = Client::new(&context.settings()?)?;
-    let function = function_named(&client, &args.name)?;
+    let name = args.name.as_deref().expect("clap asks for a name without --trace");
+    let function = function_named(&client, name)?;
     let path = format!("/functions/{}/logs", function.id);
     let mut printer = Printer::new(context.out);
 
@@ -282,12 +374,71 @@ mod tests {
 
     #[test]
     fn a_line_reads_with_its_time_to_the_millisecond_and_its_instance_short() {
-        assert_eq!(text(&line("greeting Tunis"), false), "2026-10-17 10:00:00.123 [x2x9q] greeting Tunis");
-        assert_eq!(text(&line("greeting Tunis"), true), "2026-10-17 10:00:00.123 [x2x9q] 0b7c6f2e greeting Tunis");
+        assert_eq!(text(&line("greeting Tunis"), None, false), "2026-10-17 10:00:00.123 [x2x9q] greeting Tunis");
         assert_eq!(
-            text(&Line { instance: None, request_id: None, ..line("x") }, true),
+            text(&line("greeting Tunis"), None, true),
+            "2026-10-17 10:00:00.123 [x2x9q] 0b7c6f2e greeting Tunis"
+        );
+        assert_eq!(
+            text(&Line { instance: None, request_id: None, ..line("x") }, None, true),
             "2026-10-17 10:00:00.123 [-] - x"
         );
+    }
+
+    #[test]
+    fn a_traces_line_names_its_function_before_its_instance_and_in_its_json() {
+        assert_eq!(text(&line("job done"), Some("worker"), false), "2026-10-17 10:00:00.123 worker [x2x9q] job done");
+        let traced = serde_json::to_value(TracedLine { function: "worker", line: &line("job done") }).unwrap();
+        assert_eq!(
+            traced,
+            serde_json::json!({
+                "function": "worker",
+                "time": "2026-10-17T10:00:00.123456000Z",
+                "instance": "fn-3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f-7d9f8b6c5-x2x9q",
+                "requestId": "0b7c6f2e",
+                "stream": "stdout",
+                "message": "job done"
+            })
+        );
+    }
+
+    fn traced(function: &str, request_id: &str, attempt: u32, at: &str) -> TraceCall {
+        TraceCall {
+            id: format!("{request_id}-{attempt}"),
+            request_id: request_id.into(),
+            attempt,
+            function_id: format!("id-{function}"),
+            function_name: function.into(),
+            source: "async".into(),
+            trigger: None,
+            version: None,
+            alias: None,
+            status: "COMPLETED".into(),
+            duration: 5.0,
+            created_at: at.into(),
+        }
+    }
+
+    #[test]
+    fn a_traces_lines_are_read_once_a_request_from_a_minute_before_its_first_call_a_function_alone_when_named() {
+        let calls = [
+            traced("api", "r1", 1, "2026-11-10T09:15:03.250Z"),
+            traced("worker", "r2", 1, "2026-11-10T09:15:04.000Z"),
+            traced("worker", "r2", 2, "2026-11-10T09:16:04.000Z"),
+            traced("worker", "r3", 1, "2026-11-10T09:17:00.000Z"),
+        ];
+        let read = |name| requests(&calls, name).iter().map(|call| call.id.clone()).collect::<Vec<_>>();
+        assert_eq!(read(None), ["r1-1", "r2-1", "r3-1"]);
+        assert_eq!(read(Some("worker")), ["r2-1", "r3-1"]);
+        assert!(read(Some("orders")).is_empty());
+
+        let pair = |(name, value): &(&str, String)| format!("{name}={value}");
+        assert_eq!(
+            request_query(&calls[0], Some("time out")).iter().map(pair).collect::<Vec<_>>(),
+            ["limit=1000", "requestId=r1", "start=2026-11-10T09:14:03.250Z", "q=time out"]
+        );
+        let unknown = TraceCall { created_at: "yesterday".into(), ..traced("api", "r1", 1, "") };
+        assert_eq!(request_query(&unknown, None).iter().map(pair).collect::<Vec<_>>(), ["limit=1000", "requestId=r1"]);
     }
 
     #[test]

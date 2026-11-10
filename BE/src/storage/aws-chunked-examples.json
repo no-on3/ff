@@ -1,0 +1,42 @@
+{
+  "about": "AWS's documented aws-chunked uploads (the S3 API reference, \"Signature Calculations for the Authorization Header: Transferring Payload in Multiple Chunks\", with and without a trailer): 66,560 bytes of \"a\" in a chunk of 64 KB, one of 1 KB and the empty last one, signed with AWS's example key on 2013-05-24 at midnight, UTC. The request's own signature is the seed of each chunk's, in a chain. The table the backend's reader of such bodies (aws-chunked.ts) and ff's read for their tests, so that both check an upload alike.",
+  "accessKeyId": "AKIAIOSFODNN7EXAMPLE",
+  "secret": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+  "date": "20130524",
+  "amzDate": "20130524T000000Z",
+  "region": "us-east-1",
+  "service": "s3",
+  "data": { "byte": "a", "length": 66560 },
+  "signed": {
+    "request": {
+      "method": "PUT",
+      "rawPath": "/examplebucket/chunkObject.txt",
+      "headers": [
+        ["Host", "s3.amazonaws.com"],
+        ["x-amz-date", "20130524T000000Z"],
+        ["x-amz-storage-class", "REDUCED_REDUNDANCY"],
+        ["x-amz-content-sha256", "STREAMING-AWS4-HMAC-SHA256-PAYLOAD"],
+        ["Content-Encoding", "aws-chunked"],
+        ["x-amz-decoded-content-length", "66560"],
+        ["Content-Length", "66824"]
+      ]
+    },
+    "seed": "4f232c4386841ef735655705268965c44a0e4690baa4adea153f7db9fa80a0a9",
+    "chunks": [
+      { "size": 65536, "signature": "ad80c730a21e5b8d04586a2213dd63b9a0e99e0e2307b0ade35a65485a288648" },
+      { "size": 1024, "signature": "0055627c9e194cb4542bae2aa5492e3c1575bbb81b612b7d234b86a503ef5497" },
+      { "size": 0, "signature": "b6c6ea8a5354eaf15b3cb7646744f4275b71ea724fed81ceb9323e279d449df9" }
+    ],
+    "encodedLength": 66824
+  },
+  "signedWithTrailer": {
+    "seed": "106e2a8a18243abcf37539882f36619c00e2dfc72633413f02d3b74544bfeb8e",
+    "chunks": [
+      { "size": 65536, "signature": "b474d8862b1487a5145d686f57f013e54db672cee1c953b3010fb58501ef5aa2" },
+      { "size": 1024, "signature": "1c1344b170168f8e65b41376b44b20fe354e373826ccbbe2c1d40a8cae51e5c7" },
+      { "size": 0, "signature": "2ca2aba2005185cf7159c6277faf83795951dd77a3a99e6e65d5c9f85863f992" }
+    ],
+    "trailer": { "name": "x-amz-checksum-crc32c", "value": "sOO8/Q==" },
+    "trailerSignature": "d81f82fc3505edab99d459891051a732e8730629a2e4a59689829ca17fe2e435"
+  }
+}

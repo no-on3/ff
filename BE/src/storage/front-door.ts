@@ -131,25 +131,37 @@ interface Exchange {
   bytesOut: number;
   /** The client waits for "100 Continue" before it sends its body: sent only once the request is let in. */
   expectsContinue: boolean;
-  /** The keys a DeleteObjects deleted, as the store's answer names them, for the bucket's notifications. */
+  /** A DeleteObjects' document, as the store gets it, for the keys it asks to delete, when the bucket has notifications. */
+  deleteDocument?: string;
+  /** The keys a DeleteObjects deleted, for the bucket's notifications. */
   deletedKeys?: string[];
+  /** The checksum the body carries, checked as it streams, which the store never gets. */
+  checksum?: ExpectedChecksum;
 }
 
-/** S3's event for each write that creates an object, by the operation, without its s3: prefix. */
 /** How many times a created object's size and ETag are asked of the store, and the wait before the second, longer for each next. */
 const MEASURE_ATTEMPTS = 3;
 const MEASURE_WAIT_MS = 50;
 
+/** S3's event for each write that creates an object, by the operation, without its s3: prefix. */
 const CREATED_EVENTS: Record<string, string> = {
   PutObject: 'ObjectCreated:Put',
   CopyObject: 'ObjectCreated:Copy',
   CompleteMultipartUpload: 'ObjectCreated:CompleteMultipartUpload',
 };
 
-/** The keys DeleteObjects' answer says it deleted; none when the answer can't be read. */
-function deletedKeysOf(document: string): string[] {
+/**
+ * The keys a DeleteObjects deleted: those its document asked for, but the ones the store's answer names an error for,
+ * as S3 answers either way, a quiet answer naming no other; none when either can't be read.
+ */
+function deletedKeysOf(asked: string, answered: string): string[] {
   try {
-    return childrenNamed(readXml(document), 'Deleted').map((deleted) => childText(deleted, 'Key') ?? '');
+    const answer = readXml(answered);
+    if (answer.name !== 'DeleteResult') return [];
+    const refused = new Set(childrenNamed(answer, 'Error').map((error) => childText(error, 'Key') ?? ''));
+    return childrenNamed(readXml(asked), 'Object')
+      .map((object) => childText(object, 'Key') ?? '')
+      .filter((key) => !refused.has(key));
   } catch (error) {
     if (error instanceof MalformedXml) return [];
     throw error;
@@ -488,6 +500,7 @@ export class S3FrontDoor implements OnModuleDestroy {
       whole = await readWhole(body, MAX_DOCUMENT_BYTES);
       headers['content-length'] = String(whole.length);
       headers['content-md5'] = createHash('md5').update(whole).digest('base64');
+      if (operation.name === 'DeleteObjects' && bucket.notifications?.length) exchange.deleteDocument = whole.toString('utf8');
     }
 
     const storePath = `/${bucket.storeName}${exchange.address.rawKey ? `/${exchange.address.rawKey}` : ''}`;
@@ -672,6 +685,7 @@ export class S3FrontDoor implements OnModuleDestroy {
       this.limit(operation, decodedLength, plan);
       headers['content-length'] = String(decodedLength);
       const { checksum, trailerName } = expectedChecksum(request);
+      exchange.checksum = checksum;
       stages.push(
         new ChunkedBodyReader({
           signed: payload !== STREAMING_UNSIGNED_TRAILER,
@@ -693,6 +707,7 @@ export class S3FrontDoor implements OnModuleDestroy {
     headers['content-length'] = String(length);
     if (signature.kind === 'presigned') return [...stages, counted];
     const { checksum } = expectedChecksum(request);
+    exchange.checksum = checksum;
     const sha256 = payload === UNSIGNED_PAYLOAD ? undefined : payload;
     if (sha256 !== undefined && !/^[0-9a-f]{64}$/.test(sha256)) throw invalidRequest('x-amz-content-sha256 must be UNSIGNED-PAYLOAD, a STREAMING- payload, or a SHA-256 in hexadecimal');
     if (sha256 || checksum) stages.push(new PlainBodyChecker({ sha256, checksum }));
@@ -706,12 +721,21 @@ export class S3FrontDoor implements OnModuleDestroy {
     }
   }
 
-  /** The store's answer to the client, as it comes: an XML one naming the customer's bucket rather than the store's. */
+  /**
+   * The store's answer to the client, as it comes: an XML one naming the
+   * customer's bucket rather than the store's. A PutObject's gives back the
+   * checksum the client sent, as S3's does, the store having none.
+   */
   private async relay(exchange: Exchange, answer: IncomingMessage, bucket: Bucket, operation: S3Operation): Promise<number> {
     const { response, method } = exchange;
     const status = answer.statusCode ?? 502;
     const headers: Record<string, string | string[]> = { 'x-amz-request-id': exchange.id };
     for (const [name, value] of Object.entries(answer.headers)) if (value !== undefined && ANSWERED.test(name)) headers[name] = value;
+    const sent = exchange.checksum;
+    if (operation.name === 'PutObject' && status === 200 && sent?.checked !== undefined) {
+      headers[`x-amz-checksum-${sent.algorithm}`] = sent.checked;
+      headers['x-amz-checksum-type'] = 'FULL_OBJECT';
+    }
     const xml = /xml/i.test(single(answer.headers['content-type']) ?? '');
     if (method === 'HEAD') {
       response.writeHead(status, headers);
@@ -720,9 +744,10 @@ export class S3FrontDoor implements OnModuleDestroy {
       return status;
     }
     if (xml && operation.name === 'DeleteObjects' && bucket.notifications?.length) {
-      // Read whole, for the keys it deleted, which the bucket's notifications name.
-      const document = (await readWhole([answer], MAX_DOCUMENT_BYTES)).toString('utf8').split(bucket.storeName).join(bucket.name);
-      exchange.deletedKeys = deletedKeysOf(document);
+      // Read whole, for the keys it deleted, which the bucket's notifications name, before its bucket is the customer's.
+      const answered = (await readWhole([answer], MAX_DOCUMENT_BYTES)).toString('utf8');
+      exchange.deletedKeys = deletedKeysOf(exchange.deleteDocument ?? '', answered);
+      const document = answered.split(bucket.storeName).join(bucket.name);
       headers['content-length'] = String(Buffer.byteLength(document));
       response.writeHead(status, headers);
       response.end(document);

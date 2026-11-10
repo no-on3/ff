@@ -48,6 +48,12 @@ fn names(given: &[String]) -> Result<Vec<String>, Error> {
 /// each, in the order the names come.
 fn values(names: &[String]) -> Result<BTreeMap<String, String>, Error> {
     let mut values = BTreeMap::new();
+    if crate::stdin::held() {
+        return Err(Error::usage(
+            "A secret's value comes from a prompt or stdin, and ff mcp's stdin is its protocol: \
+             the developer runs ff secrets set in a terminal",
+        ));
+    }
     if io::stdin().is_terminal() {
         for name in names {
             let value = rpassword::prompt_password(format!("{name} (not shown as you type or paste it): "))

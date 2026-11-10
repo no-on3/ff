@@ -51,7 +51,8 @@ checks_record() { # <what failed>
 }
 
 on_exit() { # <command>: run at exit, its status in $checks_status, the last added first, before the failures' list
-  checks_exit_commands=("$1" "${checks_exit_commands[@]}")
+  # ${a[@]+"${a[@]}"}: an empty array expanded to nothing by macOS's own bash too, 3.2, which calls it unbound.
+  checks_exit_commands=("$1" ${checks_exit_commands[@]+"${checks_exit_commands[@]}"})
 }
 
 checks_done() { # <suite>: the suite's last line; it fails the run when a check failed
@@ -110,7 +111,7 @@ checks_report() {
 checks_exit() {
   checks_status=$?
   local command failed
-  for command in "${checks_exit_commands[@]}"; do eval "$command" || true; done
+  for command in ${checks_exit_commands[@]+"${checks_exit_commands[@]}"}; do eval "$command" || true; done
   checks_report
   failed="$(wc -l <"$checks_failures")"
   rm -f "$checks_failures"

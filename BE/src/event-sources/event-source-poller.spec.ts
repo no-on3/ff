@@ -13,6 +13,8 @@ import { sqsRecord } from './sqs-event';
 const ACCOUNT = '000000000001';
 const ARN = `arn:aws:sqs:tn-tunis-1:${ACCOUNT}:orders`;
 const queue = { id: 'q-1', accountId: ACCOUNT, name: 'orders', visibilityTimeout: 30 } as Queue;
+/** A trace the batch's call started, none of its messages carrying one. */
+const NEW_TRACE = expect.stringMatching(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/);
 const active = { id: 'fn-1', accountId: ACCOUNT, name: 'orders-worker', status: FunctionStatus.ACTIVE, maxInstances: 3, timeout: 3 } as Function;
 
 let n = 0;
@@ -110,7 +112,7 @@ describe('the event source poller, which reads the queues functions are mapped t
     jest.restoreAllMocks();
   });
 
-  it("calls the function with SQS's event for a batch, its history's source sqs, and deletes the batch once the call succeeded", async () => {
+  it("calls the function with SQS's event for a batch, its history's source sqs, in a trace naming the queue, and deletes the batch once the call succeeded", async () => {
     const batch = [message('one'), message('two')];
     waiting.push(...batch);
 
@@ -118,9 +120,25 @@ describe('the event source poller, which reads the queues functions are mapped t
     await until(() => deleted().length === 2);
 
     expect(queues.receive).toHaveBeenCalledWith(queue, 10, 30, expect.any(Date));
-    expect(functions.call).toHaveBeenCalledWith(active, { Records: batch.map((received) => sqsRecord(received, ARN, 'tn-tunis-1')) }, { source: InvocationSource.SQS, target: {} });
+    expect(functions.call).toHaveBeenCalledWith(
+      active,
+      { Records: batch.map((received) => sqsRecord(received, ARN, 'tn-tunis-1')) },
+      { source: InvocationSource.SQS, target: {}, traceId: NEW_TRACE, trigger: { queue: 'orders', messageId: batch[0].messageId } },
+    );
     expect(deleted()).toEqual(['1', '2']);
     expect(queues.deleteMessages.mock.calls[0][1]).toEqual(batch.map(({ id, receiveCount, messageId }) => ({ id, receiveCount, messageId })));
+  });
+
+  it("joins the trace a message of the batch carries in its AWSTraceHeader, as Lambda does, naming that message", async () => {
+    const traced = message('two');
+    traced.meta.systemAttributes = { AWSTraceHeader: { DataType: 'String', StringValue: 'Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1' } };
+    waiting.push(message('one'), traced);
+
+    await poller.refresh();
+    await until(() => deleted().length === 2);
+
+    const { traceId, trigger } = functions.call.mock.calls[0][2];
+    expect([traceId, trigger]).toEqual(['1-5759e988-bd862e3fe1be46a994272793', { queue: 'orders', messageId: traced.messageId }]);
   });
 
   it('counts a batch as the request that would have received it, each 64 KB of its messages a request, and the deletes after its call as not billed; finding nothing counts nothing', async () => {
@@ -273,7 +291,12 @@ describe('the event source poller, which reads the queues functions are mapped t
     await until(() => deleted().length === 1);
 
     expect(functions.callTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 'live');
-    expect(functions.call.mock.calls[0][2]).toEqual({ source: InvocationSource.SQS, target: { version: { version: 2 }, alias: 'live' } });
+    expect(functions.call.mock.calls[0][2]).toEqual({
+      source: InvocationSource.SQS,
+      target: { version: { version: 2 }, alias: 'live' },
+      traceId: NEW_TRACE,
+      trigger: { queue: 'orders', messageId: expect.any(String) },
+    });
   });
 
   it('receives nothing while the alias a mapping names is gone, and says so once', async () => {

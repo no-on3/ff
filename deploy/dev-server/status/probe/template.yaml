@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >-
+  FF's status probe (deploy/dev-server/status): what probe.sh reaches each minute in the probe's own account, which
+  setup.sh deploys with ff on each of server.sh's runs. The canary, a function called through Lambda's endpoint and
+  at its URL; the site's bucket, read through S3 and at its site's address, its page site/index.html, which ff sites
+  deploy puts there; and the queue a message is sent to and received from.
+
+Resources:
+  Canary:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: status-canary
+      CodeUri: canary/
+      Handler: index.handler
+      Runtime: nodejs24.x
+      MemorySize: 128
+      Timeout: 5
+      FunctionUrlConfig:
+        AuthType: NONE
+
+  Site:
+    Type: AWS::S3::Bucket
+    Properties:
+      # A bucket's name is FF's alone among all accounts: the account's own ID in it makes it the probe's.
+      BucketName: !Sub "ff-status-${AWS::AccountId}"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  Queue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: status-probe
+
+Outputs:
+  CanaryUrl:
+    Description: The canary's address
+    Value: !GetAtt CanaryUrl.FunctionUrl
+  SiteBucket:
+    Description: The site's bucket, where ff sites deploy puts site/
+    Value: !Ref Site
+  SiteUrl:
+    Description: The site's address
+    Value: !GetAtt Site.WebsiteURL
+  QueueUrl:
+    Description: The queue's address, as SQS names it
+    Value: !GetAtt Queue.QueueUrl

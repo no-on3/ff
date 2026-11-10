@@ -1,22 +1,46 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Readable, Transform, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
-import { crc32 } from 'node:zlib';
-import { ChunkedBodyReader, PlainBodyChecker } from './aws-chunked';
+import { ChunkedBodyReader, ExpectedChecksum, PlainBodyChecker } from './aws-chunked';
 import { S3Error } from './s3-error';
 import { SignedRequest, SigningChain, sha256Hex, signingKey } from '../common/signature-v4';
 import { RequestSignature, checkSignature, readSignature } from './s3-signature';
+import { crc32Of } from './test-fixtures';
 
-// AWS's documented aws-chunked uploads (the S3 API reference, "Signature Calculations for the Authorization Header:
-// Transferring Payload in Multiple Chunks", with and without a trailer): 66,560 bytes of "a" in a chunk of 64 KB and
-// one of 1 KB, signed with AWS's example key on 2013-05-24 at midnight, UTC.
-const SECRET = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
-const DATA = Buffer.alloc(66_560, 'a');
+interface ExampleChunk {
+  size: number;
+  signature: string;
+}
+/** AWS's documented aws-chunked uploads, with and without a trailer: the table ff's tests read too. */
+const EXAMPLES = JSON.parse(readFileSync(join(__dirname, 'aws-chunked-examples.json'), 'utf8')) as {
+  accessKeyId: string;
+  secret: string;
+  date: string;
+  amzDate: string;
+  region: string;
+  service: string;
+  data: { byte: string; length: number };
+  signed: { request: { method: string; rawPath: string; headers: Array<[string, string]> }; seed: string; chunks: ExampleChunk[]; encodedLength: number };
+  signedWithTrailer: { seed: string; chunks: ExampleChunk[]; trailer: { name: string; value: string }; trailerSignature: string };
+};
+const SECRET = EXAMPLES.secret;
+const DATA = Buffer.alloc(EXAMPLES.data.length, EXAMPLES.data.byte);
 const chain = (seed: string): SigningChain => ({
-  key: signingKey(SECRET, '20130524', 'us-east-1', 's3'),
-  scope: '20130524/us-east-1/s3/aws4_request',
-  amzDate: '20130524T000000Z',
+  key: signingKey(SECRET, EXAMPLES.date, EXAMPLES.region, EXAMPLES.service),
+  scope: `${EXAMPLES.date}/${EXAMPLES.region}/${EXAMPLES.service}/aws4_request`,
+  amzDate: EXAMPLES.amzDate,
   seed,
 });
+/** An example's chunks, each with its slice of the data, in order. */
+function exampleChunks(chunks: ExampleChunk[]): Array<{ data: Buffer; signature: string }> {
+  let at = 0;
+  return chunks.map(({ size, signature }) => {
+    const data = DATA.subarray(at, at + size);
+    at += size;
+    return { data, signature };
+  });
+}
 
 /** The body, chunk by chunk, as a client frames it: each chunk's header with its signature if any, its data, CRLF. */
 function framed(chunks: Array<{ data: Buffer; signature?: string }>, after = '\r\n'): Buffer {
@@ -53,35 +77,23 @@ async function through(reader: Transform, body: Buffer, pieceSize = 7_919): Prom
   }
 }
 
-const SIGNED_CHUNKS = [
-  { data: DATA.subarray(0, 65_536), signature: 'ad80c730a21e5b8d04586a2213dd63b9a0e99e0e2307b0ade35a65485a288648' },
-  { data: DATA.subarray(65_536), signature: '0055627c9e194cb4542bae2aa5492e3c1575bbb81b612b7d234b86a503ef5497' },
-  { data: Buffer.alloc(0), signature: 'b6c6ea8a5354eaf15b3cb7646744f4275b71ea724fed81ceb9323e279d449df9' },
-];
-const SIGNED_SEED = '4f232c4386841ef735655705268965c44a0e4690baa4adea153f7db9fa80a0a9';
+const SIGNED_CHUNKS = exampleChunks(EXAMPLES.signed.chunks);
+const SIGNED_SEED = EXAMPLES.signed.seed;
 
 describe('aws-chunked, signed chunk by chunk', () => {
   it("AWS's example: the request's own signature, then each chunk's in its chain, the data alone passed on", async () => {
-    const headers: Array<[string, string]> = [
-      ['Host', 's3.amazonaws.com'],
-      ['x-amz-date', '20130524T000000Z'],
-      ['x-amz-storage-class', 'REDUCED_REDUNDANCY'],
-      ['x-amz-content-sha256', 'STREAMING-AWS4-HMAC-SHA256-PAYLOAD'],
-      ['Content-Encoding', 'aws-chunked'],
-      ['x-amz-decoded-content-length', '66560'],
-      ['Content-Length', '66824'],
-    ];
+    const { method, rawPath, headers } = EXAMPLES.signed.request;
     const signedHeaders = headers.map(([name]) => name.toLowerCase()).sort();
-    const authorization = `AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request,SignedHeaders=${signedHeaders.join(';')},Signature=${SIGNED_SEED}`;
+    const authorization = `AWS4-HMAC-SHA256 Credential=${EXAMPLES.accessKeyId}/${chain('').scope},SignedHeaders=${signedHeaders.join(';')},Signature=${SIGNED_SEED}`;
     const all: Array<[string, string]> = [...headers, ['Authorization', authorization]];
-    const request: SignedRequest = { method: 'PUT', rawPath: '/examplebucket/chunkObject.txt', rawQuery: '', rawHeaders: all.flat() };
+    const request: SignedRequest = { method, rawPath, rawQuery: '', rawHeaders: all.flat() };
     const signature = readSignature(Object.fromEntries(all.map(([name, value]) => [name.toLowerCase(), value])), new URLSearchParams()) as RequestSignature;
 
     const checked = checkSignature(request, signature, SECRET, new Date('2013-05-24T00:00:00Z'));
     const body = framed(SIGNED_CHUNKS);
-    const { data, completed, error } = await through(new ChunkedBodyReader({ signed: true, trailer: false, chain: checked, decodedLength: 66_560 }), body);
+    const { data, completed, error } = await through(new ChunkedBodyReader({ signed: true, trailer: false, chain: checked, decodedLength: DATA.length }), body);
 
-    expect(body.length).toBe(66_824);
+    expect(body.length).toBe(EXAMPLES.signed.encodedLength);
     expect(error).toBeUndefined();
     expect(completed).toBe(true);
     expect(data.equals(DATA)).toBe(true);
@@ -112,18 +124,14 @@ describe('aws-chunked, signed chunk by chunk', () => {
 });
 
 describe('aws-chunked, signed, with a signed trailer', () => {
-  const SEED = '106e2a8a18243abcf37539882f36619c00e2dfc72633413f02d3b74544bfeb8e';
-  const chunks = [
-    { data: DATA.subarray(0, 65_536), signature: 'b474d8862b1487a5145d686f57f013e54db672cee1c953b3010fb58501ef5aa2' },
-    { data: DATA.subarray(65_536), signature: '1c1344b170168f8e65b41376b44b20fe354e373826ccbbe2c1d40a8cae51e5c7' },
-    { data: Buffer.alloc(0), signature: '2ca2aba2005185cf7159c6277faf83795951dd77a3a99e6e65d5c9f85863f992' },
-  ];
-  const TRAILER_SIGNATURE = 'd81f82fc3505edab99d459891051a732e8730629a2e4a59689829ca17fe2e435';
+  const { seed, trailer } = EXAMPLES.signedWithTrailer;
+  const chunks = exampleChunks(EXAMPLES.signedWithTrailer.chunks);
+  const TRAILER_SIGNATURE = EXAMPLES.signedWithTrailer.trailerSignature;
   const reader = () =>
-    new ChunkedBodyReader({ signed: true, trailer: true, chain: chain(SEED), decodedLength: 66_560, checksum: { algorithm: 'crc32c' }, trailerName: 'x-amz-checksum-crc32c' });
+    new ChunkedBodyReader({ signed: true, trailer: true, chain: chain(seed), decodedLength: DATA.length, checksum: { algorithm: 'crc32c' }, trailerName: trailer.name });
 
   it("AWS's example: the chunks, then the CRC-32C in the trailer and the trailer's own signature", async () => {
-    const { data, completed, error } = await through(reader(), framed(chunks, `x-amz-checksum-crc32c:sOO8/Q==\r\nx-amz-trailer-signature:${TRAILER_SIGNATURE}\r\n\r\n`));
+    const { data, completed, error } = await through(reader(), framed(chunks, `${trailer.name}:${trailer.value}\r\nx-amz-trailer-signature:${TRAILER_SIGNATURE}\r\n\r\n`));
 
     expect([error, completed, data.equals(DATA)]).toEqual([undefined, true, true]);
   });
@@ -140,26 +148,25 @@ describe('aws-chunked, signed, with a signed trailer', () => {
 });
 
 describe("aws-chunked, unsigned, with a trailing checksum: AWS's SDK for JavaScript's streams", () => {
-  const crc = (data: Buffer) => {
-    const bytes = Buffer.alloc(4);
-    bytes.writeUInt32BE(crc32(data));
-    return bytes.toString('base64');
-  };
   const body = (checksum: string) => framed([{ data: DATA.subarray(0, 8192) }, { data: DATA.subarray(8192) }, { data: Buffer.alloc(0) }], `x-amz-checksum-crc32:${checksum}\r\n\r\n`);
-  const reader = () => new ChunkedBodyReader({ signed: false, trailer: true, decodedLength: 66_560, checksum: { algorithm: 'crc32' }, trailerName: 'x-amz-checksum-crc32' });
+  const reader = (checksum: ExpectedChecksum = { algorithm: 'crc32' }) => new ChunkedBodyReader({ signed: false, trailer: true, decodedLength: 66_560, checksum, trailerName: 'x-amz-checksum-crc32' });
 
-  it('passes the data on, its CRC-32 checked at the end', async () => {
-    const { data, completed, error } = await through(reader(), body(crc(DATA)), 1000);
+  it("passes the data on, its CRC-32 checked at the end and kept as checked, for PutObject's answer", async () => {
+    const checksum: ExpectedChecksum = { algorithm: 'crc32' };
+    const { data, completed, error } = await through(reader(checksum), body(crc32Of(DATA)), 1000);
 
     expect([error, completed, data.equals(DATA)]).toEqual([undefined, true, true]);
+    expect(checksum.checked).toBe(crc32Of(DATA));
   });
 
-  it('refuses a CRC-32 that does not match, and a trailer without it, the stream never completing', async () => {
-    const wrong = await through(reader(), body(crc(Buffer.from('other'))));
+  it('refuses a CRC-32 that does not match, and a trailer without it, the stream never completing, nothing kept as checked', async () => {
+    const checksum: ExpectedChecksum = { algorithm: 'crc32' };
+    const wrong = await through(reader(checksum), body(crc32Of(Buffer.from('other'))));
     const none = await through(reader(), framed([{ data: DATA }, { data: Buffer.alloc(0) }], '\r\n'));
 
     expect([wrong.error, wrong.completed, wrong.data.length < DATA.length]).toEqual(['400 BadDigest', false, true]);
     expect([none.error, none.completed, none.data.length < DATA.length]).toEqual(['400 InvalidRequest', false, true]);
+    expect(checksum.checked).toBeUndefined();
   });
 });
 
@@ -172,11 +179,16 @@ describe('a plain body', () => {
     expect([changed.error, changed.completed, changed.data.length < DATA.length]).toEqual(['400 XAmzContentSHA256Mismatch', false, true]);
   });
 
-  it('with a checksum in its header: checked the same way', async () => {
-    const ok = await through(new PlainBodyChecker({ checksum: { algorithm: 'crc32c', value: 'sOO8/Q==' } }), DATA);
-    const wrong = await through(new PlainBodyChecker({ checksum: { algorithm: 'crc32c', value: 'AAAAAA==' } }), DATA);
+  it('with a checksum in its header: checked the same way, and kept as checked only when it matches', async () => {
+    const [right, wrongly]: ExpectedChecksum[] = [
+      { algorithm: 'crc32c', value: 'sOO8/Q==' },
+      { algorithm: 'crc32c', value: 'AAAAAA==' },
+    ];
+    const ok = await through(new PlainBodyChecker({ checksum: right }), DATA);
+    const wrong = await through(new PlainBodyChecker({ checksum: wrongly }), DATA);
 
     expect([ok.error, ok.completed]).toEqual([undefined, true]);
     expect([wrong.error, wrong.completed, wrong.data.length < DATA.length]).toEqual(['400 BadDigest', false, true]);
+    expect([right.checked, wrongly.checked]).toEqual(['sOO8/Q==', undefined]);
   });
 });

@@ -6,6 +6,7 @@
 import { INestApplication } from '@nestjs/common';
 import { OpenAPIObject, SwaggerModule } from '@nestjs/swagger';
 import { Test } from '@nestjs/testing';
+import { ConfigService } from '@nestjs/config';
 import { AccountStatus } from './accounts/entities/account.entity';
 import { AccountsController } from './accounts/accounts.controller';
 import { AccountsService } from './accounts/accounts.service';
@@ -26,6 +27,7 @@ import { CustomDomainsService } from './function-urls/custom-domains.service';
 import { ScheduleRunsController, SchedulesController } from './schedules/schedules.controller';
 import { SchedulesService } from './schedules/schedules.service';
 import { HealthController } from './health/health.controller';
+import { LoginController } from './auth/login.controller';
 import { MetricsController } from './metrics/metrics.controller';
 import { CustomerMetricsService } from './metrics/customer-metrics.service';
 import { MetricsService } from './metrics/metrics.service';
@@ -98,6 +100,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
         ScheduleRunsController,
         MetricsController,
         HealthController,
+        LoginController,
         AccountsController,
         ApiKeysController,
         UsageController,
@@ -172,6 +175,8 @@ describe('the OpenAPI document (L1, P-08)', () => {
         { provide: DataSource, useValue: { query: async () => [] } },
         { provide: ORCHESTRATOR, useValue: { ping: async () => undefined } },
         { provide: AdminStatsService, useValue: succeeding(AdminStatsService) },
+        // Where to log in: the realm's issuer.
+        { provide: ConfigService, useValue: new ConfigService({ auth: { mode: 'oidc', oidc: { issuer: 'https://login.ff.example/realms/ff', audience: 'ff-api' } } }) },
         { provide: PlansService, useValue: succeeding(PlansService, { list: async () => [] }) },
         { provide: AdminPricesService, useValue: succeeding(AdminPricesService, { list: async () => [] }) },
         { provide: BillingService, useValue: succeeding(BillingService) },
@@ -227,7 +232,7 @@ describe('the OpenAPI document (L1, P-08)', () => {
       checked.push({ route: `${method.toUpperCase()} ${path}`, documented, answered: res.status });
     }
 
-    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /functions/{id}/event-invoke-config', 'PUT /functions/{id}/event-invoke-config', 'DELETE /functions/{id}/event-invoke-config', 'POST /functions/{id}/url', 'GET /functions/{id}/url', 'PUT /functions/{id}/url', 'DELETE /functions/{id}/url', 'GET /functions/{id}/url/domains', 'POST /functions/{id}/url/domains', 'POST /functions/{id}/url/domains/{domain}/verify', 'DELETE /functions/{id}/url/domains/{domain}', 'GET /functions/{id}/schedules', 'POST /functions/{id}/schedules', 'GET /functions/{id}/schedules/{scheduleId}', 'PUT /functions/{id}/schedules/{scheduleId}', 'DELETE /functions/{id}/schedules/{scheduleId}', 'GET /schedules/next-runs', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}', 'GET /readyz', 'GET /admin/stats/overview', 'GET /queues', 'POST /queues', 'GET /queues/{name}', 'PATCH /queues/{name}', 'DELETE /queues/{name}', 'POST /queues/{name}/purge', 'POST /queues/{name}/messages', 'POST /queues/{name}/receive', 'DELETE /queues/{name}/messages/{receiptHandle}', 'GET /functions/{id}/event-sources', 'POST /functions/{id}/event-sources', 'GET /event-sources', 'GET /event-sources/{uuid}', 'PATCH /event-sources/{uuid}', 'DELETE /event-sources/{uuid}', 'GET /stacks', 'GET /stacks/{name}', 'PUT /stacks/{name}', 'DELETE /stacks/{name}']));
+    expect(checked.map((r) => r.route)).toEqual(expect.arrayContaining(['POST /functions', 'POST /functions/{id}/invoke', 'GET /functions/{id}/event-invoke-config', 'PUT /functions/{id}/event-invoke-config', 'DELETE /functions/{id}/event-invoke-config', 'POST /functions/{id}/url', 'GET /functions/{id}/url', 'PUT /functions/{id}/url', 'DELETE /functions/{id}/url', 'GET /functions/{id}/url/domains', 'POST /functions/{id}/url/domains', 'POST /functions/{id}/url/domains/{domain}/verify', 'DELETE /functions/{id}/url/domains/{domain}', 'GET /functions/{id}/schedules', 'POST /functions/{id}/schedules', 'GET /functions/{id}/schedules/{scheduleId}', 'PUT /functions/{id}/schedules/{scheduleId}', 'DELETE /functions/{id}/schedules/{scheduleId}', 'GET /schedules/next-runs', 'GET /functions/{id}/logs', 'GET /healthz', 'GET /login', 'GET /usage', 'PUT /admin/settings', 'GET /admin/audit-log', 'POST /admin/accounts/{id}/approve', 'POST /admin/accounts/{id}/credits', 'PUT /admin/accounts/{id}/plan', 'GET /admin/plans', 'PUT /admin/plans/{id}', 'POST /admin/price-books', 'POST /admin/price-books/preview', 'DELETE /admin/price-books/{id}', 'GET /billing/balance', 'GET /billing/transactions', 'POST /billing/pro-formas', 'GET /billing/pro-formas/{id}', 'POST /billing/pro-formas/{id}/cancel', 'POST /admin/bank-transfers', 'POST /admin/payments/{id}/cancel', 'PUT /admin/payments/{id}/withholding-certificate', 'GET /billing/invoices', 'GET /billing/invoices/{id}/pdf', 'GET /billing/statements/{month}/pdf', 'GET /admin/invoices/drafts', 'POST /admin/invoices/issue', 'GET /admin/invoices', 'GET /admin/invoices/{id}/pdf', 'POST /admin/invoices/{id}/credit-notes', 'GET /admin/search', 'GET /admin/functions/{id}', 'POST /admin/functions/{id}/code', 'POST /admin/functions/{id}/invocations/{invocationId}', 'POST /admin/functions/{id}/logs', 'GET /functions/{id}/metrics', 'GET /metrics', 'GET /notifications/webhook-secret', 'POST /notifications/webhook-secret/rotate', 'POST /notifications/test', 'GET /notifications/deliveries', 'GET /alarms', 'POST /alarms', 'GET /alarms/{id}', 'PUT /alarms/{id}', 'DELETE /alarms/{id}', 'GET /readyz', 'GET /admin/stats/overview', 'GET /queues', 'POST /queues', 'GET /queues/{name}', 'PATCH /queues/{name}', 'DELETE /queues/{name}', 'POST /queues/{name}/purge', 'POST /queues/{name}/messages', 'POST /queues/{name}/receive', 'DELETE /queues/{name}/messages/{receiptHandle}', 'GET /functions/{id}/event-sources', 'POST /functions/{id}/event-sources', 'GET /event-sources', 'GET /event-sources/{uuid}', 'PATCH /event-sources/{uuid}', 'DELETE /event-sources/{uuid}', 'GET /stacks', 'GET /stacks/{name}', 'PUT /stacks/{name}', 'DELETE /stacks/{name}']));
     // The scaler's per-minute table answered GET /metrics/:functionId; the metrics now come from the usage records.
     expect(checked.map((r) => r.route)).not.toContain('GET /metrics/{functionId}');
     // Invoke answers each of its invocation types with its own status, which the next test checks.

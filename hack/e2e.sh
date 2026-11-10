@@ -156,6 +156,8 @@ sha256_of() { python3 -c 'import base64, hashlib, sys; print(base64.b64encode(ha
 
 # env_q <sql>: what FF's database holds, read with the stack's own PostgreSQL.
 env_q() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -tA -c "$1"; }
+# new_trace: a trace ID of the run's own, as AWS X-Ray makes one: 1-, the time in 8 hex digits, -, 24 random ones.
+new_trace() { printf '1-%08x-%s' "$(date +%s)" "$(head -c 12 /dev/urandom | od -An -tx1 | tr -d ' \n')"; }
 
 echo_code='export const handler = async (event: unknown) => ({ event });'
 
@@ -1132,6 +1134,26 @@ env "${clients_env[@]}" QUEUE_ARN="arn:aws:sqs:tn-tunis-1:$ver:e2e-boto3-orders"
   "$(boto3_python)" "$FF_REPO_ROOT/hack/lib/lambda-clients/boto3_checks.py" >"$work/lambda-boto3.jsonl" 2>"$work/lambda-boto3.log" || true
 client_checks "$work/lambda-boto3.jsonl" 19
 for queue_of in sdk boto3; do as_ver DELETE "/queues/e2e-$queue_of-orders" >/dev/null; done
+# Inside a function, AWS's SDKs pass its trace on in X-Amzn-Trace-Id, from _X_AMZN_TRACE_ID, as Lambda's recursion
+# detection has them do; the AWS CLI's own botocore doesn't. A call made so is in that trace.
+sdk_trace="$(new_trace)"
+boto3_trace="$(new_trace)"
+sdk_called="$(env "${clients_env[@]}" AWS_LAMBDA_FUNCTION_NAME=e2e-caller _X_AMZN_TRACE_ID="Root=$sdk_trace;Parent=53995c3f42cd8ad8;Sampled=0" \
+  MODULES="$lambda_clients/node_modules" node --input-type=module -e '
+import { createRequire } from "node:module";
+const { LambdaClient, InvokeCommand } = createRequire(`${process.env.MODULES}/`)("@aws-sdk/client-lambda");
+const credentials = { accessKeyId: process.env.KEY, secretAccessKey: process.env.SECRET };
+const client = new LambdaClient({ endpoint: process.env.ENDPOINT, region: "tn-tunis-1", credentials, maxAttempts: 1 });
+console.log((await client.send(new InvokeCommand({ FunctionName: process.env.OTHER_FUNCTION, Payload: Buffer.from("{}") }))).StatusCode);' \
+  2>>"$work/lambda-sdk.log")"
+boto3_called="$(env "${clients_env[@]}" AWS_LAMBDA_FUNCTION_NAME=e2e-caller _X_AMZN_TRACE_ID="Root=$boto3_trace;Parent=53995c3f42cd8ad8;Sampled=0" \
+  "$(boto3_python)" -I -c '
+import os, boto3
+client = boto3.client("lambda", endpoint_url=os.environ["ENDPOINT"], region_name="tn-tunis-1", aws_access_key_id=os.environ["KEY"], aws_secret_access_key=os.environ["SECRET"])
+print(client.invoke(FunctionName=os.environ["OTHER_FUNCTION"], Payload=b"{}")["StatusCode"])' 2>>"$work/lambda-boto3.log")"
+check "inside a function, AWS's SDKs pass its trace on from _X_AMZN_TRACE_ID, which Lambda's Invoke reads: each call in its trace" \
+  "200 e2e-versioned api 200 e2e-versioned api" \
+  "$sdk_called $(as_ver GET "/traces/$sdk_trace" | jq -r '"\(.calls[0].functionName) \(.calls[0].source)"') $boto3_called $(as_ver GET "/traces/$boto3_trace" | jq -r '"\(.calls[0].functionName) \(.calls[0].source)"')"
 }
 section_def lambda_sdks section_lambda_sdks lambda_changes budget=60
 
@@ -1340,11 +1362,15 @@ section_def from_package section_from_package package budget=30
 section_environment() {
 section "environment variables"
 # A variable of its own for the function, as each section's: the usage section reads $python_id, the Python function's.
-reader='export async function handler() { return { table: process.env.TABLE ?? null, tz: process.env.TZ }; }'
+reader='export async function handler() { return { table: process.env.TABLE ?? null, tz: process.env.TZ, trace: process.env._X_AMZN_TRACE_ID }; }'
 created="$(http POST /functions "$(jq -n --arg code "$reader" '{name: "e2e-environment", runtime: "nodejs", code: $code, memory: 128, timeout: 5, environment: {TABLE: "orders"}}')")"
 check "a function created with a variable answers with it" "201 ACTIVE orders" "$(status) $(jq -r '"\(.status) \(.environment.TABLE)"' <<<"$created")"
 env_fn="$(jq -r .id <<<"$created")"
 check "the function reads it, in UTC by default" "orders UTC" "$(http POST "/functions/$env_fn/invoke" '{"input":{}}' | jq -r '"\(.output.table) \(.output.tz)"')"
+env_trace="$(new_trace)"
+check "  ... and its call's trace in _X_AMZN_TRACE_ID, as Lambda sets it: the caller's Root, a Parent of the call's own, Sampled=0" true \
+  "$(http POST "/functions/$env_fn/invoke" '{"input":{}}' -H "X-Amzn-Trace-Id: Root=$env_trace" |
+    jq -r --arg root "$env_trace" '.output.trace | test("^Root=" + $root + ";Parent=[0-9a-f]{16};Sampled=0$")')"
 check "GET answers with it; the list doesn't load it" "orders null" \
   "$(http GET "/functions/$env_fn" | jq -r .environment.TABLE) $(http GET /functions | jq -r --arg id "$env_fn" '.[] | select(.id == $id) | .environment')"
 http PUT "/functions/$env_fn" '{"environment": {"TABLE": "invoices", "TZ": "Africa/Tunis"}}' >/dev/null
@@ -1374,7 +1400,8 @@ section "secrets"
 sec_reader='import os
 
 def handler(event, context):
-    return {"user": os.environ.get("DB_USER"), "password": os.environ.get("DB_PASSWORD"), "token": os.environ.get("API_TOKEN")}
+    return {"user": os.environ.get("DB_USER"), "password": os.environ.get("DB_PASSWORD"), "token": os.environ.get("API_TOKEN"),
+            "trace": os.environ.get("_X_AMZN_TRACE_ID")}
 '
 created="$(http POST /functions "$(jq -n --arg code "$sec_reader" '{name: "e2e-secrets", runtime: "python", code: $code, memory: 128, timeout: 5,
   environment: {DB_USER: "ff"}, secrets: {DB_PASSWORD: "e2e-first-password"}}')")"
@@ -1383,6 +1410,10 @@ check "a function created with a secret answers with its variable, never the sec
 sec_fn="$(jq -r .id <<<"$created")"
 check "the Python function reads both, as variables" "ff e2e-first-password null" \
   "$(http POST "/functions/$sec_fn/invoke" '{"input":{}}' | jq -r '"\(.output.user) \(.output.password) \(.output.token)"')"
+sec_trace="$(new_trace)"
+check "  ... and its call's trace in _X_AMZN_TRACE_ID, as Lambda's Python runtime sets it" true \
+  "$(http POST "/functions/$sec_fn/invoke" '{"input":{}}' -H "X-Amzn-Trace-Id: Root=$sec_trace" |
+    jq -r --arg root "$sec_trace" '.output.trace | test("^Root=" + $root + ";Parent=[0-9a-f]{16};Sampled=0$")')"
 http GET "/functions/$sec_fn/secrets" >/dev/null
 check "GET .../secrets names it, with when it was set, never its value" '200 ["DB_PASSWORD"] true 0' \
   "$(status) $(jq -c '[.secrets[].name]' "$work/body") $(jq -r '.secrets[0].updatedAt | test("^20[0-9-]{8}T")' "$work/body") $(grep -c e2e-first-password "$work/body")"
@@ -1448,7 +1479,7 @@ url_code='export async function handler(event: any) {
       method: event.requestContext.http.method, path: event.rawPath, query: event.queryStringParameters ?? null,
       cookies: event.cookies ?? [], body: event.body ?? null, base64: event.isBase64Encoded, auth: event.headers.authorization ?? null,
       account: event.requestContext.accountId, requestId: event.requestContext.requestId, domain: event.requestContext.domainName,
-      caller: event.requestContext.authorizer?.iam ?? null,
+      caller: event.requestContext.authorizer?.iam ?? null, trace: event.headers["x-amzn-trace-id"] ?? null,
     }),
   };
 }'
@@ -1478,6 +1509,13 @@ check "GET with a query reaches the function as AWS Lambda's event, anonymous, a
 check "the answer names the call, as the event does: the invocation's ID" true \
   "$(jq -r --arg id "$(url_header x-amzn-requestid)" '.requestId == $id and ($id | test("^[0-9a-f-]{36}$"))' <<<"$answered")"
 url_call="$(url_header x-amzn-requestid)"
+check "  ... and its trace, a new one, as AWS X-Ray writes one" true "$([[ $(url_header x-amzn-trace-id) =~ ^Root=1-[0-9a-f]{8}-[0-9a-f]{24}$ ]] && echo true || echo false)"
+url_trace="$(new_trace)"
+traced="$(at_url GET /traced -H "X-Amzn-Trace-Id: Root=$url_trace;Parent=53995c3f42cd8ad8;Sampled=1")"
+check "the caller's X-Amzn-Trace-Id names the call's trace: given back, and passed on to the function as sent" \
+  "Root=$url_trace Root=$url_trace;Parent=53995c3f42cd8ad8;Sampled=1" "$(url_header x-amzn-trace-id) $(jq -r .trace <<<"$traced")"
+check "  ... which GET /traces reads: the URL's call of its function" "1 url e2e-url" \
+  "$(http GET "/traces/$url_trace" | jq -r '.calls | "\(length) \(.[0].source) \(.[0].functionName)"')"
 check "a JSON POST comes as text" '200 {"body":"{\"order\":7}","base64":false}' \
   "$(url_status) $(at_url POST /orders -H 'content-type: application/json' --data '{"order":7}' | jq -c '{body, base64}')"
 printf '\x89PNG\r\n\x1a\n\x00\xff' >"$work/url-bytes"
@@ -1488,6 +1526,7 @@ check "a cookie set by the function, and read back" '200 visited=yes; Path=/ ["v
   "$(url_status) $(url_header set-cookie) $(at_url GET / -H 'cookie: visited=yes' | jq -c .cookies)"
 check "a path the function doesn't know: its own 404" "no such page 404" "$(at_url GET /missing) $(url_status)"
 check "a function's error is a 502, without its message" '502 {"Message":"Internal Server Error"}' "$(at_url GET /fail >/dev/null; url_status) $(cat "$work/url-body")"
+check "  ... which names its trace too" true "$([[ $(url_header x-amzn-trace-id) =~ ^Root=1-[0-9a-f]{8}-[0-9a-f]{24}$ ]] && echo true || echo false)"
 check "a host that is no URL is a 404" "404" \
   "$(curl -s -o /dev/null -w '%{http_code}' --resolve "nothing.fn.localhost:$url_port:127.0.0.1" "http://nothing.fn.localhost:$url_port/")"
 at_url GET / -H 'authorization: Bearer the-callers-own-token' >/dev/null
@@ -1612,6 +1651,8 @@ queued="$(http POST "/functions/$async_fn/invoke" '{"input": {"order": 7}}' -H '
 async_request="$(jq -r .requestId <<<"$queued")"
 check "an Event is kept and answered at once: 202 and its request ID, the answer's own" "202 true" \
   "$(status) $(grep -qi "^x-ff-request-id: $async_request" "$work/async-headers" && echo true || echo false)"
+check "  ... and its trace, a new one, which its answer's X-Amzn-Trace-Id names too" true \
+  "$(grep -qi "^x-amzn-trace-id: Root=$(jq -r .traceId <<<"$queued")" "$work/async-headers" && echo true || echo false)"
 attempt_ended "$async_request" 1
 gone_soon "$async_request"
 check "it runs without anyone waiting, as its first attempt, the function seeing its request ID; it is kept no more" \
@@ -1639,6 +1680,8 @@ check "a failing Event is retried a minute after its first failure, then two min
 check "then dropped after its third attempt, each attempt in the history under its request ID" "1:ERROR 2:ERROR 3:ERROR 0" \
   "$(attempts_of "$failing" | jq -r '[.[] | "\(.attempt):\(.status)"] | join(" ")') $(kept_events "$failing")"
 check "each attempt a call billed on its own" 3 "$(env_q "SELECT count(*) FROM usage_records WHERE request_id = '$failing'")"
+check "  ... and each in the call's trace, which GET /traces reads in time order" "1:ERROR 2:ERROR 3:ERROR" \
+  "$(http GET "/traces/$(attempts_of "$failing" | jq -r '.[0].traceId')" | jq -r '[.calls[] | "\(.attempt):\(.status)"] | join(" ")')"
 aged="$(http POST "/functions/$async_fn/invoke" '{"input": {"fail": true}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
 attempt_ended "$aged" 1
 put_back "$aged" 1
@@ -1666,11 +1709,15 @@ record_of() {
     sleep 1
   done
 }
-succeeded="$(http POST "/functions/$async_fn/invoke" '{"input": {"order": 9}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+async_trace="$(new_trace)"
+succeeded="$(http POST "/functions/$async_fn/invoke" '{"input": {"order": 9}}' -H 'X-Amz-Invocation-Type: Event' -H "X-Amzn-Trace-Id: Root=$async_trace" | jq -r .requestId)"
 check "a call that succeeds hands its destination Lambda's record of it: Success, its event, its answer" \
   "Success arn:aws:lambda:tn-tunis-1:$tenant:function:e2e-async:\$LATEST 1 9 9 200" \
   "$(record_of "$succeeded" | jq -r '"\(.requestContext.condition) \(.requestContext.functionArn) \(.requestContext.approximateInvokeCount) \(.requestPayload.order) \(.responsePayload.got.order) \(.responseContext.statusCode)"')"
 failed="$(http POST "/functions/$async_fn/invoke" '{"input": {"fail": true}}' -H 'X-Amz-Invocation-Type: Event' | jq -r .requestId)"
+check "  ... in the trace its caller named: the call, then its record's, which the destination's call says" \
+  "e2e-async:async:null e2e-async-records:async:$succeeded" \
+  "$(http GET "/traces/$async_trace" | jq -r '[.calls[] | "\(.functionName):\(.source):\(.trigger.recordOf // null)"] | join(" ")')"
 check "one that fails, with no retry, hands it at once its record: RetriesExhausted, the function's error" \
   "RetriesExhausted 1 Unhandled Error asked to fail" \
   "$(record_of "$failed" | jq -r '"\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.responseContext.functionError) \(.responsePayload.errorType) \(.responsePayload.errorMessage)"')"
@@ -1818,6 +1865,8 @@ check "with EventBridge's Scheduled Event: its source, its account, FF's region,
   "$(jq -r '"\(.["detail-type"]) \(.source) \(.account) \(.region) \(.resources[0]) \(.time | test("^[0-9-]{10}T[0-9:]{8}Z$"))"' <<<"$event")"
 check "or the schedule's own input, through the alias it names" '{"report":"daily"} nightly' \
   "$(jq -r '[.[] | select(.input.report != null)][0] | "\(.input | tojson) \(.alias)"' <<<"$first_calls")"
+check "  ... each run in a trace of its own, as EventBridge's, its call naming its schedule" "every-minute:true with-input:true" \
+  "$(jq -r '[.[] | "\(.trigger.schedule):\(.traceId | test("^1-[0-9a-f]{8}-[0-9a-f]{24}$"))"] | sort | join(" ")' <<<"$first_calls")"
 check "each schedule says how its run went, and which call it was; the disabled one never ran" \
   "every-minute success true off null with-input success" \
   "$(jq -r --argjson h "$history" '[.[] | "\(.name) \(.lastOutcome // "null")\(if .name == "every-minute" then " \(.lastRequestId as $id | [$h.invocations[].id] | index($id) != null)" else "" end)"] | join(" ")' <<<"$schedules")"
@@ -1843,6 +1892,7 @@ check "a run that fails is the schedule's call, its outcome on the schedule" "sc
 retry_wait="$(env_q "SELECT extract(epoch FROM r.created_at - f.updated_at) FROM function_invocations f JOIN function_invocations r ON r.request_id = f.request_id AND r.attempt = 2 WHERE f.request_id = '$first_run' AND f.attempt = 1")"
 check "  ... retried as an asynchronous call is, a minute after its failure, under the run's request ID" "a minute schedule:1:ERROR schedule:2:ERROR" \
   "$(awk -v s="${retry_wait:-0}" 'BEGIN { print (s >= 59.5 && s < 70) ? "a minute" : s " s" }') $(run_attempts "$first_run" | cut -d' ' -f1,2)"
+check "  ... in the run's trace, which its retry keeps" 1 "$(env_q "SELECT count(DISTINCT trace_id) FROM function_invocations WHERE request_id = '$first_run' AND trace_id IS NOT NULL")"
 http DELETE "/functions/$failing_sched_fn" >/dev/null
 http DELETE "/functions/$sched_fn" >/dev/null
 check "deleting the function deletes its schedules" 0 "$(env_q "SELECT count(*) FROM schedules WHERE function_id = '$sched_fn'")"
@@ -2232,8 +2282,11 @@ check "  ... once, whatever it runs: another for the same queue names the first,
   "$(status) $(jq -r .message "$work/body" | grep -oE 'Please update or delete the existing mapping with UUID [0-9a-f-]+$')"
 check "  ... which the function's list and the queue's show" "$mapping_id $mapping_id" \
   "$(http GET "/functions/$batch_fn/event-sources" | jq -r '.[0].uuid') $(http GET "/event-sources?eventSourceArn=$(jq -rn --arg arn "$batch_arn" '$arn | @uri')" | jq -r '.[0].uuid')"
-aws_sqs send-message-batch --queue-url "$sqs_endpoint/$tenant/e2e-batch" \
-  --entries "$(jq -cn '[range(1; 6) | {Id: "m\(.)", MessageBody: ({order: ., fail: (. == 2 or . == 4)} | tojson)}]')" >/dev/null
+# The third message carries a trace, as SQS keeps a message's AWSTraceHeader.
+batch_trace="$(new_trace)"
+batch_sent="$(aws_sqs send-message-batch --queue-url "$sqs_endpoint/$tenant/e2e-batch" --entries "$(jq -cn --arg trace "Root=$batch_trace" \
+  '[range(1; 6) | {Id: "m\(.)", MessageBody: ({order: ., fail: (. == 2 or . == 4)} | tojson)}
+    + (if . == 3 then {MessageSystemAttributes: {AWSTraceHeader: {DataType: "String", StringValue: $trace}}} else {} end)]')")"
 # The batch at once, PostgreSQL telling FF; the two that failed back after the 5 s of their visibility timeout, then a
 # second time, and moved by the receive after to the dead-letter queue.
 for _ in $(seq 1 60); do
@@ -2247,6 +2300,9 @@ $(aws_sqs receive-message --queue-url "$sqs_endpoint/$tenant/e2e-batch-dlq" --ma
 $(http GET /queues/e2e-batch | jq '.messages.available + .messages.inFlight') $(http GET /queues/e2e-batch-dlq | jq '.messages.available + .messages.inFlight')"
 check "  ... each call in the function's history as the queue's, through the alias: the batch, then the two again" "2 sqs batch" \
   "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | "\(length) \(.[0].source) \(.[0].alias)"')"
+check "  ... the batch's call in the trace of its message that carried one, as Lambda joins it, naming the queue and that message" \
+  "$batch_trace e2e-batch $(jq -r '.Successful[] | select(.Id == "m3") | .MessageId' <<<"$batch_sent")" \
+  "$(http GET "/functions/$batch_fn/invocations?limit=10" | jq -r '[.invocations[] | select(.source == "sqs")] | last | "\(.traceId) \(.trigger.queue) \(.trigger.messageId)"')"
 http PATCH "/event-sources/$mapping_id" '{"enabled": false}' >/dev/null
 check "a mapping disabled, as Lambda's UpdateEventSourceMapping: nothing read" "200 Disabled" "$(status) $(jq -r .state "$work/body")"
 aws_sqs send-message --queue-url "$sqs_endpoint/$tenant/e2e-batch" --message-body '{"order": 6}' >/dev/null
@@ -2294,6 +2350,8 @@ done
 check "an upload its rule names runs the function without waiting, through the alias the rule names, S3's event its input, the key decoded as Lambda's functions decode it; another, nothing" \
   '1 uploads ["uploads/red cat.jpg"] ObjectCreated:Put 9 e2e-notify' \
   "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq -r '[.invocations[] | select(.source == "async")] | "\(length) \(.[0].alias) \(.[0].output.keys | tojson) \(.[0].output.name) \(.[0].input.Records[0].s3.object.size) \(.[0].input.Records[0].s3.bucket.name)"')"
+check "  ... in a trace of its own, as S3's notifications start one, its call naming the bucket" "true e2e-notify" \
+  "$(http GET "/functions/$upload_fn/invocations?limit=5" | jq -r '[.invocations[] | select(.source == "async")][0] | "\(.traceId | test("^1-[0-9a-f]{8}-[0-9a-f]{24}$")) \(.trigger.bucket)"')"
 s3n s3 rm "s3://e2e-notify/uploads/red cat.jpg" --only-show-errors
 aws_sqs receive-message --queue-url "$removals_url" --wait-time-seconds 10 --attribute-names SenderId >"$work/s3-removed.json"
 check "a deletion puts S3's event in the queue, as S3 sends it to SQS, from the bucket" "ObjectRemoved:Delete uploads%2Fred+cat.jpg removals arn:aws:s3:::e2e-notify" \

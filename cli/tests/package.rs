@@ -110,14 +110,14 @@ fn package_writes_the_same_zip_twice_into_ffs_own_folder_and_says_what_it_holds(
         .arg(&root)
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"^packaged .*orders as .*orders/\.ff/orders\.zip: nodejs, 2 files, \d+ bytes \(\d+ bytes unpacked\)\nhandler: index.handler\nSHA-256: [A-Za-z0-9+/]{43}=\n$").unwrap())
+        .stdout(predicate::str::is_match(r"^packaged .*orders as .*orders[/\\]\.ff[/\\]orders\.zip: nodejs, 2 files, \d+ bytes \(\d+ bytes unpacked\)\nhandler: index.handler\nSHA-256: [A-Za-z0-9+/]{43}=\n$").unwrap())
         .stderr(predicate::str::contains("warning: not packaged: .env, which usually hold secrets: `ff secrets set` gives a function its secrets"));
 
     let zip = std::fs::read(root.join(".ff/orders.zip")).unwrap();
     assert_eq!(names(&zip), ["index.js", "lib/greet.js"]);
     assert_eq!(
         std::fs::read_to_string(root.join(".ff/.gitignore")).unwrap(),
-        "# ff's own: the zips ff package makes\n*\n"
+        "# ff's own: what ff makes here, ff package's zips and ff local's logs and key\n*\n"
     );
 
     // Again, its own zip in the folder: the same bytes.
@@ -175,7 +175,8 @@ fn package_refuses_what_it_cant_package_before_writing() {
 }
 
 /// A folder of stand-ins for npm and python3 that log how and where they ran to
-/// `$FF_TEST_LOG`, and make what npm and pip would; and the PATH that finds them first.
+/// `$FF_TEST_LOG`, and make what npm and pip would; and the PATH that finds them first. Shell
+/// scripts, which Windows doesn't run: the tests that use them are Unix's.
 #[cfg(unix)]
 fn tools() -> (tempfile::TempDir, String) {
     use std::os::unix::fs::PermissionsExt;
@@ -271,7 +272,9 @@ fn pip_installs_wheels_for_the_runtimes_platform_and_pyproject_names_them() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
 
     let ran = std::fs::read_to_string(log.path()).unwrap();
-    assert!(ran.starts_with("python3 -m pip install --quiet --disable-pip-version-check --no-compile --target . --platform manylinux_2_28_x86_64 --implementation cp --python-version 3.13 --only-binary=:all: --upgrade -r requirements.txt in "), "{ran}");
+    // Wheels for glibc 2.28 and each older one, down to manylinux2014's: pip widens no platform it is given but that one.
+    assert!(ran.starts_with("python3 -m pip install --quiet --disable-pip-version-check --no-compile --target . --platform manylinux_2_28_x86_64 --platform manylinux_2_27_x86_64 "), "{ran}");
+    assert!(ran.contains(" --platform manylinux_2_17_x86_64 --platform manylinux2014_x86_64 --implementation cp --python-version 3.13 --only-binary=:all: --upgrade -r requirements.txt in "), "{ran}");
     assert!(ran.ends_with("requirement: requests>=2\n"), "{ran}");
     let packaged: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(packaged["handler"], "lambda_function.lambda_handler");

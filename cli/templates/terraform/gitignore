@@ -3,3 +3,5 @@
 *.tfstate
 *.tfstate.*
 .build/
+# ff's own: ff package's zips.
+.ff/

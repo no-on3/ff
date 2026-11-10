@@ -11,6 +11,7 @@ import { InvocationType } from '../functions/dto/invoke-function.dto';
 import { InvocationSource } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
 import { CallOutcome, CallTarget, FunctionsService } from '../functions/functions.service';
+import { TRACE_HEADER, rootHeader, traceOf } from '../functions/trace';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { refusals } from '../monitoring/operator-metrics';
 import { FunctionRuntimeError, FunctionThrottledError } from '../orchestrator/orchestrator.errors';
@@ -87,6 +88,8 @@ function oneOf<T extends string>(headers: IncomingHttpHeaders, name: string, fie
  * - Refused as Lambda refuses: a function not Active, its state named; past the plan's invocations per second, or
  *   with no instance of the function free, TooManyRequestsException with its Reason; without credit, 429 too, saying
  *   so. Each call counts against the plan's invocations per second, with FF's API's and the URLs'.
+ * - The call is part of the trace X-Amzn-Trace-Id names, which the AWS SDKs send from _X_AMZN_TRACE_ID inside a
+ *   function, else of a new one; an answer that ran or kept the call gives it back in that header.
  */
 @Injectable()
 export class LambdaInvoke implements LambdaHandlers {
@@ -110,6 +113,7 @@ export class LambdaInvoke implements LambdaHandlers {
     const clientContext = clientContextOf(headerOf(headers, 'x-amz-client-context'));
     if (type === InvocationType.EVENT && body.length > MAX_ASYNC_INPUT_BYTES) throw requestEntityTooLarge(MAX_ASYNC_INPUT_BYTES, INVOKE_FUNCTION);
     const payload = payloadOf(body);
+    const traceId = traceOf(headerOf(headers, TRACE_HEADER));
     const target = await this.targetOf(function_, qualifier, caller);
     await this.count(function_, caller);
     if (type === InvocationType.DRY_RUN) return { status: 204 };
@@ -119,14 +123,14 @@ export class LambdaInvoke implements LambdaHandlers {
     }
     if (type === InvocationType.EVENT) {
       // The queue checks the account's credit, as for the API's asynchronous calls.
-      await inCredit(this.asyncInvocations.queue(caller.accountId, function_.id, payload, qualifier));
-      return { status: 202 };
+      await inCredit(this.asyncInvocations.queue(caller.accountId, function_.id, payload, qualifier, traceId));
+      return { status: 202, headers: traced(traceId) };
     }
     await inCredit(this.credit.admit(caller.accountId));
     // Lambda passes a ClientContext on to a call it waits for, and to no other.
     const asks = { logTail, ...(clientContext !== undefined ? { clientContext } : {}) };
-    const outcome = await this.functions.call(function_, payload, { source: InvocationSource.API, requestId: currentRequestId(), target, asks });
-    return answerOf(outcome, target);
+    const outcome = await this.functions.call(function_, payload, { source: InvocationSource.API, requestId: currentRequestId(), target, asks, traceId });
+    return answerOf(outcome, target, traceId);
   }
 
   /** What the qualifier names; a version or an alias the function hasn't as Lambda says it, the function's ARN with it. */
@@ -157,13 +161,17 @@ async function inCredit<T>(checked: Promise<T>): Promise<T> {
   }
 }
 
+/** An answer's header naming the call's trace. */
+const traced = (traceId: string): Record<string, string> => ({ [TRACE_HEADER]: rootHeader(traceId) });
+
 /**
- * A call's answer, as Lambda's: the function's answer, or its error as the call's outcome, 200 both; no instance free,
- * 429, its Reason the function's instances, which its maxInstances bounds as Lambda's reserved concurrency does; the
- * platform's failure, ServiceException, its details in the server's log with the request's ID.
+ * A call's answer, as Lambda's: the function's answer, or its error as the call's outcome, 200 both, with its trace;
+ * no instance free, 429, its Reason the function's instances, which its maxInstances bounds as Lambda's reserved
+ * concurrency does; the platform's failure, ServiceException, its details in the server's log with the request's ID.
  */
-function answerOf(outcome: CallOutcome, target: CallTarget): LambdaAnswer {
+function answerOf(outcome: CallOutcome, target: CallTarget, traceId: string): LambdaAnswer {
   const headers: Record<string, string> = {
+    ...traced(traceId),
     'x-amz-executed-version': target.version ? String(target.version.version) : '$LATEST',
     ...(outcome.logResult !== undefined ? { 'x-amz-log-result': outcome.logResult } : {}),
   };

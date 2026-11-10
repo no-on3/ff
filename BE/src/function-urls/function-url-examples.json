@@ -1,0 +1,297 @@
+{
+  "about": "A function URL as FF answers it: the table the backend's L1 (url-event.spec.ts, url-response.spec.ts, url-cors.spec.ts and function-url.gateway.spec.ts) and ff local's front door read for their tests, so that both answer alike. `events`: a request, the base `request` with the case's fields in its place (`headers` as sent, in order; `body` as UTF-8 text, or `bodyBase64` for bytes; `withoutHeaders`, the credentials that let the caller in; `caller`, who signed), and its event: the whole `event`, or what it `has`, each part compared whole by its path, and what it `lacks`. `answers`: a function's return value, `output`, and its answer (`status`, `headers` in order, `body` as text or `bodyBase64`) or why it can't be one, `refused`. `cors`: a URL's CORS, `configuration` unless a case gives its own `cors`, each case one question (`ask`) and its answer (`is`). `gateway`: a request to a URL (its `cors` or none; its method, path, headers and body), what the call did (`ran`: the function's `output`, else `{\"statusCode\": 200, \"body\": \"ok\"}`, or its `error`, the function's own unless its `kind` is `throttled`), and the answer as sent: its status, the `headers` it names, in lower case, none whose name starts with `noHeadersStartingWith`'s, its body; whether the function was `called`, or what its event `has`; and what the log `says`.",
+  "request": {
+    "method": "POST",
+    "target": "/my/path?parameter1=value1&parameter1=value2&parameter2=value",
+    "headers": [["header1", "value1"], ["header2", "value1"], ["header2", "value2"], ["Cookie", "cookie1; cookie2"], ["User-Agent", "agent"], ["Content-Type", "text/plain"]],
+    "body": "Hello from client!",
+    "sourceIp": "123.123.123.123",
+    "protocol": "HTTP/1.1",
+    "domainName": "0123456789abcdefghijklmnopqrstuv.fn.example.tn",
+    "domainPrefix": "0123456789abcdefghijklmnopqrstuv",
+    "urlId": "0123456789abcdefghijklmnopqrstuv",
+    "requestId": "e1506fd5-9e7b-434f-bd42-4f8fa224b599",
+    "time": "2020-03-12T19:03:58.390Z",
+    "accountId": "anonymous"
+  },
+  "events": {
+    "awsExample": [
+      {
+        "title": "AWS's own example (its documentation, \"Request payload format\")",
+        "request": {},
+        "event": {
+          "version": "2.0",
+          "routeKey": "$default",
+          "rawPath": "/my/path",
+          "rawQueryString": "parameter1=value1&parameter1=value2&parameter2=value",
+          "cookies": ["cookie1", "cookie2"],
+          "headers": { "header1": "value1", "header2": "value1,value2", "user-agent": "agent", "content-type": "text/plain" },
+          "queryStringParameters": { "parameter1": "value1,value2", "parameter2": "value" },
+          "requestContext": {
+            "accountId": "anonymous",
+            "apiId": "0123456789abcdefghijklmnopqrstuv",
+            "authentication": null,
+            "domainName": "0123456789abcdefghijklmnopqrstuv.fn.example.tn",
+            "domainPrefix": "0123456789abcdefghijklmnopqrstuv",
+            "http": { "method": "POST", "path": "/my/path", "protocol": "HTTP/1.1", "sourceIp": "123.123.123.123", "userAgent": "agent" },
+            "requestId": "e1506fd5-9e7b-434f-bd42-4f8fa224b599",
+            "routeKey": "$default",
+            "stage": "$default",
+            "time": "12/Mar/2020:19:03:58 +0000",
+            "timeEpoch": 1584039838390
+          },
+          "body": "Hello from client!",
+          "isBase64Encoded": false
+        }
+      }
+    ],
+    "empty": [
+      {
+        "title": "a GET of the root, without headers or a body",
+        "request": { "method": "GET", "target": "/", "headers": [], "body": "" },
+        "has": { "rawPath": "/", "rawQueryString": "", "isBase64Encoded": false, "headers": {}, "requestContext.http.userAgent": "" },
+        "lacks": ["queryStringParameters", "cookies", "body"]
+      }
+    ],
+    "query": [
+      {
+        "title": "a query with escapes, an empty value and a name alone",
+        "request": { "target": "/search?q=caf%C3%A9+au+lait&empty=&flag" },
+        "has": { "rawQueryString": "q=caf%C3%A9+au+lait&empty=&flag", "queryStringParameters": { "q": "café au lait", "empty": "", "flag": "" } }
+      },
+      {
+        "title": "a query alone, its path the root",
+        "request": { "method": "GET", "target": "?x=1", "headers": [], "body": "" },
+        "has": { "rawPath": "/", "rawQueryString": "x=1", "queryStringParameters": { "x": "1" }, "requestContext.http.path": "/" }
+      }
+    ],
+    "text": [
+      { "title": "application/json", "request": { "headers": [["content-type", "application/json"]], "body": "{\"a\":1}" }, "has": { "body": "{\"a\":1}", "isBase64Encoded": false } },
+      { "title": "application/json; charset=utf-8", "request": { "headers": [["content-type", "application/json; charset=utf-8"]], "body": "{\"city\":\"تونس\"}" }, "has": { "body": "{\"city\":\"تونس\"}", "isBase64Encoded": false } },
+      { "title": "text/html", "request": { "headers": [["content-type", "text/html"]], "body": "<p>é</p>" }, "has": { "body": "<p>é</p>", "isBase64Encoded": false } },
+      { "title": "application/xml", "request": { "headers": [["content-type", "application/xml"]], "body": "<a/>" }, "has": { "body": "<a/>", "isBase64Encoded": false } },
+      { "title": "application/vnd.api+json", "request": { "headers": [["content-type", "application/vnd.api+json"]], "body": "{}" }, "has": { "body": "{}", "isBase64Encoded": false } }
+    ],
+    "base64": [
+      { "title": "an image", "request": { "headers": [["content-type", "image/png"]], "bodyBase64": "iVBORwABAg==" }, "has": { "body": "iVBORwABAg==", "isBase64Encoded": true } },
+      { "title": "a form, which AWS sends in base64 too", "request": { "headers": [["content-type", "application/x-www-form-urlencoded"]], "body": "a=1&b=2" }, "has": { "body": "YT0xJmI9Mg==", "isBase64Encoded": true } },
+      { "title": "no type at all", "request": { "headers": [], "body": "raw bytes" }, "has": { "body": "cmF3IGJ5dGVz", "isBase64Encoded": true } },
+      { "title": "text that is not UTF-8", "request": { "headers": [["content-type", "text/plain"]], "bodyBase64": "//5B" }, "has": { "body": "//5B", "isBase64Encoded": true } }
+    ],
+    "headers": [
+      {
+        "title": "repeated names in any case, per-connection ones, and the credentials that let the caller in",
+        "request": {
+          "headers": [["X-Trace", "a"], ["x-trace", "b"], ["Connection", "keep-alive"], ["Transfer-Encoding", "chunked"], ["Authorization", "Bearer ffk_x"], ["Host", "h"]],
+          "withoutHeaders": ["authorization"]
+        },
+        "has": { "headers": { "x-trace": "a,b", "host": "h" } }
+      }
+    ],
+    "caller": [
+      {
+        "title": "a caller with the account's credentials",
+        "request": { "accountId": "123456789012", "caller": { "accessKey": "a1b2c3", "accountId": "123456789012", "userId": "u-1" } },
+        "has": {
+          "requestContext.accountId": "123456789012",
+          "requestContext.authorizer": {
+            "iam": { "accessKey": "a1b2c3", "accountId": "123456789012", "callerId": "u-1", "cognitoIdentity": null, "principalOrgId": null, "userArn": null, "userId": "u-1" }
+          }
+        }
+      }
+    ]
+  },
+  "answers": {
+    "json": [
+      { "title": "a string, in quotes, as Lambda's documentation shows", "output": "Hello, world!", "answer": { "status": 200, "headers": [["content-type", "application/json"]], "body": "\"Hello, world!\"" } },
+      { "title": "an object without statusCode, as its JSON", "output": { "message": "Hello, world!" }, "answer": { "status": 200, "headers": [["content-type", "application/json"]], "body": "{\"message\":\"Hello, world!\"}" } },
+      { "title": "a number", "output": 42, "answer": { "status": 200, "headers": [["content-type", "application/json"]], "body": "42" } },
+      { "title": "null", "output": null, "answer": { "status": 200, "headers": [["content-type", "application/json"]], "body": "null" } },
+      { "title": "an array", "output": [1, 2], "answer": { "status": 200, "headers": [["content-type", "application/json"]], "body": "[1,2]" } }
+    ],
+    "response": [
+      {
+        "title": "a response's status, headers and body",
+        "output": { "statusCode": 201, "headers": { "Content-Type": "text/plain", "My-Custom-Header": "Custom Value" }, "body": "made" },
+        "answer": { "status": 201, "headers": [["Content-Type", "text/plain"], ["My-Custom-Header", "Custom Value"]], "body": "made" }
+      }
+    ],
+    "untyped": [
+      { "title": "a response without a type or a body", "output": { "statusCode": 204 }, "answer": { "status": 204, "headers": [["content-type", "application/json"]], "body": "" } }
+    ],
+    "cookies": [
+      {
+        "title": "two cookies",
+        "output": { "statusCode": 200, "cookies": ["a=1; Max-Age=60", "b=2"], "body": "" },
+        "answer": { "status": 200, "headers": [["set-cookie", "a=1; Max-Age=60"], ["set-cookie", "b=2"], ["content-type", "application/json"]], "body": "" }
+      }
+    ],
+    "base64": [
+      {
+        "title": "an image in base64",
+        "output": { "statusCode": 200, "headers": { "content-type": "image/png" }, "body": "iVBORw0KGgo=", "isBase64Encoded": true },
+        "answer": { "status": 200, "headers": [["content-type", "image/png"]], "bodyBase64": "iVBORw0KGgo=" }
+      }
+    ],
+    "notText": [
+      {
+        "title": "a body that isn't text, a status in a string, a number, a boolean and a null as headers",
+        "output": { "statusCode": "202", "headers": { "X-Count": 3, "X-Flag": true, "X-None": null }, "body": { "ok": true } },
+        "answer": { "status": 202, "headers": [["X-Count", "3"], ["X-Flag", "true"], ["content-type", "application/json"]], "body": "{\"ok\":true}" }
+      }
+    ],
+    "serverHeaders": [
+      {
+        "title": "the length and the per-connection headers",
+        "output": { "statusCode": 200, "headers": { "Content-Length": "999", "Connection": "close", "Transfer-Encoding": "chunked", "X-Kept": "yes" }, "body": "ok" },
+        "answer": { "status": 200, "headers": [["X-Kept", "yes"], ["content-type", "application/json"]], "body": "ok" }
+      }
+    ],
+    "refused": [
+      { "title": "a status out of range", "output": { "statusCode": 600 }, "refused": "statusCode must be a whole number from 200 to 599; got 600" },
+      { "title": "an interim status, which ends no request", "output": { "statusCode": 101 }, "refused": "statusCode must be a whole number from 200 to 599; got 101" },
+      { "title": "a status that is no number", "output": { "statusCode": "OK" }, "refused": "statusCode must be a whole number from 200 to 599; got \"OK\"" },
+      { "title": "headers that are no object", "output": { "statusCode": 200, "headers": ["x"] }, "refused": "headers must be an object of names to values" },
+      { "title": "a header name with a space", "output": { "statusCode": 200, "headers": { "bad name": "x" } }, "refused": "\"bad name\" is not a header name" },
+      { "title": "a header value with a line break", "output": { "statusCode": 200, "headers": { "X-A": "a\r\nSet-Cookie: x=1" } }, "refused": "the header X-A's value holds a line break or NUL" },
+      { "title": "an object as a header value", "output": { "statusCode": 200, "headers": { "X-A": { "b": 1 } } }, "refused": "the header X-A's value must be a string, a number or a boolean" },
+      { "title": "cookies that are no list of strings", "output": { "statusCode": 200, "cookies": "a=1" }, "refused": "cookies must be a list of strings" }
+    ]
+  },
+  "cors": {
+    "configuration": {
+      "allowOrigins": ["https://app.example.tn"],
+      "allowMethods": ["GET", "POST"],
+      "allowHeaders": ["content-type", "x-request"],
+      "exposeHeaders": ["x-total"],
+      "maxAge": 600
+    },
+    "preflight": [
+      { "ask": "isPreflight", "method": "OPTIONS", "headers": { "origin": "https://a", "access-control-request-method": "POST" }, "is": true },
+      { "ask": "isPreflight", "method": "OPTIONS", "headers": { "origin": "https://a" }, "is": false },
+      { "ask": "isPreflight", "method": "GET", "headers": { "origin": "https://a", "access-control-request-method": "POST" }, "is": false }
+    ],
+    "origins": [
+      { "ask": "allowsOrigin", "origin": "https://APP.example.tn", "is": true },
+      { "ask": "allowsOrigin", "origin": "https://evil.example", "is": false },
+      { "ask": "allowsOrigin", "origin": null, "is": false },
+      { "ask": "allowsOrigin", "cors": { "allowOrigins": ["*"] }, "origin": "https://anyone.example", "is": true }
+    ],
+    "allowedPreflight": [
+      {
+        "ask": "preflightHeaders",
+        "origin": "https://app.example.tn",
+        "is": [
+          ["access-control-allow-origin", "https://app.example.tn"],
+          ["vary", "Origin"],
+          ["access-control-allow-methods", "GET,POST"],
+          ["access-control-allow-headers", "content-type,x-request"],
+          ["access-control-max-age", "600"]
+        ]
+      }
+    ],
+    "otherPreflight": [{ "ask": "preflightHeaders", "origin": "https://evil.example", "is": [] }],
+    "credentials": [
+      { "ask": "responseCorsHeaders", "cors": { "allowOrigins": ["*"] }, "origin": "https://a.example", "is": [["access-control-allow-origin", "*"]] },
+      {
+        "ask": "responseCorsHeaders",
+        "cors": { "allowOrigins": ["*"], "allowCredentials": true },
+        "origin": "https://a.example",
+        "is": [["access-control-allow-origin", "https://a.example"], ["vary", "Origin"], ["access-control-allow-credentials", "true"]]
+      }
+    ],
+    "answers": [
+      {
+        "ask": "responseCorsHeaders",
+        "origin": "https://app.example.tn",
+        "is": [["access-control-allow-origin", "https://app.example.tn"], ["vary", "Origin"], ["access-control-expose-headers", "x-total"]]
+      },
+      { "ask": "responseCorsHeaders", "origin": "https://evil.example", "is": [] }
+    ],
+    "corsHeaders": [
+      { "ask": "isCorsHeader", "name": "Access-Control-Allow-Origin", "is": true },
+      { "ask": "isCorsHeader", "name": "content-type", "is": false }
+    ]
+  },
+  "gateway": {
+    "calls": [
+      {
+        "title": "answers 200 with the value's JSON when the function returns no response, as Lambda does",
+        "request": { "method": "GET", "path": "/" },
+        "ran": { "output": "Hello" },
+        "answer": { "status": 200, "headers": { "content-type": "application/json" }, "body": "\"Hello\"" }
+      },
+      {
+        "title": "answers 502 when the call fails, never with the function's error, which is its account's to read",
+        "request": { "method": "GET", "path": "/" },
+        "ran": { "error": { "type": "Error", "message": "database password is hunter2" } },
+        "answer": { "status": 502, "body": "{\"Message\":\"Internal Server Error\"}" }
+      },
+      {
+        "title": "answers 429 when no instance was free in time, which the caller may retry",
+        "request": { "method": "GET", "path": "/" },
+        "ran": { "error": { "kind": "throttled", "message": "busy" } },
+        "answer": { "status": 429 }
+      },
+      {
+        "title": "answers 502 for a response that can't be sent, and logs why",
+        "request": { "method": "GET", "path": "/" },
+        "ran": { "output": { "statusCode": 200, "headers": { "X-Bad": "a\r\nInjected: 1" } } },
+        "answer": { "status": 502, "noHeadersStartingWith": ["injected"] },
+        "says": "the header X-Bad's value holds a line break or NUL"
+      },
+      {
+        "title": "answers HEAD with the GET's headers and no body",
+        "request": { "method": "HEAD", "path": "/" },
+        "ran": { "output": { "statusCode": 200, "headers": { "content-type": "text/plain" }, "body": "twelve bytes" } },
+        "answer": { "status": 200, "headers": { "content-length": "12" }, "body": "" }
+      }
+    ],
+    "cors": [
+      {
+        "title": "answers an allowed origin's preflight itself, without calling the function",
+        "cors": { "allowOrigins": ["https://app.example.tn"], "allowMethods": ["GET", "POST"], "allowHeaders": ["content-type"], "maxAge": 300 },
+        "request": { "method": "OPTIONS", "path": "/orders", "headers": { "origin": "https://app.example.tn", "access-control-request-method": "POST" } },
+        "answer": {
+          "status": 204,
+          "headers": {
+            "access-control-allow-origin": "https://app.example.tn",
+            "access-control-allow-methods": "GET,POST",
+            "access-control-allow-headers": "content-type",
+            "access-control-max-age": "300",
+            "vary": "Origin"
+          }
+        },
+        "called": false
+      },
+      {
+        "title": "answers another origin's preflight without CORS headers, which the browser refuses",
+        "cors": { "allowOrigins": ["https://app.example.tn"], "allowMethods": ["GET", "POST"], "allowHeaders": ["content-type"], "maxAge": 300 },
+        "request": { "method": "OPTIONS", "path": "/", "headers": { "origin": "https://evil.example", "access-control-request-method": "POST" } },
+        "answer": { "status": 204, "noHeadersStartingWith": ["access-control-"] },
+        "called": false
+      },
+      {
+        "title": "puts its headers on the function's answer, in place of the function's own",
+        "cors": { "allowOrigins": ["https://app.example.tn"], "allowMethods": ["GET", "POST"], "allowHeaders": ["content-type"], "maxAge": 300 },
+        "request": { "method": "GET", "path": "/", "headers": { "origin": "https://app.example.tn" } },
+        "ran": { "output": { "statusCode": 200, "headers": { "Access-Control-Allow-Origin": "*", "content-type": "text/plain" }, "body": "ok" } },
+        "answer": { "status": 200, "headers": { "access-control-allow-origin": "https://app.example.tn", "vary": "Origin" } }
+      },
+      {
+        "title": "puts them on a refusal too, which a browser can then read",
+        "cors": { "allowOrigins": ["https://app.example.tn"], "allowMethods": ["GET", "POST"], "allowHeaders": ["content-type"], "maxAge": 300 },
+        "request": { "method": "GET", "path": "/", "headers": { "origin": "https://app.example.tn" } },
+        "ran": { "error": { "type": "Error", "message": "x" } },
+        "answer": { "status": 502, "headers": { "access-control-allow-origin": "https://app.example.tn" } }
+      },
+      {
+        "title": "leaves a preflight to the function when the URL has no CORS configuration",
+        "request": { "method": "OPTIONS", "path": "/", "headers": { "origin": "https://mine.example", "access-control-request-method": "PUT" } },
+        "ran": { "output": { "statusCode": 200, "headers": { "access-control-allow-origin": "https://mine.example" } } },
+        "answer": { "status": 200, "headers": { "access-control-allow-origin": "https://mine.example" } },
+        "called": { "has": { "requestContext.http.method": "OPTIONS" } }
+      }
+    ]
+  }
+}

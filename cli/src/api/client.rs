@@ -2,19 +2,24 @@
 //! and timeouts fit for each call.
 
 use std::io::{BufReader, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use ureq::Agent;
+use ureq::config::ConfigBuilder;
 use ureq::http::Response;
 use ureq::tls::{RootCerts, TlsConfig};
+use ureq::typestate::AgentScope;
 
 use super::error::{api_error, retry_after};
 use super::events::Events;
-use crate::auth;
-use crate::config::{Endpoint, Settings};
+use super::types::Me;
+use crate::auth::{self, Token};
+use crate::config::{Endpoint, Setting, Settings};
 use crate::error::{Error, Kind};
+use crate::login;
 
 /// How long to wait for a connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -22,6 +27,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The longest a read waits on a 429's Retry-After before trying once more.
 const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+/// How the API refuses a user's token with several accounts and none named, before the route (its accounts
+/// service's words).
+const SEVERAL_ACCOUNTS: &str = "This user belongs to several accounts";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
@@ -111,31 +119,52 @@ impl Call {
     }
 }
 
+/// What each of ff's calls is made with, the API's and the login's: ff's user agent, the system's certificates, a
+/// connection within 5 s, and an answer of any status taken as an answer, for the caller to read.
+pub fn agent_config() -> ConfigBuilder<AgentScope> {
+    Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .user_agent(format!("ff-cli/{}", env!("CARGO_PKG_VERSION")))
+        .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
+}
+
+/// Whether a call of this process had an answer from the API, of any status: the update notice follows such a command
+/// alone, so that a command that never left the machine never calls the downloads site either.
+static REACHED: AtomicBool = AtomicBool::new(false);
+
+pub fn reached() -> bool {
+    REACHED.load(Ordering::Relaxed)
+}
+
 pub struct Client {
     agent: Agent,
     endpoint: Endpoint,
     headers: Vec<(&'static str, String)>,
     api_key: bool,
+    /// The account named, and where it was named.
+    account: Option<Setting<String>>,
 }
 
 impl Client {
     /// A client for the settings in effect; refused before any call when there is no token, nor
-    /// a development account.
+    /// a development account. A login's token about to end is renewed first.
     pub fn new(settings: &Settings) -> Result<Client, Error> {
         auth::require_identity(settings)?;
-        let agent = Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(CONNECT_TIMEOUT))
-            .user_agent(format!("ff-cli/{}", env!("CARGO_PKG_VERSION")))
-            .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
-            .build()
-            .into();
-        Ok(Client {
-            agent,
+        let token = login::token_for_call(settings)?;
+        Ok(Client::with_token(settings, token.as_ref()))
+    }
+
+    /// A client that calls with this token, or none, for the accounts the settings name: what `ff login` asks
+    /// before it has a token, and its first call with one.
+    pub fn with_token(settings: &Settings, token: Option<&Token>) -> Client {
+        Client {
+            agent: agent_config().build().into(),
             endpoint: settings.endpoint.value.clone(),
-            headers: auth::identity_headers(settings),
-            api_key: settings.token.as_ref().is_some_and(|token| token.value.is_api_key()),
-        })
+            headers: auth::identity_headers(settings, token),
+            api_key: token.is_some_and(Token::is_api_key),
+            account: settings.account.clone(),
+        }
     }
 
     /// The call's JSON answer.
@@ -167,7 +196,7 @@ impl Client {
             let request_id =
                 response.headers().get("x-ff-request-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
             let body = self.read_body(&mut response)?;
-            return Err(api_error(status, &String::from_utf8_lossy(&body), request_id, self.api_key));
+            return Err(self.refusal(status, &body, request_id));
         }
         Ok(Events::new(BufReader::new(response.into_body().into_reader())))
     }
@@ -206,9 +235,27 @@ impl Client {
             response.headers().get("x-ff-request-id").and_then(|value| value.to_str().ok()).map(str::to_owned);
         let body = self.read_body(&mut response)?;
         if !(200..300).contains(&status) {
-            return Err(api_error(status, &String::from_utf8_lossy(&body), request_id, self.api_key));
+            return Err(self.refusal(status, &body, request_id));
         }
         Ok((status, body))
+    }
+
+    /// The API's refusal as ff's error. A login with several accounts and none named is refused before the route:
+    /// its accounts are listed then, from `GET /me`, so that one can be named. An account named that the login
+    /// doesn't belong to is answered as one that doesn't exist, and said so.
+    fn refusal(&self, status: u16, body: &[u8], request_id: Option<String>) -> Error {
+        let mut error = api_error(status, &String::from_utf8_lossy(body), request_id, self.api_key);
+        if status == 400 && error.message.starts_with(SEVERAL_ACCOUNTS) {
+            if let Ok(me) = self.json::<Me>(&Call::get("/me")) {
+                error.message = auth::several_accounts(&me.accounts);
+            }
+        } else if let Some(account) = &self.account
+            && status == 404
+            && error.message == format!("Account {} not found", account.value)
+        {
+            error.message = auth::not_a_member(account);
+        }
+        error
     }
 
     fn send(&self, call: &Call) -> Result<Response<ureq::Body>, Error> {
@@ -235,7 +282,9 @@ impl Client {
             }
             None => request.send_empty(),
         };
-        sent.map_err(|error| self.transport_error(error, call.timeout))
+        let response = sent.map_err(|error| self.transport_error(error, call.timeout))?;
+        REACHED.store(true, Ordering::Relaxed);
+        Ok(response)
     }
 
     fn read_body(&self, response: &mut Response<ureq::Body>) -> Result<Vec<u8>, Error> {

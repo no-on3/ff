@@ -64,11 +64,22 @@ fn write(folder: &Path, relative: &str, bytes: &[u8], executable: bool) -> Resul
         std::fs::create_dir_all(parent).map_err(failed)?;
     }
     std::fs::write(&path, bytes).map_err(failed)?;
-    #[cfg(unix)]
     if executable {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).map_err(failed)?;
+        mark_as_a_program(&path).map_err(failed)?;
     }
+    Ok(())
+}
+
+/// A script marked as a program, on Unix by its mode.
+#[cfg(unix)]
+fn mark_as_a_program(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+}
+
+/// Windows has no such mark: the export's output says how Git gives one once the folder is committed.
+#[cfg(not(unix))]
+fn mark_as_a_program(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -110,8 +121,12 @@ pub fn run(args: ExportArgs, context: &Context) -> Result<(), Error> {
         write(&args.folder, &exported.code, &zip, false)?;
         files.push(exported.code.clone());
     }
+    let mut programs = Vec::new();
     for file in kit::files(&read, &template, &terraform, &estimate, &read_on) {
         write(&args.folder, &file.path, file.text.as_bytes(), file.executable)?;
+        if file.executable {
+            programs.push(file.path.clone());
+        }
         files.push(file.path);
     }
     let written = Written {
@@ -141,6 +156,12 @@ pub fn run(args: ExportArgs, context: &Context) -> Result<(), Error> {
             text.push_str(&format!(
                 "\nMIGRATION.md lists {} thing(s) the template changes or leaves to you",
                 template.notes.len()
+            ));
+        }
+        if cfg!(windows) && !programs.is_empty() {
+            text.push_str(&format!(
+                "\nWindows has no mark for a program: when you commit the folder, `git add --chmod=+x {}` gives Git's",
+                programs.join(" ")
             ));
         }
         text.push_str(&format!(

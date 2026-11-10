@@ -27,8 +27,9 @@
 #     aws-tools  AWS's tools on the stack: the project ff init --template terraform writes, applied by OpenTofu and by
 #             Terraform's CLI, each pinned, planned again with nothing to change, destroyed; a throttled change retried
 #     images  the platform's images, run as the cluster runs them, and its manifests, without deploying them
-#   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last push's) and the lockfiles,
-#             checked again with the day's advisories, for an image or a package unchanged since its push: nightly
+#   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last security job's) and the
+#             lockfiles, checked again with the day's advisories, for an image or a package unchanged since its push:
+#             nightly
 #   tools     the latest release of each tool the tests pin (the AWS CLI, the SDK for JavaScript, boto3, OpenTofu,
 #             Terraform and its AWS provider, the SAM CLI, Rust's stable toolchain), tried as the pinned ones run,
 #             and what changed said: nightly
@@ -101,12 +102,13 @@ free_ports() {
   return 1
 }
 
-# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, the SAM CLI the unit
-# tests lint the SAM fixtures with, and the AWS tools the ff suite checks an export with. A stage that runs the backend here needs its packages; the images build in Docker
+# What each stage uses that deps installs: the directories npm ci runs in, the ff command's Rust, minisign the release's
+# tests sign with, the SAM CLI the unit tests lint the SAM fixtures with, and the AWS tools the ff suite checks an
+# export with. A stage that runs the backend here needs its packages; the images build in Docker
 # with their own, and npm audit reads the lockfiles.
 declare -A stage_uses=(
-  [static]="BE FE admin runtimes/nodejs rust" [unit]="BE FE admin runtimes/nodejs rust sam" [db]=BE [security]=''
-  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws" [aws-tools]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
+  [static]="BE FE admin runtimes/nodejs rust minisign" [unit]="BE FE admin runtimes/nodejs rust sam" [db]=BE [security]=''
+  [l3]=BE [l4]=BE [l5]=BE [cli]="BE rust aws minisign" [aws-tools]="BE rust" [images]=BE [platform]='' [advisories]='' [tools]=''
 )
 stage_uses[cluster]="${stage_uses[l3]} ${stage_uses[l4]} ${stage_uses[l5]} ${stage_uses[cli]} ${stage_uses[aws-tools]} ${stage_uses[images]}"
 stage_uses[all]="${stage_uses[static]} ${stage_uses[unit]} ${stage_uses[db]} ${stage_uses[security]} ${stage_uses[cluster]}"
@@ -119,6 +121,7 @@ stage_deps() {
     case "$uses" in *" $dir "*) prepare "npm ci in $dir" in_dir "$dir" npm ci --no-audit --no-fund ;; esac
   done
   case "$uses" in *" rust "*) prepare "Rust for the ff command" hack/install-tools.sh rust ;; esac
+  case "$uses" in *" minisign "*) prepare "minisign, pinned and checked" hack/install-tools.sh minisign ;; esac
   case "$uses" in
     *" aws "*) prepare "the SAM CLI, OpenTofu and AWS's provider, pinned and checked" hack/install-tools.sh tofu aws-provider sam ;;
     *" sam "*) prepare "the SAM CLI, pinned and checked" hack/install-tools.sh sam ;;
@@ -146,8 +149,10 @@ gitleaks_history() {
     --config /repo/.gitleaks.toml --gitleaks-ignore-path /repo/.gitleaksignore --redact --no-banner --log-level warn
 }
 
-workflow_lints() { # the CI server's workflow, its run: steps shellchecked
-  docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color=false
+workflow_lints() { # the CI server's workflow, its run: steps shellchecked; and the GitHub Actions example customers copy
+  docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color=false &&
+    docker run --rm --user "$(id -u):$(id -g)" -v "$repo:/repo:ro" -w /repo "$ACTIONLINT_IMAGE" -color=false \
+      examples/ci/github-actions.yml
 }
 
 # Under pipefail, grep -q's exit at its first match fails a writer that is still writing, and a match reads as none:
@@ -184,6 +189,8 @@ stage_static() {
   step "the nightly's SBOMs, the branch's last, against a stand-in gh" hack/test-last-sboms.sh
   step "the nightly's latest tools, compared with the pinned ones, on recordings of its own" hack/test-tools-compare.sh
   step "the resource guard, its limits and the load's off" hack/test-check-resources.sh
+  step "a release's files signed and listed, with a throwaway key" hack/test-release.sh
+  step "the install scripts against a copy of the downloads site, with stand-in builds" hack/test-install.sh
   step "the suites' sections, alone and with what they need, on suites of their own" hack/test-sections.sh
   # shellcheck disable=SC2046 # one argument per file
   step "docs: fences, tables and relative links" python3 hack/check-docs.py $(git ls-files '*.md')
@@ -207,6 +214,8 @@ stage_unit() {
   step "the small app: its handlers, their clients stubbed" node --test examples/orders-app/test/handlers.test.js
   step "ff: unit tests, and its binary's against a scripted API (L1, L2)" in_dir cli cargo test --locked
   step "the SAM fixtures, which sam validate --lint takes, cfn-lint inside it" hack/test-sam-fixtures.sh
+  step "the development server's updater, against a stand-in for GitHub" hack/test-updater.sh
+  step "the status page: its probe against a stand-in for FF behind the server's proxy, then the page" hack/test-status.sh
   step "alert rules and dashboards" hack/k8s/test-monitoring-rules.sh
   step "log collector: configuration and filter" hack/k8s/test-logging-filter.sh
 }
@@ -219,7 +228,10 @@ stage_db() {
   admin="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   s3_key="ci$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   ci_cleanups+=("docker rm -f -v $name $data $s3 $cache >/dev/null 2>&1 || true")
-  docker run -d --name "$name" -e POSTGRES_PASSWORD="$password" -p 127.0.0.1::5432 "$POSTGRES_IMAGE" >/dev/null
+  # A server thrown away after the stage: no commit waits for the disk, which on a spinning one held each suite's 84
+  # migrations past its hook's 20 s.
+  docker run -d --name "$name" -e POSTGRES_PASSWORD="$password" -p 127.0.0.1::5432 "$POSTGRES_IMAGE" \
+    -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
   port="$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')"
   # Customers' database server (ADR 0008), its certificate from a CA of its own, for the suites that make databases.
   docker build -q -t ff-data-db:ci "$repo/deploy/data-db" >/dev/null
@@ -263,8 +275,9 @@ stage_db() {
   docker rm -f -v "$name" "$data" "$s3" "$cache" >/dev/null
 }
 
-# Every image FF builds: the platform's, the runtimes', the edge's, the backup's, and customers' database, cache and
-# mail servers', each with its build arguments. The apps bake their addresses in: any will do for a scan.
+# Every image FF builds: the platform's, the runtimes', the edge's, the backup's, customers' database, cache and mail
+# servers', and the status page's web server, each with its build arguments. The apps bake their addresses in: any
+# will do for a scan.
 apps=(--build-arg VITE_API_URL=https://api.ff.test --build-arg VITE_OIDC_AUTHORITY=https://login.ff.test/realms/ff)
 IMAGES=(
   "ff-backend:ci BE"
@@ -277,6 +290,7 @@ IMAGES=(
   "ff-data-db:ci deploy/data-db"
   "ff-cache:ci deploy/cache"
   "ff-mail:ci deploy/mail"
+  "ff-status-web:ci deploy/dev-server/status/web"
 )
 
 npm_audit() { # <directory>: what ships, high and critical advisories, but those .npmauditignore accepts until a date

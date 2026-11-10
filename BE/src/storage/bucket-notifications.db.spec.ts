@@ -276,7 +276,10 @@ run("buckets' notifications, as S3's, through the S3 front door and FF's API (L2
     await client.send(new PutObjectCommand({ Bucket: photos.name, Key: 'live.txt', Body: 'x' }));
     await frontDoor.notified();
 
-    expect(await db.dataSource.query(`SELECT attributes FROM queue_messages WHERE function_id = $1`, [thumbnails.id])).toEqual([{ attributes: { qualifier: 'live' } }]);
+    // With its bucket, and a trace of its own, as S3's notifications start one.
+    expect(await db.dataSource.query(`SELECT attributes FROM queue_messages WHERE function_id = $1`, [thumbnails.id])).toEqual([
+      { attributes: { qualifier: 'live', origin: 'notification', bucket: photos.name, trace: expect.stringMatching(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/) } },
+    ]);
     await notifications.put(ACCOUNT, photos.name, {});
   });
 

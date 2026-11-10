@@ -10,3 +10,4 @@ Une page par service, pour les clients de FF ; la documentation de référence, 
 - [Le courrier de vos applications](courrier.md), comme Amazon SES.
 - [Des caches](caches.md), comme Amazon ElastiCache.
 - [Partir vers AWS](partir-vers-aws.md), avec `ff export` : le modèle SAM, Terraform, le code et le déroulé du départ.
+- [Les outils du développeur](outils.md) : `ff`, l'installer, se connecter, toute l'application sur votre machine avec `ff local`, les modèles, votre agent de code IA, votre CI, suivre une requête, et la page d'état.

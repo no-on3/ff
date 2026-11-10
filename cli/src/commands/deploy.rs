@@ -322,7 +322,7 @@ pub struct Deploy<'a> {
 pub type Applied<'a> = (&'a str, Vec<&'a str>, Function);
 
 pub fn run(args: DeployArgs, context: &Context) -> Result<(), Error> {
-    if super::stack::is_template(&args.path) {
+    if super::template::is_template(&args.path) {
         return super::stack::deploy(&args, context);
     }
     super::stack::stack_flags(&args)?;

@@ -1,9 +1,16 @@
+/**
+ * The SQS endpoint as AWS's SDK calls it. The requests on the wire that ff local's SQS shares, and its answers, are
+ * sqs-examples.json's `frontDoor`, which its tests read too; what only FF has, its keys past their end, its accounts,
+ * its plan's rate and its credit, the endpoint functions reach in the cluster, stays here.
+ */
 import { GetQueueUrlCommand, ReceiveMessageCommand, SQSClient, SQSServiceException, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ThrottlerStorage } from '@nestjs/throttler';
+import { readFileSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
 import { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { AccountStatus } from '../accounts/entities/account.entity';
 import { AuditService } from '../audit/audit.service';
 import { InsufficientCreditException } from '../billing/credit-policy';
@@ -35,6 +42,23 @@ const ORDERS: Queue = Object.assign(new Queue(), {
 });
 
 type AccountRow = Awaited<ReturnType<StorageDirectory['account']>>;
+
+/** A request on the wire and its answer, as sqs-examples.json writes them: signed by AWS's SDK, or `request` as it is sent. */
+interface Wire {
+  title: string;
+  /** Signed with a key the account hasn't, or with the account's key and another secret; by default its own. */
+  key?: 'another' | 'anotherSecret';
+  operation?: string;
+  input?: Record<string, unknown>;
+  refused?: { status: number; type: string; queryError: string; message: string };
+  request?: { method: string; headers?: Record<string, string>; body?: string };
+  answer?: { status: number; type: string; queryError: string; message: string; headers?: Record<string, string> };
+}
+
+const table = JSON.parse(readFileSync(join(__dirname, 'sqs-examples.json'), 'utf8')) as { frontDoor: Record<string, Wire[]> };
+
+/** The SDK's command for each operation the table's signed requests call. */
+const COMMANDS = { GetQueueUrl: GetQueueUrlCommand, SendMessage: SendMessageCommand, ReceiveMessage: ReceiveMessageCommand };
 
 describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
   let frontDoor: SqsFrontDoor;
@@ -137,6 +161,36 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
     });
   }
 
+  /** The keys the table's `key` names: one the account hasn't, and the account's with another secret. */
+  const KEYS = { another: { id: 'AKFFZZZZZZZZZZZZZZZZ', secret: KEY.secret }, anotherSecret: { id: KEY.id, secret: 'b'.repeat(40) } };
+
+  /**
+   * Each case of the table's group: a signed request's refusal as the SDK names it, the query code its x-amzn-query-error
+   * header gives; or a request as it is sent, its answer's status, the names and message of its body and header, and the
+   * headers the table names. Each is named by its title.
+   */
+  async function answersAsTheTableSays(group: string): Promise<void> {
+    for (const example of table.frontDoor[group]) {
+      if (example.request) {
+        const { status, body, headers } = await raw(example.request);
+        const expected = example.answer!;
+        expect([example.title, { status, type: String(body.__type).replace('com.amazonaws.sqs#', ''), queryError: headers['x-amzn-query-error'], message: body.message }]).toEqual([
+          example.title,
+          { status: expected.status, type: expected.type, queryError: expected.queryError, message: expected.message },
+        ]);
+        expect([example.title, headers]).toEqual([example.title, expect.objectContaining(expected.headers ?? {})]);
+        continue;
+      }
+      const Command = COMMANDS[example.operation as keyof typeof COMMANDS] as unknown as new (input: object) => GetQueueUrlCommand;
+      const { name, code, status, message } = await failure(client(example.key ? KEYS[example.key] : KEY).send(new Command(example.input ?? {})));
+      const refused = example.refused!;
+      expect([example.title, { name, code, status, message }]).toEqual([
+        example.title,
+        { name: refused.type, code: refused.queryError.split(';')[0], status: refused.status, message: refused.message },
+      ]);
+    }
+  }
+
   it("answers a request signed with the account's key, with its request ID, and writes the key's use down, and what it used", async () => {
     const answer = await client().send(new GetQueueUrlCommand({ QueueName: 'orders' }));
     expect(answer.QueueUrl).toBe(URL_);
@@ -169,23 +223,18 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
   });
 
   it("refuses an unknown key, one past its end, and another secret, as SQS names them", async () => {
-    expect(await failure(client({ id: 'AKFFZZZZZZZZZZZZZZZZ', secret: KEY.secret }).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).toMatchObject({
-      name: 'InvalidClientTokenId',
-      status: 403,
-      message: 'The security token included in the request is invalid.',
-    });
+    await answersAsTheTableSays('keys');
+    // A function's key past its end, which only FF has.
     expect(await failure(client({ id: 'AKFFFFFFFFFFFFFFFFFF', secret: KEY.secret }).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).toMatchObject({
       name: 'ExpiredToken',
       status: 403,
       message: 'The security token included in the request is expired',
     });
-    expect(await failure(client({ id: KEY.id, secret: 'b'.repeat(40) }).send(new GetQueueUrlCommand({ QueueName: 'orders' })))).toMatchObject({ name: 'SignatureDoesNotMatch', status: 403 });
   });
 
   it("names a queue that isn't there, or another account's, by SQS's both names for it", async () => {
-    const refused = await failure(client().send(new GetQueueUrlCommand({ QueueName: 'gone' })));
-    expect(refused).toMatchObject({ name: 'QueueDoesNotExist', code: 'AWS.SimpleQueueService.NonExistentQueue', status: 400, message: 'The specified queue does not exist.' });
-    expect(refused.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    await answersAsTheTableSays('notThere');
+    expect((await failure(client().send(new GetQueueUrlCommand({ QueueName: 'gone' })))).requestId).toMatch(/^[0-9a-f-]{36}$/);
     accounts.set(OTHERS.accountId, { ...accounts.get(KEY.accountId), id: OTHERS.accountId } as AccountRow);
     expect((await failure(client(OTHERS).send(new SendMessageCommand({ QueueUrl: URL_, MessageBody: 'not theirs' })))).name).toBe('QueueDoesNotExist');
   });
@@ -222,28 +271,39 @@ describe("queues' SQS endpoint, as AWS's SDK calls it", () => {
     await expect(client().send(new ReceiveMessageCommand({ QueueUrl: URL_ }))).resolves.toMatchObject({ $metadata: { httpStatusCode: 200 } });
   });
 
+  it("keeps the X-Amzn-Trace-Id that AWS's SDK sends inside a function with the message, in its AWSTraceHeader, as SQS does", async () => {
+    const traced = client();
+    // A function's own two lines, as FF's templates have them: Lambda's recursion detection does it on AWS.
+    const header = 'Root=1-6730a1f2-0123456789abcdef01234567;Parent=53995c3f42cd8ad8;Sampled=0';
+    traced.middlewareStack.add(
+      (next) => (args) => {
+        (args.request as { headers: Record<string, string> }).headers['x-amzn-trace-id'] = header;
+        return next(args);
+      },
+      { step: 'build' },
+    );
+
+    await traced.send(new SendMessageCommand({ QueueUrl: URL_, MessageBody: 'traced' }));
+
+    expect(queues.send).toHaveBeenCalledWith(
+      ORDERS,
+      [expect.objectContaining({ body: 'traced', meta: expect.objectContaining({ systemAttributes: { AWSTraceHeader: { DataType: 'String', StringValue: 'Root=1-6730a1f2-0123456789abcdef01234567' } } }) })],
+      expect.any(Date),
+    );
+  });
+
   it("refuses a request that isn't signed, with SQS's error and its query code in x-amzn-query-error", async () => {
-    const answer = await raw({ headers: { 'content-type': 'application/x-amz-json-1.0', 'x-amz-target': 'AmazonSQS.ListQueues' }, body: '{}' });
-    expect(answer.status).toBe(403);
-    expect(answer.body).toEqual({ __type: 'com.amazonaws.sqs#MissingAuthenticationToken', message: 'Request is missing Authentication Token' });
-    expect(answer.headers['x-amzn-query-error']).toBe('MissingAuthenticationToken;Sender');
-    expect(answer.headers['content-type']).toBe('application/x-amz-json-1.0');
-    expect(answer.headers['x-amzn-requestid']).toMatch(/^[0-9a-f-]{36}$/);
+    await answersAsTheTableSays('unsigned');
+    const [unsigned] = table.frontDoor.unsigned;
+    expect((await raw(unsigned.request!)).headers['x-amzn-requestid']).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it("answers what isn't SQS's JSON protocol as an operation it doesn't support", async () => {
-    for (const request of [{ method: 'GET' }, { headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'Action=ListQueues' }]) {
-      const answer = await raw(request);
-      expect(answer.status).toBe(400);
-      expect(answer.body.__type).toBe('com.amazonaws.sqs#UnsupportedOperation');
-      expect(answer.headers['x-amzn-query-error']).toBe('AWS.SimpleQueueService.UnsupportedOperation;Sender');
-    }
+    await answersAsTheTableSays('protocol');
   });
 
   it('refuses a body over 3 MiB before reading it', async () => {
-    const answer = await raw({ headers: { 'content-type': 'application/x-amz-json-1.0', 'x-amz-target': 'AmazonSQS.SendMessage', 'content-length': String(3 * 1024 * 1024 + 1) } });
-    expect(answer.status).toBe(413);
-    expect(answer.headers.connection).toBe('close');
+    await answersAsTheTableSays('tooLarge');
   });
 
   it('answers an unexpected failure as InternalError, and logs it', async () => {

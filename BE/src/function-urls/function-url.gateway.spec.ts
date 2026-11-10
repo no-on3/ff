@@ -5,8 +5,11 @@
  * call counts against the plan's rate, the function gets AWS Lambda's event,
  * and its return value is the answer; a site's own domain goes to the website
  * server. The services behind it are stand-ins; the rate's count is the
- * throttler's own storage.
+ * throttler's own storage. What a call answers and the URL's CORS are also
+ * function-url-examples.json's, which ff local's front door reads too.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Logger, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ThrottlerStorageService } from '@nestjs/throttler';
@@ -32,13 +35,12 @@ import { FunctionUrlEvent } from './url-event';
 const ACCOUNT = '123456789012';
 const PUBLIC = 'p0000000000000000000000000000001';
 const PRIVATE = 'k0000000000000000000000000000001';
-const WITH_CORS = 'c0000000000000000000000000000001';
 /** The URL of the alias live of fn-p, whose $LATEST URL is PUBLIC. */
 const ALIASED = 'a0000000000000000000000000000001';
 const host = (urlId: string) => `${urlId}.fn.localhost:3001`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-const CORS: UrlCors = { allowOrigins: ['https://app.example.tn'], allowMethods: ['GET', 'POST'], allowHeaders: ['content-type'], maxAge: 300 };
+/** A trace header naming a trace the request started, as AWS X-Ray writes one. */
+const NEW_ROOT = /^Root=1-[0-9a-f]{8}-[0-9a-f]{24}$/;
 
 const urlRow = (urlId: string, authType: UrlAuthType, cors: UrlCors | null = null, alias: string | null = null): FunctionUrl =>
   ({ functionId: `fn-${alias ? 'p' : urlId[0]}`, alias, accountId: ACCOUNT, urlId, authType, cors, invokeMode: UrlInvokeMode.BUFFERED }) as FunctionUrl;
@@ -89,6 +91,18 @@ interface Answer {
   message?: string;
 }
 
+/** A case of the table: a request to a URL, with its CORS or none; what its call did; the answer as sent, and what the call and the log saw. */
+interface GatewayExample {
+  title: string;
+  cors?: UrlCors;
+  request: { method: string; path: string; headers?: Record<string, string>; body?: string };
+  ran?: { output?: unknown; error?: { kind?: 'throttled'; type?: string; message: string } };
+  answer: { status: number; headers?: Record<string, string>; noHeadersStartingWith?: string[]; body?: string };
+  called?: false | { has: Record<string, unknown> };
+  says?: string;
+}
+const table = JSON.parse(readFileSync(join(__dirname, 'function-url-examples.json'), 'utf8')) as { gateway: Record<string, GatewayExample[]> };
+
 describe('the function URL gateway (L1)', () => {
   let gateway: FunctionUrlGateway;
   let port: number;
@@ -115,7 +129,7 @@ describe('the function URL gateway (L1)', () => {
   /** The function's answer to the next calls, and the calls it got. */
   let output: unknown;
   const calls = () =>
-    functions.call.mock.calls as Array<[Function, FunctionUrlEvent, { source: InvocationSource; requestId: string; history: FunctionUrlEvent; target: CallTarget }]>;
+    functions.call.mock.calls as Array<[Function, FunctionUrlEvent, { source: InvocationSource; requestId: string; traceId: string; history: FunctionUrlEvent; target: CallTarget }]>;
   const lastEvent = () => calls().at(-1)![1];
 
   const send = (
@@ -141,6 +155,29 @@ describe('the function URL gateway (L1)', () => {
       request.end(body);
     });
 
+  /** The case's request sent to a URL with its CORS, its call answered as it says; the answer, the call and the log as it says. */
+  async function answersAsItSays(example: GatewayExample): Promise<void> {
+    urls.set(PUBLIC, urlRow(PUBLIC, UrlAuthType.NONE, example.cors ?? null));
+    if (example.ran?.output !== undefined) output = example.ran.output;
+    const error = example.ran?.error;
+    if (error) {
+      const thrown = error.kind === 'throttled' ? new FunctionThrottledError(error.message) : new FunctionRuntimeError(error.type ?? 'Error', error.message);
+      functions.call.mockImplementation(async () => ({ ok: false, invocation: {}, error: thrown, visible: error.message }));
+    }
+
+    const { method, path, headers, body } = example.request;
+    const answer = await send(PUBLIC, path, { method, headers, body });
+
+    const expected = example.answer;
+    expect(answer.status).toBe(expected.status);
+    expect(answer.headers).toMatchObject(expected.headers ?? {});
+    for (const prefix of expected.noHeadersStartingWith ?? []) expect(Object.keys(answer.headers).filter((name) => name.startsWith(prefix))).toEqual([]);
+    if (expected.body !== undefined) expect(answer.body.toString()).toBe(expected.body);
+    if (example.called === false) expect(functions.call).not.toHaveBeenCalled();
+    for (const [at, value] of Object.entries(example.called ? example.called.has : {})) expect(lastEvent()).toHaveProperty(at.split('.'), value);
+    if (example.says) expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.stringContaining(example.says));
+  }
+
   beforeEach(async () => {
     jest.resetAllMocks();
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
@@ -153,7 +190,7 @@ describe('the function URL gateway (L1)', () => {
       response.end(`the site of ${bucket}`);
     });
     websites.allowsCertificate.mockImplementation(async (domain: string) => domain === 'docs.site.localhost');
-    for (const row of [urlRow(PUBLIC, UrlAuthType.NONE), urlRow(PRIVATE, UrlAuthType.AWS_IAM), urlRow(WITH_CORS, UrlAuthType.NONE, CORS), urlRow(ALIASED, UrlAuthType.NONE, null, 'live')]) {
+    for (const row of [urlRow(PUBLIC, UrlAuthType.NONE), urlRow(PRIVATE, UrlAuthType.AWS_IAM), urlRow(ALIASED, UrlAuthType.NONE, null, 'live')]) {
       urls.set(row.urlId, row);
     }
     output = { statusCode: 200, body: 'ok' };
@@ -255,14 +292,6 @@ describe('the function URL gateway (L1)', () => {
     expect(event.headers).toMatchObject({ host: host(PUBLIC), 'user-agent': 'curl/8' });
   });
 
-  it("answers 200 with the value's JSON when the function returns no response, as Lambda does", async () => {
-    output = 'Hello';
-
-    const answer = await send(PUBLIC);
-
-    expect([answer.status, answer.headers['content-type'], answer.body.toString()]).toEqual([200, 'application/json', '"Hello"']);
-  });
-
   it('passes a JSON body as text, and bytes in base64', async () => {
     await send(PUBLIC, '/orders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"item":"قهوة"}' });
     expect([lastEvent().body, lastEvent().isBase64Encoded]).toEqual(['{"item":"قهوة"}', false]);
@@ -282,34 +311,21 @@ describe('the function URL gateway (L1)', () => {
     expect(history).not.toHaveProperty('cookies');
   });
 
-  it("answers 502 when the call fails, never with the function's error, which is its account's to read", async () => {
-    functions.call.mockImplementation(async () => ({
-      ok: false,
-      invocation: {},
-      error: new FunctionRuntimeError('Error', 'database password is hunter2'),
-      visible: 'Error: database password is hunter2',
-    }));
+  it("makes the call part of the trace the caller's X-Amzn-Trace-Id names, else of a new one, and names it on every answer, whatever the function said", async () => {
+    output = { statusCode: 200, headers: { 'x-amzn-trace-id': 'Root=1-00000000-000000000000000000000000' }, body: 'ok' };
 
-    const answer = await send(PUBLIC);
+    const traced = await send(PUBLIC, '/', { headers: { 'x-amzn-trace-id': 'Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1' } });
+    const started = await send(PUBLIC);
+    const refused = await send('z0000000000000000000000000000001');
 
-    expect([answer.status, answer.body.toString()]).toEqual([502, '{"Message":"Internal Server Error"}']);
+    const [first, second] = calls().map(([, , { traceId }]) => traceId);
+    expect([first, `Root=${second}`]).toEqual(['1-5759e988-bd862e3fe1be46a994272793', expect.stringMatching(NEW_ROOT)]);
+    expect([traced, started, refused].map((answer) => answer.headers['x-amzn-trace-id'])).toEqual(['Root=1-5759e988-bd862e3fe1be46a994272793', `Root=${second}`, expect.stringMatching(NEW_ROOT)]);
+    // The caller's header reaches the function as sent, as a function URL passes it.
+    expect(calls()[0][1].headers['x-amzn-trace-id']).toBe('Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1');
   });
 
-  it('answers 429 when no instance was free in time, which the caller may retry', async () => {
-    functions.call.mockImplementation(async () => ({ ok: false, invocation: {}, error: new FunctionThrottledError('busy'), visible: 'busy' }));
-
-    expect((await send(PUBLIC)).status).toBe(429);
-  });
-
-  it("answers 502 for a response that can't be sent, and logs why", async () => {
-    output = { statusCode: 200, headers: { 'X-Bad': 'a\r\nInjected: 1' } };
-
-    const answer = await send(PUBLIC);
-
-    expect(answer.status).toBe(502);
-    expect(answer.headers).not.toHaveProperty('injected');
-    expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.stringContaining("the header X-Bad's value holds a line break or NUL"));
-  });
+  it.each(table.gateway.calls)('$title', answersAsItSays);
 
   it("answers 500 when the gateway itself fails, the details only in the log", async () => {
     functions.call.mockRejectedValue(new Error('connection to the database lost'));
@@ -496,64 +512,8 @@ describe('the function URL gateway (L1)', () => {
     expect(functions.call).not.toHaveBeenCalled();
   });
 
-  it("answers HEAD with the GET's headers and no body", async () => {
-    output = { statusCode: 200, headers: { 'content-type': 'text/plain' }, body: 'twelve bytes' };
-
-    const answer = await send(PUBLIC, '/', { method: 'HEAD' });
-
-    expect([answer.status, answer.headers['content-length'], answer.body.length]).toEqual([200, '12', 0]);
-  });
-
   describe('CORS', () => {
-    it("answers an allowed origin's preflight itself, without calling the function", async () => {
-      const answer = await send(WITH_CORS, '/orders', {
-        method: 'OPTIONS',
-        headers: { origin: 'https://app.example.tn', 'access-control-request-method': 'POST' },
-      });
-
-      expect(answer.status).toBe(204);
-      expect(answer.headers).toMatchObject({
-        'access-control-allow-origin': 'https://app.example.tn',
-        'access-control-allow-methods': 'GET,POST',
-        'access-control-allow-headers': 'content-type',
-        'access-control-max-age': '300',
-        vary: 'Origin',
-      });
-      expect(functions.call).not.toHaveBeenCalled();
-    });
-
-    it("answers another origin's preflight without CORS headers, which the browser refuses", async () => {
-      const answer = await send(WITH_CORS, '/', { method: 'OPTIONS', headers: { origin: 'https://evil.example', 'access-control-request-method': 'POST' } });
-
-      expect(answer.status).toBe(204);
-      expect(Object.keys(answer.headers).filter((name) => name.startsWith('access-control-'))).toEqual([]);
-    });
-
-    it("puts its headers on the function's answer, in place of the function's own", async () => {
-      output = { statusCode: 200, headers: { 'Access-Control-Allow-Origin': '*', 'content-type': 'text/plain' }, body: 'ok' };
-
-      const answer = await send(WITH_CORS, '/', { headers: { origin: 'https://app.example.tn' } });
-
-      expect(answer.headers['access-control-allow-origin']).toBe('https://app.example.tn');
-      expect(answer.headers.vary).toBe('Origin');
-    });
-
-    it('puts them on a refusal too, which a browser can then read', async () => {
-      functions.call.mockImplementation(async () => ({ ok: false, invocation: {}, error: new FunctionRuntimeError('Error', 'x'), visible: 'x' }));
-
-      const answer = await send(WITH_CORS, '/', { headers: { origin: 'https://app.example.tn' } });
-
-      expect([answer.status, answer.headers['access-control-allow-origin']]).toEqual([502, 'https://app.example.tn']);
-    });
-
-    it('leaves a preflight to the function when the URL has no CORS configuration', async () => {
-      output = { statusCode: 200, headers: { 'access-control-allow-origin': 'https://mine.example' } };
-
-      const answer = await send(PUBLIC, '/', { method: 'OPTIONS', headers: { origin: 'https://mine.example', 'access-control-request-method': 'PUT' } });
-
-      expect([answer.status, answer.headers['access-control-allow-origin']]).toEqual([200, 'https://mine.example']);
-      expect(lastEvent().requestContext.http.method).toBe('OPTIONS');
-    });
+    it.each(table.gateway.cors)('$title', answersAsItSays);
   });
 
   describe("an alias's URL", () => {

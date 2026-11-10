@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# hack/release.sh with a throwaway key, made here with a password, in place of the release job's: five stand-in builds
+# signed and listed, each signature verifying against the public key, latest.json naming the version, the commit and
+# each file's SHA-256; and refused, with nothing signed, for a tag that isn't cli/Cargo.toml's version, a build missing
+# or differing from its checksum, a wrong password, and a secret key that isn't the public key's other half. With the
+# runtime images' manifest, the archives it names signed and listed too, and refused when one is missing or isn't a
+# file of images/. The password never in the output. In a few seconds.
+#   hack/test-release.sh
+set -euo pipefail
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo/hack/lib/checks.sh"
+work="$(mktemp -d)"
+on_exit 'rm -rf "$work"'
+minisign="${FF_TOOLS_BIN:-$repo/hack/bin}/minisign"
+[ -x "$minisign" ] || fail "minisign is installed (hack/install-tools.sh minisign)"
+version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$repo/cli/Cargo.toml" | head -1)"
+source "$repo/hack/lib/ff-builds.sh"
+
+password="throwaway-$RANDOM-$RANDOM"
+printf '%s\n%s\n' "$password" "$password" | "$minisign" -G -p "$work/release.pub" -s "$work/release.key" >/dev/null 2>&1
+printf '%s\n%s\n' "$password" "$password" | "$minisign" -G -p "$work/other.pub" -s "$work/other.key" >/dev/null 2>&1
+builds() { # a folder of stand-in builds, each with its .sha256 as hack/build-cli.sh writes it
+  rm -rf "$work/dist" && mkdir "$work/dist"
+  local binary
+  for binary in "${FF_BUILDS[@]}"; do
+    printf 'stand-in for %s\n' "$binary" >"$work/dist/$binary"
+    (cd "$work/dist" && sha256sum "$binary" >"$binary.sha256")
+  done
+}
+release() { # <tag> [<secret key file>] [<password>]: the script's status; its output in $work/out
+  local status=0
+  FF_RELEASE_KEY="$(cat "${2:-$work/release.key}")" FF_RELEASE_KEY_PASSWORD="${3:-$password}" \
+    FF_RELEASE_PUBLIC_KEY="$work/release.pub" "$repo/hack/release.sh" "$work/dist" "$1" 0123456789ab \
+    >"$work/out" 2>&1 || status=$?
+  echo "$status"
+}
+signed() { find "$work/dist" -name '*.minisig' -o -name latest.json -o -name SHA256SUMS | wc -l | tr -d ' '; }
+
+section "a release signed"
+builds
+check "the files signed, each signature verified" \
+  "0 ff $version (0123456789ab): 5 files and latest.json signed in $work/dist, each signature verified" \
+  "$(release "ff-v$version") $(cat "$work/out")"
+verified=0
+for file in "${FF_BUILDS[@]}" latest.json; do
+  "$minisign" -Vqm "$work/dist/$file" -p "$work/release.pub" >/dev/null 2>&1 && verified=$((verified + 1))
+done
+check "minisign verifies all six against the public key" 6 "$verified"
+check "the trusted comment names the file, as minisign signs by default" true \
+  "$(grep -E '^trusted comment: timestamp:[0-9]+	file:latest\.json	hashed$' "$work/dist/latest.json.minisig" >/dev/null && echo true || echo false)"
+expected_files="$(cd "$work/dist" && for binary in "${FF_BUILDS[@]}"; do
+  jq -n --arg name "$binary" --arg sha "$(sha256sum "$binary" | cut -d' ' -f1)" '{($name): $sha}'
+done | jq -cs 'add')"
+check "latest.json: the version, the commit, each file's SHA-256" \
+  "$(jq -cn --arg version "$version" --argjson files "$expected_files" '{version: $version, commit: "0123456789ab", files: $files}')" \
+  "$(jq -c . "$work/dist/latest.json")"
+check "SHA256SUMS lists the five, as sha256sum -c reads it" 5 \
+  "$(cd "$work/dist" && sha256sum -c SHA256SUMS 2>/dev/null | grep -c ': OK$')"
+check "the password never printed" false "$(grep -F "$password" "$work/out" >/dev/null && echo true || echo false)"
+
+section "with the runtime images' archives"
+# A manifest as hack/runtime-images.sh writes it, its archives stand-ins.
+archive="images/ff-runtime-python-3.13-v3-ff-$version.tar.gz"
+manifest="$(jq -cn --arg archive "$archive" \
+  '{python: {image: "ghcr.io/ff/ff-runtime-python", tag: "3.13-v3-ff-0", digest: "sha256:\("0" * 64)", archive: $archive}}')"
+images() { builds && mkdir "$work/dist/images" && printf 'stand-in for an image\n' >"$work/dist/$archive"; }
+images
+check "the archive signed with the builds" \
+  "0 ff $version (0123456789ab): 5 files, 1 runtime images' archives and latest.json signed in $work/dist, each signature verified" \
+  "$(FF_RUNTIME_IMAGES="$manifest" release "ff-v$version") $(cat "$work/out")"
+check "  ... its signature beside it, verified by minisign, its trusted comment naming it" "true true" \
+  "$("$minisign" -Vqm "$work/dist/$archive" -p "$work/release.pub" >/dev/null 2>&1 && echo true || echo false) $(grep -E "^trusted comment: timestamp:[0-9]+	file:${archive#images/}	hashed\$" "$work/dist/$archive.minisig" >/dev/null && echo true || echo false)"
+check "  ... and listed in SHA256SUMS, by its path" 6 "$(cd "$work/dist" && sha256sum -c SHA256SUMS 2>/dev/null | grep -c ': OK$')"
+images
+rm "$work/dist/$archive"
+check "refused when an archive the manifest names is missing" \
+  "1 release refused: $archive, which FF_RUNTIME_IMAGES names, is missing from $work/dist; nothing signed 0" \
+  "$(FF_RUNTIME_IMAGES="$manifest" release "ff-v$version") $(cat "$work/out") $(signed)"
+images
+check "  ... or one outside images/" \
+  "1 release refused: FF_RUNTIME_IMAGES names images/../ff-linux-arm64, not a file of images/; nothing signed 0" \
+  "$(FF_RUNTIME_IMAGES='{"python": {"archive": "images/../ff-linux-arm64"}}' release "ff-v$version") $(cat "$work/out") $(signed)"
+
+section "refused, with nothing signed"
+builds
+check "a tag that isn't cli/Cargo.toml's version" "1 release refused: the tag ff-v99.0.0 names 99.0.0, and cli/Cargo.toml's version is $version; nothing signed 0" \
+  "$(release ff-v99.0.0) $(cat "$work/out") $(signed)"
+check "a tag that isn't ff-v<version>" "1 release refused: the tag v$version isn't ff-v<version>; nothing signed" \
+  "$(release "v$version") $(cat "$work/out")"
+rm "$work/dist/ff-macos-x86_64"
+check "a build missing" "1 release refused: ff-macos-x86_64 or its .sha256 is missing from $work/dist; nothing signed 0" \
+  "$(release "ff-v$version") $(cat "$work/out") $(signed)"
+builds
+echo changed >>"$work/dist/ff-linux-arm64"
+check "a build that differs from its checksum" "1 release refused: ff-linux-arm64 differs from its .sha256; nothing signed 0" \
+  "$(release "ff-v$version") $(cat "$work/out") $(signed)"
+builds
+check "a wrong password" "1 release refused: minisign couldn't sign ff-linux-x86_64 with FF_RELEASE_KEY: a wrong password, or not a secret key; nothing signed 0" \
+  "$(release "ff-v$version" "$work/release.key" wrong) $(cat "$work/out") $(signed)"
+check "a secret key that isn't the public key's other half" "1 release refused: ff-linux-x86_64's signature doesn't verify against $work/release.pub: FF_RELEASE_KEY isn't its secret half; nothing signed 0" \
+  "$(release "ff-v$version" "$work/other.key") $(cat "$work/out") $(signed)"
+check "the tag and the public key alone, checked before the builds" "0 ff $version" \
+  "$(FF_RELEASE_PUBLIC_KEY="$work/release.pub" "$repo/hack/release.sh" --check "ff-v$version" >"$work/out" 2>&1 && echo 0 || echo $?) $(cat "$work/out")"
+check "  ... refused without the public key" "1 release refused: there is no public key at $work/none.pub: the guide's \"A release of ff\" makes one; nothing signed" \
+  "$(FF_RELEASE_PUBLIC_KEY="$work/none.pub" "$repo/hack/release.sh" --check "ff-v$version" >"$work/out" 2>&1 && echo 0 || echo $?) $(cat "$work/out")"
+checks_done release

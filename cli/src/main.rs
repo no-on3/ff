@@ -7,16 +7,26 @@ mod backend_source;
 mod cli;
 mod commands;
 mod config;
+mod dates;
+mod downloads;
 mod error;
 mod local;
-mod local_url;
+mod login;
+mod mcp;
 mod md5;
+mod minisign;
 mod output;
+#[cfg(windows)]
+mod owner_only;
 mod package;
 mod progress;
 mod s3;
 mod sam;
+mod sigv4;
+mod site_files;
+mod stdin;
 mod table;
+mod update;
 
 use std::process::ExitCode;
 
@@ -27,7 +37,14 @@ fn main() -> ExitCode {
     let out = output::Output::new(&cli.global);
     let context = commands::Context { connection: &cli.global.connection, out: &out };
     match commands::run(cli.command, &context) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            if api::reached()
+                && let Ok(settings) = config::load(context.connection)
+            {
+                update::after_command(&out, &settings);
+            }
+            ExitCode::SUCCESS
+        }
         // A reader that stopped reading, as `ff … | head` does, isn't a failure.
         Err(error) if error.is_broken_pipe() => ExitCode::SUCCESS,
         Err(error) => {

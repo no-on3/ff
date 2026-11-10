@@ -21,6 +21,8 @@ const ACCOUNT = '123456789012';
 const DUE = new Date('2026-10-21T08:00:00Z');
 const NOW = new Date('2026-10-21T08:00:03Z');
 const MB = 1024 * 1024;
+/** A trace the run started, as EventBridge's do: its time the tick's, in seconds. */
+const RUN_TRACE = expect.stringMatching(new RegExp(`^1-${Math.floor(NOW.getTime() / 1000).toString(16)}-[0-9a-f]{24}$`));
 
 describe('the scheduler (L1)', () => {
   let scheduler: SchedulerService;
@@ -118,7 +120,8 @@ describe('the scheduler (L1)', () => {
     // Its runs stay on their grid: every 5 minutes from 07:55.
     expect(values).toEqual({ nextRunAt: new Date('2026-10-21T08:05:00Z'), lastRunAt: DUE, lastOutcome: 'running', lastRequestId: expect.any(String) });
     const [queuedFor, requestId, body, expiresAt, options] = queues.sendEvent.mock.calls[0];
-    expect([queuedFor, requestId, options]).toEqual([fn, values.lastRequestId, { manager, attributes: { origin: 'schedule', scheduleId: 's-1' } }]);
+    // The schedule's, which its outcome is told and its call names, in a trace of the run's own.
+    expect([queuedFor, requestId, options]).toEqual([fn, values.lastRequestId, { manager, attributes: { origin: 'schedule', scheduleId: 's-1', scheduleName: 'nightly', trace: RUN_TRACE } }]);
     // Kept as long as any function keeps an asynchronous call, and an hour.
     expect((expiresAt as Date).getTime() - NOW.getTime()).toBe(7 * 3600 * 1000);
     expect(JSON.parse(body as string)).toEqual({
@@ -140,7 +143,7 @@ describe('the scheduler (L1)', () => {
 
     expect(await tick()).toEqual(['running']);
 
-    expect(queues.sendEvent.mock.calls[0][4]).toEqual({ manager, attributes: { origin: 'schedule', scheduleId: 's-1', qualifier: 'live' } });
+    expect(queues.sendEvent.mock.calls[0][4]).toEqual({ manager, attributes: { origin: 'schedule', scheduleId: 's-1', scheduleName: 'nightly', qualifier: 'live', trace: RUN_TRACE } });
   });
 
   it.each([

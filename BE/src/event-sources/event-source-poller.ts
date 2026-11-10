@@ -12,6 +12,7 @@ import { Function, FunctionStatus } from '../functions/entities/function.entity'
 import { FunctionsService } from '../functions/functions.service';
 import { MAX_INPUT_BYTES } from '../functions/limits';
 import { qualifierText } from '../functions/qualifier';
+import { batchTrace } from '../functions/trace';
 import { CustomerQueues, Received } from '../queues/customer-queues';
 import { Queue } from '../queues/queue.entity';
 import { QueueEvents } from '../queues/queue-events';
@@ -305,7 +306,12 @@ export class EventSourcePoller implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`Function ${fn.name} is not ACTIVE any more: ${some} come back after the queue's visibility timeout`);
         return;
       }
-      const outcome = await this.functions.call(fn, { Records: batch.map((item) => item.record) }, { source: InvocationSource.SQS, target });
+      const { traceId, messageId } = batchTrace(batch.map((item) => item.message));
+      const outcome = await this.functions.call(
+        fn,
+        { Records: batch.map((item) => item.record) },
+        { source: InvocationSource.SQS, target, traceId, trigger: { queue: queue.name, messageId } },
+      );
       let handled: Item[] = batch;
       if (!outcome.ok) {
         handled = [];

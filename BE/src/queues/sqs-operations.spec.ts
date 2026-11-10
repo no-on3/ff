@@ -1,5 +1,11 @@
+/**
+ * SQS's operations as FF answers them. The requests and answers that ff local's SQS shares are sqs-examples.json's,
+ * which its tests read too; what only FF has, its keys' kinds and reach, the plan, the audit log, the counts SQS bills
+ * and the tags, stays here.
+ */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { BadRequestException } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { plan } from '../plans/test-fixtures';
@@ -12,14 +18,13 @@ import { QueueStore } from './queue-store';
 import { Queue, QueueKind } from './queue.entity';
 import { DEFAULT_SETTINGS } from './sqs-attributes';
 import { SqsError } from './sqs-error';
-import { attributesMd5, parseReceiptHandle, receiptHandle } from './sqs-messages';
+import { MessageAttribute, messageSize, parseReceiptHandle, receiptHandle } from './sqs-messages';
 import { Caller, SqsOperations } from './sqs-operations';
 
 const BASE = 'http://localhost:3003';
 const REGION = 'tn-tunis-1';
 const ACCOUNT = '000000000001';
 const URL_ = `${BASE}/${ACCOUNT}/orders`;
-const md5 = (text: string) => createHash('md5').update(text, 'utf8').digest('hex');
 
 const ORDERS: Queue = Object.assign(new Queue(), {
   id: 'queue-orders',
@@ -33,6 +38,63 @@ const ORDERS: Queue = Object.assign(new Queue(), {
   updatedAt: new Date('2026-10-23T08:00:00Z'),
 });
 
+/** A message the queue holds before a request, as the table writes it. */
+interface Held {
+  id: string;
+  messageId: string;
+  body: string;
+  meta: { senderId?: string; messageAttributes?: Record<string, MessageAttribute> };
+  sentAt: string;
+  receiveCount: number;
+  firstReceivedAt?: string;
+  visibleAt?: string;
+}
+
+/** A request to an operation and its answer or refusal, as sqs-examples.json writes them. */
+interface Example {
+  title: string;
+  operation: string;
+  input: Record<string, unknown>;
+  queue?: Partial<Queue>;
+  holds?: Held[];
+  at?: string;
+  answer?: Record<string, unknown>;
+  refused?: { status: number; type: string; message: string };
+  kept?: unknown[];
+  notLookedFor?: boolean;
+}
+
+const table = JSON.parse(readFileSync(join(__dirname, 'sqs-examples.json'), 'utf8')) as { operations: Record<string, Example[]> };
+
+/** The table's placeholders filled with this test's endpoint, account, region and key; {x*N}, N x's. */
+function filled<T>(value: T): T {
+  if (typeof value === 'string') {
+    const many = /^\{x\*(\d+)\}$/.exec(value);
+    if (many) return 'x'.repeat(Number(many[1])) as T;
+    return value
+      .replaceAll('{queueUrl}', '{endpoint}/{account}/orders')
+      .replaceAll('{endpoint}', BASE)
+      .replaceAll('{account}', ACCOUNT)
+      .replaceAll('{region}', REGION)
+      .replaceAll('{keyId}', 'AKFFAAAAAAAAAAAAAAAA') as T;
+  }
+  if (Array.isArray(value)) return value.map(filled) as T;
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, filled(item)])) as T;
+  return value;
+}
+
+/** An answer with each {messageId} the ID of the message kept, in order. */
+function withIds(value: unknown, sent: Outgoing[]): unknown {
+  let next = 0;
+  const each = (item: unknown): unknown => {
+    if (item === '{messageId}') return sent[next++]?.messageId;
+    if (Array.isArray(item)) return item.map(each);
+    if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, inner]) => [key, each(inner)]));
+    return item;
+  };
+  return each(value);
+}
+
 const received = (n: number, extra: Partial<Received> = {}): Received => ({
   id: String(100 + n),
   messageId: `6b5a8a52-6f0b-4c3e-9d4e-3c4b8f1e2a${String(n).padStart(2, '0')}`,
@@ -45,12 +107,61 @@ const received = (n: number, extra: Partial<Received> = {}): Received => ({
   ...extra,
 });
 
-/** The database's side, as each test sets it: the queues are found by name; what is sent is kept in `sent`. */
-function setup(options: { bytes?: number; receives?: Received[][] } = {}) {
+/**
+ * The messages a table's case holds, as the database would answer for them at its time: a receive takes those that can
+ * be received, the oldest first, each hidden for the visibility timeout and its receive counted; the counts and a
+ * visibility changed as its SQL has them.
+ */
+function heldQueue(holds: Held[], at: string) {
+  const now = Date.parse(at);
+  const messages = holds.map((message) => ({ ...message, visibleAt: Date.parse(message.visibleAt ?? message.sentAt) }));
+  const names = (receipt: { id: string; receiveCount: number; messageId: string }) => (message: (typeof messages)[number]) =>
+    message.id === receipt.id && message.receiveCount === receipt.receiveCount && message.messageId === receipt.messageId;
+  return {
+    receive: (max: number, visibility: number): Received[] =>
+      messages
+        .filter((message) => message.visibleAt <= now)
+        .slice(0, max)
+        .map((message) => {
+          message.receiveCount += 1;
+          message.firstReceivedAt ??= at;
+          message.visibleAt = now + visibility * 1000;
+          return {
+            id: message.id,
+            messageId: message.messageId,
+            body: message.body,
+            meta: message.meta,
+            sentAt: new Date(message.sentAt),
+            receiveCount: message.receiveCount,
+            firstReceivedAt: new Date(message.firstReceivedAt),
+            sizeBytes: messageSize(message.body, message.meta.messageAttributes ?? {}),
+          };
+        }),
+    counts: () => ({
+      visible: messages.filter((message) => message.visibleAt <= now).length,
+      notVisible: messages.filter((message) => message.visibleAt > now && message.receiveCount > 0).length,
+      delayed: messages.filter((message) => message.visibleAt > now && message.receiveCount === 0).length,
+    }),
+    changeVisibility: (receipt: { id: string; receiveCount: number; messageId: string }, timeout: number): boolean => {
+      const message = messages.find((held) => names(receipt)(held) && held.visibleAt > now);
+      if (message) message.visibleAt = now + timeout * 1000;
+      return message !== undefined;
+    },
+  };
+}
+
+/**
+ * The database's side, as each test sets it: the queues are found by name; what is sent is kept in `sent`. A table's
+ * case gives what its queue holds and when it is asked, `holds` and `at`, and its settings, `queue`; another test, what
+ * each receive answers, `receives`.
+ */
+function setup(options: { bytes?: number; receives?: Received[][]; holds?: Held[]; at?: string; queue?: Partial<Queue> } = {}) {
   const sent: Outgoing[] = [];
   const receives = [...(options.receives ?? [])];
+  const held = heldQueue(options.holds ?? [], options.at ?? new Date().toISOString());
+  const orders: Queue = Object.assign(new Queue(), { ...ORDERS, ...options.queue });
   const queues = {
-    find: jest.fn(async (accountId: string, name: string) => (accountId === ACCOUNT && name === 'orders' ? ORDERS : null)),
+    find: jest.fn(async (accountId: string, name: string) => (accountId === ACCOUNT && name === 'orders' ? orders : null)),
     create: jest.fn(async (accountId: string, name: string, settings: object, _plan: object, _region: string, alongside?: (manager: EntityManager, queue: Queue) => Promise<void>) => {
       const queue = Object.assign(new Queue(), { ...ORDERS, id: `queue-${name}`, accountId, name, ...settings });
       await alongside?.({} as EntityManager, queue);
@@ -60,11 +171,11 @@ function setup(options: { bytes?: number; receives?: Received[][] } = {}) {
     list: jest.fn(async () => ({ queues: [ORDERS] })),
     delete: jest.fn(async () => undefined),
     purge: jest.fn(async () => undefined),
-    counts: jest.fn(async () => ({ visible: 3, notVisible: 2, delayed: 1 })),
+    counts: jest.fn(async () => held.counts()),
     send: jest.fn(async (_queue: Queue, messages: Outgoing[]) => void sent.push(...messages)),
-    receive: jest.fn(async () => receives.shift() ?? []),
+    receive: jest.fn(async (_queue: Queue, max: number, visibility: number) => (options.receives ? (receives.shift() ?? []) : held.receive(max, visibility))),
     deleteMessages: jest.fn(async () => undefined),
-    changeVisibility: jest.fn(async () => true),
+    changeVisibility: jest.fn(async (_queue: Queue, receipt: { id: string; receiveCount: number; messageId: string }, timeout: number) => held.changeVisibility(receipt, timeout)),
   };
   const store = { accountBytes: jest.fn(async () => options.bytes ?? 0) };
   const events = { wait: jest.fn(async (): Promise<void> => undefined) };
@@ -115,12 +226,34 @@ async function refusal(promise: Promise<unknown>): Promise<{ type: string; messa
   throw new Error('not refused');
 }
 
+/**
+ * Each case of the table's group, on a queue that holds what the case says: its answer, or its refusal, and what a send
+ * kept, none when refused, each named by its title. Answers each case's stand-ins, for what only FF checks.
+ */
+async function answersAsTheTableSays(group: string): Promise<Array<ReturnType<typeof setup>>> {
+  const ran: Array<ReturnType<typeof setup>> = [];
+  for (const example of table.operations[group]) {
+    const stage = setup({ holds: example.holds, at: example.at, queue: example.queue });
+    ran.push(stage);
+    const call = stage.operations.run(example.operation, filled(example.input), caller());
+    if (example.refused) {
+      expect([example.title, await refusal(call)]).toEqual([example.title, filled(example.refused)]);
+      if (example.notLookedFor) expect([example.title, stage.queues.find.mock.calls]).toEqual([example.title, []]);
+    } else {
+      expect([example.title, await call]).toEqual([example.title, withIds(filled(example.answer), stage.sent)]);
+    }
+    expect([example.title, stage.sent.map(({ messageId, ...kept }) => ({ messageId: /^[0-9a-f-]{36}$/.test(messageId), ...kept }))]).toEqual([
+      example.title,
+      filled(example.kept ?? []).map((kept) => ({ messageId: true, ...(kept as object) })),
+    ]);
+  }
+  return ran;
+}
+
 describe("SQS's operations on an account's queues", () => {
   describe('which operations, for which key', () => {
     it("answers UnsupportedOperation for SQS's operations FF doesn't offer, and for names SQS doesn't have", async () => {
-      const { operations } = setup();
-      expect(await refusal(operations.run('AddPermission', { QueueUrl: URL_ }, caller()))).toMatchObject({ type: 'UnsupportedOperation', message: "FF's queues don't offer AddPermission." });
-      expect((await refusal(operations.run('MakeCoffee', {}, caller()))).type).toBe('UnsupportedOperation');
+      await answersAsTheTableSays('unsupported');
     });
 
     it('lets a read-only key read the queues and receive, but not send, delete or change them', async () => {
@@ -137,30 +270,15 @@ describe("SQS's operations on an account's queues", () => {
 
   describe("a queue's URL", () => {
     it('is <endpoint>/<account>/<name>, and any host reaches it by its path', async () => {
-      const { operations, queues } = setup();
-      for (const url of [URL_, `https://sqs.tn-tunis-1.amazonaws.com/${ACCOUNT}/orders`, `${URL_}/`, `/${ACCOUNT}/orders`]) {
-        await expect(operations.run('GetQueueAttributes', { QueueUrl: url, AttributeNames: ['QueueArn'] }, caller())).resolves.toEqual({
-          Attributes: { QueueArn: 'arn:aws:sqs:tn-tunis-1:000000000001:orders' },
-        });
-      }
-      expect(queues.find).toHaveBeenCalledWith(ACCOUNT, 'orders');
+      for (const { queues } of await answersAsTheTableSays('anyHost')) expect(queues.find.mock.calls).toEqual([[ACCOUNT, 'orders']]);
     });
 
     it("names another account's queue as one that doesn't exist, without looking for it", async () => {
-      const { operations, queues } = setup();
-      expect(await refusal(operations.run('SendMessage', { QueueUrl: `${BASE}/000000000002/orders`, MessageBody: 'x' }, caller()))).toMatchObject({
-        type: 'QueueDoesNotExist',
-        message: 'The specified queue does not exist.',
-      });
-      expect(queues.find).not.toHaveBeenCalled();
-      expect((await refusal(operations.run('SendMessage', { QueueUrl: `${BASE}/${ACCOUNT}/gone`, MessageBody: 'x' }, caller()))).type).toBe('QueueDoesNotExist');
-      expect((await refusal(operations.run('SendMessage', { MessageBody: 'x' }, caller()))).type).toBe('MissingParameter');
+      await answersAsTheTableSays('notThere');
     });
 
     it("answers GetQueueUrl for the account's own queues only", async () => {
-      const { operations } = setup();
-      expect((await refusal(operations.run('GetQueueUrl', { QueueName: 'orders', QueueOwnerAWSAccountId: '000000000002' }, caller()))).type).toBe('QueueDoesNotExist');
-      await expect(operations.run('GetQueueUrl', { QueueName: 'orders', QueueOwnerAWSAccountId: ACCOUNT }, caller())).resolves.toEqual({ QueueUrl: URL_ });
+      await answersAsTheTableSays('queueUrl');
     });
   });
 
@@ -232,33 +350,16 @@ describe("SQS's operations on an account's queues", () => {
   });
 
   describe('SendMessage', () => {
-    const attributes = { color: { DataType: 'String', StringValue: 'red' } };
-
     it('keeps the message, and answers its ID and the MD5 sums of its body and attributes', async () => {
-      const { operations, sent } = setup();
-      const answer = await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'سلام', MessageAttributes: attributes, DelaySeconds: 5 }, caller());
-      expect(answer).toEqual({ MessageId: sent[0].messageId, MD5OfMessageBody: md5('سلام'), MD5OfMessageAttributes: attributesMd5(attributes) });
-      expect(sent).toEqual([
-        { messageId: expect.stringMatching(/^[0-9a-f-]{36}$/), body: 'سلام', meta: { senderId: 'AKFFAAAAAAAAAAAAAAAA', messageAttributes: attributes }, sizeBytes: 8 + 5 + 6 + 3, delaySeconds: 5 },
-      ]);
+      await answersAsTheTableSays('sendKept');
     });
 
     it("takes the queue's delay when the message names none, and refuses one past 15 minutes", async () => {
-      const { operations, sent } = setup();
-      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'later' }, caller());
-      expect(sent[0].delaySeconds).toBe(ORDERS.delaySeconds);
-      expect(await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'later', DelaySeconds: 901 }, caller()))).toMatchObject({
-        type: 'InvalidParameterValue',
-        message: 'Value 901 for parameter DelaySeconds is invalid. Reason: Must be between 0 and 900.',
-      });
+      await answersAsTheTableSays('sendDelay');
     });
 
     it("refuses a message larger than the queue's maximum, and FIFO queues' parameters", async () => {
-      const { operations } = setup();
-      expect((await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x'.repeat(1_048_577) }, caller()))).message).toBe(
-        'One or more parameters are invalid. Reason: Message must be shorter than 1048576 bytes.',
-      );
-      expect((await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'x', MessageGroupId: 'g' }, caller()))).message).toContain('standard queues');
+      await answersAsTheTableSays('sendRefused');
     });
 
     it("refuses a message once the account's messages hold the plan's storage, its asynchronous calls among them", async () => {
@@ -268,77 +369,55 @@ describe("SQS's operations on an account's queues", () => {
       expect(await refusal(operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'abcd' }, caller()))).toMatchObject({ type: 'OverLimit', status: 400 });
       expect(sent).toHaveLength(1);
     });
+
+    it("gives each message without a trace of its own the request's X-Amzn-Trace-Id, as SQS keeps it; a message's own stays", async () => {
+      const { operations, sent } = setup();
+      const traced = caller({ traceHeader: 'Root=1-6730a1f2-0123456789abcdef01234567;Parent=53995c3f42cd8ad8;Sampled=0' });
+      const own = { AWSTraceHeader: { DataType: 'String', StringValue: 'Root=1-6730a1f2-fedcba9876543210fedcba98' } };
+
+      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'a' }, traced);
+      await operations.run('SendMessageBatch', { QueueUrl: URL_, Entries: [{ Id: 'b', MessageBody: 'b' }, { Id: 'c', MessageBody: 'c', MessageSystemAttributes: own }] }, traced);
+      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'd' }, caller({ traceHeader: 'Sampled=1' }));
+      await operations.run('SendMessage', { QueueUrl: URL_, MessageBody: 'e' }, caller());
+
+      expect(sent.map(({ body, meta }) => [body, meta.systemAttributes?.AWSTraceHeader?.StringValue ?? null])).toEqual([
+        ['a', 'Root=1-6730a1f2-0123456789abcdef01234567'],
+        ['b', 'Root=1-6730a1f2-0123456789abcdef01234567'],
+        ['c', 'Root=1-6730a1f2-fedcba9876543210fedcba98'],
+        ['d', null],
+        ['e', null],
+      ]);
+    });
   });
 
   describe('SendMessageBatch', () => {
-    const entries = (n: number) => Array.from({ length: n }, (_, i) => ({ Id: `m${i}`, MessageBody: `batch ${i}` }));
-
     it('keeps every entry in one write, and answers each by its ID', async () => {
-      const { operations, queues, sent } = setup();
-      const answer = await operations.run('SendMessageBatch', { QueueUrl: URL_, Entries: entries(10) }, caller());
+      const [{ queues }] = await answersAsTheTableSays('batchKept');
       expect(queues.send).toHaveBeenCalledTimes(1);
-      expect(sent).toHaveLength(10);
-      expect(answer).toEqual({ Successful: sent.map((message, i) => ({ Id: `m${i}`, MessageId: message.messageId, MD5OfMessageBody: md5(`batch ${i}`) })), Failed: [] });
     });
 
     it("answers an entry SQS would refuse as failed, and keeps the others", async () => {
-      const { operations, sent } = setup();
-      const answer = await operations.run('SendMessageBatch', { QueueUrl: URL_, Entries: [{ Id: 'good', MessageBody: 'fine' }, { Id: 'bad', MessageBody: '' }] }, caller());
-      expect(sent.map((message) => message.body)).toEqual(['fine']);
-      expect(answer.Failed).toEqual([{ Id: 'bad', Code: 'InvalidParameterValue', SenderFault: true, Message: 'The request must contain a non-empty message body.' }]);
+      await answersAsTheTableSays('batchFailedEntry');
     });
 
     it("refuses a batch as SQS does: empty, more than ten, an ID twice or not SQS's, over 1 MiB together", async () => {
-      const { operations } = setup();
-      const type = async (Entries: unknown) => (await refusal(operations.run('SendMessageBatch', { QueueUrl: URL_, Entries }, caller()))).type;
-      expect(await type([])).toBe('EmptyBatchRequest');
-      expect(await type(entries(11))).toBe('TooManyEntriesInBatchRequest');
-      expect(await type([{ Id: 'same', MessageBody: 'a' }, { Id: 'same', MessageBody: 'b' }])).toBe('BatchEntryIdsNotDistinct');
-      expect(await type([{ Id: 'not ok', MessageBody: 'a' }])).toBe('InvalidBatchEntryId');
-      expect(await type([{ Id: 'a', MessageBody: 'x'.repeat(600_000) }, { Id: 'b', MessageBody: 'x'.repeat(600_000) }])).toBe('BatchRequestTooLong');
+      await answersAsTheTableSays('batchRefused');
     });
   });
 
   describe('ReceiveMessage', () => {
     it('answers the messages there are, with their receipt handles and MD5 sums, and no attributes not asked for', async () => {
-      const message = received(1, { meta: { senderId: 'AKFFAAAAAAAAAAAAAAAA', messageAttributes: { color: { DataType: 'String', StringValue: 'red' } } } });
-      const { operations, queues, events } = setup({ receives: [[message]] });
-      const answer = await operations.run('ReceiveMessage', { QueueUrl: URL_, MaxNumberOfMessages: 10, VisibilityTimeout: 45 }, caller());
-      expect(answer).toEqual({
-        Messages: [{ MessageId: message.messageId, ReceiptHandle: receiptHandle({ id: '101', receiveCount: 1, messageId: message.messageId }), MD5OfBody: md5('message 1'), Body: 'message 1' }],
-      });
+      const [{ queues, events }] = await answersAsTheTableSays('received');
       expect(queues.receive).toHaveBeenCalledWith(ORDERS, 10, 45, expect.any(Date));
       expect(events.wait).not.toHaveBeenCalled();
     });
 
     it("answers the system attributes asked for, All or by name, as SQS's newer and older parameters name them", async () => {
-      const message = received(1, { receiveCount: 2 });
-      const all = await setup({ receives: [[message]] }).operations.run('ReceiveMessage', { QueueUrl: URL_, MessageSystemAttributeNames: ['All'] }, caller());
-      expect((all.Messages as Array<{ Attributes: object }>)[0].Attributes).toEqual({
-        SenderId: 'AKFFAAAAAAAAAAAAAAAA',
-        SentTimestamp: String(Date.parse('2026-10-23T08:00:00Z')),
-        ApproximateReceiveCount: '2',
-        ApproximateFirstReceiveTimestamp: String(Date.parse('2026-10-23T08:00:05Z')),
-      });
-      const named = await setup({ receives: [[message]] }).operations.run('ReceiveMessage', { QueueUrl: URL_, AttributeNames: ['ApproximateReceiveCount'] }, caller());
-      expect((named.Messages as Array<{ Attributes: object }>)[0].Attributes).toEqual({ ApproximateReceiveCount: '2' });
+      await answersAsTheTableSays('systemAttributes');
     });
 
     it('answers the message attributes asked for, All, by name or by prefix, and the MD5 sum of those it answers', async () => {
-      const messageAttributes = {
-        'color.main': { DataType: 'String', StringValue: 'red' },
-        'color.edge': { DataType: 'String', StringValue: 'blue' },
-        size: { DataType: 'Number', StringValue: '3' },
-      };
-      const message = received(1, { meta: { messageAttributes } });
-      const receive = async (MessageAttributeNames: string[]) =>
-        ((await setup({ receives: [[message]] }).operations.run('ReceiveMessage', { QueueUrl: URL_, MessageAttributeNames }, caller())).Messages as Array<Record<string, unknown>>)[0];
-      expect((await receive(['All'])).MessageAttributes).toEqual(messageAttributes);
-      const prefixed = await receive(['color.*']);
-      expect(prefixed.MessageAttributes).toEqual({ 'color.main': messageAttributes['color.main'], 'color.edge': messageAttributes['color.edge'] });
-      expect(prefixed.MD5OfMessageAttributes).toBe(attributesMd5({ 'color.main': messageAttributes['color.main'], 'color.edge': messageAttributes['color.edge'] }));
-      expect((await receive(['size'])).MessageAttributes).toEqual({ size: messageAttributes.size });
-      expect(await receive(['weight'])).not.toHaveProperty('MessageAttributes');
+      await answersAsTheTableSays('messageAttributes');
     });
 
     it("waits for the queue's news when none are there and the receive waits, then receives again", async () => {
@@ -364,10 +443,7 @@ describe("SQS's operations on an account's queues", () => {
     });
 
     it("refuses SQS's out-of-range parameters", async () => {
-      const { operations } = setup();
-      for (const input of [{ MaxNumberOfMessages: 11 }, { MaxNumberOfMessages: 0 }, { WaitTimeSeconds: 21 }, { VisibilityTimeout: 43_201 }, { VisibilityTimeout: '30' }]) {
-        expect((await refusal(operations.run('ReceiveMessage', { QueueUrl: URL_, ...input }, caller()))).type).toBe('InvalidParameterValue');
-      }
+      await answersAsTheTableSays('receiveRefused');
     });
   });
 
@@ -375,32 +451,18 @@ describe("SQS's operations on an account's queues", () => {
     const handle = receiptHandle({ id: '101', receiveCount: 1, messageId: '6b5a8a52-6f0b-4c3e-9d4e-3c4b8f1e2a01' });
 
     it("deletes the message its receipt handle names, and refuses a handle no receive gave", async () => {
-      const { operations, queues } = setup();
-      await expect(operations.run('DeleteMessage', { QueueUrl: URL_, ReceiptHandle: handle }, caller())).resolves.toEqual({});
+      const [{ queues }] = await answersAsTheTableSays('deleted');
       expect(queues.deleteMessages).toHaveBeenCalledWith(ORDERS, [parseReceiptHandle(handle)]);
-      expect(await refusal(operations.run('DeleteMessage', { QueueUrl: URL_, ReceiptHandle: 'made-up' }, caller()))).toMatchObject({
-        type: 'ReceiptHandleIsInvalid',
-        message: 'The input receipt handle "made-up" is not a valid receipt handle.',
-      });
     });
 
     it('answers each entry of a batch, a failed one beside the others', async () => {
-      const { operations } = setup();
-      await expect(
-        operations.run('DeleteMessageBatch', { QueueUrl: URL_, Entries: [{ Id: 'a', ReceiptHandle: handle }, { Id: 'b', ReceiptHandle: 'made-up' }] }, caller()),
-      ).resolves.toEqual({
-        Successful: [{ Id: 'a' }],
-        Failed: [{ Id: 'b', Code: 'ReceiptHandleIsInvalid', SenderFault: true, Message: 'The input receipt handle "made-up" is not a valid receipt handle.' }],
-      });
+      const [{ queues }] = await answersAsTheTableSays('deleteBatch');
+      expect(queues.deleteMessages).toHaveBeenCalledWith(ORDERS, [parseReceiptHandle(handle)]);
     });
 
     it('changes a received message\'s visibility, and answers MessageNotInflight for one not received any more', async () => {
-      const { operations, queues } = setup();
-      await expect(operations.run('ChangeMessageVisibility', { QueueUrl: URL_, ReceiptHandle: handle, VisibilityTimeout: 120 }, caller())).resolves.toEqual({});
+      const [{ queues }] = await answersAsTheTableSays('visibility');
       expect(queues.changeVisibility).toHaveBeenCalledWith(ORDERS, parseReceiptHandle(handle), 120, expect.any(Date));
-      queues.changeVisibility.mockResolvedValue(false);
-      expect((await refusal(operations.run('ChangeMessageVisibility', { QueueUrl: URL_, ReceiptHandle: handle, VisibilityTimeout: 120 }, caller()))).type).toBe('MessageNotInflight');
-      expect((await refusal(operations.run('ChangeMessageVisibility', { QueueUrl: URL_, ReceiptHandle: handle }, caller()))).type).toBe('MissingParameter');
     });
   });
 
@@ -511,8 +573,6 @@ describe("SQS's operations on an account's queues", () => {
     const { operations, queues } = setup();
     await expect(operations.run('ListQueues', { QueueNamePrefix: 'ord', MaxResults: 5 }, caller())).resolves.toEqual({ QueueUrls: [URL_] });
     expect(queues.list).toHaveBeenCalledWith(ACCOUNT, 'ord', 5, undefined);
-    await expect(operations.run('GetQueueAttributes', { QueueUrl: URL_, AttributeNames: ['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible'] }, caller())).resolves.toEqual({
-      Attributes: { ApproximateNumberOfMessages: '3', ApproximateNumberOfMessagesNotVisible: '2' },
-    });
+    await answersAsTheTableSays('counts');
   });
 });

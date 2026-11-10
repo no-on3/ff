@@ -1,6 +1,6 @@
 import { In } from 'typeorm';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
-import { Function, FunctionStatus, Runtime } from '../functions/entities/function.entity';
+import { Function, FunctionStatus, Runtime, UpdateStatus } from '../functions/entities/function.entity';
 import { Orchestrator } from '../orchestrator/orchestrator.types';
 import { PlanView } from '../plans/plan-limits';
 import { PlansService } from '../plans/plans.service';
@@ -352,6 +352,14 @@ describe('MetricsService', () => {
       await service.sweepIdleFunctions(Date.now() + 60_000);
 
       expect(orchestrator.readyInstances).not.toHaveBeenCalled();
+      expect(orchestrator.scale).not.toHaveBeenCalled();
+    });
+
+    it("never scales a function to zero while a change of it rolls out, which would pass at zero without trying its code", async () => {
+      functionRepository.find.mockResolvedValue([fn({ updateStatus: UpdateStatus.IN_PROGRESS })]);
+
+      await service.sweepIdleFunctions(now + 3_600_000);
+
       expect(orchestrator.scale).not.toHaveBeenCalled();
     });
 

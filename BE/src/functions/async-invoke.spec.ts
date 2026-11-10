@@ -9,8 +9,12 @@ import {
   isRecorded,
   keptResponse,
   lastResponseOf,
+  notificationAttributes,
   onClaim,
   qualifierOf,
+  recordAttributes,
+  scheduleAttributes,
+  triggerOf,
 } from './async-invoke';
 
 const SENT = new Date('2026-10-23T10:00:00Z');
@@ -27,6 +31,23 @@ describe('asynchronous calls, as AWS Lambda retries them (L1)', () => {
 
     it('keeps the version or the alias the call named, none for $LATEST', () => {
       expect([qualifierOf({ qualifier: 'live', failures: 1 }), qualifierOf({ qualifier: '3' }), qualifierOf({ qualifier: 3 }), qualifierOf(null)]).toEqual(['live', '3', undefined, undefined]);
+    });
+
+    it('keeps what brought the call beside it, which its attempts name: a schedule, a bucket, the call whose record it is', () => {
+      const schedule = scheduleAttributes({ id: 'sched-1', name: 'nightly' });
+      expect(schedule).toEqual({ origin: 'schedule', scheduleId: 'sched-1', scheduleName: 'nightly' });
+      expect(triggerOf({ ...schedule, qualifier: 'live', failures: 1 })).toEqual({ schedule: 'nightly' });
+      expect(triggerOf(notificationAttributes('photos'))).toEqual({ bucket: 'photos' });
+      expect(triggerOf(recordAttributes('req-1'))).toEqual({ recordOf: 'req-1' });
+    });
+
+    it("says nothing of what brought a call of FF's API or Lambda's, nor of a run kept before runs named their schedule", () => {
+      expect([triggerOf(null), triggerOf({ qualifier: 'live' }), triggerOf({ origin: 'schedule', scheduleId: 'sched-1' }), triggerOf({ origin: 'other', bucket: 'x' })]).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      ]);
     });
   });
 

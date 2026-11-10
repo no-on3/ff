@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 # Installs pinned kubectl and k3d into hack/bin/ (git-ignored) after verifying
-# the SHA-256 checksums each project publishes, and the ff command's Rust toolchain
+# the SHA-256 checksums each project publishes (a GitHub release's file through GitHub's API when its address fails), and the ff command's Rust toolchain
 # (cli/rust-toolchain.toml's) through rustup, the PATH's, or one installed into
 # hack/.rust/ (git-ignored), rustup-init's checksum verified too; hack/ci.sh uses
 # it from there. On request, the AWS tools the tests of AWS's way in and out drive:
 # OpenTofu and Terraform's CLI into hack/bin, Terraform's AWS and archive providers,
 # for both, into hack/.terraform/mirror (a directory the CLIs install providers from,
-# in place of a registry), and the SAM CLI into hack/.sam, cfn-lint inside it. Each
-# pinned to a release at least two weeks old when chosen. Idempotent: tools
+# in place of a registry), and the SAM CLI into hack/.sam, cfn-lint inside it; and
+# minisign, which checks and makes the signatures of ff's releases, in Windows's Git bash too; zig, into
+# hack/.zig/ (git-ignored), and cargo-zigbuild, which build ff for Linux and Windows. Each pinned to a release at
+# least two weeks old when chosen. Idempotent: tools
 # already at the pinned version are left alone, and so is a Rust at least as
-# recent where there is no rustup to pin it with. Nothing is installed system-wide.
+# recent where there is no rustup to pin it with. Nothing is installed system-wide. It runs in macOS's own bash, 3.2,
+# as a Mac's build job runs it: the checksums copied here are looked up by functions, as it has no associative arrays.
 # FF_TOOLS_BIN and FF_SAM_DIR put the binaries and the SAM CLI elsewhere, as the nightly's newest tools go into a
 # directory of their own, so that the pinned ones the other stages use stay as they are.
 #   hack/install-tools.sh [kubectl] [k3d] [rust]     (all three without an argument)
 #   hack/install-tools.sh tofu terraform aws-provider archive-provider sam, or aws for the five
+#   hack/install-tools.sh minisign
+#   hack/install-tools.sh zig cargo-zigbuild
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,10 +34,38 @@ ARCHIVE_PROVIDER_VERSION="${ARCHIVE_PROVIDER_VERSION:-2.8.1}"
 SAM_VERSION="${SAM_VERSION:-1.169.0}"
 # The SAM CLI publishes its installers' checksums in its release's notes alone: copied from there, for the version
 # pinned. Another version needs SAM_SHA256, from its own release's notes.
-declare -A SAM_SHA256S=(
-  [1.169.0-linux-amd64]=3e921832e9fb39a6563380afc9855eac6dab163238ef3b2bec4a5ba223e4be8b
-  [1.169.0-linux-arm64]=a11352c4288a32cd75bb21eb9eb2cd7f23eb59384aa1224497e8de9862290d33
-)
+sam_sha256() { # <version>-<os>-<arch>
+  case "$1" in
+    1.169.0-linux-amd64) echo 3e921832e9fb39a6563380afc9855eac6dab163238ef3b2bec4a5ba223e4be8b ;;
+    1.169.0-linux-arm64) echo a11352c4288a32cd75bb21eb9eb2cd7f23eb59384aa1224497e8de9862290d33 ;;
+  esac
+}
+# zig, the C compiler and the linker of ff's builds for Linux and Windows (hack/build-cli.sh), each archive signed with
+# its project's key, ZIG_KEY, as ziglang.org/download gives it: the signature is checked at each install, and the
+# SHA-256s copied here are its index's for the version pinned. Another version or system needs ZIG_SHA256, the same
+# way. It goes into hack/.zig, a version a folder, hack/bin/zig leading to it.
+ZIG_VERSION="${ZIG_VERSION:-0.17.0}"
+ZIG_KEY=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
+zig_sha256() { # <version>-<processor>-<system>
+  case "$1" in
+    0.17.0-x86_64-linux) echo 1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026 ;;
+    0.17.0-aarch64-linux) echo 9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8 ;;
+  esac
+}
+# cargo-zigbuild, cargo's builds with zig as their C compiler and linker; its release publishes each file's checksum.
+CARGO_ZIGBUILD_VERSION="${CARGO_ZIGBUILD_VERSION:-0.24.0}"
+# minisign publishes no checksum file, only each file's signature by its author's key,
+# RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3, as its README gives it: the SHA-256s copied here are those of
+# the files whose signatures were checked against that key when the version was pinned. Another version needs
+# MINISIGN_SHA256, the same way.
+MINISIGN_VERSION="${MINISIGN_VERSION:-0.12}"
+minisign_sha256() { # <version>-<os>
+  case "$1" in
+    0.12-linux) echo 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73 ;;
+    0.12-darwin) echo 89000b19535765f9cffc65a65d64a820f433ef6db8020667f7570e06bf6aac63 ;;
+    0.12-windows) echo 37b600344e20c19314b2e82813db2bfdcc408b77b876f7727889dbd46d539479 ;;
+  esac
+}
 bin_dir="${FF_TOOLS_BIN:-$repo_root/hack/bin}"
 sam_dir="${FF_SAM_DIR:-$repo_root/hack/.sam}"
 mkdir -p "$bin_dir"
@@ -40,6 +73,7 @@ mkdir -p "$bin_dir"
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=darwin ;;
+  MINGW* | MSYS*) os=windows ;; # Git's bash, as GitHub's Windows runners have it: minisign alone
   *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
@@ -51,11 +85,33 @@ esac
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# fetch <url> <file, - for stdout>: a download, retried. A file of a GitHub release that its download address won't
+# serve comes through GitHub's API, which serves the same file: the address has answered 504 for hours for some files
+# while the API gave them. What comes either way is checked against its checksum after.
+fetch() {
+  curl -fsSL --retry 3 -o "$2" "$1" && return 0
+  case "$1" in
+    https://github.com/*/releases/download/*) ;;
+    *) return 1 ;;
+  esac
+  local path="${1#https://github.com/}" repo tag name asset_url
+  repo="${path%%/releases/download/*}"
+  tag="${path#*/releases/download/}"
+  name="${tag#*/}"
+  tag="${tag%%/*}"
+  command -v jq >/dev/null || { echo "$1 failed, and jq, which finds the file in GitHub's API, isn't here" >&2; return 1; }
+  echo "$1 failed: through GitHub's API instead" >&2
+  asset_url="$(curl -fsSL --retry 3 "https://api.github.com/repos/$repo/releases/tags/$tag" |
+    jq -r --arg name "$name" '.assets[] | select(.name == $name) | .url')"
+  [ -n "$asset_url" ] || { echo "$repo's release $tag has no $name in GitHub's API" >&2; return 1; }
+  curl -fsSL --retry 3 -H 'Accept: application/octet-stream' -o "$2" "$asset_url"
+}
+
 # The SHA-256 a project's checksum file gives one of its files: lines of "<sha256>  <file>", the file's name perhaps
 # with a path or a leading *.
 published_sha256() { # <checksum file's URL> <file name>
   local expected
-  expected="$(curl -fsSL --retry 3 "$1" |
+  expected="$(fetch "$1" - |
     awk -v a="$2" '{ f = $2; sub(/^\*/, "", f); n = split(f, p, "/"); if (p[n] == a) { print $1; exit } }')"
   [ -n "$expected" ] || { echo "no checksum for $2 in $1" >&2; return 1; }
   echo "$expected"
@@ -67,6 +123,8 @@ unzip_to() { # <zip> <directory>: with unzip, else bsdtar, which keep the files'
     unzip -q -o "$1" -d "$2"
   elif command -v bsdtar >/dev/null; then
     LC_ALL=C bsdtar -xf "$1" -C "$2"
+  elif [ -x /c/Windows/System32/tar.exe ]; then # Windows's own tar, which is bsdtar
+    /c/Windows/System32/tar.exe -xf "$1" -C "$2"
   else
     echo "unzip or bsdtar is needed to unpack $(basename "$1")" >&2
     return 1
@@ -75,7 +133,8 @@ unzip_to() { # <zip> <directory>: with unzip, else bsdtar, which keep the files'
 
 verify() { # <file> <expected sha256>
   local actual
-  actual="$(sha256sum "$1" | awk '{ print $1 }')"
+  if command -v sha256sum >/dev/null; then actual="$(sha256sum "$1")"; else actual="$(shasum -a 256 "$1")"; fi # a Mac's
+  actual="${actual%% *}"
   if [ "$actual" != "$2" ]; then
     echo "checksum mismatch for $(basename "$1"): expected $2, got $actual" >&2
     exit 1
@@ -88,8 +147,8 @@ install_kubectl() {
     return
   fi
   local base="https://dl.k8s.io/release/$KUBECTL_VERSION/bin/$os/$arch"
-  curl -fsSL --retry 3 -o "$tmp/kubectl" "$base/kubectl"
-  verify "$tmp/kubectl" "$(curl -fsSL --retry 3 "$base/kubectl.sha256")"
+  fetch "$base/kubectl" "$tmp/kubectl"
+  verify "$tmp/kubectl" "$(fetch "$base/kubectl.sha256" -)"
   install -m 0755 "$tmp/kubectl" "$bin_dir/kubectl"
   echo "installed kubectl $KUBECTL_VERSION (sha256 verified)"
 }
@@ -101,7 +160,7 @@ install_k3d() {
   fi
   local base="https://github.com/k3d-io/k3d/releases/download/$K3D_VERSION"
   local asset="k3d-$os-$arch" expected
-  curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+  fetch "$base/$asset" "$tmp/$asset"
   expected="$(published_sha256 "$base/checksums.txt" "$asset")"
   verify "$tmp/$asset" "$expected"
   install -m 0755 "$tmp/$asset" "$bin_dir/k3d"
@@ -132,8 +191,8 @@ install_rust() {
     darwin-arm64) triple=aarch64-apple-darwin ;;
   esac
   local base="https://static.rust-lang.org/rustup/dist/$triple"
-  curl -fsSL --retry 3 -o "$tmp/rustup-init" "$base/rustup-init"
-  verify "$tmp/rustup-init" "$(curl -fsSL --retry 3 "$base/rustup-init.sha256" | awk '{ print $1 }')"
+  fetch "$base/rustup-init" "$tmp/rustup-init"
+  verify "$tmp/rustup-init" "$(fetch "$base/rustup-init.sha256" - | awk '{ print $1 }')"
   chmod +x "$tmp/rustup-init"
   RUSTUP_HOME="$rust_dir/rustup" CARGO_HOME="$rust_dir/cargo" "$tmp/rustup-init" -y --no-modify-path --profile minimal \
     --default-toolchain "$RUST_TOOLCHAIN" --component rustfmt,clippy >/dev/null
@@ -151,7 +210,7 @@ install_tofu() {
   fi
   local base="https://github.com/opentofu/opentofu/releases/download/v$TOFU_VERSION"
   local asset="tofu_${TOFU_VERSION}_${os}_${arch}.tar.gz" expected
-  curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+  fetch "$base/$asset" "$tmp/$asset"
   expected="$(published_sha256 "$base/tofu_${TOFU_VERSION}_SHA256SUMS" "$asset")"
   verify "$tmp/$asset" "$expected"
   tar -xzf "$tmp/$asset" -C "$tmp" tofu
@@ -166,7 +225,7 @@ install_terraform() {
   fi
   local base="https://releases.hashicorp.com/terraform/$TERRAFORM_VERSION"
   local asset="terraform_${TERRAFORM_VERSION}_${os}_${arch}.zip" expected
-  curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+  fetch "$base/$asset" "$tmp/$asset"
   expected="$(published_sha256 "$base/terraform_${TERRAFORM_VERSION}_SHA256SUMS" "$asset")"
   verify "$tmp/$asset" "$expected"
   unzip_to "$tmp/$asset" "$tmp/terraform"
@@ -187,7 +246,7 @@ install_provider() { # <name> <version> <its name in messages>
     echo "Terraform's $label provider $version already installed"
   else
     local base="https://releases.hashicorp.com/terraform-provider-$name/$version"
-    curl -fsSL --retry 3 -o "$tmp/$asset" "$base/$asset"
+    fetch "$base/$asset" "$tmp/$asset"
     expected="$(published_sha256 "$base/terraform-provider-${name}_${version}_SHA256SUMS" "$asset")"
     verify "$tmp/$asset" "$expected"
     mkdir -p "$(dirname "$zip")" "$mirror/registry.opentofu.org/hashicorp/$name"
@@ -232,10 +291,10 @@ install_sam() {
     echo "the SAM CLI $SAM_VERSION already installed"
     return
   fi
-  local expected="${SAM_SHA256:-${SAM_SHA256S[$SAM_VERSION-$os-$arch]:-}}" asset
+  local expected="${SAM_SHA256:-$(sam_sha256 "$SAM_VERSION-$os-$arch")}" asset
   [ -n "$expected" ] || { echo "no checksum for the SAM CLI $SAM_VERSION: give SAM_SHA256, from its release's notes" >&2; return 1; }
   asset="aws-sam-cli-linux-$([ "$arch" = amd64 ] && echo x86_64 || echo arm64).zip"
-  curl -fsSL --retry 3 -o "$tmp/$asset" "https://github.com/aws/aws-sam-cli/releases/download/v$SAM_VERSION/$asset"
+  fetch "https://github.com/aws/aws-sam-cli/releases/download/v$SAM_VERSION/$asset" "$tmp/$asset"
   verify "$tmp/$asset" "$expected"
   unzip_to "$tmp/$asset" "$tmp/sam"
   "$tmp/sam/install" --install-dir "$sam_dir" --bin-dir "$bin_dir" --update >/dev/null
@@ -250,13 +309,96 @@ sam_cfn_lint_version() { # the cfn-lint the SAM CLI's installer brought, by its 
   find "$sam_dir/$SAM_VERSION" -maxdepth 6 -type d -name 'cfn_lint-*.dist-info' 2>/dev/null | head -1 | sed 's/.*cfn_lint-\(.*\)\.dist-info/\1/'
 }
 
+# minisign: Linux's and Windows's archives hold a binary for each processor, macOS's one for Apple's processors alone,
+# so none is installed on an Intel Mac.
+install_minisign() {
+  local exe=''
+  [ "$os" = windows ] && exe=.exe
+  if [ "$os-$arch" = darwin-amd64 ]; then
+    echo "minisign $MINISIGN_VERSION has no build for an Intel Mac, its macOS one being for Apple's processors alone" >&2
+    return 1
+  fi
+  if [ -x "$bin_dir/minisign$exe" ] && "$bin_dir/minisign$exe" -v 2>/dev/null | grep -x "minisign $MINISIGN_VERSION" >/dev/null; then
+    echo "minisign $MINISIGN_VERSION already installed"
+    return
+  fi
+  local expected="${MINISIGN_SHA256:-$(minisign_sha256 "$MINISIGN_VERSION-$os")}" asset binary
+  [ -n "$expected" ] || { echo "no checksum for minisign $MINISIGN_VERSION: give MINISIGN_SHA256, of a file whose signature you checked" >&2; return 1; }
+  case "$os" in
+    linux)
+      asset="minisign-$MINISIGN_VERSION-linux.tar.gz"
+      binary="minisign-linux/$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)/minisign"
+      ;;
+    windows)
+      asset="minisign-$MINISIGN_VERSION-win64.zip"
+      binary="minisign-win64/$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)/minisign.exe"
+      ;;
+    *)
+      asset="minisign-$MINISIGN_VERSION-macos.zip"
+      binary=minisign
+      ;;
+  esac
+  fetch "https://github.com/jedisct1/minisign/releases/download/$MINISIGN_VERSION/$asset" "$tmp/$asset"
+  verify "$tmp/$asset" "$expected"
+  if [ "$os" = linux ]; then tar -xzf "$tmp/$asset" -C "$tmp" "$binary" 2>/dev/null; else unzip_to "$tmp/$asset" "$tmp"; fi
+  install -m 0755 "$tmp/$binary" "$bin_dir/minisign$exe"
+  echo "installed minisign $MINISIGN_VERSION (sha256 verified)"
+}
+
+# zig, its signature checked with minisign's, then its checksum.
+install_zig() {
+  if [ -x "$bin_dir/zig" ] && [ "$("$bin_dir/zig" version 2>/dev/null)" = "$ZIG_VERSION" ]; then
+    echo "zig $ZIG_VERSION already installed"
+    return
+  fi
+  local system processor
+  system="$([ "$os" = linux ] && echo linux || echo macos)"
+  processor="$([ "$arch" = amd64 ] && echo x86_64 || echo aarch64)"
+  local expected="${ZIG_SHA256:-$(zig_sha256 "$ZIG_VERSION-$processor-$system")}"
+  [ -n "$expected" ] || { echo "no checksum for zig $ZIG_VERSION on $processor $system: give ZIG_SHA256, from its index" >&2; return 1; }
+  install_minisign >/dev/null
+  local asset="zig-$processor-$system-$ZIG_VERSION.tar.xz" zig_dir="$repo_root/hack/.zig/$ZIG_VERSION"
+  fetch "https://ziglang.org/download/$ZIG_VERSION/$asset" "$tmp/$asset"
+  fetch "https://ziglang.org/download/$ZIG_VERSION/$asset.minisig" "$tmp/$asset.minisig"
+  "$bin_dir/minisign" -Vqm "$tmp/$asset" -P "$ZIG_KEY" >/dev/null ||
+    { echo "zig's $asset isn't signed by zig's key: nothing installed" >&2; exit 1; }
+  verify "$tmp/$asset" "$expected"
+  rm -rf "$zig_dir" && mkdir -p "$zig_dir"
+  tar -xJf "$tmp/$asset" -C "$zig_dir" --strip-components=1
+  ln -sfn "$zig_dir/zig" "$bin_dir/zig"
+  echo "installed zig $ZIG_VERSION in hack/.zig (signature and sha256 verified)"
+}
+
+install_cargo_zigbuild() {
+  if [ -x "$bin_dir/cargo-zigbuild" ] &&
+    [ "$("$bin_dir/cargo-zigbuild" --version 2>/dev/null)" = "cargo-zigbuild $CARGO_ZIGBUILD_VERSION" ]; then
+    echo "cargo-zigbuild $CARGO_ZIGBUILD_VERSION already installed"
+    return
+  fi
+  local triple
+  case "$os-$arch" in
+    linux-amd64) triple=x86_64-unknown-linux-musl ;;
+    linux-arm64) triple=aarch64-unknown-linux-gnu ;;
+    darwin-amd64) triple=x86_64-apple-darwin ;;
+    darwin-arm64) triple=aarch64-apple-darwin ;;
+  esac
+  local base="https://github.com/rust-cross/cargo-zigbuild/releases/download/v$CARGO_ZIGBUILD_VERSION"
+  local asset="cargo-zigbuild-$triple.tar.xz"
+  fetch "$base/$asset" "$tmp/$asset"
+  verify "$tmp/$asset" "$(published_sha256 "$base/$asset.sha256" "$asset")"
+  tar -xJf "$tmp/$asset" -C "$tmp" "cargo-zigbuild-$triple/cargo-zigbuild"
+  install -m 0755 "$tmp/cargo-zigbuild-$triple/cargo-zigbuild" "$bin_dir/cargo-zigbuild"
+  echo "installed cargo-zigbuild $CARGO_ZIGBUILD_VERSION (sha256 verified)"
+}
+
 [ $# -gt 0 ] || set -- kubectl k3d rust
 for tool in "$@"; do
   case "$tool" in
-    kubectl | k3d | rust | tofu | terraform | sam) "install_$tool" ;;
+    kubectl | k3d | rust | tofu | terraform | sam | minisign | zig) "install_$tool" ;;
     aws-provider) install_aws_provider ;;
     archive-provider) install_archive_provider ;;
     aws) install_tofu; install_terraform; install_aws_provider; install_archive_provider; install_sam ;;
-    *) echo "unknown tool $tool: kubectl, k3d, rust, tofu, terraform, aws-provider, archive-provider, sam, or aws for the last five" >&2; exit 2 ;;
+    cargo-zigbuild) install_cargo_zigbuild ;;
+    *) echo "unknown tool $tool: kubectl, k3d, rust, tofu, terraform, aws-provider, archive-provider, sam, aws for those five, minisign, zig or cargo-zigbuild" >&2; exit 2 ;;
   esac
 done

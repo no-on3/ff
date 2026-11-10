@@ -1,95 +1,94 @@
+/**
+ * SQS's event as Lambda gives it, and a call's answer as Lambda reads it. The
+ * messages, their records and the answers are sqs-event-examples.json's,
+ * which ff local's event source mappings read too; what only JavaScript can
+ * hold, an answer of nothing, is here.
+ */
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { Received } from '../queues/customer-queues';
-import { attributesMd5, md5Hex, parseReceiptHandle } from '../queues/sqs-messages';
-import { EVENT_ENVELOPE_BYTES, failedMessages, recordBytes, sqsRecord } from './sqs-event';
+import { MessageAttribute, attributesMd5, md5Hex, parseReceiptHandle } from '../queues/sqs-messages';
+import { EVENT_ENVELOPE_BYTES, SqsRecord, failedMessages, recordBytes, sqsRecord } from './sqs-event';
 
-const ARN = 'arn:aws:sqs:tn-tunis-1:000000000001:orders';
-const message = (values: Partial<Received> = {}): Received => ({
-  id: '42',
-  messageId: '7e4d1c2a-0000-4000-8000-000000000001',
-  body: '{"order": 42}',
-  meta: { senderId: 'AKFF7Q2MLKX4RTZB3W5N' },
-  sentAt: new Date('2026-10-24T08:00:00.000Z'),
-  receiveCount: 2,
-  firstReceivedAt: new Date('2026-10-24T08:00:01.500Z'),
-  sizeBytes: 13,
+/** A message as sqs-event-examples.json writes it: as the queue keeps it, its times as text. */
+interface Held {
+  id: string;
+  messageId: string;
+  body: string;
+  meta: Received['meta'];
+  sentAt: string;
+  receiveCount: number;
+  firstReceivedAt: string;
+}
+
+interface Examples {
+  queueArn: string;
+  region: string;
+  order: string[];
+  records: Record<'asSent' | 'withAttributes', { title: string; message: Held; record: SqsRecord }>;
+  batchResponses: { batch: string[]; none: unknown[]; named: Array<{ output: unknown; failed: string[] }>; all: unknown[] };
+}
+
+const table = JSON.parse(readFileSync(join(__dirname, 'sqs-event-examples.json'), 'utf8')) as Examples;
+const { queueArn: ARN, region: REGION } = table;
+
+const received = (held: Held, values: Partial<Received> = {}): Received => ({
+  ...held,
+  sentAt: new Date(held.sentAt),
+  firstReceivedAt: new Date(held.firstReceivedAt),
+  sizeBytes: Buffer.byteLength(held.body),
   ...values,
 });
 
 describe("SQS's event, as AWS Lambda gives a function that reads a queue", () => {
   it("gives each message as Lambda's record: SQS's system attributes as strings, the body's MD5, the queue's ARN and region", () => {
-    const record = sqsRecord(message(), ARN, 'tn-tunis-1');
+    const { message, record: expected } = table.records.asSent;
+    const record = sqsRecord(received(message), ARN, REGION);
 
-    expect(record).toEqual({
-      messageId: '7e4d1c2a-0000-4000-8000-000000000001',
-      receiptHandle: expect.any(String),
-      body: '{"order": 42}',
-      attributes: {
-        ApproximateReceiveCount: '2',
-        SentTimestamp: String(Date.parse('2026-10-24T08:00:00.000Z')),
-        SenderId: 'AKFF7Q2MLKX4RTZB3W5N',
-        ApproximateFirstReceiveTimestamp: String(Date.parse('2026-10-24T08:00:01.500Z')),
-      },
-      messageAttributes: {},
-      md5OfBody: md5Hex('{"order": 42}'),
-      eventSource: 'aws:sqs',
-      eventSourceARN: ARN,
-      awsRegion: 'tn-tunis-1',
-    });
+    expect(record).toEqual(expected);
+    expect(record.md5OfBody).toBe(md5Hex(message.body));
     // Its receipt handle is this receive's, which DeleteMessage takes, as a function may delete a message itself.
-    expect(parseReceiptHandle(record.receiptHandle)).toEqual({ id: '42', receiveCount: 2, messageId: '7e4d1c2a-0000-4000-8000-000000000001' });
+    expect(parseReceiptHandle(record.receiptHandle)).toEqual({ id: message.id, receiveCount: message.receiveCount, messageId: message.messageId });
     // Lambda's own keys, in its order.
-    expect(Object.keys(record)).toEqual(['messageId', 'receiptHandle', 'body', 'attributes', 'messageAttributes', 'md5OfBody', 'eventSource', 'eventSourceARN', 'awsRegion']);
+    expect(Object.keys(record)).toEqual(table.order.filter((key) => key in expected));
   });
 
   it("gives message attributes in Lambda's shape, with SQS's empty lists, their MD5, and a trace header among the system attributes", () => {
-    const messageAttributes = {
-      item: { DataType: 'String', StringValue: 'harissa' },
-      picture: { DataType: 'Binary.png', BinaryValue: 'AAEC' },
-    };
-    const trace = { DataType: 'String', StringValue: 'Root=1-5759e988-bd862e3fe1be46a994272793' };
-    const record = sqsRecord(message({ meta: { senderId: 'AKFF7Q2MLKX4RTZB3W5N', messageAttributes, systemAttributes: { AWSTraceHeader: trace } } }), ARN, 'tn-tunis-1');
+    const { message, record: expected } = table.records.withAttributes;
+    const record = sqsRecord(received(message), ARN, REGION);
 
-    expect(record.messageAttributes).toEqual({
-      item: { stringValue: 'harissa', stringListValues: [], binaryListValues: [], dataType: 'String' },
-      picture: { binaryValue: 'AAEC', stringListValues: [], binaryListValues: [], dataType: 'Binary.png' },
-    });
-    expect(record.md5OfMessageAttributes).toBe(attributesMd5(messageAttributes));
-    expect(record.attributes).toMatchObject({ AWSTraceHeader: 'Root=1-5759e988-bd862e3fe1be46a994272793', SenderId: 'AKFF7Q2MLKX4RTZB3W5N' });
+    expect(record).toEqual(expected);
+    expect(record.md5OfMessageAttributes).toBe(attributesMd5(message.meta.messageAttributes as Record<string, MessageAttribute>));
+    expect(Object.keys(record)).toEqual(table.order);
   });
 
   it('counts what each record adds to the event as JSON, its comma with it', () => {
-    const one = sqsRecord(message(), ARN, 'tn-tunis-1');
-    const two = sqsRecord(message({ id: '43', messageId: '7e4d1c2a-0000-4000-8000-000000000002' }), ARN, 'tn-tunis-1');
+    const { message } = table.records.asSent;
+    const one = sqsRecord(received(message), ARN, REGION);
+    const two = sqsRecord(received(message, { id: '43', messageId: '7e4d1c2a-0000-4000-8000-000000000002' }), ARN, REGION);
 
     expect(EVENT_ENVELOPE_BYTES + recordBytes(one) + recordBytes(two) - 1).toBe(Buffer.byteLength(JSON.stringify({ Records: [one, two] })));
   });
 });
 
 describe("a call's answer, as Lambda reads a partial batch response", () => {
-  const ids = new Set(['m-1', 'm-2', 'm-3']);
+  const { batch, none, named, all } = table.batchResponses;
+  const ids = new Set(batch);
 
   it('names no failure for no answer, an empty one, or an empty or null list', () => {
-    for (const output of [null, undefined, {}, { batchItemFailures: [] }, { batchItemFailures: null }, { other: 1 }]) {
+    for (const output of [undefined, ...none]) {
       expect(failedMessages(output, ids)).toEqual(new Set());
     }
   });
 
   it('names the messages the answer names, by their IDs', () => {
-    expect(failedMessages({ batchItemFailures: [{ itemIdentifier: 'm-2' }, { itemIdentifier: 'm-3' }] }, ids)).toEqual(new Set(['m-2', 'm-3']));
+    for (const { output, failed } of named) {
+      expect(failedMessages(output, ids)).toEqual(new Set(failed));
+    }
   });
 
   it("takes the whole batch as failed for an answer Lambda can't read as one: not an object, a list that isn't one, an ID empty, null, misnamed or not the batch's", () => {
-    for (const output of [
-      'done',
-      42,
-      [{ itemIdentifier: 'm-1' }],
-      { batchItemFailures: 'm-1' },
-      { batchItemFailures: [{ itemIdentifier: '' }] },
-      { batchItemFailures: [{ itemIdentifier: null }] },
-      { batchItemFailures: [{ id: 'm-1' }] },
-      { batchItemFailures: [null] },
-      { batchItemFailures: [{ itemIdentifier: 'm-1' }, { itemIdentifier: 'not-in-the-batch' }] },
-    ]) {
+    for (const output of all) {
       expect(failedMessages(output, ids)).toBe('all');
     }
   });

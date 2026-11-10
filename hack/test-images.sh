@@ -7,7 +7,10 @@
 #     keeps the API's documents off; with development settings it refuses to start;
 #   - the console (FE/) and the admin app (admin/): their URLs baked into the bundle, index.html for the
 #     router's paths, the hashed files cached a year and a missing one a 404, the security headers; and a build
-#     without its login refused.
+#     without its login refused;
+#   - the status page's web server (deploy/dev-server/status/web), as the development server's Compose runs it: its
+#     health check, a 503 before the first page, the page with its headers and nothing else, and a page made again
+#     served at once.
 # Needs Docker and the dev cluster (hack/k8s/cluster-up.sh). Removes what it starts.
 #   hack/test-images.sh
 set -euo pipefail
@@ -19,9 +22,9 @@ prefix="ff-images-$$"
 
 MIN_MEM_AVAILABLE_MB="${MIN_MEM_AVAILABLE_MB:-3000}" "$FF_REPO_ROOT/hack/check-resources.sh"
 work="$(mktemp -d)"
-on_exit 'docker rm -f "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin" >/dev/null 2>&1 || true; rm -rf "$work"'
+on_exit 'docker rm -f "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin" "$prefix-status-web" >/dev/null 2>&1 || true; rm -rf "$work"'
 # Added after, so run first: the containers' logs while they are still there.
-on_exit '[ "$checks_status" -eq 0 ] || { evidence="$(evidence_start images)"; evidence_containers "$evidence" "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin"; evidence_done "$evidence" images; }'
+on_exit '[ "$checks_status" -eq 0 ] || { evidence="$(evidence_start images)"; evidence_containers "$evidence" "$prefix-db" "$prefix-backend" "$prefix-console" "$prefix-admin" "$prefix-status-web"; evidence_done "$evidence" images; }'
 free_port() { node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})"; }
 size() { docker image inspect "$1" --format '{{.Size}}' | awk '{ printf "%d MB", $1 / 1e6 }'; }
 # The hardening every platform container gets in the cluster.
@@ -150,5 +153,38 @@ static() {
 }
 static console FE ff-console
 static admin admin ff-admin
+
+section "the status page's web server"
+docker build -q -t "ff-status-web:$tag" "$FF_REPO_ROOT/deploy/dev-server/status/web" >/dev/null
+echo "  built ff-status-web:$tag ($(size "ff-status-web:$tag"))"
+check "it runs as the numeric user 65532" "65532:65532" "$(docker image inspect "ff-status-web:$tag" --format '{{.Config.User}}')"
+# The page's folder as the probe's renderer makes it, mounted read-only as the server's Compose mounts it, in 64 MB.
+status="$work/status"
+mkdir -p "$status/page"
+chmod 0755 "$status" "$status/page"
+echo domain=ff.test >"$status/probe.env"
+render() { FF_STATUS_HOME="$status" FF_STATUS_NOW="$1" python3 -I "$FF_REPO_ROOT/deploy/dev-server/status/render.py"; }
+port="$(free_port)"
+docker run -d --name "$prefix-status-web" "${hardened[@]}" --memory 64m -v "$status/page:/srv:ro" -p "127.0.0.1:$port:8080" \
+  "ff-status-web:$tag" >/dev/null
+url="http://127.0.0.1:$port"
+for _ in $(seq 1 40); do [ "$(docker inspect "$prefix-status-web" --format '{{.State.Health.Status}}')" = healthy ] && break; sleep 0.5; done
+check "it starts on a read-only root, and Docker's health check finds it alive" "200 healthy" \
+  "$(curl -s -o /dev/null -w '%{http_code}' "$url/healthz") $(docker inspect "$prefix-status-web" --format '{{.State.Health.Status}}')"
+check "before the probe's first minute, a 503 that says the page is on its way" "503 true" \
+  "$(curl -s -o "$work/status-none" -w '%{http_code}' "$url/") $(grep -q 'its first is on its way' "$work/status-none" && echo true || echo false)"
+render 2026-11-10T12:00:30Z
+echo "half written" >"$status/page/index.html.new"
+curl -s -D "$work/status-headers" -o "$work/status.html" "$url/"
+header_of() { tr -d '\r' <"$work/status-headers" | awk -F': ' -v name="$1" 'tolower($1) == name {printf "%s", $2}'; }
+check "the page, never cached, with the security headers and HSTS, and no Server header" \
+  "true no-cache nosniff DENY no-referrer max-age=31536000 false" \
+  "$(grep -q '<title>FF status</title>' "$work/status.html" && echo true || echo false) $(header_of cache-control) $(header_of x-content-type-options) $(header_of x-frame-options) $(header_of referrer-policy) $(header_of strict-transport-security) $(grep -qi '^server:' "$work/status-headers" && echo true || echo false)"
+check "nothing else: the page by its file's name, another file of its folder and any other path are 404s" "404 404 404" \
+  "$(for path in /index.html /index.html.new /minutes.log; do curl -s -o /dev/null -w '%{http_code} ' "$url$path"; done | sed 's/ $//')"
+# The renderer replaces the file each minute: the folder is mounted, not the file, so the new one is served.
+render 2026-11-10T12:01:30Z
+check "a page made again is served at once" true \
+  "$(curl -s "$url/" | grep 'datetime="2026-11-10T12:01:30Z"' >/dev/null && echo true || echo false)"
 
 checks_done images

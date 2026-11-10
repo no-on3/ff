@@ -14,8 +14,16 @@
 # world with a URL for its API, deployed as a stack, called and deleted with ff delete-stack, and sam init's own refused at
 # its Api event; a stack with an alias, a second function, queues and a bucket's site and notifications, again
 # unchanged, then without them, after asking, a variable with a secret's name refused, and ff delete-stack, stopped by
-# the bucket's files; folders deployed as
-# packages with their libraries (an npm library, requests, numpy's native wheels from
+# the bucket's files; ff init's REST API, its README's commands run for both runtimes, the Python one deployed with
+# a database of ff db's and called at its URL, with its CORS, each run with ff local start --with postgres; ff init's
+# cron job, the Python one deployed, a file uploaded with the AWS CLI and reported, a failed run's record in its queue,
+# each run here as its README says, its schedule by hand and a failed run tried three times; ff init's queue worker,
+# the Node.js one deployed, a job done and one dead-lettered after three tries, each the same here; ff init's site with
+# an API, the Node.js one deployed, its page by ff sites deploy and signed from its origin, each here with --site;
+# ff init's image resizer, both deployed with --container and an image's thumbnail made, each the same here; ff
+# init's webhook, the Node.js one deployed as its README says, Konnect out of reach: no order made, a notification
+# kept and left, an order's left pending; each the same here with --with postgres;
+# folders deployed as packages with their libraries (an npm library, requests, numpy's native wheels from
 # pyproject.toml, bcrypt's native module), uploaded once, one built in Docker with --container,
 # an ES module named by --handler with .ffignore, and TypeScript compiled for AWS Lambda by
 # ff package --compile, whose zip runs on FF as it is; the small app (examples/orders-app), its
@@ -28,7 +36,9 @@
 # measure and its month in ff usage, the export kit's s3-sync.sh copying it out to a folder and on
 # to another bucket as to AWS S3, the bucket emptied when told, the key revoked; ff sites: a built folder deployed
 # with a deploy's own key, visited as a single-page app, deployed again changed, its visits in its metrics, a domain of
-# the customer's added, the bucket no site again; ff queues: a queue made
+# the customer's added, the bucket no site again; the downloads site, a release signed with a throwaway key and
+# deployed to FF by ff sites deploy, installed from it by install.sh as a customer would, refused changed (its checks
+# hack/test-install.sh's); ff queues: a queue made
 # with its attributes and a dead-letter queue by name, a message sent by ff and received by the AWS CLI
 # with a key naming that queue alone, received again by ff until the third receive moves it to the
 # dead-letter queue, where ff receives and deletes it, a purge, attributes changed and seen by the AWS
@@ -39,9 +49,22 @@
 # link, the receipt read back by a GET and by the AWS CLI, both gone after the night 90 days on, called without
 # waiting as its schedule calls it; its page a site, which the function URL's CORS lets in; its stack deleted at the
 # end; the account exported to AWS, its template and terraform/ taken by the SAM CLI and OpenTofu, each function's
-# role what its keys used, the template deployed back on FF by another account, which makes the same; and
-# ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
-# answering on its port until Ctrl-C, no container left behind.
+# role what its keys used, the template deployed back on FF by another account, which makes the same; ff login against
+# the development realm in Keycloak (its own port, 28181) and a second backend that takes its tokens: the user's part
+# of the device flow done with curl at the realm's pages, as a browser does it, the login kept and renewed, a user with
+# two accounts shown them, an API key made by ff api-keys and put before the login, then revoked, and ff logout
+# revoking the offline token at the realm; and ff local, in Docker: both runtimes, a failed load, a timeout, a call over its memory, and ff local start
+# answering on its port until Ctrl-C, no container left behind; a template's app behind its front door, each function
+# started at its first call, its variables resolved there and its secrets from .env.local, one calling another through
+# the front door, started again when its code changes and stopped when idle; ff init's SAM application and the small app
+# on it, called at their URLs, the small app's nightly run by hand and retried; a template's queues there, the AWS
+# CLI's SQS cases against them, a function sending to one, a failed call's record and dead letter in them; the mail its
+# functions send, the AWS CLI's SES cases and a function's receipt, kept as files a mail reader opens, listed by ff
+# local mail, never sent; the small app whole there with its database and its cache: its page served, an order kept,
+# listed from the cache, its receipt made through the local queue into the local bucket and e-mailed, its nightly
+# removing an old order and its receipt; then a release's runtime image, made, signed and put on
+# a site of FF's as the release job does, ff pinned to it: pulled by its digest from the dev registry, else its archive
+# loaded from the site, verified, once, and refused when signed by another key or changed.
 # What waits on the clock (the schedule's runs, a sample taken each minute, requests and visits written a minute at a
 # time) is started in its section and read a few sections on, in a section of its own (schedules_ran, databases_used,
 # buckets_used, sites_counted, queues_counted, small_app_exported), so that its minute passes while the sections between
@@ -57,9 +80,12 @@ E2E_PROJECT=ff-cli-e2e
 E2E_NAME=cli-e2e
 export FF_PG_PORT="${FF_CLI_E2E_PG_PORT:-25436}"
 export FF_S3_PORT="${FF_CLI_E2E_S3_PORT:-29007}"
+# Keycloak, for ff login's section alone.
+export FF_KEYCLOAK_PORT="${FF_CLI_E2E_KEYCLOAK_PORT:-28181}"
 source "$FF_REPO_ROOT/hack/lib/e2e-stack.sh"
 source "$FF_REPO_ROOT/hack/lib/sections.sh"
 source "$FF_REPO_ROOT/hack/lib/orders-app.sh"
+source "$FF_REPO_ROOT/hack/lib/keycloak.sh"
 sections_options "$@"
 e2e_options "${sections_rest[@]}"
 
@@ -87,6 +113,191 @@ in_folder() { local folder=$1; shift; (cd "$folder" && ff "$@"); }
 
 # sql <statement>: run on FF's database, its answer dropped.
 sql() { "${compose[@]}" exec -T postgres psql -U postgres -d serverless_platform -qc "$1" >/dev/null; }
+
+# local_image <name>: the image ff local start --with runs, as cli/src/local/services.rs pins it, by digest; its client
+# reaches the service here as a developer's tools would, at its port.
+local_image() { sed -n "s|^ *\"\($1:[^\"]*@sha256:[0-9a-f]*\)\"$|\1|p" "$FF_REPO_ROOT/cli/src/local/services.rs"; }
+# local_url <ff local start's listing> <service>: the service's URL from this machine, with its password, as listed.
+local_url() { sed -n "s/^  $2 \{1,\}\([a-z]*:\/\/[^,]*\),.*/\1/p" "$1"; }
+# local_psql <listing> <statement>: the statement run at the PostgreSQL the listing names, its rows unaligned.
+local_psql() { docker run --rm --network host "$(local_image postgres)" psql "$(local_url "$1" postgres)" -Atqc "$2" 2>&1; }
+# read_mail <file>: the message as a mail reader shows it: its sender, its recipients, its subject decoded, its type,
+# and its text.
+read_mail() {
+  python3 -I -c 'import email, email.policy, sys
+message = email.message_from_binary_file(open(sys.argv[1], "rb"), policy=email.policy.default)
+print(message["from"], "|", message["to"], "|", message["subject"], "|", message.get_content_type(), "|", message.get_body(("plain",)).get_content().strip())' "$1"
+}
+
+# leftover: how many of ff local's containers are left, running or stopped.
+leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l | tr -d ' '; }
+# at <url> [curl args...]: a request, its status and its answer; its headers in $work/at.head.
+at() {
+  local url="$1"
+  shift
+  curl -s -o "$work/at.body" -D "$work/at.head" -w '%{http_code}' "$@" "$url"
+  echo " $(cat "$work/at.body")"
+}
+# location: where the last answer of at sends the browser.
+location() { sed -n 's/^location: //Ip' "$work/at.head" | tr -d '\r'; }
+# until_said <file> <text> [<pid>] [<tries>]: waits, half a second at a time, 60 times unless told, for the file to
+# hold the text, a line that a command in the background writes: 0 once it does; 1 when the tries run out, or when
+# the process named ends first.
+until_said() {
+  local file="$1" text="$2" pid="${3:-}" tries="${4:-60}" _
+  for _ in $(seq 1 "$tries"); do
+    grep -F "$text" "$file" >/dev/null 2>&1 && return 0
+    [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  grep -F "$text" "$file" >/dev/null 2>&1
+}
+# local_started <listing> <its stderr> <ff local start's args...>: ff local start in the background, its pid in
+# $starter, until it says how to stop it: 120 s at most, as a first start with --with pulls its images, and less if it
+# ends. Its pid is kept in a file until local_stopped, so that one a stopped section left running is stopped.
+local_started() {
+  local listing="$1" errors="$2"
+  shift 2
+  local_left_stopped
+  "$ff_bin" local start "$@" >"$listing" 2>"$errors" &
+  starter=$!
+  echo "$starter" >"$work/local-start.pid"
+  until_said "$listing" "Ctrl-C stops" "$starter" 240 ||
+    fail "ff local start $* said nothing in 120 s, or ended: $(cat "$errors")"
+}
+# local_stopped: Ctrl-C to the ff local start local_started made, its end waited for.
+local_stopped() {
+  kill -INT "$starter"
+  wait "$starter" 2>/dev/null || true
+  rm -f "$work/local-start.pid"
+}
+# local_left_stopped: Ctrl-C to an ff local start a section that stopped before its local_stopped left running, its
+# containers removed with it, waited for 30 s at most; at the next start and at the suite's end.
+local_left_stopped() {
+  local pid _
+  pid="$(cat "$work/local-start.pid" 2>/dev/null || true)"
+  rm -f "$work/local-start.pid"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 0
+  kill -INT "$pid"
+  for _ in $(seq 1 60); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.5
+  done
+}
+on_exit local_left_stopped
+# konnect_started <listing> <its stderr> <ff local konnect's args...>: Konnect's stand-in in the background, its pid in
+# $konnect_pid, until it prints its addresses, 30 s at most. konnect_stopped ends it, waited for, so that its port is
+# free again; and at the suite's end, one a stopped section left running. A script's job in the background ignores
+# Ctrl-C, which the stand-in doesn't handle: it is ended by SIGTERM.
+konnect_pid=""
+konnect_started() {
+  local listing="$1" errors="$2"
+  shift 2
+  konnect_stopped
+  "$ff_bin" local konnect "$@" >"$listing" 2>"$errors" &
+  konnect_pid=$!
+  until_said "$listing" "Ctrl-C stops it" "$konnect_pid" 60 ||
+    fail "ff local konnect $* said nothing in 30 s, or ended: $(cat "$errors")"
+}
+konnect_stopped() {
+  [ -n "$konnect_pid" ] || return 0
+  kill "$konnect_pid" 2>/dev/null || true
+  wait "$konnect_pid" 2>/dev/null || true
+  konnect_pid=""
+}
+on_exit konnect_stopped
+# local_aws <project> <port> <aws args...>: the AWS CLI with the local key's file of ff local's project alone, none of
+# this machine's settings, the front door at the port the endpoint of each service.
+local_aws() {
+  local project="$1" door="http://127.0.0.1:$2"
+  shift 2
+  AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE="$project/.ff/local/credentials" AWS_PROFILE=default \
+    AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_LAMBDA="$door" AWS_ENDPOINT_URL_SQS="$door" AWS_ENDPOINT_URL_S3="$door" \
+    AWS_ENDPOINT_URL_SESV2="$door" "${aws_cli[@]}" "$@"
+}
+
+# json_lines: the JSON objects of log lines, whatever comes before each, as each runtime writes a line differently.
+json_lines() { sed -n 's/^[^{]*\({.*}\)$/\1/p'; }
+# template_files <folder>: the files ff init wrote there, sorted, on one line.
+template_files() { (cd "$1" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | paste -sd' '); }
+# git_sees <folder>: the files git takes of the folder made a repository, what its .gitignore leaves in, on one line.
+git_sees() {
+  git -C "$1" init -q
+  git -C "$1" status --porcelain --untracked-files=all | sed 's/^?? //' | LC_ALL=C sort | paste -sd' '
+}
+# readme_here <folder>: a template's README's commands before its ff local start, as written, from its block's first
+# line, after what the section says before it, which install its libraries and run its tests: their exit, then how many
+# tests passed.
+readme_here() {
+  local status=0
+  (cd "$1" && bash -e -o pipefail -c "$(sed -n '/^## Here$/,/^ff local start/p' README.md | sed '1,/^```bash$/d;$d')") \
+    >"$work/here.out" 2>&1 || status=$?
+  echo "$status $(sed -nE 's/^(# |ℹ )pass ([0-9]+)$/\2/p; s/^Ran ([0-9]+) tests? in .*/\1/p' "$work/here.out")"
+}
+# readme_after <folder> <line> <sed script>: a template's README's commands after the line its pattern finds, to the
+# end of their block, as written but for the script's changes, ff local start's port or a placeholder's value, with
+# the suite's ff: their exit; what they wrote in $work/after.out, their stderr in $work/after.err.
+readme_after() {
+  local status=0
+  (cd "$1" && PATH="$(dirname "$ff_bin"):$PATH" bash -e -o pipefail -c \
+    "$(sed -n "/$2/,/^\`\`\`\$/p" README.md | sed '1d;$d;/^```bash$/d' | sed "$3")") \
+    >"$work/after.out" 2>"$work/after.err" || status=$?
+  echo "$status"
+}
+# preflight <URL> <origin>: the origin a browser's preflight for a POST from it is let in as, or none.
+preflight() {
+  local allowed
+  allowed="$(curl -s -o /dev/null -D - -X OPTIONS "$1" -H "Origin: $2" -H 'Access-Control-Request-Method: POST' \
+    -H 'Access-Control-Request-Headers: content-type' | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
+  echo "${allowed:-none}"
+}
+# until_found <url>: waits up to 30 s for the URL to answer 200.
+until_found() {
+  local _
+  for _ in $(seq 1 60); do
+    [ "$(curl -s -o /dev/null -w '%{http_code}' "$1")" = 200 ] && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+# release_site <folder> <bucket>: a release of ff as the release job makes it, on a site FF serves as the downloads
+# site, http://<bucket>.site.localhost:<port>: this machine's build the suite's ff, the other four stand-ins, signed by
+# hack/release.sh with a throwaway key (<folder>/release.pub) and made a site by hack/downloads-site.sh, then put on
+# the bucket by ff sites deploy. FF_RUNTIME_IMAGES, when set, names runtime images' archives already in <folder>/dist.
+release_site() {
+  local folder=$1 bucket=$2 binary processor version
+  local minisign="${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/minisign"
+  version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$FF_REPO_ROOT/cli/Cargo.toml" | head -1)"
+  case "$(uname -m)" in x86_64 | amd64) processor=x86_64 ;; *) processor=arm64 ;; esac
+  source "$FF_REPO_ROOT/hack/lib/ff-builds.sh"
+  mkdir -p "$folder/dist"
+  for binary in "${FF_BUILDS[@]}"; do
+    if [ "$binary" = "ff-linux-$processor" ]; then
+      cp "$ff_bin" "$folder/dist/$binary"
+    else
+      printf 'stand-in for %s\n' "$binary" >"$folder/dist/$binary"
+    fi
+    (cd "$folder/dist" && sha256sum "$binary" >"$binary.sha256")
+  done
+  "$minisign" -G -W -p "$folder/release.pub" -s "$folder/release.key" >/dev/null 2>&1
+  FF_RELEASE_KEY="$(cat "$folder/release.key")" FF_RELEASE_PUBLIC_KEY="$folder/release.pub" \
+    "$FF_REPO_ROOT/hack/release.sh" "$folder/dist" "ff-v$version" 0123456789ab >>"$folder/made.out"
+  FF_RELEASE_PUBLIC_KEY="$folder/release.pub" "$FF_REPO_ROOT/hack/downloads-site.sh" "$folder/dist" "$folder/site" \
+    "$(site_of "$bucket")" >>"$folder/made.out"
+  "$ff_bin" buckets create "$bucket" >>"$folder/made.out" 2>&1
+  "$ff_bin" sites deploy "$bucket" "$folder/site" >>"$folder/made.out" 2>&1
+}
+site_of() { echo "http://$1.site.localhost:$website_port"; }
+
+# aws_cli: the AWS CLI, this machine's, else AWS's image: as this user, so that the files it writes are this user's,
+# s3.localhost this machine, given the variables AWS's tools read that the sections set.
+if command -v aws >/dev/null; then aws_cli=("$(command -v aws)"); else
+  aws_cli=(docker run --rm --network host --add-host s3.localhost:127.0.0.1 --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work"
+    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_ENDPOINT_URL_SQS
+    -e AWS_ENDPOINT_URL_LAMBDA -e AWS_ENDPOINT_URL_SESV2 -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
+    -e AWS_PROFILE amazon/aws-cli:2.34.32)
+fi
 
 section_stack() {
 section "the stack: its database and object storage, the cluster, customers' database, cache and mail servers"
@@ -461,6 +672,36 @@ done
 }
 section_def init section_init backend budget=35
 
+section_mcp() {
+section "ff mcp: an AI coding agent's tools, over a pipe"
+printf 'def handler(event, context):\n    return {"greeting": "Ahlan " + event.get("name", "world")}\n' >"$work/mcp-hello.py"
+# The client: each message a line of ff mcp's stdin, which then ends; each answer read from stdout by its ID.
+mcp_call() { jq -nc --argjson id "$1" --arg name "$2" --argjson arguments "$3" \
+  '{jsonrpc: "2.0", id: $id, method: "tools/call", params: {name: $name, arguments: $arguments}}'; }
+mcp_answer() { out | jq -r --argjson id "$1" "select(.id == \$id) | $2"; }
+deploy_hello="$(mcp_call 3 ff_deploy "$(jq -nc --arg path "$work/mcp-hello.py" '{path: $path, name: "cli-mcp"}')")"
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli-e2e","version":"1"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  "$deploy_hello" "$(mcp_call 4 ff_list_functions '{}')" | ff mcp
+check "the handshake at its version, its 25 tools listed, a deploy refused without --allow-write, the list read" \
+  "0 2025-11-25 25 true ff_deploy changes the account false false" \
+  "$(code) $(mcp_answer 1 .result.protocolVersion) $(mcp_answer 2 '.result.tools | length') $(mcp_answer 3 .result.isError) \
+$(mcp_answer 3 .result.structuredContent.error.message | cut -d, -f1) $(mcp_answer 4 .result.isError) \
+$(mcp_answer 4 '.result.structuredContent.functions | any(.name == "cli-mcp")')"
+printf '%s\n' "$deploy_hello" "$(mcp_call 4 ff_invoke '{"name": "cli-mcp", "data": "{\"name\": \"agent\"}"}')" \
+  "$(mcp_call 5 ff_get_function '{"name": "cli-mcp"}')" "$(mcp_call 6 ff_set_env '{"name": "cli-mcp", "variables": ["TOKEN"]}')" \
+  | ff mcp --allow-write
+check "with --allow-write, the deploy runs, then the call, and a read of the function" "0 created Ahlan agent ACTIVE" \
+  "$(code) $(mcp_answer 3 .result.structuredContent.action) $(mcp_answer 4 .result.structuredContent.output.greeting) \
+$(mcp_answer 5 .result.structuredContent.status)"
+check "and a value ff env set would read from stdin is refused: stdin is the protocol's" \
+  "true TOKEN has no value: under ff mcp, whose stdin is its protocol, a value is given as TOKEN=<value>" \
+  "$(mcp_answer 6 .result.isError) $(mcp_answer 6 .result.structuredContent.error.message)"
+ff delete cli-mcp --yes
+}
+section_def mcp section_mcp backend budget=30
+
 section_stacks() {
 section "SAM templates as stacks: ff init --template sam deployed and called at its URL, sam init's own refused, a stack deployed with a second function, events, queues and a bucket's site and notifications, then without them, ff delete-stack"
 (cd "$work" && rm -rf cli-sam && "$ff_bin" init cli-sam --runtime nodejs --template sam >"$work/out" 2>"$work/err")
@@ -703,6 +944,644 @@ check "which is gone" "3" "$(code)"
 }
 section_def stacks section_stacks backend budget=80
 
+section_template_rest_api() {
+section "ff init --template rest-api: a REST API at a function's URL, its items in PostgreSQL; the Python one deployed on FF with a database of ff db's, then each runtime's run here as its README says, with ff local start --with postgres"
+local runtime api url items db_conn deleted base port starter id
+declare -A written=(
+  [nodejs]=".gitignore README.md events/create-item.json events/list-items.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/create-item.json events/list-items.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-rest-$runtime" && "$ff_bin" init "cli-rest-$runtime" --runtime "$runtime" --template rest-api >"$work/out" 2>"$work/err")
+  check "ff init --template rest-api makes cli-rest-$runtime's template, code, tests, events and README, and nothing else" "${written[$runtime]}" \
+    "$(template_files "$work/cli-rest-$runtime")"
+done
+
+# On FF, from the folder as ff init wrote it: ff deploy installs psycopg's Linux build itself.
+api="$work/cli-rest-python"
+in_folder "$api" deploy template.yaml --output json
+url="$(out | jq -r '.outputs[] | select(.name == "ApiUrl") | .value')"
+check "the Python one deployed as the stack samconfig.toml names: its function, psycopg installed by ff deploy, its URL the output ApiUrl" \
+  "0 cli-rest-python created cli-rest-python-api true" \
+  "$(code) $(out | jq -r '"\(.stack) \(.functions[0].action) \(.functions[0].name)"') $(out | jq -r --arg url "$url" '.functions[0].url == $url and ($url | startswith("http"))')"
+ff db create cli-rest --secret-for cli-rest-python-api --output json
+db_conn="$(out | jq -r .connectionString)"
+check "ff db create makes its database, its address the function's DATABASE_URL, as its README says" "0 active cli-rest-python-api:DATABASE_URL" \
+  "$(code) $(out | jq -r '"\(.status) \(.secretsSet[0].function):\(.secretsSet[0].secret)"')"
+ff invoke cli-rest-python-api --http POST /items --data '{"name": "Harissa, 2 jars"}'
+id="$(out | tail -1 | jq -r .id)"
+check "  ... ff invoke --http POST /items keeps an item there, over TLS, the table made at the first call" "0 HTTP 201 Harissa, 2 jars $id|Harissa, 2 jars" \
+  "$(code) $(out | head -1) $(out | tail -1 | jq -r .name) $(data_db_psql "$db_conn" 'select id, name from items')"
+items="$("$ff_bin" url show cli-rest-python-api --output json | jq -r .url.functionUrl)items"
+check "  ... its URL, as its README reads it from ff url show, lists it, and gives it at its address" "true 200 1 200 Harissa, 2 jars" \
+  "$([ "$items" = "${url}items" ] && echo true || echo false) $(at "$items" | sed 's/ .*//') $(jq length "$work/at.body") \
+$(at "$items/$id" | sed 's/ .*//') $(jq -r .name "$work/at.body")"
+check "  ... deletes it, then has none; a path without a route is 404, a method its route lacks 405 with Allow" \
+  "204 404 No item $id 404 405 GET, DELETE" \
+  "$(at "$items/$id" -X DELETE | sed 's/ .*//') $(at "$items/$id" | sed 's/ .*//') $(jq -r .message "$work/at.body") \
+$(at "${url}orders" | sed 's/ .*//') $(at "$items/$id" -X PUT | sed 's/ .*//') $(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+check "  ... its URL's CORS, as the template says, lets in its one origin and no other" "http://localhost:5173 none" \
+  "$(preflight "$items" http://localhost:5173) $(preflight "$items" https://elsewhere.example)"
+in_folder "$api" delete-stack --yes
+deleted="$(code) $(out | paste -sd' ')"
+ff db delete cli-rest --yes
+check "ff delete-stack deletes its function with its URL, ff db delete its database" \
+  "0 deleted the function cli-rest-python-api (Api) deleted the stack cli-rest-python 0 deleted the database cli-rest, with its data" \
+  "$deleted $(code) $(out)"
+
+# Here, each runtime as its README says: its commands before ff local start, as written, install its library and run
+# its tests; then ff local start --with postgres, called with its curl.
+for runtime in python nodejs; do
+  api="$work/cli-rest-$runtime"
+  check "cli-rest-$runtime's README: its commands install its library and run its 7 tests, which pass" "0 7" "$(readme_here "$api")"
+  port="$(free_port)"
+  base="http://cli-rest-$runtime-api.fn.localhost:$port"
+  local_started "$work/rest.out" "$work/rest.err" "$api/template.yaml" --port "$port" --with postgres
+  check "  ... ff local start --with postgres runs it at the address its README names, a PostgreSQL beside it" "true true" \
+    "$(grep -E "^  cli-rest-$runtime-api +$runtime +256 MB, 10 s  $base/$" "$work/rest.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  postgres  postgresql://' "$work/rest.out" >/dev/null && echo true || echo false)"
+  id="$(at "$base/items" -d '{"name": "Harissa, 2 jars"}' >"$work/rest-post"; jq -r .id "$work/at.body")"
+  check "  ... its README's curl keeps an item: 201, its address in Location, kept in that PostgreSQL" \
+    "201 /items/$id Harissa, 2 jars $id|Harissa, 2 jars" \
+    "$(sed 's/ .*//' "$work/rest-post") $(location) $(jq -r .name "$work/at.body") \
+$(local_psql "$work/rest.out" 'select id, name from items')"
+  check "  ... lists it, gives it at its address, deletes it, then has none, and answers 405 with Allow" \
+    "200 Harissa, 2 jars 200 Harissa, 2 jars 204 404 405 GET, DELETE" \
+    "$(at "$base/items" | sed 's/ .*//') $(jq -r '.[0].name' "$work/at.body") $(at "$base/items/$id" | sed 's/ .*//') $(jq -r .name "$work/at.body") \
+$(at "$base/items/$id" -X DELETE | sed 's/ .*//') $(at "$base/items/$id" | sed 's/ .*//') \
+$(at "$base/items/$id" -X PUT | sed 's/ .*//') $(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+  check "  ... its URL's CORS lets in its one origin and no other, as on FF" "http://localhost:5173 none" \
+    "$(preflight "$base/items" http://localhost:5173) $(preflight "$base/items" https://elsewhere.example)"
+  local_stopped
+  ff local reset "$api" --data --yes
+  check "  ... Ctrl-C leaving no container, ff local reset --data its database's volume gone" "0 0 0" \
+    "$(code) $(leftover) $(docker volume ls --quiet --filter "label=ff.local.project=$(cd "$api" && pwd -P)" | wc -l | tr -d ' ')"
+  check "  ... and its .gitignore leaves out what its README's commands installed and ff local kept: git sees ff init's files alone" \
+    "${written[$runtime]}" "$(git_sees "$api")"
+done
+}
+section_def template_rest_api section_template_rest_api backend budget=90
+
+section_template_cron_job() {
+section "ff init --template cron-job: a job on a schedule, its bucket and a queue of its failed runs; the Python one deployed on FF, a file uploaded with the AWS CLI and reported, its schedule, a failed run's record in its queue; then each runtime's run here as its README says, its schedule run by hand, a failed run tried three times then recorded in the local queue"
+local runtime job bucket today yesterday size port starter failed_id deleted
+declare -A written=(
+  [nodejs]=".gitignore README.md events/scheduled.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/scheduled.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-cron-$runtime" && "$ff_bin" init "cli-cron-$runtime" --runtime "$runtime" --template cron-job >"$work/out" 2>"$work/err")
+  check "ff init --template cron-job makes cli-cron-$runtime's template, code, tests, event and README, and nothing else" "${written[$runtime]}" \
+    "$(template_files "$work/cli-cron-$runtime")"
+done
+today="$(date -u +%F)"
+yesterday="$(date -u -d yesterday +%F)"
+
+# On FF, from the folder as ff init wrote it: ff deploy installs boto3, which FF's Python runtime hasn't.
+job="$work/cli-cron-python"
+in_folder "$job" deploy template.yaml --output json
+bucket="$(out | jq -r '.outputs[] | select(.name == "FilesBucket") | .value')"
+check "the Python one deployed as the stack samconfig.toml names: its function, its bucket named from the stack's, its queue" \
+  "0 cli-cron-python created cli-cron-python-report true cli-cron-python-failed-runs" \
+  "$(code) $(out | jq -r '"\(.stack) \(.functions[0].action) \(.functions[0].name)"') \
+$([[ $bucket =~ ^cli-cron-python-files-[a-z0-9]{12}$ ]] && echo true || echo false) \
+$(out | jq -r '.outputs[] | select(.name == "FailedRunsQueue") | .value | split("/") | last')"
+# As its README says: a key to the bucket alone, its variables for the AWS CLI, none of this machine's settings.
+ff keys create --name cli-cron-files --bucket "$bucket"
+out | grep '^export ' >"$work/cron.env"
+cron_aws() { (eval "$(cat "$work/cron.env")"; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+size="$(wc -c <"$job/README.md" | tr -d ' ')"
+uploaded="$(cron_aws s3 cp "$job/README.md" "s3://$bucket/incoming/README.md" --only-show-errors >/dev/null 2>&1; echo $?)"
+ff invoke cli-cron-python-report --data "{\"day\": \"$today\"}"
+check "  ... a file uploaded to its bucket by the AWS CLI with that key; ff invoke naming today reports it" \
+  "0 0 $today 1 $size incoming/README.md" \
+  "$uploaded $(code) $(out | sed '$d' | jq -r '"\(.day) \(.files) \(.bytes) \(.largest.key)"')"
+check "  ... in the bucket, beside the files, as reports/<day>.json" "$today 1 $size" \
+  "$(cron_aws s3 cp "s3://$bucket/reports/$today.json" - 2>/dev/null | jq -r '"\(.day) \(.files) \(.bytes)"')"
+ff schedule list cli-cron-python-report --output json
+check "  ... its schedule, the template's Schedule event: 06:00 UTC each day, running" "0 EveryMorning cron(0 6 * * ? *) true" \
+  "$(code) $(out | jq -r '.[] | "\(.name) \(.expression) \(.enabled)"')"
+ff async-config cli-cron-python-report
+check "  ... a run that fails tried twice more, then sent to its queue, as its EventInvokeConfig says" \
+  "0 cli-cron-python-report: a call that fails is retried twice, and kept 6 hours at most; one that fails for good to the queue cli-cron-python-failed-runs" \
+  "$(code) $(out)"
+# FF tries a run again a minute after it failed, then two minutes after: with no retry, its record comes at once.
+ff async-config cli-cron-python-report --retries 0
+ff invoke cli-cron-python-report --async --data '{"time": "yesterday"}' --raw
+failed_id="$(out)"
+ff queues receive cli-cron-python-failed-runs --wait 20s --output json
+check "  ... a run that failed for good: its record in that queue, as Lambda writes it, its event under requestPayload" \
+  "0 RetriesExhausted $failed_id yesterday The event's time is no date: \"yesterday\"" \
+  "$(code) $(out | jq -r '.[0].body | fromjson | "\(.requestContext.condition) \(.requestContext.requestId) \(.requestPayload.time) \(.responsePayload.errorMessage)"')"
+in_folder "$job" delete-stack --yes
+check "ff delete-stack stops at the bucket while it holds files, as CloudFormation does, saying what deletes it" "3 true" \
+  "$(code) $(err | grep -F "The bucket $bucket (Files) isn't empty" | grep -F "ff buckets delete $bucket --force" >/dev/null && echo true || echo false)"
+ff buckets delete "$bucket" --force --yes
+deleted="$(code)"
+in_folder "$job" delete-stack --yes
+check "  ... ff buckets delete --force deletes it with its files, then ff delete-stack the rest" \
+  "0 0 deleted the function cli-cron-python-report (Report) deleted the bucket $bucket (Files) deleted the queue cli-cron-python-failed-runs (FailedRuns) deleted the stack cli-cron-python" \
+  "$deleted $(code) $(out | paste -sd' ')"
+ff keys revoke cli-cron-files --yes
+
+# Here, each runtime as its README says: its commands before ff local start, then the start, then the commands for
+# another terminal, at the suite's port. A failed run's retries come in 1.2 s and 2.4 s, a second of the test build's
+# asynchronous calls 20 ms.
+for runtime in python nodejs; do
+  job="$work/cli-cron-$runtime"
+  check "cli-cron-$runtime's README: its commands install its library and run its 6 tests, which pass" "0 6" "$(readme_here "$job")"
+  port="$(free_port)"
+  FF_TEST_ASYNC_SECOND_MS=20 local_started "$work/cron.out" "$work/cron.err" "$job/template.yaml" --port "$port"
+  check "  ... ff local start runs the job, its schedule, its queue and its bucket, its files kept in .ff/local/buckets/files" \
+    "true true true true" \
+    "$(grep -E "^  cli-cron-$runtime-report  $runtime  256 MB, 60 s$" "$work/cron.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  cli-cron-$runtime-report/EveryMorning  cron\(0 6 \* \* \? \*\)  next [0-9-]{10}T06:00:00Z$" "$work/cron.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  cli-cron-$runtime-failed-runs  http://127\.0\.0\.1:$port/000000000000/cli-cron-$runtime-failed-runs$" "$work/cron.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  files  $job/\.ff/local/buckets/files$" "$work/cron.out" >/dev/null && echo true || echo false)"
+  check "  ... its README's commands for another terminal: a file put in the bucket by curl, today's report made by Lambda's Invoke" \
+    "0 200 $today 1 $(wc -c <"$job/README.md" | tr -d ' ') incoming/README.md" \
+    "$(readme_after "$job" '^In another terminal' "s/:3700/:$port/g") $(at "http://127.0.0.1:$port/files/reports/$today.json" | sed -n '1s/ .*//p') \
+$(jq -r '"\(.day) \(.files) \(.bytes) \(.largest.key)"' "$work/at.body")"
+  until_found "http://127.0.0.1:$port/files/reports/$yesterday.json" || true
+  check "  ... and ff local run EveryMorning, the schedule's run now, yesterday's report, with none of today's files" \
+    "200 $yesterday 0 null true" \
+    "$(at "http://127.0.0.1:$port/files/reports/$yesterday.json" | sed -n '1s/ .*//p') $(jq -r '"\(.day) \(.files) \(.largest)"' "$work/at.body") \
+$(grep -F "cli-cron-$runtime-report | " "$work/cron.err" | grep -F "reported $yesterday: 0 files, 0 bytes" >/dev/null && echo true || echo false)"
+  curl -s -o /dev/null -X POST -H 'X-Amz-Invocation-Type: Event' \
+    "http://127.0.0.1:$port/2015-03-31/functions/cli-cron-$runtime-report/invocations" -d '{"time": "yesterday"}'
+  local_aws "$job" "$port" sqs receive-message --wait-time-seconds 20 --output json \
+    --queue-url "http://127.0.0.1:$port/000000000000/cli-cron-$runtime-failed-runs" >"$work/cron-record.json" 2>&1 || true
+  check "  ... a run that fails, tried three times as on FF, then its record in the local queue, read by the AWS CLI with the local key" \
+    "RetriesExhausted 3 yesterday The event's time is no date: \"yesterday\"" \
+    "$(jq -r '.Messages[0].Body | fromjson | "\(.requestContext.condition) \(.requestContext.approximateInvokeCount) \(.requestPayload.time) \(.responsePayload.errorMessage)"' "$work/cron-record.json" 2>&1)"
+  local_stopped
+  check "  ... Ctrl-C leaving no container, the bucket's three files kept for the next start" "0 3" \
+    "$(leftover) $(find "$job/.ff/local/buckets/files" -name '*.object.json' | wc -l | tr -d ' ')"
+  ff local reset "$job" --yes
+  check "  ... ff local reset removing them, and its .gitignore leaves out what its README's commands installed: git sees ff init's files alone" \
+    "0 false ${written[$runtime]}" "$(code) $([ -e "$job/.ff/local" ] && echo true || echo false) $(git_sees "$job")"
+done
+}
+section_def template_cron_job section_template_cron_job backend budget=70
+
+section_template_queue_worker() {
+section "ff init --template queue-worker: a URL that takes jobs into a queue, a worker reading it in batches, a dead-letter queue; the Node.js one deployed on FF, a job done and one of a task it hasn't failed three times then dead-lettered; then each runtime's run here as its README says, the same"
+local runtime app url failing_on_ff good bad port base starter jobs trace
+declare -A written=(
+  [nodejs]=".gitignore README.md events/batch.json events/post-job.json samconfig.toml src/api.mjs src/package-lock.json src/package.json src/worker.mjs template.yaml tests/api.test.mjs tests/worker.test.mjs"
+  [python]=".gitignore README.md events/batch.json events/post-job.json samconfig.toml src/api.py src/requirements.txt src/worker.py template.yaml tests/__init__.py tests/test_api.py tests/test_worker.py"
+)
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-jobs-$runtime" && "$ff_bin" init "cli-jobs-$runtime" --runtime "$runtime" --template queue-worker >"$work/out" 2>"$work/err")
+  check "ff init --template queue-worker makes cli-jobs-$runtime's template, code, tests, events and README, and nothing else" \
+    "${written[$runtime]}" "$(template_files "$work/cli-jobs-$runtime")"
+done
+
+# On FF, the Node.js one: ff deploy installs AWS's SDK's SQS client. A job the worker failed comes back after 10 s, not
+# 60, so that its third failure comes within the section, whose part here runs meanwhile.
+app="$work/cli-jobs-nodejs"
+in_folder "$app" deploy template.yaml --parameter-overrides JobsVisibilityTimeout=10 --output json
+url="$(out | jq -r '.outputs[] | select(.name == "ApiUrl") | .value')"
+check "the Node.js one deployed as the stack samconfig.toml names: the API and its URL, the worker, the two queues" \
+  "0 cli-jobs-nodejs cli-jobs-nodejs-api cli-jobs-nodejs-worker true cli-jobs-nodejs-jobs cli-jobs-nodejs-jobs-dead-letters" \
+  "$(code) $(out | jq -r '"\(.stack) \([.functions[].name] | sort | join(" "))"') $([[ $url == http*/ ]] && echo true || echo false) \
+$(out | jq -r '[.outputs[] | select(.name == "JobsQueue" or .name == "DeadLettersQueue") | .value | split("/") | last] | sort | join(" ")')"
+ff invoke cli-jobs-nodejs-api --http POST /jobs --data '{"task": "resize"}'
+failing_on_ff="$(out | tail -1 | jq -r .id)"
+check "  ... ff invoke --http POST /jobs, a job of a task the worker hasn't: 202, its ID" "0 HTTP 202 resize true" \
+  "$(code) $(out | head -1) $(out | tail -1 | jq -r .task) $([[ $failing_on_ff =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false)"
+ff invoke cli-jobs-nodejs-api --http POST /jobs --data '{"task": "greet", "name": "Amira"}'
+good="$(out | tail -1 | jq -r .id)"
+jobs=""
+for _ in $(seq 1 30); do
+  ff logs cli-jobs-nodejs-worker
+  jobs="$(out | json_lines | jq -r --arg job "$good" 'select(.job == $job) | "\(.task) \(.done)"' 2>/dev/null)"
+  [ -n "$jobs" ] && break
+  sleep 1
+done
+check "  ... and a greeting's, done by the worker from the queue, its line in ff logs" "greet Hello Amira" "$jobs"
+check "  ... the API's refusals at its URL: a job without a task 400, another path 404, another method 405 with Allow" \
+  "400 A job names its task, {\"task\": \"…\"}, 1 to 100 characters 404 405 POST" \
+  "$(at "${url}jobs" -d '{"name": "Amira"}' | sed 's/ .*//') $(jq -r .message "$work/at.body") $(at "${url}orders" | sed 's/ .*//') \
+$(at "${url}jobs" | sed 's/ .*//') $(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+ff event-sources list --function cli-jobs-nodejs-worker --output json
+check "  ... the worker reads the jobs' queue in batches of 10, naming the jobs it failed" "0 cli-jobs-nodejs-jobs 10 Enabled ReportBatchItemFailures" \
+  "$(code) $(out | jq -r '.[] | "\(.eventSourceArn | split(":") | last) \(.batchSize) \(.state) \(.functionResponseTypes | join(","))"')"
+
+# Here, each runtime as its README says, the same 10 s.
+for runtime in python nodejs; do
+  app="$work/cli-jobs-$runtime"
+  check "cli-jobs-$runtime's README: its commands install its library and run its 10 tests, which pass" "0 10" "$(readme_here "$app")"
+  port="$(free_port)"
+  base="http://cli-jobs-$runtime-api.fn.localhost:$port"
+  local_started "$work/jobs.out" "$work/jobs.err" "$app/template.yaml" --port "$port" --parameter-overrides JobsVisibilityTimeout=10
+  check "  ... ff local start runs the API at the address its README names, the worker reading the jobs' queue, the two queues" \
+    "true true true" \
+    "$(grep -E "^  cli-jobs-$runtime-api +$runtime  256 MB, 10 s  $base/$" "$work/jobs.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  cli-jobs-$runtime-worker/Jobs  cli-jobs-$runtime-jobs: batches of 10, ReportBatchItemFailures$" "$work/jobs.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  cli-jobs-$runtime-jobs +http://127\.0\.0\.1:$port/000000000000/cli-jobs-$runtime-jobs, to cli-jobs-$runtime-jobs-dead-letters after 3 receives$" "$work/jobs.out" >/dev/null && echo true || echo false)"
+  check "  ... its README's two curls: each job taken, 202 with its ID" "0 greet resize" \
+    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g") $(jq -r .task "$work/after.out" | paste -sd' ')"
+  good="$(jq -r 'select(.task == "greet") | .id' "$work/after.out")"
+  bad="$(jq -r 'select(.task == "resize") | .id' "$work/after.out")"
+  # The job the worker fails is received a fourth time 30 s after it came, and goes to the dead-letter queue then.
+  for _ in 1 2 3; do
+    local_aws "$app" "$port" sqs receive-message --wait-time-seconds 20 --output json \
+      --queue-url "http://127.0.0.1:$port/000000000000/cli-jobs-$runtime-jobs-dead-letters" >"$work/jobs-dead.json" 2>&1 || true
+    jq -e '.Messages | length > 0' "$work/jobs-dead.json" >/dev/null 2>&1 && break
+  done
+  grep -F "cli-jobs-$runtime-worker | " "$work/jobs.err" | json_lines >"$work/worker.lines"
+  check "  ... the greeting's job done by the worker, its line on ff local start's stderr as its README shows it" "greet Hello Amira" \
+    "$(jq -r --arg job "$good" 'select(.job == $job) | "\(.task) \(.done)"' "$work/worker.lines")"
+  check "  ... the other failed at each of its three tries, then in the dead-letter queue, read by the AWS CLI with the local key" \
+    "1,2,3 No task \"resize\" $bad resize" \
+    "$(jq -r --arg job "$bad" 'select(.job == $job) | .tries' "$work/worker.lines" | paste -sd,) \
+$(jq -r --arg job "$bad" 'select(.job == $job) | .failed' "$work/worker.lines" | sort -u) \
+$(jq -r '.Messages[0] | "\(.MessageId) \(.Body | fromjson | .task)"' "$work/jobs-dead.json" 2>&1)"
+  local_stopped
+  ff local reset "$app" --yes
+  check "  ... Ctrl-C leaving no container, ff local reset what ff local kept, and git sees ff init's files alone" \
+    "0 0 ${written[$runtime]}" "$(leftover) $(code) $(git_sees "$app")"
+done
+
+# On FF meanwhile, the job the worker failed: received three times, 10 s apart, then in the dead-letter queue.
+ff queues receive cli-jobs-nodejs-jobs-dead-letters --wait 20s --output json
+check "the job the worker failed on FF: in the dead-letter queue after its three tries, as its redrive policy says" \
+  "0 resize" "$(code) $(out | jq -r '.[0].body | fromjson | .task')"
+ff logs cli-jobs-nodejs-worker
+check "  ... its three tries' lines in ff logs, each failed" "1,2,3 No task \"resize\"" \
+  "$(out | json_lines | jq -r --arg job "$failing_on_ff" 'select(.job == $job) | .tries' | paste -sd,) \
+$(out | json_lines | jq -r --arg job "$failing_on_ff" 'select(.job == $job) | .failed' | sort -u)"
+# One trace from the API's call to the worker's: the API's client sends its call's trace with the job, which the queue
+# keeps, and the worker's call joins it. Its second and third tries come in batches of their own; its first may share
+# one with the greeting, whose trace the batch may take.
+ff history cli-jobs-nodejs-api --limit 20 --output json
+trace="$(out | jq -r --arg job "$failing_on_ff" '[.invocations[] | select(((.output.body // "{}") | fromjson? | .id) == $job) | .traceId][0] // ""')"
+ff history cli-jobs-nodejs-api --limit 20
+check "  ... the API's call that took it, its trace in ff history's TRACE column" "0 true true" \
+  "$(code) $([[ $trace =~ ^1-[0-9a-f]{8}-[0-9a-f]{24}$ ]] && echo true || echo false) $(out | grep -F " $trace " >/dev/null && echo true || echo false)"
+ff trace "$trace" --output json
+check "  ... ff trace: the API's call first, then the worker's, called with the queue's batches, two of them at least" \
+  "0 $trace cli-jobs-nodejs-api cli-jobs-nodejs-worker sqs cli-jobs-nodejs-jobs true" \
+  "$(code) $(out | jq -r '"\(.traceId) \(.calls[0].functionName) \([.calls[1:][] | .functionName] | unique | join(","))"') \
+$(out | jq -r '"\([.calls[1:][] | .source] | unique | join(",")) \([.calls[1:][] | .trigger.queue] | unique | join(","))"') \
+$(out | jq -r '[.calls[1:][] | select(.functionName == "cli-jobs-nodejs-worker")] | length >= 2')"
+ff trace "$trace"
+check "  ... as a timeline, its header naming its calls and their two functions" "0 true" \
+  "$(code) $(out | head -1 | grep -E "^Trace $trace: [0-9]+ calls of 2 functions, from .+ UTC, over " >/dev/null && echo true || echo false)"
+ff logs --trace "$trace"
+check "  ... ff logs --trace: the two functions' lines, by time, each named, the API's first, the worker's tries' among them" \
+  "0 cli-jobs-nodejs-api cli-jobs-nodejs-api,cli-jobs-nodejs-worker 2,3" \
+  "$(code) $(out | head -1 | awk '{print $3}') $(out | awk '{print $3}' | sort -u | paste -sd,) \
+$(out | json_lines | jq -r --arg job "$failing_on_ff" 'select(.job == $job) | .tries' | tail -2 | paste -sd,)"
+in_folder "$work/cli-jobs-nodejs" delete-stack --yes
+check "ff delete-stack deletes both functions, with the URL and the worker's reading of the queue, and the two queues" \
+  "0 deleted the function cli-jobs-nodejs-api (Api) deleted the function cli-jobs-nodejs-worker (Worker) deleted the queue cli-jobs-nodejs-jobs-dead-letters (DeadLetters) deleted the queue cli-jobs-nodejs-jobs (Jobs) deleted the stack cli-jobs-nodejs" \
+  "$(code) $(out | paste -sd' ')"
+}
+section_def template_queue_worker section_template_queue_worker backend budget=180
+
+section_template_site_with_api() {
+section "ff init --template site-with-api: a page on a bucket's site and its API at a function's URL, a guestbook kept in a second bucket; the Node.js one deployed on FF, its page by ff sites deploy, as its README says, and signed from its site's origin; then each runtime's run here as its README says, its page served from its folder by ff local start --site"
+local runtime app url bucket entries site deployed page base port starter id
+declare -A written=(
+  [nodejs]=".gitignore README.md events/list-entries.json events/post-entry.json samconfig.toml site/app.js site/index.html site/style.css src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/list-entries.json events/post-entry.json samconfig.toml site/app.js site/index.html site/style.css src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-guests-$runtime" && "$ff_bin" init "cli-guests-$runtime" --runtime "$runtime" --template site-with-api >"$work/out" 2>"$work/err")
+  check "ff init --template site-with-api makes cli-guests-$runtime's template, code, tests, events, page and README, and nothing else" "${written[$runtime]}" \
+    "$(template_files "$work/cli-guests-$runtime")"
+done
+
+# On FF, from the folder as ff init wrote it: ff deploy installs AWS's SDK, then the README's lines after it write the
+# page's config.json and deploy the page, its bucket the deploy's output.
+app="$work/cli-guests-nodejs"
+in_folder "$app" deploy template.yaml --output json
+url="$(out | jq -r '.outputs[] | select(.name == "ApiUrl") | .value')"
+bucket="$(out | jq -r '.outputs[] | select(.name == "WebsiteBucket") | .value')"
+entries="$(out | jq -r '.outputs[] | select(.name == "EntriesBucket") | .value')"
+site="$(out | jq -r '.outputs[] | select(.name == "WebsiteUrl") | .value')"
+check "the Node.js one deployed as the stack samconfig.toml names: its function at its URL, its two buckets named from the stack's, the page's address its bucket's site" \
+  "0 cli-guests-nodejs created cli-guests-nodejs-api true true true $(site_of "$bucket")" \
+  "$(code) $(out | jq -r '"\(.stack) \(.functions[0].action) \(.functions[0].name)"') \
+$(out | jq -r --arg url "$url" '.functions[0].url == $url and ($url | startswith("http"))') \
+$([[ $bucket =~ ^cli-guests-nodejs-website-[a-z0-9]{12}$ ]] && echo true || echo false) \
+$([[ $entries =~ ^cli-guests-nodejs-entries-[a-z0-9]{12}$ ]] && echo true || echo false) $site"
+check "  ... its README's lines after ff deploy: config.json naming the API's URL, from ff url show, and the page's four files deployed to its bucket" \
+  "0 {\"api\": \"$url\"} site deployed to $bucket: 4 files uploaded, 0 files unchanged, 0 files deleted $site" \
+  "$(readme_after "$app" '^ff deploy template.yaml' "s/<WebsiteBucket>/$bucket/g") $(cat "$app/site/config.json") \
+$(paste -sd' ' "$work/after.out")"
+check "  ... the page answers at its site's address, and its config.json there names the API" \
+  "200 true 200 $url" \
+  "$(at "$site/" | sed -n '1s/ .*//p') $(grep -F "<h1>cli-guests-nodejs's guestbook</h1>" "$work/at.body" >/dev/null && echo true || echo false) \
+$(at "$site/config.json" | sed -n '1s/ .*//p') $(jq -r .api "$work/at.body")"
+page="$(site_of "$bucket")"
+check "  ... the API's CORS lets the page's origin in, as any, without credentials" "* *" \
+  "$(preflight "${url}entries" "$page") $(curl -s -o /dev/null -D - "${url}entries" -H "Origin: $page" | tr -d '\r' | sed -n 's/^access-control-allow-origin: //Ip')"
+id="$(at "${url}entries" -H "Origin: $page" -H 'content-type: application/json' -d '{"name": " Amira ", "message": "Ahlan from Sousse!"}' >"$work/guests-post"; jq -r .id "$work/at.body")"
+check "  ... a POST from the page keeps an entry, trimmed, in the entries' bucket; GET lists it" \
+  "201 Amira 200 1 $id Ahlan from Sousse!" \
+  "$(sed -n '1s/ .*//p' "$work/guests-post") $(jq -r .name "$work/at.body") $(at "${url}entries" | sed -n '1s/ .*//p') \
+$(jq -r '"\(length) \(.[0].id) \(.[0].message)"' "$work/at.body")"
+check "  ... an entry without a message is refused with 400, another path is 404, another method 405 with Allow" \
+  "400 An entry has a message, 1 to 500 characters 404 405 GET, POST" \
+  "$(at "${url}entries" -d '{"name": "Amira"}' | sed -n '1s/ .*//p') $(jq -r .message "$work/at.body") \
+$(at "${url}items" | sed -n '1s/ .*//p') $(at "${url}entries" -X DELETE | sed -n '1s/ .*//p') $(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+in_folder "$app" delete-stack --yes
+check "ff delete-stack stops at the buckets that hold files, as its README says" "3 true" \
+  "$(code) $(err | grep -F "ff buckets delete" >/dev/null && echo true || echo false)"
+ff buckets delete "$bucket" --force --yes
+ff buckets delete "$entries" --force --yes
+in_folder "$app" delete-stack --yes
+check "  ... ff buckets delete --force deletes each with its files, then ff delete-stack the rest" \
+  "0 deleted the function cli-guests-nodejs-api (Api) deleted the bucket $entries (Entries) deleted the bucket $bucket (Website) deleted the stack cli-guests-nodejs" \
+  "$(code) $(out | paste -sd' ')"
+
+# Here, each runtime as its README says: its commands before ff local start install its library, run its tests and
+# write config.json; ff local start --site serves the page from its folder; the README's curl signs the guestbook.
+for runtime in python nodejs; do
+  app="$work/cli-guests-$runtime"
+  check "cli-guests-$runtime's README: its commands install its library, run its 6 tests, which pass, and write config.json naming the API here" \
+    "0 6 {\"api\": \"http://cli-guests-$runtime-api.fn.localhost:3700\"}" "$(readme_here "$app") $(cat "$app/site/config.json")"
+  port="$(free_port)"
+  sed -i "s/:3700/:$port/" "$app/site/config.json"
+  base="http://cli-guests-$runtime-api.fn.localhost:$port"
+  page="http://website.site.localhost:$port"
+  local_started "$work/guests.out" "$work/guests.err" "$app/template.yaml" --port "$port" --site "Website=$app/site"
+  check "  ... ff local start --site runs its API at the address its README names, its page from site/, its entries kept in .ff/local" \
+    "true true true" \
+    "$(grep -E "^  cli-guests-$runtime-api +$runtime +256 MB, 10 s  $base/$" "$work/guests.out" >/dev/null && echo true || echo false) \
+$(grep -F "  website  $page/, $(cd "$app/site" && pwd -P)'s files" "$work/guests.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  entries  $app/\.ff/local/buckets/entries$" "$work/guests.out" >/dev/null && echo true || echo false)"
+  check "  ... the page answers at the address its README names, config.json with it, and the API lets its origin in" \
+    "200 true 200 $base *" \
+    "$(at "$page/" | sed -n '1s/ .*//p') $(grep -F "<h1>cli-guests-$runtime's guestbook</h1>" "$work/at.body" >/dev/null && echo true || echo false) \
+$(at "$page/config.json" | sed -n '1s/ .*//p') $(jq -r .api "$work/at.body") $(preflight "$base/entries" "$page")"
+  check "  ... its README's curl signs the guestbook and lists the entry, kept in the entries' bucket" \
+    "0 Amira 1 Ahlan from Sousse! 1" \
+    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g") $(jq -rs '"\(.[0].name) \(.[1] | length) \(.[1][0].message)"' "$work/after.out") \
+$(find "$app/.ff/local/buckets/entries" -name '*.object.json' | wc -l | tr -d ' ')"
+  local_stopped
+  ff local reset "$app" --yes
+  check "  ... Ctrl-C leaving no container, ff local reset removing the entries, and its .gitignore leaves out config.json and what its README's commands installed: git sees ff init's files alone" \
+    "0 0 false ${written[$runtime]}" "$(leftover) $(code) $([ -e "$app/.ff/local" ] && echo true || echo false) $(git_sees "$app")"
+done
+}
+section_def template_site_with_api section_template_site_with_api backend budget=50
+
+section_template_image_resize() {
+section "ff init --template image-resize: an image put in a bucket under uploads/ makes its thumbnail under thumbnails/, sharp's or Pillow's native code built for Linux; both runtimes deployed on FF with --container as its README says, an image uploaded by the AWS CLI and its thumbnail waited for; then each runtime's run here as its README says, an image too small to shrink kept its size, a file that is no image left"
+local runtime app bucket port starter made _
+declare -A written=(
+  [nodejs]=".gitignore README.md events/upload.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/upload.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+# png_of <width> <height> <file>: a PNG of a gradient, written by Python alone, as this machine may have no image tool.
+png_of() {
+  python3 -I -c 'import struct, sys, zlib
+width, height = int(sys.argv[1]), int(sys.argv[2])
+rows = b"".join(b"\0" + b"".join(bytes((x * 255 // width, y * 255 // height, 160)) for x in range(width)) for y in range(height))
+chunk = lambda kind, data: struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+open(sys.argv[3], "wb").write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+  + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))' "$@"
+}
+# pixels <file>: an image's width x height, as file reads it; webp <file>: WebP when file reads one, which its older
+# versions call Web/P.
+pixels() { file -b "$1" | grep -oE '[0-9]+ ?x ?[0-9]+' | head -1 | tr -d ' '; }
+webp() { file -b "$1" | grep -oE 'Web/?P image' | sed 's|/||; s| image||'; }
+for runtime in python nodejs; do
+  (cd "$work" && rm -rf "cli-photos-$runtime" && "$ff_bin" init "cli-photos-$runtime" --runtime "$runtime" --template image-resize >"$work/out" 2>"$work/err")
+  check "ff init --template image-resize makes cli-photos-$runtime's template, code, tests, event and README, and nothing else" "${written[$runtime]}" \
+    "$(template_files "$work/cli-photos-$runtime")"
+done
+png_of 640 480 "$work/photo.png"
+png_of 120 90 "$work/small.png"
+check "the suite's images: a photo, 640x480, and one smaller than a thumbnail, 120x90" "640x480 120x90" \
+  "$(pixels "$work/photo.png") $(pixels "$work/small.png")"
+
+# On FF, each runtime from its folder as ff init wrote it, as the README says: --container installs sharp, or Pillow,
+# in the runtime's build image, Linux's native code. One stack at a time, as the dev cluster has room for one
+# function of this size beside the suite's own.
+for runtime in nodejs python; do
+  app="$work/cli-photos-$runtime"
+  in_folder "$app" deploy template.yaml --container --output json
+  bucket="$(out | jq -r '.outputs[] | select(.name == "ImagesBucket") | .value')"
+  check "the $runtime one deployed with --container as the stack samconfig.toml names: its function, its bucket named after the stack and the account" \
+    "0 cli-photos-$runtime created cli-photos-$runtime-resize true" \
+    "$(code) $(out | jq -r '"\(.stack) \(.functions[0].action) \(.functions[0].name)"') \
+$([[ $bucket =~ ^cli-photos-$runtime-images-[0-9]{12}$ ]] && echo true || echo false)"
+  # As its README says: a key to the bucket alone, its variables for the AWS CLI, none of this machine's settings.
+  ff keys create --name "cli-photos-$runtime" --bucket "$bucket"
+  out | grep '^export ' >"$work/photos.env"
+  photos_aws() { (eval "$(cat "$work/photos.env")"; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
+  rm -f "$work/photo.webp"
+  check "  ... an image uploaded under uploads/ by the AWS CLI with that key: its thumbnail waited for as the README says, 200x150, a WebP" \
+    "0 0 0 200x150 WebP" \
+    "$(photos_aws s3 cp "$work/photo.png" "s3://$bucket/uploads/photo.png" --only-show-errors >/dev/null 2>&1; echo $?) \
+$(photos_aws s3api wait object-exists --bucket "$bucket" --key thumbnails/photo.webp >/dev/null 2>&1; echo $?) \
+$(photos_aws s3 cp "s3://$bucket/thumbnails/photo.webp" "$work/photo.webp" --only-show-errors >/dev/null 2>&1; echo $?) \
+$(pixels "$work/photo.webp") $(webp "$work/photo.webp")"
+  for _ in $(seq 1 20); do
+    ff logs "cli-photos-$runtime-resize"
+    out | grep -E '"made": ?"thumbnails/photo.webp", ?"from": ?"uploads/photo.png"' >/dev/null && break
+    sleep 1
+  done
+  check "  ... and its log says so, in ff logs" "0 true" \
+    "$(code) $(out | grep -E '"made": ?"thumbnails/photo.webp", ?"from": ?"uploads/photo.png"' >/dev/null && echo true || echo false)"
+  ff buckets delete "$bucket" --force --yes
+  in_folder "$app" delete-stack --yes
+  made="$(code) $(out | paste -sd' ')"
+  ff keys revoke "cli-photos-$runtime" --yes
+  check "  ... ff buckets delete --force and ff delete-stack delete it, the key revoked" \
+    "0 deleted the function cli-photos-$runtime-resize (Resize) deleted the bucket $bucket (Images) deleted the stack cli-photos-$runtime 0" \
+    "$made $(code)"
+done
+
+# Here, each runtime as its README says: its commands before ff local start install its libraries, Linux's builds,
+# and run its tests; ff local start; its curls, the image put and its thumbnail waited for.
+for runtime in python nodejs; do
+  app="$work/cli-photos-$runtime"
+  bucket="cli-photos-$runtime-images-000000000000"
+  check "cli-photos-$runtime's README: its commands install its libraries and run its 6 tests, which pass" "0 6" "$(readme_here "$app")"
+  port="$(free_port)"
+  local_started "$work/photos.out" "$work/photos.err" "$app/template.yaml" --port "$port"
+  check "  ... ff local start runs the function and its bucket, named as the README says, its files kept in .ff/local, its events to the function" \
+    "true true" \
+    "$(grep -E "^  cli-photos-$runtime-resize  $runtime  512 MB, 30 s$" "$work/photos.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  $bucket  $app/\.ff/local/buckets/$bucket, its events to cli-photos-$runtime-resize$" "$work/photos.out" >/dev/null && echo true || echo false)"
+  cp "$work/photo.png" "$app/photo.png"
+  check "  ... its README's curls: the image put under uploads/, its thumbnail waited for, 200x150, a WebP" "0 200x150 WebP" \
+    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g; s/photo\.jpg/photo.png/g") $(pixels "$app/photo.webp") $(webp "$app/photo.webp")"
+  curl -s -o /dev/null -T "$work/small.png" "http://127.0.0.1:$port/$bucket/uploads/small.png"
+  printf 'no image\n' >"$work/notes.txt"
+  curl -s -o /dev/null -T "$work/notes.txt" "http://127.0.0.1:$port/$bucket/uploads/notes.txt"
+  until_found "http://127.0.0.1:$port/$bucket/thumbnails/small.webp" || true
+  curl -s -o "$work/small.webp" "http://127.0.0.1:$port/$bucket/thumbnails/small.webp"
+  for _ in $(seq 1 60); do
+    grep -E '"left": ?"uploads/notes.txt"' "$work/photos.err" >/dev/null && break
+    sleep 0.5
+  done
+  check "  ... an image smaller than a thumbnail kept its size; a file that is no image left, said in the log, nothing made of it" \
+    "120x90 true 404" \
+    "$(pixels "$work/small.webp") $(grep -E '"left": ?"uploads/notes.txt"' "$work/photos.err" >/dev/null && echo true || echo false) \
+$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/$bucket/thumbnails/notes.webp")"
+  local_stopped
+  check "  ... Ctrl-C leaving no container, the bucket's five files kept for the next start" "0 5" \
+    "$(leftover) $(find "$app/.ff/local/buckets/$bucket" -name '*.object.json' | wc -l | tr -d ' ')"
+  rm -f "$app/photo.png" "$app/photo.webp"
+  ff local reset "$app" --yes
+  check "  ... ff local reset removing them, and its .gitignore leaves out what its README's commands installed: git sees ff init's files alone" \
+    "0 false ${written[$runtime]}" "$(code) $([ -e "$app/.ff/local" ] && echo true || echo false) $(git_sees "$app")"
+done
+}
+section_def template_image_resize section_template_image_resize backend budget=300
+
+section_template_webhook() {
+section "ff init --template webhook: orders paid through Konnect, its notifications received right; the Node.js one deployed on FF as its README says, its database ff db's and Konnect's key a secret, Konnect out of reach; then each runtime's run here as its README says, ff local konnect standing in for Konnect, with ff local start --with postgres: an order paid at its page, and the faults a webhook must survive"
+local runtime app url db_conn made base port starter id log konnect_port pay ref forged browser second second_pay
+declare -A written=(
+  [nodejs]=".gitignore README.md events/create-order.json events/notification.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
+  [python]=".gitignore README.md events/create-order.json events/notification.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
+)
+# logged <jq filter> <command...>: what the filter takes from the JSON lines of the log the command prints, waited for
+# 20 s at most, as a call's line can come a moment after its answer.
+logged() {
+  local filter="$1" found="" _
+  shift
+  for _ in $(seq 1 40); do
+    found="$("$@" 2>/dev/null | json_lines | jq -rR "fromjson? | $filter" 2>/dev/null || true)"
+    [ -n "$found" ] && break
+    sleep 0.5
+  done
+  echo "$found"
+}
+for runtime in nodejs python; do
+  (cd "$work" && rm -rf "cli-pay-$runtime" && "$ff_bin" init "cli-pay-$runtime" --runtime "$runtime" --template webhook >"$work/out" 2>"$work/err")
+  check "ff init --template webhook makes cli-pay-$runtime's template, code, tests, events and README, and nothing else" "${written[$runtime]}" \
+    "$(template_files "$work/cli-pay-$runtime")"
+done
+
+# On FF, the Node.js one as its README says, its commands as written: its wallet's placeholder given, and Konnect's
+# address a port of the function's own where nothing listens, so that nothing leaves the cluster; Konnect's key on
+# stdin, as the prompt takes it. A payment Konnect makes and confirms is tried here, below, against ff local konnect.
+app="$work/cli-pay-nodejs"
+made="$(readme_after "$app" '^## On FF$' "s|<your wallet's ID>|suite-wallet KonnectApiUrl=http://127.0.0.1:9|" <<<'suite-key')"
+db_conn="$(grep -m1 -E '^postgres(ql)?://' "$work/after.out" || true)"
+url="$("$ff_bin" url show cli-pay-nodejs-payments --output json | jq -r .url.functionUrl)"
+check "the Node.js one's README on FF: ff deploy, ff db create, ff secrets set, then its curl, which Konnect out of reach makes 502, no order kept" \
+  "0 true Konnect made no payment: try again 0" \
+  "$made $([[ $db_conn == postgres* && $url == http* ]] && echo true || echo false) $(tail -1 "$work/after.out" | jq -r .message) \
+$(data_db_psql "$db_conn" 'select count(*) from orders')"
+check "  ... and its log, in ff logs, says why" "true" \
+  "$(logged 'select(.unpaid) | .why | startswith("no payment made: Konnect didn\u0027t answer: ")' "$ff_bin" logs cli-pay-nodejs-payments)"
+check "  ... a notification no order has: the same 200 Received, kept as it came, left, and Konnect not asked" \
+  "200 Received konnect|forged-0001|payment_ref=forged-0001|suite/1 no order has this payment" \
+  "$(at "${url}webhooks/konnect?payment_ref=forged-0001" -A suite/1) \
+$(data_db_psql "$db_conn" 'select provider, payment_ref, query, user_agent from notifications') \
+$(logged 'select(.left == "forged-0001") | .why' "$ff_bin" logs cli-pay-nodejs-payments)"
+id=6f1c2a7e-0b8d-4c5e-9a3f-2d4b6c8e0f11
+data_db_psql "$db_conn" "insert into orders (id, amount, currency, description, payment_ref)
+  values ('$id', 12500, 'TND', '2 jars of harissa', 'suite-ref-1')" >/dev/null
+check "  ... an order's notification, Konnect not answering: the same 200, the order left pending, its log saying why" \
+  "200 Received pending true" \
+  "$(at "${url}webhooks/konnect?payment_ref=suite-ref-1") $(data_db_psql "$db_conn" "select status from orders where id = '$id'") \
+$(logged 'select(.left == "suite-ref-1") | .why | startswith("Konnect didn\u0027t answer: ")' "$ff_bin" logs cli-pay-nodejs-payments)"
+check "  ... GET /orders/<id> pending still; a notification without its reference 400, an order it hasn't 404, a method its route lacks 405 with Allow" \
+  "200 pending 400 A notification names its payment: ?payment_ref=<its reference> 404 405 POST" \
+  "$(at "${url}orders/$id" | sed 's/ .*//') $(jq -r .status "$work/at.body") $(at "${url}webhooks/konnect" | sed 's/ .*//') \
+$(jq -r .message "$work/at.body") $(at "${url}orders/00000000-0000-4000-8000-000000000000" | sed 's/ .*//') $(at "${url}orders" -X PUT | sed 's/ .*//') \
+$(sed -n 's/^allow: //Ip' "$work/at.head" | tr -d '\r')"
+in_folder "$app" delete-stack --yes
+made="$(code) $(out | paste -sd' ')"
+ff db delete cli-pay-nodejs --yes
+check "ff delete-stack deletes its function with its URL, ff db delete its database, as its README says" \
+  "0 deleted the function cli-pay-nodejs-payments (Payments) deleted the stack cli-pay-nodejs 0 deleted the database cli-pay-nodejs, with its data" \
+  "$made $(code) $(out)"
+
+# Here, each runtime as its README says: its commands before ff local start install its library, run its tests and
+# write .env.local; Konnect's stand-in, which the README starts first, on a port of its own; ff local start as the
+# README writes it, but for the two ports and the template's folder; then its curl, the order paid at the stand-in's
+# page, and each fault the page sends. Then the stand-in again with --delay, a Konnect too slow to wait for.
+# holds <file> <text>...: true when the file holds each text, else what it lacks.
+holds() {
+  local file="$1" text lacks=()
+  shift
+  for text in "$@"; do grep -F -- "$text" "$file" >/dev/null || lacks+=("$text"); done
+  if [ ${#lacks[@]} -eq 0 ]; then echo true; else echo "lacking: ${lacks[*]}"; fi
+}
+konnect_port="$(free_port)"
+for runtime in python nodejs; do
+  app="$work/cli-pay-$runtime"
+  log="$app/.ff/local/logs/cli-pay-$runtime-payments.log"
+  check "cli-pay-$runtime's README: its commands install its library, run its 13 tests, which pass, and give .env.local the stand-in's key" \
+    "0 13 KONNECT_API_KEY=ff-local-konnect" "$(readme_here "$app") $(cat "$app/.env.local")"
+  konnect_started "$work/konnect.out" "$work/konnect.err" --port "$konnect_port"
+  check "  ... ff local konnect prints the address ff local start's functions reach it at, its key and its wallet, which the README names" \
+    "KONNECT_API_URL=http://host.docker.internal:$konnect_port/api/v2|KONNECT_API_KEY=ff-local-konnect|KONNECT_WALLET_ID=ff0000000000000000000001" \
+    "$(sed -n 's/^  \(KONNECT_API_URL=http:\/\/host[^ ]*\).*/\1/p; s/^  \(KONNECT_\(API_KEY\|WALLET_ID\)=.*\)/\1/p' "$work/konnect.out" | paste -sd'|')"
+  port="$(free_port)"
+  base="http://cli-pay-$runtime-payments.fn.localhost:$port"
+  read -ra started_with <<<"$(sed -n 's/^ff local start //p' "$app/README.md" |
+    sed "s|^template\.yaml |$app/template.yaml |; s|host\.docker\.internal:3800/|host.docker.internal:$konnect_port/|")"
+  local_started "$work/pay.out" "$work/pay.err" "${started_with[@]}" --port "$port"
+  check "  ... ff local start --with postgres runs it at the address its README names, a PostgreSQL beside it" "true true" \
+    "$(grep -E "^  cli-pay-$runtime-payments +$runtime +256 MB, 15 s  $base/$" "$work/pay.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  postgres  postgresql://' "$work/pay.out" >/dev/null && echo true || echo false)"
+  check "  ... its README's curl: 201, the order pending, its payUrl the stand-in's page for a payment of Konnect's 24 hex digits" \
+    "0 pending http://127.0.0.1:$konnect_port/pay 24" \
+    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g") $(jq -r .status "$work/after.out") \
+$(jq -r '.payUrl | sub("[?].*"; "")' "$work/after.out") $(jq -r '.payUrl | sub(".*payment_ref="; "") | length' "$work/after.out")"
+  id="$(jq -r .id "$work/after.out")"
+  pay="$(jq -r .payUrl "$work/after.out")"
+  ref="${pay##*payment_ref=}"
+  check "  ... its page: the amount, the description, Pay and Fail" "200 true" \
+    "$(at "$pay" | sed -n '1s/ .*//p') $(holds "$work/at.body" '12.500 TND' '2 jars of harissa' '<button>Pay</button>' '<button>Fail</button>')"
+  check "  ... Fail: the webhook called, Konnect asked, saying pending, the order left so, its log saying why; the browser sent to the webhook" \
+    "303 $base/webhooks/konnect?payment_ref=$ref pending Konnect says pending" \
+    "$(at "$pay&outcome=failed" | sed 's/ .*//') $(location) $(local_psql "$work/pay.out" "select status from orders where id = '$id'") \
+$(logged "select(.left == \"$ref\") | .why" cat "$log")"
+  at "$pay&fault=unknown" >/dev/null
+  forged="$(sed -n 's/.*payment_ref=\([0-9a-f]*\), which no payment has.*/\1/p' "$work/at.body")"
+  check "  ... a notification for a payment that doesn't exist, the page's fault: kept as it came, left, Konnect not asked" \
+    "24 1 no order has this payment" \
+    "${#forged} $(local_psql "$work/pay.out" "select count(*) from notifications where payment_ref = '$forged'") \
+$(logged "select(.left == \"$forged\") | .why" cat "$log")"
+  check "  ... Pay, notified before the payment is completed: kept, Konnect asked, saying pending, the order still pending" \
+    "303 2 pending" \
+    "$(at "$pay&outcome=paid&fault=early" | sed 's/ .*//') \
+$(local_psql "$work/pay.out" "select count(*) from notifications where payment_ref = '$ref'") \
+$(local_psql "$work/pay.out" "select status from orders where id = '$id'")"
+  browser="$(location)"
+  check "  ... then the browser, sent to the webhook, finds it completed: the order paid, once, its log saying so; GET /orders/<id> paid" \
+    "200 Received paid $ref 200 paid" \
+    "$(at "$browser") $(local_psql "$work/pay.out" "select status from orders where id = '$id'") \
+$(logged "select(.paid == \"$id\") | .paymentRef" cat "$log") $(at "$base/orders/$id" | sed 's/ .*//') $(jq -r .status "$work/at.body")"
+  curl -s -d '{"amount": 4000, "description": "a bottle of olive oil"}' "$base/orders" >"$work/second.json"
+  second="$(jq -r .id "$work/second.json")"
+  second_pay="$(jq -r .payUrl "$work/second.json")"
+  check "  ... a second order paid, notified twice: paid once, the second notification finding it paid already" \
+    "303 paid $second $second" \
+    "$(at "$second_pay&outcome=paid&fault=twice" | sed 's/ .*//') \
+$(local_psql "$work/pay.out" "select status from orders where id = '$second'") \
+$(logged "select(.paid == \"$second\") | .paid" cat "$log") $(logged "select(.already == \"$second\") | .already" cat "$log")"
+  konnect_started "$work/konnect.out" "$work/konnect.err" --port "$konnect_port" --delay 6s
+  check "  ... ff local konnect --delay 6s, a Konnect too slow for the function's 5 s: the README's curl 502, no order kept, its log saying why" \
+    "502 Konnect made no payment: try again 2 true" \
+    "$(at "$base/orders" -d '{"amount": 900, "description": "a slow Konnect"}' | sed 's/ .*//') $(jq -r .message "$work/at.body") \
+$(local_psql "$work/pay.out" 'select count(*) from orders') \
+$(logged 'select(.unpaid) | .why | startswith("no payment made: Konnect didn\u0027t answer: ")' cat "$log")"
+  konnect_stopped
+  local_stopped
+  ff local reset "$app" --data --yes
+  check "  ... Ctrl-C leaving no container, ff local reset --data its database's volume gone" "0 0 0" \
+    "$(code) $(leftover) $(docker volume ls --quiet --filter "label=ff.local.project=$(cd "$app" && pwd -P)" | wc -l | tr -d ' ')"
+  check "  ... and its .gitignore leaves out what its README's commands installed, ff local kept and .env.local: git sees ff init's files alone" \
+    "${written[$runtime]}" "$(git_sees "$app")"
+done
+}
+section_def template_webhook section_template_webhook backend budget=150
+
 section_packages() {
 section "packages: a folder with its libraries, packaged, uploaded once, deployed"
 # npm and pip fetch the libraries: this part needs the network, or their caches.
@@ -852,7 +1731,9 @@ for _ in $(seq 1 30); do
   fi
   sleep 5
 done
-ff history cli-sched --output json
+# A run each minute since it was made: a whole run comes here some 13 minutes on, past the 10 calls of history's
+# default page, which would leave its first run out; 100 go back further than a whole run.
+ff history cli-sched --limit 100 --output json
 first_run_after="$(out | jq --argjson made "$sched_made_at" '[.invocations[] | select(.source == "schedule") | (.createdAt | sub("\\.[0-9]+Z$"; "Z") | fromdate) - $made] | min')"
 check "within about 70 s it has run, and ff schedule list says it succeeded" "true true" \
   "$ran $([ "${first_run_after:-null}" != null ] && [ "$first_run_after" -le 75 ] && echo true || echo "false: $first_run_after s after")"
@@ -969,12 +1850,6 @@ out | grep '^export AWS_' >"$work/s3.env"
 key_id="$(sed -n 's/^export AWS_ACCESS_KEY_ID=//p' "$work/s3.env")"
 printf 'Ahlan from the CLI' >"$work/hello.txt"
 # The AWS CLI with those variables alone, none of this machine's settings: AWS_ENDPOINT_URL_S3 names FF's endpoint.
-# Without one here, AWS's image: as this user, so that the files it writes are this user's, s3.localhost this machine.
-if command -v aws >/dev/null; then aws_cli=("$(command -v aws)"); else
-  aws_cli=(docker run --rm --network host --add-host s3.localhost:127.0.0.1 --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$work:$work"
-    -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_REGION -e AWS_ENDPOINT_URL_S3 -e AWS_ENDPOINT_URL_SQS -e AWS_CONFIG_FILE -e AWS_SHARED_CREDENTIALS_FILE
-    -e AWS_PROFILE amazon/aws-cli:2.34.32)
-fi
 aws_with_key() { (set -a; . "$work/s3.env"; set +a; AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null "${aws_cli[@]}" "$@"); }
 uploaded="$(aws_with_key s3 cp "$work/hello.txt" s3://cli-photos/hello.txt --only-show-errors >/dev/null 2>&1; echo $?)"
 check "the AWS CLI uploads with them and reads it back, AWS_ENDPOINT_URL_S3 its only change" "0 Ahlan from the CLI" \
@@ -1066,6 +1941,23 @@ ff sites domains remove cli-site www.cli-shop.tn --yes
 check "  ... and remove takes it away" "0 0" "$(code) $("$ff_bin" sites domains list cli-site --output json | jq length)"
 }
 section_def sites section_sites backend budget=5
+
+section_downloads() {
+section "the downloads site: a release signed with a throwaway key, deployed to FF by ff sites deploy, installed from it"
+# This machine's ff as its build in the release, stand-ins for the others: hack/test-install.sh installs it from the
+# site FF serves as a customer would, runs it, and is refused a changed build and signatures by another key; then
+# installs as each machine install.sh knows.
+local processor
+case "$(uname -m)" in x86_64 | amd64) processor=x86_64 ;; *) processor=arm64 ;; esac
+rm -rf "$work/builds" && mkdir "$work/builds"
+cp "$ff_bin" "$work/builds/ff-linux-$processor"
+ff buckets create cli-downloads
+"$FF_REPO_ROOT/hack/test-install.sh" --site "http://cli-downloads.site.localhost:$website_port" \
+  --deploy "$ff_bin sites deploy cli-downloads" "$work/builds" >"$work/install.out" 2>&1 || true
+check "install.sh installs ff from the site FF serves, and refuses what changed: hack/test-install.sh's checks" \
+  "install: 15 checks passed" "$(tail -1 "$work/install.out")"
+}
+section_def downloads section_downloads backend budget=5
 
 section_queues() {
 section "queues, with ff queues: made with a dead-letter queue, a message sent, received by the AWS CLI and by ff, then dead"
@@ -1604,9 +2496,131 @@ check "  ... and its calls that didn't wait, as Lambda's metrics count them, cli
 }
 section_def account section_account failures budget=5
 
+section_login() {
+section "ff login against the development realm, the user's part done as a browser does it; the account, an API key, the logout"
+# The realm, and a backend that takes its tokens, beside the development one and on its database. The function URLs
+# it gives are the development one's, whose front serves every account's (the CI examples' section calls one).
+e2e_up "Keycloak" keycloak
+keycloak="http://localhost:$FF_KEYCLOAK_PORT"
+api_oidc="http://127.0.0.1:$(free_port)"
+e2e_start_backend "$work/backend-oidc.log" "$api_oidc" "${e2e_base_env[@]}" PORT="${api_oidc##*:}" \
+  FF_AUTH_MODE=oidc FF_DEV_ACCOUNT_ID= FF_OIDC_ISSUER="$keycloak/realms/ff" FF_OIDC_AUDIENCE=ff-api \
+  FF_FUNCTION_URL_BASE="http://fn.localhost:$url_port"
+# A customer as the console's sign-up leaves one: one of this run's own, since a kept stack keeps the realm's users.
+email="cli-e2e-$account_a@ff.test" password=cli-e2e-password-1
+check "the realm has a customer to log in as" 201 "$(keycloak_user "$email" "$password" Cli)"
+
+ff config set endpoint "$api_oidc" --profile login
+"$ff_bin" login --profile login --no-browser >"$work/login.out" 2>"$work/login.err" &
+login_pid=$!
+for _ in $(seq 1 60); do
+  grep 'check that it shows the code' "$work/login.err" >/dev/null 2>&1 && break
+  sleep 0.5
+done
+address="$(sed -n 's/^Open \([^ ]*\) in a browser: check that it shows the code .*/\1/p' "$work/login.err")"
+user_code="$(sed -n 's/.* check that it shows the code \([A-Z0-9-]*\), then sign in and approve this device\.$/\1/p' "$work/login.err")"
+check "ff login asks the API where to log in, and prints the realm's address for this device and the code it shows" \
+  "$keycloak/realms/ff/device?user_code=$user_code" "$address"
+check "the user opens it, signs in and approves the device, as a browser does it" \
+  "the login form, the device's approval, Device Login Successful" \
+  "$(keycloak_approve_device "$address" "$user_code" "$email" "$password")"
+for _ in $(seq 1 30); do
+  kill -0 "$login_pid" 2>/dev/null || break
+  sleep 1
+done
+kill "$login_pid" 2>/dev/null || true
+login_code=0
+wait "$login_pid" || login_code=$?
+credentials="$FF_CONFIG_DIR/credentials.toml"
+check "ff login sees the approval within a poll or two, keeps the login for the profile, readable by its owner alone, and says who logged in" \
+  "0 Logged in on profile login, as: true 600 issuer access_token refresh_token expires_at" \
+  "$login_code $(head -1 "$work/login.out") $(grep -F "$email" "$work/login.out" >/dev/null && echo true || echo false) \
+$(stat -c %a "$credentials") $(sed -n 's/^\([a-z_]*\) = .*/\1/p' "$credentials" | tr '\n' ' ' | sed 's/ $//')"
+ff whoami --profile login --output json
+check "the login's token calls the API: the user, with no account yet" "0 $email 0" "$(code) $(out | jq -r '"\(.user.email) \(.accounts | length)"')"
+
+# Two accounts, the development ones: an owner of A, a developer of B.
+ff whoami --profile b
+sql "INSERT INTO memberships (account_id, user_id, role) SELECT '$account_a', id, 'owner' FROM users WHERE email = '$email'"
+sql "INSERT INTO memberships (account_id, user_id, role) SELECT '$account_b', id, 'developer' FROM users WHERE email = '$email'"
+ff list --profile login
+check "with several accounts and none named, a command lists them, each with the role in it, and stops" \
+  "3 Your login has several accounts: name the one to act for with --account, FF_ACCOUNT or \`ff config set account <ID>\` true true" \
+  "$(code) $(err | head -1 | sed 's/^error: //') $(err | grep -F "  account $account_a " | grep ', as owner$' >/dev/null && echo true || echo false) \
+$(err | grep -F "  account $account_b " | grep ', as developer$' >/dev/null && echo true || echo false)"
+ff list --profile login --account 000000000000
+check "an account named that the login isn't in is said so" \
+  "3 error: You don't belong to account 000000000000 (from --account): \`ff accounts\` lists yours" "$(code) $(err | head -1)"
+ff config set account "$account_a" --profile login
+ff list --profile login --output json
+check "with the account named, a command after the login works" "0 array" "$(code) $(out | jq -r type)"
+
+ff api-keys create --profile login --name "cli e2e" --scopes functions:read,logs:read --expires 1d --output json
+key="$(out | jq -r .key)"
+check "ff api-keys create, with the login: the key once, in its field, its scopes, its expiry a day on" \
+  "0 true functions:read,logs:read true" \
+  "$(code) $([[ $key =~ ^ffk_[0-9a-f]{12}_ ]] && echo true || echo false) $(out | jq -r '.scopes | join(",")') \
+$(out | jq '(.expiresAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) - now | . > 86000 and . < 86500')"
+key_id="$(out | jq -r .id)"
+ff api-keys list --profile login
+check "ff api-keys list shows it working, never the key" "0 true false" \
+  "$(code) $(out | grep -E "^$key_id +cli e2e +functions:read,logs:read +active " >/dev/null && echo true || echo false) \
+$(out | grep -F "$key" >/dev/null && echo true || echo false)"
+FF_TOKEN="$key" ff whoami --profile login --output json
+check "FF_TOKEN's key comes before the login" "0 cli e2e" "$(code) $(out | jq -r .key.name)"
+ff config set-token --profile login <<<"$key"
+ff whoami --profile login --output json
+check "and so does the profile's key" "0 cli e2e" "$(code) $(out | jq -r .key.name)"
+# At most a few seconds: were the key not there, it would wait for a browser until its code's end.
+timeout 20 "$ff_bin" login --profile login --no-browser >"$work/out" 2>"$work/err" && echo 0 >"$work/code" || echo $? >"$work/code"
+check "ff login on a profile with a key says so, and stops" "3 true" \
+  "$(code) $(err | grep -F "Profile login holds an API key (${key:0:17}…), which ff uses before a login" >/dev/null && echo true || echo false)"
+ff api-keys list --profile login
+check "ff api-keys refuses to call with a key, saying how to use the login" "3 true" \
+  "$(code) $(err | grep -F "API keys are managed with an owner's login, never with a key" >/dev/null && echo true || echo false)"
+ff config unset token --profile login
+ff api-keys revoke "cli e2e" --yes --profile login
+check "ff api-keys revoke finds the key by its name and revokes it" "0 Revoked the API key \"cli e2e\" ($key_id): whatever uses it is refused" \
+  "$(code) $(out)"
+FF_TOKEN="$key" ff whoami --profile login
+check "the key is refused from then on" "3 error: The API key was revoked: save another key with \`ff config set-token\`" \
+  "$(code) $(err | head -1)"
+# The CI examples' keys (section ci), made while the login lasts, as an owner makes a CI's: a deploy's scopes, and a
+# reader's, which a deploy lacks.
+ff api-keys create --profile login --name "cli ci" --scopes stacks:read,stacks:write,functions:read,functions:write \
+  --expires 1d --output json
+ci_key="$(out | jq -r .key)"
+ff api-keys create --profile login --name "cli ci reader" --scopes functions:read --expires 1d --output json
+ci_reader_key="$(out | jq -r .key)"
+
+# The renewal: the access token's end moved to the past, as five minutes on would leave it.
+access="$(sed -n 's/^access_token = "\(.*\)"$/\1/p' "$credentials")"
+sed -i 's/^expires_at = .*/expires_at = "2000-01-01T00:00:00Z"/' "$credentials"
+ff whoami --profile login --output json
+check "an access token at its end is renewed before the call, and the new one kept" "0 $email true true" \
+  "$(code) $(out | jq -r .user.email) $([ "$(sed -n 's/^access_token = "\(.*\)"$/\1/p' "$credentials")" != "$access" ] && echo true || echo false) \
+$(sed -n 's/^expires_at = "\(.*\)"$/\1/p' "$credentials" | jq -R 'fromdateiso8601 > now')"
+refresh="$(sed -n 's/^refresh_token = "\(.*\)"$/\1/p' "$credentials")"
+refreshed() {
+  curl -sS -o "$work/refreshed.json" -w '%{http_code}' -X POST "$keycloak/realms/ff/protocol/openid-connect/token" \
+    -d grant_type=refresh_token -d client_id=ff-cli --data-urlencode "refresh_token=$refresh"
+}
+check "the login is an offline one, which outlives the realm's session: its token, refreshed at the realm, says so" "200 true" \
+  "$(refreshed) $(jq -r .scope "$work/refreshed.json" | tr ' ' '\n' | grep -x offline_access >/dev/null && echo true || echo false)"
+ff logout --profile login
+check "ff logout revokes the login at the realm, then removes its tokens" \
+  "0 Logged out of profile login: the login revoked at $keycloak/realms/ff, its tokens removed from $credentials 0" \
+  "$(code) $(out) $(grep -c -E '^(issuer|access_token|refresh_token|expires_at) = ' "$credentials" || true)"
+check "the token a copy would hold is refused at the realm from then on" "400 invalid_grant" \
+  "$(refreshed) $(jq -r .error "$work/refreshed.json")"
+ff whoami --profile login
+check "and ff has no token to call with, saying how to log in" "3 true" \
+  "$(code) $(err | grep -F 'There is no token to call' | grep -F '`ff login` logs you in with your browser' >/dev/null && echo true || echo false)"
+}
+section_def login section_login backend budget=60
+
 section_local() {
 section "ff local: on this machine, in Docker, as production runs it"
-leftover() { docker ps -a --filter name=ff-local- --format '{{.Names}}' | wc -l; }
 for example in hello.ts hello.py; do
   ff local invoke "$FF_REPO_ROOT/examples/$example" --data '{"name": "Local"}'
   check "local invoke of $example answers, in its runtime image, and says how it went" "0 Hello Local true" \
@@ -1624,35 +2638,1119 @@ ff local invoke "$work/hog.py" --memory 128
 check "a call over its memory exits 5, as the runtime reports it" "5 error: Runtime.OutOfMemory: Runtime exceeded its memory limit" "$(code) $(err | grep '^error:')"
 check "no container is left behind" 0 "$(leftover)"
 local_port="$(free_port)"
-"$ff_bin" local start "$FF_REPO_ROOT/examples/hello.py" --port "$local_port" >"$work/start.out" 2>"$work/start.err" &
-starter=$!
-for _ in $(seq 1 60); do
-  grep -q 'runs at' "$work/start.out" 2>/dev/null && break
-  sleep 0.5
-done
+local_started "$work/start.out" "$work/start.err" "$FF_REPO_ROOT/examples/hello.py" --port "$local_port"
 check "local start says where it runs" "hello (python) runs at http://127.0.0.1:$local_port/invoke: POST an event to it. Ctrl-C stops it" "$(cat "$work/start.out")"
 check "and answers there, as the runtime answers the backend" "Hello Port" \
   "$(curl -s -X POST "http://127.0.0.1:$local_port/invoke" -d '{"name": "Port"}' | jq -r .message)"
-kill -INT "$starter"
-wait "$starter" 2>/dev/null || true
+local_stopped
 check "Ctrl-C stops it and removes its container" 0 "$(leftover)"
 url_local_port="$(free_port)"
-"$ff_bin" local start "$work/web.ts" --url --port "$url_local_port" >"$work/start.out" 2>"$work/start.err" &
-starter=$!
-for _ in $(seq 1 60); do
-  grep -q 'runs as its URL would' "$work/start.out" 2>/dev/null && break
-  sleep 0.5
-done
+local_started "$work/start.out" "$work/start.err" "$work/web.ts" --url --port "$url_local_port"
 check "local start --url serves it as its URL would" \
   "web (nodejs) runs as its URL would at http://127.0.0.1:$url_local_port/: any request calls it with AWS Lambda's URL event. Ctrl-C stops it" \
   "$(cat "$work/start.out")"
 check "a request there gets the function's answer, from Lambda's URL event" "200 Ahlan Local at /hi" \
   "$(curl -s -o "$work/answer" -w '%{http_code}' "http://127.0.0.1:$url_local_port/hi?name=Local") $(cat "$work/answer")"
-kill -INT "$starter"
-wait "$starter" 2>/dev/null || true
+local_stopped
 check "and Ctrl-C removes its container too" 0 "$(leftover)"
 }
 section_def local section_local backend budget=45
+
+section_local_template() {
+section "ff local start template.yaml: the template's functions behind one front door, each started at its first call"
+local app="$work/shop" port starter
+# invoked <function> <event>: Lambda's Invoke at the front door, its status and its answer.
+invoked() {
+  curl -s -o "$work/invoked" -w '%{http_code}' -X POST "http://127.0.0.1:$port/2015-03-31/functions/$1/invocations" -d "$2"
+  echo " $(cat "$work/invoked")"
+}
+# at_url <host> [curl args...]: a request to a function's URL, its status and its answer; its headers in $work/url.head.
+at_url() {
+  local host="$1"
+  shift
+  curl -s -o "$work/url.body" -D "$work/url.head" -w '%{http_code}' "$@" "http://$host.fn.localhost:$port/"
+  echo " $(cat "$work/url.body")"
+}
+# url_header <name>: the header of the last answer at_url got.
+url_header() { sed -n "s/^$1: //Ip" "$work/url.head" | tr -d '\r'; }
+# lambda_cli <args...>: the AWS CLI's lambda commands with the local key's file alone, the front door their endpoint.
+lambda_cli() { local_aws "$app" "$port" lambda "$@"; }
+rm -rf "$app" && mkdir -p "$app/greeter" "$app/caller" "$app/failing" "$app/recorder" "$app/reporter"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Runtime: python3.13
+    Handler: app.handler
+    Timeout: 10
+Resources:
+  Failing:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: failing/
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        DestinationConfig:
+          OnFailure:
+            Type: Lambda
+            Destination: !GetAtt Recorder.Arn
+  Recorder:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: recorder/
+  Greeter:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: greeter/
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: [https://app.example.tn]
+          AllowMethods: [GET, POST]
+          MaxAge: 300
+      Environment:
+        Variables:
+          GREETING: Hola
+          QUEUE_URL: !Ref Jobs
+  Caller:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: caller/
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+      Environment:
+        Variables:
+          GREETER: !Ref Greeter
+  Reporter:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: reporter/
+      Events:
+        Nightly:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+        Hourly:
+          Type: ScheduleV2
+          Properties:
+            ScheduleExpression: rate(1 hour)
+            State: DISABLED
+            Input: '{"report": "hourly"}'
+  Jobs:
+    Type: AWS::SQS::Queue
+YAML
+greeter() {
+  printf 'import os\n\n\ndef handler(event, context):\n    print("greeting", event.get("name"))\n    return {"greeting": os.environ["GREETING"], "secret": os.environ["SECRET"], "queue": os.environ["QUEUE_URL"], "code": "%s"}\n' "$1" >"$app/greeter/app.py"
+}
+greeter first
+cat >"$app/caller/app.py" <<'PY'
+import json
+import os
+import urllib.request
+
+
+def handler(event, context):
+    url = f"{os.environ['AWS_ENDPOINT_URL_LAMBDA']}/2015-03-31/functions/{os.environ['GREETER']}/invocations"
+    request = urllib.request.Request(url, data=json.dumps({"name": "Caller"}).encode(), method="POST")
+    with urllib.request.urlopen(request, timeout=10) as answer:
+        return {"called": json.load(answer)}
+PY
+printf 'def handler(event, context):\n    raise RuntimeError("no luck")\n' >"$app/failing/app.py"
+printf 'def handler(event, context):\n    request = event["requestContext"]\n    print("recorded", request["condition"], request["approximateInvokeCount"], event["requestPayload"]["n"])\n' \
+  >"$app/recorder/app.py"
+printf 'def handler(event, context):\n    print("ran", event.get("source"), event.get("time"), (event.get("resources") or [event.get("report")])[0])\n' \
+  >"$app/reporter/app.py"
+printf '# what the functions are given apart from the template\nSECRET=from-env-local\n' >"$app/.env.local"
+printf 'SECRET=fine\nAWS_REGION=eu-west-1\n' >"$work/reserved.env"
+ff local start "$app/template.yaml" --secrets "$work/reserved.env"
+check "a secrets file's problem is refused at its line, before anything starts" \
+  "2 error: ff local start ran nothing: $work/reserved.env has a problem|$work/reserved.env:2: AWS_REGION is reserved: AWS Lambda or FF's runtime sets it" \
+  "$(code) $(err | grep -A1 '^error:' | paste -sd'|')"
+
+port="$(free_port)"
+# An asynchronous call's second lasts 20 ms in the suite's build: its retry's minute comes in 1.2 s. Its schedules' clock
+# is at noon, so that no schedule runs, whenever the suite does.
+FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z \
+  local_started "$work/start.out" "$work/start.err" "$app/template.yaml" --port "$port" --idle 4s --watch
+check "it says where the app runs, its functions, and how to call them" \
+  "shop ($app/template.yaml) runs on this machine, its front door at http://127.0.0.1:$port:" \
+  "$(head -1 "$work/start.out")"
+check "  ... each function's URL, and which takes the local key's signature" "true true" \
+  "$(grep -E "^  Greeter +python +128 MB, 10 s  http://greeter.fn.localhost:$port/$" "$work/start.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  Caller +python +128 MB, 10 s  http://caller.fn.localhost:$port/, signed with its key$" "$work/start.out" >/dev/null && echo true || echo false)"
+check "  ... with its secrets file" "true" "$(grep -F "Their secrets are $app/.env.local's." "$work/start.out" >/dev/null && echo true || echo false)"
+check "nothing runs before a call" 0 "$(leftover)"
+check "a call starts the function and answers, its variables resolved here and its secret given" \
+  "200 Hola from-env-local http://host.docker.internal:$port/000000000000/Jobs first" \
+  "$(invoked Greeter '{"name": "Curl"}' | sed 's/ .*//') $(jq -r '[.greeting, .secret, .queue, .code] | join(" ")' "$work/invoked")"
+invoked Greeter '{"name": "Again"}' >/dev/null
+check "  ... and the next call finds it running" "1 1" \
+  "$(leftover) $(grep -c '^Greeter: started' "$work/start.err")"
+check "a function calls another through the front door, as AWS_ENDPOINT_URL_LAMBDA leads it from its container" \
+  "200 Hola 2" "$(invoked Caller '{}' | sed 's/ .*//') $(jq -r .called.greeting "$work/invoked") $(leftover)"
+check "each function's log is on stderr after its name, and in its file" "true true" \
+  "$(grep -F 'Greeter | greeting Caller' "$work/start.err" >/dev/null && echo true || echo false) $(grep -F 'greeting Curl' "$app/.ff/local/logs/Greeter.log" >/dev/null && echo true || echo false)"
+check "a function this machine hasn't is Lambda's 404" \
+  "404 Function not found: arn:aws:lambda:tn-tunis-1:000000000000:function:Payments" \
+  "$(invoked Payments '{}' | sed 's/ .*//') $(jq -r .message "$work/invoked")"
+greeter second
+until_said "$work/start.err" "Greeter: its code changed: starting it again" || true
+check "--watch starts a running function again when its code changes" "true 200 second" \
+  "$(grep -F 'Greeter: its code changed' "$work/start.err" >/dev/null && echo true || echo false) $(invoked Greeter '{}' | sed 's/ .*//') $(jq -r .code "$work/invoked")"
+until_said "$work/start.err" "Greeter: no call for 4s: stopped" || true
+until_said "$work/start.err" "Caller: no call for 4s: stopped" || true
+check "--idle stops each function after that long without a call" 0 "$(leftover)"
+check "  ... and its next call starts it again" "200 second 0" \
+  "$(invoked Greeter '{}' | sed 's/ .*//') $(jq -r .code "$work/invoked") $(grep -c 'its code failed' "$work/start.err")"
+local key_id
+key_id="$(sed -n 's/^aws_access_key_id = //p' "$app/.ff/local/credentials")"
+check "the local key is printed, and kept in .ff/local/credentials, which its owner alone reads" "AKFF 600 true" \
+  "${key_id:0:4} $(stat -c %a "$app/.ff/local/credentials") $(grep -F "is in $app/.ff/local/credentials: AWS_ACCESS_KEY_ID=$key_id " "$work/start.out" >/dev/null && echo true || echo false)"
+lambda_cli invoke --function-name Greeter --payload '{"name": "Cli"}' --cli-binary-format raw-in-base64-out \
+  --log-type Tail "$work/cli-invoked.json" >"$work/cli-invoke.out"
+check "the AWS CLI calls a function with the local key, its log asked with LogType Tail" "200 Hola true" \
+  "$(jq -r .StatusCode "$work/cli-invoke.out") $(jq -r .greeting "$work/cli-invoked.json") $(jq -r .LogResult "$work/cli-invoke.out" | base64 -d | grep -F 'greeting Cli' >/dev/null && echo true || echo false)"
+check "  ... and reads its configuration, the template's variables and never a secret" "python3.13 app.handler GREETING,QUEUE_URL Active" \
+  "$(lambda_cli get-function-configuration --function-name Greeter | jq -r '[.Runtime, .Handler, (.Environment.Variables | keys | join(",")), .State] | join(" ")')"
+AWS_ACCESS_KEY_ID=AKFFNOTTHELOCALKEY00 AWS_SECRET_ACCESS_KEY=not-the-secret AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+  AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_LAMBDA="http://127.0.0.1:$port" "${aws_cli[@]}" lambda invoke --function-name Greeter "$work/refused.json" \
+  >"$work/refused.out" 2>&1 || true
+check "a request signed with another key is refused in Lambda's words" "true" \
+  "$(grep -F '(UnrecognizedClientException) when calling the Invoke operation: The security token included in the request is invalid.' "$work/refused.out" >/dev/null && echo true || echo false)"
+# Greeter's calls without a name so far, each a line of its log: the URL's event has none.
+local nameless
+nameless="$(grep -c 'Greeter | greeting None' "$work/start.err" || true)"
+check "a function's URL calls it with the URL's event, and answers its value with the template's CORS" \
+  "200 Hola https://app.example.tn" \
+  "$(at_url greeter -H 'Origin: https://app.example.tn' | sed 's/ .*//') $(jq -r .greeting "$work/url.body") $(url_header access-control-allow-origin)"
+for _ in $(seq 1 60); do
+  [ "$(grep -c 'Greeter | greeting None' "$work/start.err" || true)" -gt "$nameless" ] && break
+  sleep 0.5
+done
+check "  ... a browser's preflight answered by its CORS, without a call" "204 POST 300 $((nameless + 1))" \
+  "$(at_url greeter -X OPTIONS -H 'Origin: https://app.example.tn' -H 'Access-Control-Request-Method: POST' | sed 's/ .*//') \
+$(url_header access-control-allow-methods | tr -d ' ' | tr ',' '\n' | grep -x POST) $(url_header access-control-max-age) \
+$(grep -c 'Greeter | greeting None' "$work/start.err")"
+check "a host that names no function's URL is the gateway's 404" '404 {"Message":"Not Found"}' "$(at_url recorder)"
+check "a URL that takes the account's credentials refuses a request without the local key's signature" \
+  '403 Forbidden: this URL takes a request signed for lambda by an access key of its account, or an API key of it, as "Authorization: Bearer ffk_…"' \
+  "$(at_url caller | sed 's/ .*//') $(jq -r .Message "$work/url.body")"
+check "  ... and takes one signed with it, as curl --aws-sigv4 signs it" "200 Hola" \
+  "$(at_url caller --aws-sigv4 aws:amz:tn-tunis-1:lambda --user "$key_id:$(sed -n 's/^aws_secret_access_key = //p' "$app/.ff/local/credentials")" | sed 's/ .*//') $(jq -r .called.greeting "$work/url.body")"
+check "an asynchronous call is answered 202" 202 \
+  "$(lambda_cli invoke --function-name Failing --invocation-type Event --payload '{"n": 1}' --cli-binary-format raw-in-base64-out "$work/event.json" | jq -r .StatusCode)"
+until_said "$work/start.err" "Recorder | recorded" || true
+check "  ... retried as FF retries it, as many times as its function says, then its record is its OnFailure destination's" \
+  "true true true" \
+  "$(grep -E '^Failing: the asynchronous call [^ ]+ failed: RuntimeError: no luck; tried again in 60 s$' "$work/start.err" >/dev/null && echo true || echo false) \
+$(grep -E '^Failing: the asynchronous call [^ ]+ failed: RuntimeError: no luck; dropped after 2 attempts: its retries are used$' "$work/start.err" >/dev/null && echo true || echo false) \
+$(grep -F 'Recorder | recorded RetriesExhausted 2 1' "$work/start.err" >/dev/null && echo true || echo false)"
+local_stopped
+check "Ctrl-C removes their containers" 0 "$(leftover)"
+
+# The schedules, in a start of their own: its clock, a test build's, three seconds before the Nightly's time.
+port="$(free_port)"
+FF_TEST_NOW=2026-11-10T01:59:57Z \
+  local_started "$work/scheduled.out" "$work/scheduled.err" "$app/template.yaml" --port "$port"
+check "the start lists each schedule, its expression and its next run" "true true" \
+  "$(grep -E '^  Reporter/Nightly +cron\(0 2 \* \* \? \*\)  next 2026-11-10T02:00:00Z$' "$work/scheduled.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  Reporter/Hourly +rate\(1 hour\)  disabled$' "$work/scheduled.out" >/dev/null && echo true || echo false)"
+until_said "$work/scheduled.err" "Reporter | ran aws.events" || true
+check "a schedule runs on time, its function called without waiting with EventBridge's Scheduled Event" "true true" \
+  "$(grep -E '^Reporter: its schedule Nightly runs, due at 2026-11-10T02:00:00Z: the asynchronous call [0-9a-f-]{36}$' "$work/scheduled.err" >/dev/null && echo true || echo false) \
+$(grep -F 'Reporter | ran aws.events 2026-11-10T02:00:00Z arn:aws:events:tn-tunis-1:000000000000:rule/Reporter-Nightly' "$work/scheduled.err" >/dev/null && echo true || echo false)"
+ff local run Hourly "$app"
+until_said "$work/scheduled.err" "Reporter | ran None None hourly" || true
+check "ff local run runs one now, a disabled one too, with its own input" "0 Reporter's schedule Hourly runs now true" \
+  "$(code) $(out | sed 's/: the asynchronous call.*//') $(grep -F 'Reporter | ran None None hourly' "$work/scheduled.err" >/dev/null && echo true || echo false)"
+ff local run Weekly "$app"
+check "  ... and refuses one the template hasn't, naming those it has" \
+  "2 error: No function has a schedule Weekly: the template's are Reporter/Hourly, Reporter/Nightly" "$(code) $(err | grep '^error:')"
+local_stopped
+ff local run Nightly "$app"
+check "  ... and says when ff local start isn't running" "3 true" \
+  "$(code) $(err | grep -F "error: ff local start isn't running for $app: nothing answers at http://127.0.0.1:$port" >/dev/null && echo true || echo false)"
+ff local reset "$app" --yes
+check "ff local reset removes what ff local keeps, the logs and the key" "0 removed $app/.ff/local false" \
+  "$(code) $(out) $([ -e "$app/.ff/local" ] && echo true || echo false)"
+}
+section_def local_template section_local_template backend budget=45
+
+section_local_apps() {
+section "ff local start on the applications a developer has: ff init --template sam's, and the small app, its libraries installed, its page served from its folder"
+local hello="$work/cli-local-hello" shop="$work/cli-local-shop" port starter origin
+# started <out> <err> <args...>: ff local start in the background, at the section's port, with the test clocks.
+started() { FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z local_started "$@" --port "$port"; }
+
+(cd "$work" && rm -rf "$hello" && "$ff_bin" init "$(basename "$hello")" --runtime nodejs --template sam >"$work/out" 2>"$work/err")
+check "ff init --template sam's .gitignore leaves out what ff local keeps, and its secrets file" "true true" \
+  "$(grep -x '.ff/' "$hello/.gitignore" >/dev/null && echo true || echo false) $(grep -x '.env.local' "$hello/.gitignore" >/dev/null && echo true || echo false)"
+printf 'GREETING=never-committed\n' >"$hello/.env.local"
+port="$(free_port)"
+started "$work/hello.out" "$work/hello.err" "$hello/template.yaml"
+check "its application starts as it is, its function's URL printed" "true" \
+  "$(grep -E "^  HelloWorldFunction +nodejs +128 MB, 3 s  http://helloworldfunction.fn.localhost:$port/$" "$work/hello.out" >/dev/null && echo true || echo false)"
+check "  ... and called there, answers as it does on FF" '200 {"message":"hello world"}' \
+  "$(at "http://helloworldfunction.fn.localhost:$port/hello")"
+local_stopped
+git -C "$hello" init -q
+check "  ... what ff local keeps and the secrets file stay out of git" ".gitignore README.md events/ hello-world/ samconfig.toml template.yaml tests/" \
+  "$(git -C "$hello" status --porcelain --untracked-files=normal | sed 's/^?? //' | LC_ALL=C sort | paste -sd' ')"
+
+# The small app as a developer runs it here: its libraries installed, as sam build installs them for sam local; its
+# page served from site/ itself, at its site's address, which the API's CORS lets in, config.json beside it naming the
+# API's address here, as a deploy writes it there.
+rm -rf "$shop" && cp -r "$FF_REPO_ROOT/examples/orders-app" "$shop"
+(cd "$shop" && npm ci --no-audit --no-fund --omit=dev >"$work/npm.out" 2>&1) || fail "npm ci in the small app: $(tail -5 "$work/npm.out")"
+port="$(free_port)"
+origin="http://local-site.site.localhost:$port"
+printf '{"api": "http://shop-api.fn.localhost:%s"}\n' "$port" >"$shop/site/config.json"
+started "$work/shop.out" "$work/shop.err" "$shop/template.yaml" --site "local-site=$shop/site" \
+  --parameter-overrides ReceiptsBucketName=local-receipts SiteBucketName=local-site "SiteOrigin=$origin"
+check "the small app starts, its three functions named as the stack names them, its URL, its schedule and its site listed" "shop-api,shop-nightly,shop-receipts true true true" \
+  "$(sed -n 's/^  \(shop-[a-z]*\) .*/\1/p' "$work/shop.out" | LC_ALL=C sort | paste -sd,) \
+$(grep -E "^  shop-api +nodejs +128 MB, 5 s  http://shop-api.fn.localhost:$port/$" "$work/shop.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  shop-nightly/EveryNight +cron\(0 2 \* \* \? \*\)  next 2026-11-11T02:00:00Z$' "$work/shop.out" >/dev/null && echo true || echo false) \
+$(grep -F "  local-site  $origin/, $(cd "$shop/site" && pwd -P)'s files" "$work/shop.out" >/dev/null && echo true || echo false)"
+check "  ... its page at its site's address, from site/, its config.json naming the API here, its error page for a path it hasn't" \
+  "200 text/html; charset=utf-8 <title>Orders</title> http://shop-api.fn.localhost:$port 404 text/html; charset=utf-8" \
+  "$(at "$origin/" | sed -n '1s/ .*//p') $(sed -n 's/^content-type: //Ip' "$work/at.head" | tr -d '\r') $(grep -o '<title>Orders</title>' "$work/at.body") \
+$(at "$origin/config.json" >/dev/null; jq -r .api "$work/at.body") $(at "$origin/no/such/page" | sed -n '1s/ .*//p') $(sed -n 's/^content-type: //Ip' "$work/at.head" | tr -d '\r')"
+orders_cors_check "http://shop-api.fn.localhost:$port" "$origin"
+check "  ... and its handler, loaded with its libraries, refuses a wrong order before it reaches the database" \
+  "400 An order is {\"item\": \"<what>\", \"quantity\": <a whole number above 0>}, and \"email\": \"<an address>\" for its receipt $origin" \
+  "$(at "http://shop-api.fn.localhost:$port/orders" -X POST -H "Origin: $origin" -d '{"item": ""}' | sed 's/ .*//') $(jq -r .message "$work/at.body") \
+$(sed -n 's/^access-control-allow-origin: //Ip' "$work/at.head" | tr -d '\r')"
+ff local run EveryNight "$shop"
+check "ff local run runs its nightly now, as its schedule would" "0 shop-nightly's schedule EveryNight runs now" \
+  "$(code) $(out | sed 's/: the asynchronous call.*//')"
+for _ in $(seq 1 60); do
+  grep -F 'dropped after 3 attempts' "$work/shop.err" >/dev/null && break
+  sleep 0.5
+done
+# Without its database's address, a secret, it fails: an asynchronous call's failure, tried twice more, a minute and
+# then two after it, which the suite's build makes 1.2 s and 2.4 s.
+check "  ... and, failing without its database, is tried again twice, then dropped, as FF retries an asynchronous call" \
+  "3 2 true" \
+  "$(grep -cE '^shop-nightly: the asynchronous call [^ ]+ failed: Error: DATABASE_URL is not set' "$work/shop.err") \
+$(grep -cE '^shop-nightly: the asynchronous call [^ ]+ failed: Error: DATABASE_URL is not set: .*; tried again in (60|120) s$' "$work/shop.err") \
+$(grep -E '^shop-nightly: the asynchronous call [^ ]+ failed: Error: DATABASE_URL is not set: .*; dropped after 3 attempts: its retries are used$' "$work/shop.err" >/dev/null && echo true || echo false)"
+local_stopped
+check "Ctrl-C removes their containers" 0 "$(leftover)"
+git -C "$shop" init -q
+check "what ff local keeps stays out of git in an app whose .gitignore doesn't name it: .ff/ has its own" "true 0" \
+  "$([ -e "$shop/.ff/local/credentials" ] && echo true || echo false) $(git -C "$shop" status --porcelain --untracked-files=normal | grep -c '^?? \.ff/' || true)"
+}
+section_def local_apps section_local_apps backend budget=45
+
+section_local_queues() {
+section "ff local start's queues: SQS at the front door, the AWS CLI's cases of L4, a function's sends, its failures' records, and a function reading one"
+local app="$work/queues" port starter key_id url
+# sqs_cli <args...>: the AWS CLI's sqs commands with the local key's file alone, the front door their endpoint.
+sqs_cli() { local_aws "$app" "$port" sqs "$@" --output json; }
+# refused <args...>: an sqs command's error, by the code the AWS CLI names.
+refused() { sqs_cli "$@" >/dev/null 2>"$work/sqs.err" && echo accepted || grep -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/sqs.err" | head -1; }
+# received <queue> [args...]: the messages a queue answers a receive, all their attributes asked; nothing for none.
+received() {
+  local queue="$1"
+  shift
+  sqs_cli receive-message --queue-url "$url/$queue" --attribute-names All --message-attribute-names All "$@"
+}
+rm -rf "$app" && mkdir -p "$app/sender" "$app/failing" "$app/reader"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Globals:
+  Function:
+    Runtime: python3.13
+    Handler: app.handler
+    Timeout: 10
+Resources:
+  Sender:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: sender/
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref Orders
+  Failing:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: failing/
+      DeadLetterQueue:
+        Type: SQS
+        TargetArn: !GetAtt Dead.Arn
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0
+        DestinationConfig:
+          OnFailure:
+            Type: SQS
+            Destination: !GetAtt Records.Arn
+  Orders:
+    Type: AWS::SQS::Queue
+    Properties:
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt Dead.Arn
+        maxReceiveCount: 2
+  Reader:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: reader/
+      Timeout: 3
+      Events:
+        Work:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Jobs.Arn
+            MaximumBatchingWindowInSeconds: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+  Dead:
+    Type: AWS::SQS::Queue
+  Records:
+    Type: AWS::SQS::Queue
+  Jobs:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 3
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt JobsDead.Arn
+        maxReceiveCount: 2
+  JobsDead:
+    Type: AWS::SQS::Queue
+YAML
+# A function that sends to its queue as an SDK would, with no setting: the endpoint, the region and the key FF gives
+# it, its request signed by hand, as the runtime images have no SDK.
+cp "$FF_REPO_ROOT/hack/lib/local-functions/signed.py" "$app/sender/"
+cat >"$app/sender/app.py" <<'PY'
+import json
+import os
+
+from signed import send
+
+
+def handler(event, context):
+    body = json.dumps({"QueueUrl": os.environ["QUEUE_URL"], "MessageBody": event["body"]}).encode()
+    headers = {"content-type": "application/x-amz-json-1.0", "x-amz-target": "AmazonSQS.SendMessage"}
+    with send("sqs", "POST", os.environ["AWS_ENDPOINT_URL_SQS"] + "/", body, headers) as answer:
+        return json.load(answer)
+PY
+printf 'def handler(event, context):\n    raise RuntimeError("no luck")\n' >"$app/failing/app.py"
+# A function reading its queue in batches, as the small app's receipts do: each batch and record logged, a message
+# whose body is "fail" named in its answer, so that it alone comes back.
+cat >"$app/reader/app.py" <<'PY'
+import json
+
+
+def handler(event, context):
+    print(f"batch of {len(event['Records'])}", flush=True)
+    failures = []
+    for record in event["Records"]:
+        print("record " + json.dumps(record, sort_keys=True), flush=True)
+        if record["body"] == "fail":
+            failures.append({"itemIdentifier": record["messageId"]})
+    return {"batchItemFailures": failures}
+PY
+
+port="$(free_port)"
+url="http://127.0.0.1:$port/000000000000"
+FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z \
+  local_started "$work/queues.out" "$work/queues.err" "$app/template.yaml" --port "$port"
+check "the start lists the template's queues, their URLs and a redrive policy" "true true true" \
+  "$(grep -F "Its queues, SQS's at http://127.0.0.1:$port, kept while it runs:" "$work/queues.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  Orders +$url/Orders, to Dead after 2 receives$" "$work/queues.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  Records +$url/Records$" "$work/queues.out" >/dev/null && echo true || echo false)"
+check "the AWS CLI lists them and finds one's URL, with the local key" "$url/Dead $url/Jobs $url/JobsDead $url/Orders $url/Records $url/Orders" \
+  "$(sqs_cli list-queues | jq -r '.QueueUrls | join(" ")') $(sqs_cli get-queue-url --queue-name Orders | jq -r .QueueUrl)"
+sqs_cli send-message --queue-url "$url/Orders" --message-body 'Ahlan from the CLI' \
+  --message-attributes '{"source": {"DataType": "String", "StringValue": "aws-cli"}}' >"$work/sent.json"
+received Orders --wait-time-seconds 2 >"$work/received.json"
+key_id="$(sed -n 's/^aws_access_key_id = //p' "$app/.ff/local/credentials")"
+check "  ... sends a message with an attribute, the sums it checks right, and receives it back, sent by the key" \
+  "Ahlan from the CLI aws-cli 1 true" \
+  "$(jq -r '.Messages[0] | "\(.Body) \(.MessageAttributes.source.StringValue) \(.Attributes.ApproximateReceiveCount)"' "$work/received.json") \
+$([ "$(jq -r '.Messages[0].Attributes.SenderId' "$work/received.json")" = "$key_id" ] && echo true || echo false)"
+sqs_cli delete-message --queue-url "$url/Orders" --receipt-handle "$(jq -r '.Messages[0].ReceiptHandle' "$work/received.json")"
+check "  ... deletes it, the queue empty after" "0 0" \
+  "$(sqs_cli get-queue-attributes --queue-url "$url/Orders" --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+  | jq -r '.Attributes | "\(.ApproximateNumberOfMessages) \(.ApproximateNumberOfMessagesNotVisible)"')"
+check "  ... a queue that isn't there, by its query code" "An error occurred (AWS.SimpleQueueService.NonExistentQueue)" \
+  "$(refused get-queue-url --queue-name nowhere)"
+check "  ... and one ff local doesn't make, as the template makes them" "An error occurred (AWS.SimpleQueueService.UnsupportedOperation)" \
+  "$(refused create-queue --queue-name more)"
+check "  ... sends a batch, each entry answered" "a,b" \
+  "$(sqs_cli send-message-batch --queue-url "$url/Records" --entries Id=a,MessageBody=one Id=b,MessageBody=two | jq -r '[.Successful[].Id] | sort | join(",")')"
+sqs_cli purge-queue --queue-url "$url/Records"
+check "  ... and purges a queue" 0 \
+  "$(sqs_cli get-queue-attributes --queue-url "$url/Records" --attribute-names ApproximateNumberOfMessages | jq -r .Attributes.ApproximateNumberOfMessages)"
+sqs_cli send-message --queue-url "$url/Orders" --message-body poison >/dev/null
+received Orders --visibility-timeout 0 >/dev/null
+received Orders --visibility-timeout 0 >/dev/null
+check "a message received as often as its queue's redrive policy allows goes to its dead-letter queue" "0 poison 1" \
+  "$(received Orders | jq -s 'map(.Messages | length) | add // 0') \
+$(received Dead --visibility-timeout 0 | jq -r '.Messages[0] | "\(.Body) \(.Attributes.ApproximateReceiveCount)"')"
+AWS_ACCESS_KEY_ID=AKFFNOTTHELOCALKEY00 AWS_SECRET_ACCESS_KEY=not-the-secret AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+  AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_SQS="http://127.0.0.1:$port" "${aws_cli[@]}" sqs list-queues >/dev/null 2>"$work/sqs.err" || true
+check "a request signed with another key is refused in SQS's words, the key said on stderr" "true true" \
+  "$(grep -F 'An error occurred (InvalidClientTokenId) when calling the ListQueues operation: The security token included in the request is invalid.' "$work/sqs.err" >/dev/null && echo true || echo false) \
+$(grep -F "A request signed with AKFFNOTTHELOCALKEY00, not the local key $key_id" "$work/queues.err" >/dev/null && echo true || echo false)"
+sqs_cli purge-queue --queue-url "$url/Dead"
+curl -s -o "$work/sender.json" -X POST "http://127.0.0.1:$port/2015-03-31/functions/Sender/invocations" -d '{"body": "from a function"}'
+check "a function sends to its queue with no setting, through the endpoint, the region and the key it is given" \
+  "true from a function true" \
+  "$(jq -r 'has("MessageId")' "$work/sender.json") \
+$(received Orders --wait-time-seconds 2 | jq -r --arg key "$key_id" '.Messages[0] | "\(.Body) \(.Attributes.SenderId == $key)"')"
+curl -s -o /dev/null -X POST -H 'X-Amz-Invocation-Type: Event' "http://127.0.0.1:$port/2015-03-31/functions/Failing/invocations" -d '{"n": 1}'
+received Records --wait-time-seconds 20 >"$work/record.json"
+received Dead --wait-time-seconds 20 >"$work/dead.json"
+check "an asynchronous call that failed: its record in its OnFailure queue, sent by the function" \
+  "RetriesExhausted 1 arn:aws:lambda:tn-tunis-1:000000000000:function:Failing" \
+  "$(jq -r '.Messages[0] | (.Body | fromjson | "\(.requestContext.condition) \(.requestPayload.n)") + " " + .Attributes.SenderId' "$work/record.json")"
+check "  ... and its event in its dead-letter queue, with its request ID, the status and the error, as Lambda sends it" \
+  '1 200 no luck true' \
+  "$(jq -r '.Messages[0] | "\(.Body | fromjson | .n) \(.MessageAttributes.ErrorCode.StringValue) \(.MessageAttributes.ErrorMessage.StringValue) \(.MessageAttributes.RequestID.StringValue | test("^[0-9a-f-]{36}$"))"' "$work/dead.json")"
+check "the start lists a function's SQS event: its queue, its batches and window, its failures reported" "true true" \
+  "$(grep -F "Its SQS events, each reading its queue while it runs, as FF's event source mappings:" "$work/queues.out" >/dev/null && echo true || echo false) \
+$(grep -E '^  Reader/Work +Jobs: batches of 10 within 1 s, ReportBatchItemFailures$' "$work/queues.out" >/dev/null && echo true || echo false)"
+cat >"$work/jobs.json" <<'JSON'
+[
+  {"Id": "one", "MessageBody": "ok-1", "MessageAttributes": {"source": {"DataType": "String", "StringValue": "aws-cli"}},
+   "MessageSystemAttributes": {"AWSTraceHeader": {"DataType": "String", "StringValue": "Root=1-5759e988-bd862e3fe1be46a994272793"}}},
+  {"Id": "two", "MessageBody": "fail"},
+  {"Id": "three", "MessageBody": "ok-2"}
+]
+JSON
+sqs_cli send-message-batch --queue-url "$url/Jobs" --entries "file://$work/jobs.json" >/dev/null
+# Its message named as failed comes back after the queue's 3 s, fails again, and goes to JobsDead at the next receive.
+received JobsDead --wait-time-seconds 20 >"$work/jobs-dead.json"
+records() { sed -n 's/^.*record //p' "$app/.ff/local/logs/Reader.log"; }
+check "a function's SQS event reads its queue: the three messages in one batch, as Lambda's SQS event gives them" \
+  "batch of 3|ok-1 fail ok-2|aws:sqs arn:aws:sqs:tn-tunis-1:000000000000:Jobs tn-tunis-1 1|aws-cli String Root=1-5759e988-bd862e3fe1be46a994272793 true" \
+  "$(grep -m1 -o 'batch of [0-9]*' "$app/.ff/local/logs/Reader.log")|$(records | head -3 | jq -r .body | paste -sd' ')|\
+$(records | head -1 | jq -r '"\(.eventSource) \(.eventSourceARN) \(.awsRegion) \(.attributes.ApproximateReceiveCount)"')|\
+$(records | head -1 | jq -r --arg key "$key_id" '"\(.messageAttributes.source.stringValue) \(.messageAttributes.source.dataType) \(.attributes.AWSTraceHeader) \(.attributes.SenderId == $key)"')"
+check "  ... the message its answer names comes back after the visibility timeout, alone, the others deleted" \
+  "fail 2|0 0" \
+  "$(records | sed -n 4p | jq -r '"\(.body) \(.attributes.ApproximateReceiveCount)"')|\
+$(sqs_cli get-queue-attributes --queue-url "$url/Jobs" --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible \
+  | jq -r '.Attributes | "\(.ApproximateNumberOfMessages) \(.ApproximateNumberOfMessagesNotVisible)"')"
+check "  ... and, received as often as the queue's redrive policy allows, goes to its dead-letter queue" "fail 4" \
+  "$(jq -r '.Messages[0].Body' "$work/jobs-dead.json") $(records | wc -l | tr -d ' ')"
+local_stopped
+check "Ctrl-C removes their containers" 0 "$(leftover)"
+}
+section_def local_queues section_local_queues backend budget=45
+
+section_local_buckets() {
+section "ff local start's buckets: S3 at the front door, the AWS CLI's cases of L4, objects as files kept from a start to the next, a function writing to its bucket, their events to a function and a queue, a site from its objects or a folder"
+local app="$work/buckets" port starter key_id described kept_file queue_url pages
+local photos_line="^  photos +.*/\\.ff/local/buckets/photos, its events to Uploads, Thumbs$"
+# s3_cli <args...>: the AWS CLI with the local key's file alone, the front door its S3 endpoint.
+s3_cli() { local_aws "$app" "$port" "$@"; }
+# s3_refused <args...>: an AWS CLI command's error, by the code it names.
+s3_refused() { s3_cli "$@" >/dev/null 2>"$work/s3.err" && echo accepted || grep -m1 -oE 'An error occurred \([A-Za-z0-9.]+\)' "$work/s3.err"; }
+# page <path> [curl args...]: a visit to the site pages, its status and its answer; `| sed -n '1s/ .*//p'` its status alone.
+page() {
+  local path="$1"
+  shift
+  curl -s -o "$work/page.body" -w '%{http_code}' "$@" "http://pages.site.localhost:$port$path"
+  echo " $(cat "$work/page.body")"
+}
+# started [args...]: ff local start in the background, its listing waited for.
+started() { local_started "$work/buckets.out" "$work/buckets.err" "$app/template.yaml" --port "$port" "$@"; }
+rm -rf "$app" && mkdir -p "$app/writer"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Photos:
+    Type: AWS::S3::Bucket
+    Properties:
+      NotificationConfiguration:
+        QueueConfigurations:
+          - Event: s3:ObjectRemoved:*
+            Queue: !GetAtt Uploads.Arn
+  Uploads:
+    Type: AWS::SQS::Queue
+  Pages:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: 404.html
+  Writer:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: writer/
+      Runtime: python3.13
+      Handler: app.handler
+      Timeout: 10
+      Environment:
+        Variables:
+          BUCKET: !Ref Photos
+  Thumbs:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: writer/
+      Runtime: python3.13
+      Handler: app.seen
+      Timeout: 10
+      Environment:
+        Variables:
+          BUCKET: !Ref Photos
+      Events:
+        Upload:
+          Type: S3
+          Properties:
+            Bucket: !Ref Photos
+            Events: s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: images/
+YAML
+# A function that writes to its bucket as an SDK would, with no setting: at the bucket's own host under the endpoint
+# FF gives it, its request signed by hand, as the runtime images have no SDK; and one that keeps the event an image's
+# upload sent it, in the bucket, under a prefix its notification doesn't name.
+cp "$FF_REPO_ROOT/hack/lib/local-functions/signed.py" "$app/writer/"
+cat >"$app/writer/app.py" <<'PY'
+import json
+import os
+
+from signed import send
+
+
+def put(key, body, content_type):
+    scheme, authority = os.environ["AWS_ENDPOINT_URL_S3"].split("://")
+    url = f"{scheme}://{os.environ['BUCKET']}.{authority}/{key}"
+    return send("s3", "PUT", url, body, {"content-type": content_type})
+
+
+def handler(event, context):
+    with put("from-a-function.txt", event["body"].encode(), "text/plain") as answer:
+        return {"status": answer.status, "etag": answer.headers["ETag"]}
+
+
+def seen(event, context):
+    with put("seen/event.json", json.dumps(event).encode(), "application/json") as answer:
+        return answer.status
+PY
+mkdir -p "$app/pages-folder"
+printf '<h1>From the folder</h1>' >"$app/pages-folder/index.html"
+
+port="$(free_port)"
+started
+key_id="$(sed -n 's/^aws_access_key_id = //p' "$app/.ff/local/credentials")"
+check "the start lists the template's bucket and the folder its objects are files in" "true true" \
+  "$(grep -F "Its buckets, S3's at http://127.0.0.1:$port, each object a file in its bucket's folder, kept from a start to the next:" "$work/buckets.out" >/dev/null && echo true || echo false) \
+$(grep -E "$photos_line" "$work/buckets.out" >/dev/null && echo true || echo false)"
+check "the AWS CLI lists them and finds one, with the local key" "photos pages accepted" \
+  "$(s3_cli s3 ls | awk '{print $3}' | paste -sd' ') $(s3_refused s3api head-bucket --bucket photos)"
+check "aws: s3api reads a bucket's notifications and website as the template sets them, and refuses a website it hasn't" \
+  "PhotosQueue1 s3:ObjectRemoved:* ThumbsUpload arn:aws:lambda:tn-tunis-1:000000000000:function:Thumbs images/ index.html 404.html An error occurred (NoSuchWebsiteConfiguration)" \
+  "$(s3_cli s3api get-bucket-notification-configuration --bucket photos --output json \
+    | jq -r '[.QueueConfigurations[0].Id, .QueueConfigurations[0].Events[0], .LambdaFunctionConfigurations[0].Id, .LambdaFunctionConfigurations[0].LambdaFunctionArn, .LambdaFunctionConfigurations[0].Filter.Key.FilterRules[0].Value] | join(" ")') \
+$(s3_cli s3api get-bucket-website --bucket pages --output json | jq -r '"\(.IndexDocument.Suffix) \(.ErrorDocument.Key)"') \
+$(s3_refused s3api get-bucket-website --bucket photos)"
+
+head -c $((100 * 1024 * 1024)) /dev/urandom >"$work/big.bin"
+s3_cli s3 cp "$work/big.bin" s3://photos/cli/big.bin --only-show-errors
+s3_cli s3 cp s3://photos/cli/big.bin "$work/big.out" --only-show-errors
+check "aws: 100 MB up in parts and down again, byte for byte" "104857600 0" \
+  "$(s3_cli s3api head-object --bucket photos --key cli/big.bin --query ContentLength --output text) $(cmp -s "$work/big.bin" "$work/big.out"; echo $?)"
+described="$(jq -r 'select(.key == "cli/big.bin") | input_filename' "$app"/.ff/local/buckets/photos/*.object.json)"
+kept_file="$app/.ff/local/buckets/photos/$(jq -r .file "$described")"
+check "  ... a file in its bucket's folder, its key's extension kept, its key and its parts in the file beside it, no part left" \
+  "0 bin cli/big.bin true 0" \
+  "$(cmp -s "$work/big.bin" "$kept_file"; echo $?) ${kept_file##*.} $(jq -r '"\(.key) \(.parts | length > 1)"' "$described") \
+$(find "$app/.ff/local/buckets/photos/.uploads" -type f 2>/dev/null | wc -l | tr -d ' ')"
+s3_cli s3api get-object --bucket photos --key cli/big.bin --range bytes=0-9 "$work/range.out" >/dev/null
+check "aws: a range" "$(head -c 10 "$work/big.bin" | od -An -tx1 | tr -d ' \n')" "$(od -An -tx1 "$work/range.out" | tr -d ' \n')"
+rm -rf "$work/site" "$work/site-back"
+mkdir -p "$work/site/css" "$work/site-back"
+printf '<h1>Ahlan</h1>' >"$work/site/index.html"
+printf 'body {}' >"$work/site/css/main.css"
+s3_cli s3 sync "$work/site" s3://photos/site --only-show-errors
+s3_cli s3 sync s3://photos/site "$work/site-back" --only-show-errors
+check "aws: a folder synced up, listed, and down again, the same" "2 0" \
+  "$(s3_cli s3 ls s3://photos/site/ --recursive | wc -l | tr -d ' ') $(diff -r "$work/site" "$work/site-back" >/dev/null; echo $?)"
+presigned="$(s3_cli s3 presign s3://photos/site/index.html --expires-in 300)"
+expiring="$(s3_cli s3 presign s3://photos/site/index.html --expires-in 1)"
+sleep 2
+check "aws: a presigned URL, fetched; one past its expiry, AccessDenied" "<h1>Ahlan</h1> 403 AccessDenied" \
+  "$(curl -s "$presigned") $(curl -s -o "$work/expired" -w '%{http_code}' "$expiring") $(grep -o '<Code>[^<]*' "$work/expired" | cut -c7-)"
+s3_cli s3 cp s3://photos/site/index.html s3://photos/copied/index.html --only-show-errors
+check "aws: an object copied, then the folder's two deleted in one request" "<h1>Ahlan</h1> 2 0" \
+  "$(s3_cli s3 cp s3://photos/copied/index.html - 2>/dev/null) \
+$(s3_cli s3api delete-objects --bucket photos --delete '{"Objects": [{"Key": "site/index.html"}, {"Key": "site/css/main.css"}]}' | jq '.Deleted | length') \
+$(s3_cli s3 ls s3://photos/site/ --recursive | wc -l | tr -d ' ')"
+queue_url="http://127.0.0.1:$port/000000000000/Uploads"
+local_aws "$app" "$port" sqs receive-message --queue-url "$queue_url" --max-number-of-messages 10 \
+  --attribute-names SenderId --output json >"$work/uploads.json"
+check "a removal's event goes to the queue the bucket's notification names, S3's record from the bucket, after S3's test event at the start" \
+  "ObjectRemoved:Delete site%2Fcss%2Fmain.css, ObjectRemoved:Delete site%2Findex.html, s3:TestEvent arn:aws:s3:::photos" \
+  "$(jq -r '[.Messages[].Body | fromjson | .Event // (.Records[0].eventName + " " + .Records[0].s3.object.key)] | sort | join(", ")' "$work/uploads.json") \
+$(jq -r '[.Messages[].Attributes.SenderId] | unique | join(" ")' "$work/uploads.json")"
+printf 'meow!' | s3_cli s3 cp - "s3://photos/images/red cat.jpg" --only-show-errors
+for _ in $(seq 1 60); do
+  s3_cli s3 cp s3://photos/seen/event.json "$work/seen.json" --only-show-errors 2>/dev/null && break
+  sleep 0.5
+done
+check "an image's upload calls the function its notification names, with S3's record, its key form-encoded" \
+  "ObjectCreated:Put images%2Fred+cat.jpg 5 ThumbsUpload photos" \
+  "$(jq -r '.Records[0] | "\(.eventName) \(.s3.object.key) \(.s3.object.size) \(.s3.configurationId) \(.s3.bucket.name)"' "$work/seen.json" 2>/dev/null)"
+check "aws: a wrong secret, SignatureDoesNotMatch" "An error occurred (SignatureDoesNotMatch)" \
+  "$(AWS_ACCESS_KEY_ID="$key_id" AWS_SECRET_ACCESS_KEY=wrong-secret s3_refused s3 ls s3://photos)"
+AWS_ACCESS_KEY_ID=AKFFNOTTHELOCALKEY00 AWS_SECRET_ACCESS_KEY=not-the-secret AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+  AWS_REGION=tn-tunis-1 AWS_ENDPOINT_URL_S3="http://127.0.0.1:$port" "${aws_cli[@]}" s3 ls s3://photos >/dev/null 2>"$work/s3.err" || true
+check "  ... another key, InvalidAccessKeyId, the key said on stderr" "true true" \
+  "$(grep -F 'An error occurred (InvalidAccessKeyId)' "$work/s3.err" >/dev/null && echo true || echo false) \
+$(grep -F "A request signed with AKFFNOTTHELOCALKEY00, not the local key $key_id" "$work/buckets.err" >/dev/null && echo true || echo false)"
+check "aws: a bucket the template hasn't, NoSuchBucket; one made or deleted, refused as the template's to make" \
+  "An error occurred (NoSuchBucket) An error occurred (NotImplemented) An error occurred (NotImplemented)" \
+  "$(s3_refused s3 ls s3://nowhere) $(s3_refused s3 mb s3://more) $(s3_refused s3 rb s3://photos)"
+check "aws: s3api reads a bucket's settings it hasn't as S3 answers a bucket without them: the owner paying, versioning never on" \
+  "BucketOwner never" \
+  "$(s3_cli s3api get-bucket-request-payment --bucket photos --query Payer --output text) \
+$(s3_cli s3api get-bucket-versioning --bucket photos --query "Status || 'never'" --output text)"
+curl -s -o "$work/writer.json" -X POST "http://127.0.0.1:$port/2015-03-31/functions/Writer/invocations" -d '{"body": "from a function"}'
+check "a function writes to its bucket with no setting, at the bucket's host under the endpoint it is given, with its key" \
+  "200 from a function" \
+  "$(jq -r .status "$work/writer.json") $(s3_cli s3 cp s3://photos/from-a-function.txt - 2>/dev/null)"
+printf '<h1>Pages</h1>' | s3_cli s3 cp - s3://pages/index.html --content-type text/html --only-show-errors
+printf '<h1>Not here</h1>' | s3_cli s3 cp - s3://pages/404.html --content-type text/html --only-show-errors
+check "the start lists the site at its address; a browser gets the index document there, the error document with 404, and 405 for a POST" \
+  "true 200 <h1>Pages</h1> 404 <h1>Not here</h1> 405" \
+  "$(grep -E "^  pages +http://pages\.site\.localhost:$port/, its objects$" "$work/buckets.out" >/dev/null && echo true || echo false) \
+$(page /) $(page /no/such/page) $(page / -X POST | sed -n '1s/ .*//p')"
+s3_cli s3 ls s3://photos --recursive | awk '{print $3, $4}' | sort >"$work/listed"
+local_stopped
+check "Ctrl-C removes the functions' containers" 0 "$(leftover)"
+started --site "pages=$app/pages-folder"
+pages="$(cd "$app/pages-folder" && pwd -P)"
+check "the objects are kept from a start to the next: listed the same, read the same" "true 0" \
+  "$(s3_cli s3 ls s3://photos --recursive | awk '{print $3, $4}' | sort | cmp -s - "$work/listed" && echo true || echo false) \
+$(s3_cli s3 cp s3://photos/cli/big.bin - 2>/dev/null | cmp -s - "$work/big.bin"; echo $?)"
+first="$(page /)"
+printf '<h1>Changed in the folder</h1>' >"$app/pages-folder/index.html"
+check "--site: the site answers a folder's files, a change seen at once without a copy, the bucket's objects as they were" \
+  "true 200 <h1>From the folder</h1> 200 <h1>Changed in the folder</h1> 404 <h1>Pages</h1>" \
+  "$(grep -F "  pages  http://pages.site.localhost:$port/, $pages's files" "$work/buckets.out" >/dev/null && echo true || echo false) \
+$first $(page /) $(page /404.html | sed -n '1s/ .*//p') $(s3_cli s3 cp s3://pages/index.html - 2>/dev/null)"
+local_stopped
+rm -rf "$work/big.bin" "$work/big.out" "$app/.ff/local/buckets"
+}
+section_def local_buckets section_local_buckets backend budget=45
+
+section_local_data() {
+section "ff local start --with postgres,valkey: each beside the functions at its name and its variable, reached from this machine at its port, its data kept in Docker's volumes from a start to the next, a second start refused, ff local reset --data removing them"
+local app="$work/data" port starter project before
+local postgres_image valkey_image
+postgres_image="$(local_image postgres)"
+valkey_image="$(local_image valkey/valkey)"
+[ -n "$postgres_image" ] && [ -n "$valkey_image" ] || fail "the images of cli/src/local/services.rs weren't found"
+volumes() { docker volume ls --quiet --filter "label=ff.local.project=$project" | wc -l | tr -d ' '; }
+url_of() { local_url "$work/data.out" "$1"; }
+psql_here() { local_psql "$work/data.out" "$1"; }
+valkey_here() { docker run --rm --network host "$valkey_image" valkey-cli --no-auth-warning -u "$(url_of valkey)" "$@" 2>&1; }
+# started [args...]: ff local start in the background with both, its listing waited for: a first start pulls the
+# images and makes the data.
+started() {
+  local_started "$work/data.out" "$work/data.err" "$app/template.yaml" --port "$port" --with postgres,valkey "$@"
+}
+rm -rf "$app" && mkdir -p "$app/probe"
+project="$(cd "$app" && pwd -P)"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Probe:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: probe/
+      Runtime: python3.13
+      Handler: app.handler
+      Timeout: 10
+YAML
+# A function that finds each service at its variable and reaches it at its name: PostgreSQL's answer to a TLS request,
+# and Valkey's to its password and a PING; the runtime images have no driver.
+cat >"$app/probe/app.py" <<'PY'
+import os
+import socket
+from urllib.parse import urlsplit
+
+
+def handler(event, context):
+    database, cache = urlsplit(os.environ["DATABASE_URL"]), urlsplit(os.environ["REDIS_URL"])
+    with socket.create_connection((database.hostname, database.port), timeout=5) as connection:
+        connection.sendall((8).to_bytes(4, "big") + (80877103).to_bytes(4, "big"))
+        tls = connection.recv(1).decode()
+    with socket.create_connection((cache.hostname, cache.port), timeout=5) as connection:
+        connection.sendall(f"AUTH {cache.username} {cache.password}\r\nPING\r\n".encode())
+        answer = b""
+        while answer.count(b"\r\n") < 2:
+            answer += connection.recv(64)
+    return f"{database.hostname}:{database.port}{database.path} {tls} {cache.hostname}:{cache.port} {' '.join(answer.decode().split())}"
+PY
+port="$(free_port)"
+started
+check "the start lists each service at its URL here, with its password, where the functions reach it, and their variable" "true true" \
+  "$(grep -E "^  postgres  postgresql://app:[A-Za-z0-9]{32}@127\.0\.0\.1:[0-9]+/app, at postgres:5432 from the functions, the functions' DATABASE_URL$" "$work/data.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  valkey    redis://default:[A-Za-z0-9]{32}@127\.0\.0\.1:[0-9]+, at valkey:6379 from the functions, the functions' REDIS_URL$" "$work/data.out" >/dev/null && echo true || echo false)"
+check "a function finds each at its variable and reaches it at its name: PostgreSQL answering, Valkey taking its password" \
+  '"postgres:5432/app N valkey:6379 +OK +PONG"' \
+  "$(curl -s -d '{}' "http://127.0.0.1:$port/2015-03-31/functions/Probe/invocations")"
+check "this machine reaches each at its port with its password, and Valkey refuses a client without it" "1 OK NOAUTH" \
+  "$(psql_here "create table kept (word text); insert into kept values ('first'); select count(*) from kept") \
+$(valkey_here set word kept) \
+$(docker run --rm --network host "$valkey_image" valkey-cli -p "$(url_of valkey | sed 's/.*://')" ping 2>&1 | grep -o NOAUTH)"
+ff local start "$app/template.yaml" --port "$(free_port)" --with postgres
+check "a second start of the project is refused while the first runs its data, the container named" \
+  "3 another ff local start of this project runs it" \
+  "$(code) $(err | grep -o 'another ff local start of this project runs it')"
+before="$(url_of postgres)"
+local_stopped
+check "Ctrl-C removes the containers, the functions' and the services', and keeps their volumes" "0 2" "$(leftover) $(volumes)"
+started
+check "the data is kept from a start to the next, at the same URL" "first kept true" \
+  "$(psql_here "select word from kept") $(valkey_here get word) $([ "$(url_of postgres)" = "$before" ] && echo true || echo false)"
+local_stopped
+ff local reset "$project" --yes
+started
+check "ff local reset leaves the data: the next start makes another password, and reads the data with it" "true first kept" \
+  "$([ "$(url_of postgres | sed 's/@.*//')" != "$(printf '%s' "$before" | sed 's/@.*//')" ] && echo true || echo false) \
+$(psql_here "select word from kept") $(valkey_here get word)"
+local_stopped
+ff local reset "$project" --data --yes
+check "ff local reset --data removes the volumes, naming them" "0 2 0" \
+  "$(code) $(out | grep -o "Docker's volume ff-local-data-[0-9a-f]*-[a-z]*" | wc -l | tr -d ' ') $(volumes)"
+}
+section_def local_data section_local_data backend budget=90
+
+section_local_mail() {
+section "ff local start's mail: SES v2's SendEmail at the front door, the AWS CLI's cases of L4 and a function's, each message kept as a file a mail reader opens, its Bcc in its envelope alone, said, listed by ff local mail, refused in FF's words, never sent"
+local app="$work/mail" port starter sent_id function_id raw_id
+local simple='{"Simple": {"Subject": {"Data": "Your order"}, "Body": {"Text": {"Data": "Thanks for your order."}}}}'
+local to_orders='{"ToAddresses": ["orders@example.tn"]}'
+# ses_cli <args...>: the AWS CLI's sesv2 with the local key's file alone, the front door its SES endpoint.
+ses_cli() { local_aws "$app" "$port" sesv2 "$@"; }
+# ses_refused <args...>: the error the CLI prints, its name and FF's words.
+ses_refused() { ses_cli "$@" >/dev/null 2>"$work/ses.err" && echo accepted || grep -m1 -oE 'An error occurred .*' "$work/ses.err"; }
+# kept <message ID> <extension>: the message's file, or its envelope's.
+kept() { printf '%s\n' "$app"/.ff/local/mail/*-"$1.$2"; }
+# started: ff local start in the background, its listing waited for.
+started() { local_started "$work/mail.out" "$work/mail.err" "$app/template.yaml" --port "$port"; }
+rm -rf "$app" && mkdir -p "$app/sender"
+cat >"$app/template.yaml" <<'YAML'
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Sender:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: sender/
+      Runtime: python3.13
+      Handler: app.handler
+      Timeout: 10
+YAML
+# A function that sends a receipt as an SDK would, with no setting: to the SES endpoint FF gives it, signed by hand, as
+# the runtime images have no SDK.
+cp "$FF_REPO_ROOT/hack/lib/local-functions/signed.py" "$app/sender/"
+cat >"$app/sender/app.py" <<'PY'
+import json
+import os
+
+from signed import send
+
+
+def handler(event, context):
+    body = json.dumps({
+        "FromEmailAddress": "Boutique Ana <orders@shop.example.tn>",
+        "Destination": {"ToAddresses": [event["to"]]},
+        "Content": {"Simple": {"Subject": {"Data": event["subject"]},
+                               "Body": {"Text": {"Data": "Merci"}, "Html": {"Data": "<p>Merci</p>"}}}},
+    }).encode()
+    url = f"{os.environ['AWS_ENDPOINT_URL_SESV2']}/v2/email/outbound-emails"
+    with send("ses", "POST", url, body, {"content-type": "application/json"}) as answer:
+        return json.load(answer)["MessageId"]
+PY
+
+port="$(free_port)"
+started
+check "the start says where its mail is kept, never sent" true \
+  "$(grep -E "^Its mail, SES v2's SendEmail at http://127\.0\.0\.1:$port, is kept in .*/\.ff/local/mail, never sent: ff local mail lists it$" "$work/mail.out" >/dev/null && echo true || echo false)"
+
+sent_id="$(ses_cli send-email --from-email-address 'Shop <news@shop.example.tn>' \
+  --destination '{"ToAddresses": ["orders@example.tn"], "CcAddresses": ["copy@example.tn"], "BccAddresses": ["Audit@Example.TN"]}' \
+  --content "$simple" --output json | jq -r .MessageId)"
+check "the AWS CLI sends L4's message with the local key, a Cc and a Bcc: SES's MessageId" true \
+  "$([[ $sent_id =~ ^[0-9a-f-]{36}$ ]] && echo true || echo false)"
+check "  ... kept: its envelope names its sender and each recipient, in lower case, the Bcc too; its file has no Bcc, its ID the message's" \
+  "news@shop.example.tn orders@example.tn,copy@example.tn,audit@example.tn Your order 0 true" \
+  "$(jq -r '"\(.from) \(.recipients | join(",")) \(.subject)"' "$(kept "$sent_id" json)") $(grep -c '^Bcc:' "$(kept "$sent_id" eml)" || true) \
+$(grep -F "Message-ID: <$sent_id@email.localhost>" "$(kept "$sent_id" eml)" >/dev/null && echo true || echo false)"
+check "  ... said on ff local start's stderr, with its file" true \
+  "$(grep -E "^A message from news@shop\.example\.tn to orders@example\.tn, copy@example\.tn, audit@example\.tn, \"Your order\", kept in .*/\.ff/local/mail/[0-9TZ]+-$sent_id\.eml, not sent$" "$work/mail.err" >/dev/null && echo true || echo false)"
+
+function_id="$(curl -s -d '{"to": "client@example.tn", "subject": "Votre reçu n° 42"}' "http://127.0.0.1:$port/2015-03-31/functions/Sender/invocations" | jq -r .)"
+check "a function sends a receipt at the SES endpoint FF gives it, which a mail reader opens: its subject decoded, both bodies" \
+  "Boutique Ana <orders@shop.example.tn> | client@example.tn | Votre reçu n° 42 | multipart/alternative | Merci" \
+  "$(read_mail "$(kept "$function_id" eml)" 2>&1)"
+
+printf 'From: Shop <news@shop.example.tn>\r\nTo: orders@example.tn\r\nBcc: audit@example.tn\r\nSubject: Raw\r\nMessage-ID: <raw-local@shop.example.tn>\r\n\r\nHello from a raw message.\r\n' >"$work/raw.eml"
+printf 'From: Shop <news@shop.example.tn>\r\nTo: orders@example.tn\r\nSubject: Raw\r\nMessage-ID: <raw-local@shop.example.tn>\r\n\r\nHello from a raw message.\r\n' >"$work/raw-without-bcc.eml"
+raw_id="$(ses_cli send-email --content "{\"Raw\": {\"Data\": \"$(base64 -w0 "$work/raw.eml")\"}}" --output json | jq -r .MessageId)"
+check "a raw message, its sender and recipients from its header, the Bcc's too: kept as it came but its Bcc field" \
+  "news@shop.example.tn orders@example.tn,audit@example.tn 0" \
+  "$(jq -r '"\(.from) \(.recipients | join(","))"' "$(kept "$raw_id" json)") $(cmp -s "$work/raw-without-bcc.eml" "$(kept "$raw_id" eml)"; echo $?)"
+
+check "a sender of two addresses is refused in FF's words, a template as FF refuses it, and nothing kept" \
+  "An error occurred (BadRequestException) when calling the SendEmail operation: a@shop.example.tn, b@shop.example.tn is not one address|An error occurred (NotImplemented) when calling the SendEmail operation: FF's SES endpoint doesn't send templates: send Simple or Raw content|3" \
+  "$(ses_refused send-email --from-email-address 'a@shop.example.tn, b@shop.example.tn' --destination "$to_orders" --content "$simple")|$(ses_refused send-email --from-email-address news@shop.example.tn --destination "$to_orders" --content '{"Template": {"TemplateName": "receipt"}}')|$(find "$app/.ff/local/mail" -name '*.eml' | wc -l | tr -d ' ')"
+check "FF's account's operations are FF's: ff local says so" \
+  "An error occurred (NotImplemented) when calling the GetAccount operation: ff local keeps the mail its functions send, and answers SendEmail alone: GetAccount is FF's, whose account has identities, quotas and a suppression list" \
+  "$(ses_refused get-account)"
+local_stopped
+
+ff local mail "$app"
+check "ff local mail lists them once the app has stopped, the latest last, each with its file" \
+  "0 3 messages kept in true|Raw" \
+  "$(code) $(out | head -1 | grep -oE '^3 messages kept in') $(out | head -1 | grep -E "/\.ff/local/mail, never sent, the latest last:$" >/dev/null && echo true || echo false)|$(out | sed -n '6s/.*: "\(.*\)", [0-9]* bytes$/\1/p')"
+ff local mail "$app/template.yaml" --output json
+check "  ... and as JSON, by the template too: each message's subject, its recipients and its file" \
+  "Your order|Votre reçu n° 42|Raw 3 true" \
+  "$(out | jq -r '[.messages[].subject] | join("|")') $(out | jq -r '.messages[0].recipients | length') $([ -f "$(out | jq -r '.messages[2].file')" ] && echo true || echo false)"
+ff local reset "$app" --yes
+ff local mail "$app"
+check "ff local reset removes the mail with what ff local keeps, and ff local mail says there is none; no container left" \
+  "0 true 0" \
+  "$(code) $(out | grep -E '^No mail in .*/\.ff/local/mail: ' >/dev/null && echo true || echo false) $(leftover)"
+}
+section_def local_mail section_local_mail backend budget=20
+
+section_local_small_app() {
+section "the small app whole on ff local, with --with postgres,valkey: its page served, an order posted at its URL kept in PostgreSQL, the latest listed from Valkey, its receipt made through the local queue into the local bucket and e-mailed, the mail kept; the nightly run by hand removing an old order and its receipt"
+# The small app local_apps installed, started again with its database, its cache and an address its receipts go from.
+local shop="$work/cli-local-shop" port starter origin api order old put report
+volumes() { docker volume ls --quiet --filter "label=ff.local.project=$(cd "$shop" && pwd -P)" | wc -l | tr -d ' '; }
+x_cache() { at "$api/orders" >/dev/null; sed -n 's/^x-cache: //Ip' "$work/at.head" | tr -d '\r'; }
+# until_true <command...>: waits up to 30 s for the command to succeed.
+until_true() {
+  for _ in $(seq 1 60); do
+    "$@" && return 0
+    sleep 0.5
+  done
+  return 1
+}
+receipt_of() { [ "$(at "$api/orders/$1/receipt" | sed -n '1s/ .*//p')" = "$2" ]; }
+mailed() { "$ff_bin" local mail "$shop" --output json 2>/dev/null | jq -e '.messages | length > 0' >/dev/null; }
+reported() { grep -F 'shop-nightly | ' "$work/small.err" | grep -F 'report {' >/dev/null; }
+[ -d "$shop/node_modules" ] || fail "the small app isn't installed in $shop: local_apps installs it"
+port="$(free_port)"
+origin="http://local-site.site.localhost:$port"
+api="http://shop-api.fn.localhost:$port"
+printf '{"api": "%s"}\n' "$api" >"$shop/site/config.json"
+FF_TEST_ASYNC_SECOND_MS=20 FF_TEST_NOW=2026-11-10T12:00:00Z \
+  local_started "$work/small.out" "$work/small.err" "$shop/template.yaml" --port "$port" --with postgres,valkey \
+  --site "local-site=$shop/site" --parameter-overrides ReceiptsBucketName=local-receipts SiteBucketName=local-site \
+  "SiteOrigin=$origin" ReceiptsFrom=receipts@shop.example.tn
+check "the small app starts with its database and its cache, each the functions' at DATABASE_URL and REDIS_URL" "true true" \
+  "$(grep -E "^  postgres  postgresql://app:[^@]+@127\.0\.0\.1:[0-9]+/app, at postgres:5432 from the functions, the functions' DATABASE_URL$" "$work/small.out" >/dev/null && echo true || echo false) \
+$(grep -E "^  valkey    redis://default:[^@]+@127\.0\.0\.1:[0-9]+, at valkey:6379 from the functions, the functions' REDIS_URL$" "$work/small.out" >/dev/null && echo true || echo false)"
+check "  ... its page served at its site's address from its folder, its config.json naming the API here" \
+  "200 <title>Orders</title> $api" \
+  "$(at "$origin/" | sed -n '1s/ .*//p') $(grep -o '<title>Orders</title>' "$work/at.body") $(at "$origin/config.json" >/dev/null; jq -r .api "$work/at.body")"
+
+at "$api/orders" -X POST -H "Origin: $origin" -H 'content-type: application/json' \
+  -d '{"item": "tea", "quantity": 2, "email": "client@example.tn"}' >"$work/order.out"
+order="$(jq -r .id "$work/at.body")"
+check "an order posted at the API's URL, as the page posts it, is kept in PostgreSQL, its receipt queued" "201 tea 2 queued" \
+  "$(sed 's/ .*//' "$work/order.out") $(local_psql "$work/small.out" "select item, quantity from orders where id = $order" | tr '|' ' ') $(jq -r .receipt "$work/at.body")"
+check "  ... the latest listed, from the database the first time, then from Valkey" "miss hit tea" \
+  "$(x_cache) $(x_cache) $(jq -r '.[0].item' "$work/at.body")"
+until_true receipt_of "$order" 200 || true
+check "  ... its receipt made by shop-receipts from the local queue, into the local bucket, read back at its URL" \
+  "200 Order $order|2 × tea true" \
+  "$(at "$api/orders/$order/receipt" | sed -n '1s/ .*//p') $(head -2 "$work/at.body" | paste -sd'|') \
+$(grep -lF "\"receipts/$order.txt\"" "$shop"/.ff/local/buckets/local-receipts/*.object.json >/dev/null 2>&1 && echo true || echo false)"
+until_true mailed || true
+ff local mail "$shop" --output json
+check "  ... and e-mailed from ReceiptsFrom to the order's address through the SES endpoint FF gives it: kept, never sent" \
+  "1 receipts@shop.example.tn client@example.tn Your receipt, order $order true" \
+  "$(out | jq -r '.messages | length') $(out | jq -r '.messages[0] | "\(.from) \(.recipients | join(",")) \(.subject)"') \
+$(read_mail "$(out | jq -r '.messages[0].file')" | grep -F "2 × tea" >/dev/null && echo true || echo false)"
+
+# An order of last July and its receipt, which the nightly of 10 November removes, past 90 days.
+old="$(local_psql "$work/small.out" "insert into orders (item, quantity, created_at) values ('old', 1, '2026-07-01T10:00:00Z') returning id")"
+printf 'Order %s\n' "$old" >"$work/old-receipt.txt"
+put="$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary "@$work/old-receipt.txt" "http://127.0.0.1:$port/local-receipts/receipts/$old.txt")"
+x_cache >/dev/null
+ff local run EveryNight "$shop"
+until_true reported || true
+report="$(grep -F 'shop-nightly | ' "$work/small.err" | sed -n 's/.*report \({.*}\)$/\1/p' | tail -1)"
+check "ff local run runs the nightly with its database: the day before counted, the old order and its receipt removed" \
+  "200 0 2026-11-09 1 1 404 0 miss" \
+  "$put $(code) $(jq -r '"\(.day) \(.removed) \(.receipts)"' <<<"$report") $(at "$api/orders/$old/receipt" | sed -n '1s/ .*//p') \
+$(local_psql "$work/small.out" "select count(*) from orders where id = $old") $(x_cache)"
+local_stopped
+ff local reset "$shop" --data --yes
+check "Ctrl-C removes the containers, and ff local reset --data the database's and the cache's volumes" "0 0 0" \
+  "$(leftover) $(code) $(volumes)"
+}
+section_def local_small_app section_local_small_app local_apps budget=90
+
+section_local_images() {
+section "ff local's runtime images as a release pins them: pulled by digest, else loaded from the downloads site, verified"
+# The release job's steps with this machine's Python image, which hack/runtime-images.sh pushes to the dev registry
+# rather than GitHub's, its archive signed with the release and put on a site FF serves (release_site). ff then runs
+# with that release's settings, as a test build takes them.
+local images="$work/images" minisign="${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/minisign" version
+local registry="127.0.0.1:$FF_REGISTRY_PORT/cli-e2e" site
+local manifest tagged by_digest archive digest key other_key
+site="$(site_of cli-images)"
+version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$FF_REPO_ROOT/cli/Cargo.toml" | head -1)"
+rm -rf "$images" && mkdir -p "$images/dist"
+"$FF_REPO_ROOT/hack/runtime-images.sh" "$registry" "$version" "$images/dist" --from-local --runtime python >"$images/made.out"
+manifest="$(cat "$images/dist/runtime-images.json")"
+tagged="$(jq -r '.python.image + ":" + .python.tag' <<<"$manifest")"
+by_digest="$(jq -r '.python.image + "@" + .python.digest' <<<"$manifest")"
+archive="$(jq -r .python.archive <<<"$manifest")"
+digest="$(jq -r .python.digest <<<"$manifest")"
+FF_RUNTIME_IMAGES="$manifest" release_site "$images" cli-images
+"$minisign" -G -W -p "$images/other.pub" -s "$images/other.key" >/dev/null 2>&1
+key="$(sed -n 2p "$images/release.pub")"
+other_key="$(sed -n 2p "$images/other.pub")"
+check "the release's image pushed, its archive signed and on the site FF serves" "true" \
+  "$(curl -fsS -o /dev/null "$site/$archive.minisig" && echo true || echo false)"
+
+# pinned [<manifest>] [<key>]: ff local invoke as the release's build runs it, examples/hello.py its function.
+pinned() {
+  FF_TEST_RUNTIME_IMAGES="${1:-$manifest}" FF_TEST_RELEASE_KEY="${2:-$key}" FF_DOWNLOADS_URL="$site" \
+    ff local invoke "$FF_REPO_ROOT/examples/hello.py" --data '{"name": "Pinned"}'
+}
+said() { err | grep -F "$1" >/dev/null && echo true || echo false; }
+here() { docker image inspect "$tagged" >/dev/null 2>&1 && echo true || echo false; }
+downloads_left() { find "${TMPDIR:-/tmp}" -maxdepth 1 -name "ff-*-${archive#images/}" 2>/dev/null | wc -l | tr -d ' '; }
+docker rmi "$tagged" >/dev/null
+pinned
+check "missing here, the release's image is pulled by its digest, tagged, and runs the function" "0 Hello Pinned true true" \
+  "$(code) $(out | sed '$d' | jq -r .message) $(said "pulling the runtime image $by_digest") $(here)"
+docker rmi "$tagged" >/dev/null
+unpullable="$(jq -c --arg digest "sha256:$(printf '0%.0s' $(seq 1 64))" '.python.digest = $digest' <<<"$manifest")"
+pinned "$unpullable"
+check "when Docker can't pull it, its archive is downloaded from the site, verified, loaded, and runs it" \
+  "0 Hello Pinned true true true true" \
+  "$(code) $(out | sed '$d' | jq -r .message) $(said "its archive instead, from $site/$archive") $(said "downloading $site/$archive") $(said "loading $tagged") $(here)"
+pinned "$unpullable"
+check "  ... once: the next run finds it here" "0 false false" \
+  "$(code) $(said "pulling") $(said "downloading")"
+docker rmi "$tagged" >/dev/null
+pinned "$unpullable" "$other_key"
+check "an archive another key signed is refused, and nothing loaded" \
+  "3 error: The runtime image's archive, $site/$archive: its signature: signed by another key than the one given; nothing was loaded false" \
+  "$(code) $(err | grep '^error:') $(here)"
+head -c 1048576 "$images/dist/$archive" >"$images/site/$archive"
+ff sites deploy cli-images "$images/site"
+pinned "$unpullable"
+check "  ... and a changed one too" \
+  "3 error: The runtime image's archive, $site/$archive: its signature: the signature doesn't match the file: it was changed, or another key signed it; nothing was loaded false" \
+  "$(code) $(err | grep '^error:') $(here)"
+check "the download is removed however it ends" 0 "$(downloads_left)"
+# What the dev registry and this machine hold of it, removed: the tag here, the image there.
+docker rmi "$tagged" >/dev/null 2>&1 || true
+curl -fsS -o /dev/null -X DELETE "http://127.0.0.1:$FF_REGISTRY_PORT/v2/cli-e2e/ff-runtime-python/manifests/$digest" || true
+}
+section_def local_images section_local_images backend budget=60
+
+section_ci() {
+section "ff in a customer's CI: the examples' own steps, as GitHub Actions and GitLab CI run them, deploying a SAM app"
+# Each example's steps, read from its file, run in a checkout of a customer's application (ff init --template sam's)
+# with the settings it names: the downloads site of a release made here, which FF serves; the key the login section
+# made with a deploy's scopes; the API that takes it. A home of their own, where install.sh puts ff, as a runner's.
+# GitHub's steps run as its runner runs them, with bash, its PATH and summary files; GitLab's job as one script in sh,
+# its image's packages this machine's, minisign among them, so that install.sh checks the signatures there.
+local ci="$work/ci" site extra code steps
+site="$(site_of cli-ci-downloads)"
+rm -rf "$ci" && mkdir -p "$ci/github" "$ci/bin"
+release_site "$ci/release" cli-ci-downloads
+(cd "$ci" && "$ff_bin" init cli-ci --runtime nodejs --template sam >/dev/null 2>&1)
+cp "${FF_TOOLS_BIN:-$FF_REPO_ROOT/hack/bin}/minisign" "$ci/bin/"
+# The deploy job's run: blocks, each a script of its own, in order.
+steps="$(awk -v out="$ci/github" '
+  /^        run: \|$/ { n++; block = 1; next }
+  block && /^          / { sub(/^          /, ""); print > (out "/step-" n ".sh"); next }
+  { block = 0 }
+  END { print n + 0 }' "$FF_REPO_ROOT/examples/ci/github-actions.yml")"
+check "the downloads site serves both examples as examples/ci/ has them" "true true" \
+  "$(curl -fsS "$site/ci/github-actions.yml" | cmp -s - "$FF_REPO_ROOT/examples/ci/github-actions.yml" && echo true || echo false) \
+$(curl -fsS "$site/ci/gitlab-ci.yml" | cmp -s - "$FF_REPO_ROOT/examples/ci/gitlab-ci.yml" && echo true || echo false)"
+check "the GitHub example's job takes FF_ENDPOINT, FF_DOWNLOADS_URL and FF_TOKEN, and runs two steps after the checkout" \
+  "FF_ENDPOINT FF_DOWNLOADS_URL FF_TOKEN 2" \
+  "$(awk '/^    env:$/ { env = 1; next } env && /^      [A-Z_]+:/ { sub(/:.*/, ""); sub(/^ +/, ""); print; next } { env = 0 }' \
+    "$FF_REPO_ROOT/examples/ci/github-actions.yml" | paste -sd' ') $steps"
+# github_job <key>: the steps in a fresh checkout and home, each with bash -eo pipefail as the runner runs it, the
+# folders a step adds to GITHUB_PATH before PATH from the next step on; to the first that fails. The output in
+# $ci/job.out, the exit code in $ci/job.code.
+github_job() {
+  local step=0
+  code=0
+  rm -rf "$ci/home" "$ci/app" && mkdir "$ci/home" && cp -r "$ci/cli-ci" "$ci/app"
+  : >"$ci/github_path" && : >"$ci/summary.md" && : >"$ci/job.out"
+  while [ "$step" -lt "$steps" ] && [ "$code" -eq 0 ]; do
+    step=$((step + 1))
+    extra="$(tac "$ci/github_path" | paste -sd:)"
+    (cd "$ci/app" && env -i HOME="$ci/home" PATH="${extra:+$extra:}$PATH" GITHUB_PATH="$ci/github_path" \
+      GITHUB_STEP_SUMMARY="$ci/summary.md" FF_ENDPOINT="$api_oidc" FF_DOWNLOADS_URL="$site" FF_TOKEN="$1" \
+      bash --noprofile --norc -eo pipefail "$ci/github/step-$step.sh") >>"$ci/job.out" 2>&1 || code=$?
+  done
+  echo "$code" >"$ci/job.code"
+}
+job() { cat "$ci/job.out"; }
+said_in_job() { job | grep -E "$1" >/dev/null && echo true || echo false; }
+github_job "$ci_key"
+check "GitHub's: ff installed from the downloads site into the runner's home, its SHA-256 checked, the app deployed" \
+  "0 true true" \
+  "$(cat "$ci/job.code") $(said_in_job "^ff [0-9.]+ installed as $ci/home/.local/bin/ff: its SHA-256 is latest.json's") \
+$(said_in_job '^created HelloWorldFunction: ')"
+url="$(sed -n 's/^- HelloWorldApi: //p' "$ci/summary.md")"
+check "  ... its URL in the job's summary, where the app answers" "true hello world" \
+  "$(grep -Fx '### Deployed to FF' "$ci/summary.md" >/dev/null && echo true || echo false) $(curl -s "${url%/}/hello" | jq -r .message)"
+github_job "$ci_reader_key"
+check "  ... and with a key that lacks a deploy's scopes, the job fails with ff's code, 6, the account's message its error" \
+  "6 true" "$(cat "$ci/job.code") $(said_in_job '^::error title=FF refused the account \(exit 6\)::This API key lacks the scope ')"
+
+# GitLab's: before_script's and script's lines, one script as the runner joins them, the image's apk line aside.
+awk '
+  /^  (before_script|script):$/ { list = 1; next }
+  list && /^    - \|$/ { block = 1; next }
+  list && block && /^      / { sub(/^      /, ""); print; next }
+  list && /^    - / { block = 0; sub(/^    - /, ""); print; next }
+  { list = 0; block = 0 }' "$FF_REPO_ROOT/examples/ci/gitlab-ci.yml" >"$ci/gitlab-job.sh"
+check "the GitLab example's job installs curl, jq and minisign in its image, then installs ff and deploys" \
+  "apk add --no-cache curl jq minisign" "$(grep '^apk ' "$ci/gitlab-job.sh")"
+grep -v '^apk ' "$ci/gitlab-job.sh" >"$ci/gitlab.sh"
+# gitlab_job <key>: its script with sh -e, in a fresh checkout and home.
+gitlab_job() {
+  code=0
+  rm -rf "$ci/home" "$ci/app" && mkdir "$ci/home" && cp -r "$ci/cli-ci" "$ci/app"
+  (cd "$ci/app" && env -i HOME="$ci/home" PATH="$ci/bin:$PATH" FF_ENDPOINT="$api_oidc" FF_DOWNLOADS_URL="$site" \
+    FF_TOKEN="$1" sh -e "$ci/gitlab.sh") >"$ci/job.out" 2>&1 || code=$?
+  echo "$code" >"$ci/job.code"
+}
+gitlab_job "$ci_key"
+check "GitLab's: ff installed, its signatures checked with minisign, the app deployed again, unchanged, its URL said" \
+  "0 true true true" \
+  "$(cat "$ci/job.code") $(said_in_job "^ff [0-9.]+ installed as $ci/home/.local/bin/ff: its SHA-256 is latest.json's, and their signatures are the release key's") \
+$(said_in_job '^unchanged HelloWorldFunction: ') $(said_in_job "^HelloWorldApi: ${url%/}")"
+gitlab_job "$ci_reader_key"
+check "  ... and refused with a reader's key, its last line the account's message" "6 true" \
+  "$(cat "$ci/job.code") $(job | tail -1 | grep -E '^FF refused the account \(exit 6\): This API key lacks the scope ' >/dev/null && echo true || echo false)"
+in_folder "$ci/cli-ci" delete-stack --yes
+check "the app's stack deleted after" 0 "$(code)"
+}
+section_def ci section_ci login budget=60
 
 sections_run
 checks_done cli-e2e

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# FF on its development server (README.md), as root, from the checkout install.sh copied to /data/ff/src: k3s and
-# gVisor; PostgreSQL, S3, mail, and customers' database, cache and mail servers beside the cluster, in Docker Compose;
-# FF's passwords and keys, made once, in /data/ff/secrets; the images built here and given to k3s, and ff for the
-# smoke test; deploy/k8s applied and the platform deployed by its deploy.sh; the first operator; FF's route in the
-# server's own proxy (/data/proxy); then every hostname checked through that proxy. A step already done does nothing,
-# so that an update is the same run. No password is ever printed, or put on a command line.
+# FF on its development server (README.md), as root, from the checkout it is in: /data/ff/src, where install.sh
+# copies one, or the directory the updater fetched a commit into (updater/update.sh). k3s and gVisor; PostgreSQL, S3,
+# mail, and customers' database, cache and mail servers beside the cluster, in Docker Compose; FF's passwords and
+# keys, made once, in /data/ff/secrets; the images built here and given to k3s, and ff for the smoke test; deploy/k8s
+# applied and the platform deployed by its deploy.sh; the first operator; FF's route in the server's own proxy
+# (/data/proxy); every hostname checked through that proxy; then the status page, its probe on a timer and its web
+# server beside the cluster; and the updater, on a timer. A step already done does nothing, so that an update is the
+# same run. No password is ever printed, or put on a command line.
 #   FF_VERSION=<the images' tag> FF_ADMIN_ALLOW=<address>/32 /data/ff/src/deploy/dev-server/server.sh
 set -euo pipefail
 home=/data/ff
-src=$home/src
+src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 secrets=$home/secrets
 proxy=/data/proxy
 # FF's names on this server, as the edge's settings give them (k8s/edge.env): api.<domain> and the others.
@@ -51,7 +53,9 @@ host_address="$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1)"
 [ -n "$host_address" ] || fail "no address on docker0, where the services beside the cluster listen"
 
 step "FF's passwords and keys, made once ($secrets)"
-install -d -o deploy -g deploy -m 0750 "$home"
+# Others may pass through FF's folder, and list nothing, so that the status page's probe reaches its own, status/:
+# everything else in it is deploy's or root's alone, by its own mode.
+install -d -o deploy -g deploy -m 0751 "$home"
 install -d -o deploy -g deploy -m 0700 "$secrets"
 # <name> <command...>: secrets/<name>, made by the command when there is none, readable by root and deploy alone.
 secret() {
@@ -64,7 +68,7 @@ password() { head -c 24 /dev/urandom | base64 | tr -d '/+=\n'; }
 hex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 for name in postgres-password ff-db-password keycloak-db-password keycloak-admin-password operator-password \
   s3-secret-key registry-backend-password registry-node-password data-db-superuser-password data-db-admin-password \
-  grafana-password; do
+  grafana-password status-probe-password; do
   secret "$name" password
 done
 secret s3-access-key sh -c "printf 'ffdev%s' '$(hex 8)'"
@@ -385,9 +389,10 @@ else
 fi
 
 step "every hostname, through the server's proxy, as from the internet"
-# Let's Encrypt's certificates for the eight fixed names, which the proxy asks for once it has the route: a minute
+# Let's Encrypt's certificates for the nine fixed names, which the proxy asks for once it has the route: a minute
 # or so the first time. Checked against the system's roots alone. Each name needs its record in the DNS (README.md).
-for name in api console admin login s3 sqs email lambda; do
+# The status page answers once its own step has started its web server; the proxy has its certificate before.
+for name in api console admin login s3 sqs email lambda status; do
   for i in $(seq 1 60); do
     curl -s -o /dev/null --cacert /etc/ssl/certs/ca-certificates.crt --resolve "$name.$domain:443:127.0.0.1" "https://$name.$domain/" && break
     [ "$i" -lt 60 ] || fail "no certificate from Let's Encrypt for $name.$domain after 3 minutes: the proxy's log says why (docker compose --project-directory $proxy logs caddy)"
@@ -430,9 +435,52 @@ check "Lambda's endpoint: Lambda's refusal of an unsigned request" "403 MissingA
 echo "server.sh: $passed checks passed; FF $version is up at https://console.$domain"
 
 step "ff, built here as one static binary, which the smoke test deploys a template with"
-# Last, as FF's install needs none of it. In Rust's image (hack/build-cli.sh --container), on half the server's
+# After FF's install, which needs none of it. In Rust's image (hack/build-cli.sh --container), on half the server's
 # processors, as other projects share them; Cargo's downloads and build kept in cli/target, which install.sh's copy
 # leaves alone, so that an update builds what changed.
 FF_BUILD_COMMIT="$version" CARGO_BUILD_JOBS="$(($(nproc) / 2))" "$src/hack/build-cli.sh" --container >"$work/ff-build.log" 2>&1 ||
   { tail -n 20 "$work/ff-build.log" >&2; fail "ff's build failed"; }
 echo "  $("$src/cli/target/dist/ff-linux-x86_64" version | head -1)"
+
+# <unit> <its folder> <when>: its service and its timer installed, systemd told when either changed, and the timer
+# started unless it runs.
+timer() {
+  local changed=false file
+  for file in "$1.service" "$1.timer"; do
+    write_if_changed "/etc/systemd/system/$file" "$(cat "$2/$file")" 0644 && changed=true
+  done
+  if $changed; then systemctl daemon-reload; fi
+  if systemctl is-enabled --quiet "$1.timer" && systemctl is-active --quiet "$1.timer"; then
+    echo "  its timer runs, $3"
+  else
+    systemctl enable --now --quiet "$1.timer"
+    echo "  its timer started, $3"
+  fi
+}
+
+step "the status page: each piece of FF, as a customer meets it, every minute, at https://status.$domain (status/)"
+"$src/deploy/dev-server/status/setup.sh" || fail "the status page's probe wasn't set up"
+timer ff-status-probe "$src/deploy/dev-server/status" "every minute"
+# Its web server, beside the cluster on the proxy's network, once the page's folder is there: built without BuildKit's
+# provenance, as customers' servers are, so that an update starts it again only when it changed.
+docker build -q --provenance=false -t ff-status-web:dev-server "$src/deploy/dev-server/status/web" >/dev/null
+"${compose[@]}" up -d --no-build --wait status-web >"$work/compose.log" 2>&1 ||
+  { tail -20 "$work/compose.log" >&2; fail "the status page's web server didn't start"; }
+# The probe once, so that the page is there now, not in a minute; then the page through the proxy.
+systemctl start ff-status-probe.service || fail "the status page's probe failed: journalctl -u ff-status-probe says why"
+check "the status page, through the proxy: made, never cached" "200 true no-cache" \
+  "$(at "status.$domain" /) $(grep -q '<title>FF status</title>' "$work/body" && echo true || echo false) $(header cache-control)"
+
+step "the updater: master's newest commit that passed, installed at night (updater/update.sh, $home/updater)"
+# Its settings: the admin allow list, which it gives this script; the server's mail and the operator, for a failure.
+# Then the version installed, last, as everything above passed.
+updater="$home/updater"
+install -d -m 0700 "$updater"
+write_if_changed "$updater/settings" "admin_allow=$admin_allow
+mail=smtp://$host_address:1025
+operator=operator@$domain" 0600 || true
+# A failure stops its timer until someone looks; this script, run by hand once someone has, starts it again.
+timer ff-updater "$src/deploy/dev-server/updater" "every 10 minutes"
+[ -s "$updater/deploy-key" ] || echo "  no deploy key, which install.sh carries: git reaches GitHub over HTTPS, as a public repository allows"
+[ -s "$updater/github-token" ] || echo "  no GitHub token, which install.sh carries: the workflow's runs asked as anyone, as a public repository allows"
+printf '%s\n' "$version" >"$updater/installed"

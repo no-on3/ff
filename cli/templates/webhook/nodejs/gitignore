@@ -1,0 +1,6 @@
+.aws-sam/
+node_modules/
+# ff's own: ff local's logs and key, ff package's zips.
+.ff/
+# The secrets ff local start gives the functions, KEY=value lines: never committed.
+.env.local

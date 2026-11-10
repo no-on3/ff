@@ -7,18 +7,24 @@
 
 # The documents, which static checks: the ff command's templates are code, as it builds them in.
 cli/templates/terraform/*               static unit aws-tools
+cli/templates/rest-api/*                static unit cli:template_rest_api
+cli/templates/cron-job/*                static unit cli:template_cron_job
+cli/templates/queue-worker/*            static unit cli:template_queue_worker
+cli/templates/site-with-api/*           static unit cli:template_site_with_api
+cli/templates/image-resize/*            static unit cli:template_image_resize
+cli/templates/webhook/*                 static unit cli:template_webhook
 cli/templates/*                         static unit cli
 docs/*                                  static
 *.md                                    static
 
 # The backend, a module at a time where its suites' sections are its own; L5 tries every route, so it runs whole.
-BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted aws-tools
-BE/src/event-sources/*                  static unit db l4:mappings l5 cli:event_sources aws-tools
-BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted aws-tools
+BE/src/queues/*                         static unit db l4:queues,mappings,notifications,sites_counted l5 cli:queues,event_sources,queues_counted,local_queues,local_buckets aws-tools
+BE/src/event-sources/*                  static unit db l4:mappings l5 cli:event_sources,local_queues aws-tools
+BE/src/storage/*                        static unit db l4:buckets,buckets_room,notifications,sites,sites_counted l5 cli:buckets,sites,notifications,buckets_used,sites_counted,local_buckets,local_apps aws-tools
 BE/src/object-store/*                   static unit db l4:buckets,buckets_room,notifications,sites l5 cli:buckets,sites
 BE/src/databases/*                      static unit db l4:databases,databases_sampled l5 cli:databases,databases_used
 BE/src/caches/*                         static unit db l4:caches,caches_sampled l5 cli:small_app
-BE/src/email/*                          static unit db l4:mail,mail_sent l5 cli:small_app
+BE/src/email/*                          static unit db l4:mail,mail_sent l5 cli:small_app,local_mail
 BE/src/mail/*                           static unit db l4:mail_sent l5
 BE/src/schedules/*                      static unit db l4:schedules,schedules_ran l5 cli:schedules,schedules_ran
 BE/src/alarms/*                         static unit db l4:alarms,sites_counted,caches_sampled l5
@@ -32,8 +38,8 @@ BE/src/monitoring/*                     static unit db l4:monitoring l5
 BE/src/notifications/*                  static unit db l4:alarms l5
 BE/src/admin/*                          static unit db l5
 BE/src/audit/*                          static unit db l5
-BE/src/accounts/*                       static unit db l5
-BE/src/api-keys/*                       static unit db l5
+BE/src/accounts/*                       static unit db l5 cli:login
+BE/src/api-keys/*                       static unit db l5 cli:login
 BE/src/retention/*                      static unit db l5
 BE/src/orchestrator/*                   static unit db l3 l4 l5 cli aws-tools images
 BE/src/*                                static unit db l3 l4 l5 cli aws-tools
@@ -48,7 +54,21 @@ runtimes/python/*                       static unit security l3 l4 cli aws-tools
 runtimes/*                              static unit security l3 l4 l5 cli aws-tools images
 
 # The ff command; its Terraform project is AWS's tools' too.
-cli/src/commands/init.rs                static unit cli:init aws-tools
+cli/src/commands/init.rs                static unit cli:init,local_apps,template_rest_api,template_cron_job,template_queue_worker,template_site_with_api,template_image_resize,template_webhook aws-tools
+cli/release/*                           static unit cli:downloads
+cli/src/local/konnect.rs                static unit
+cli/src/commands/local_konnect.rs       static unit
+cli/tests/local_konnect.rs              static unit
+cli/src/local/images.rs                 static unit cli:local,local_images
+cli/src/local/*                         static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail,local_small_app
+cli/src/commands/local*                 static unit cli:local,local_template,local_apps,local_queues,local_buckets,local_data,local_mail,local_small_app
+cli/src/s3.rs                           static unit cli:sites,local_buckets
+cli/src/md5.rs                          static unit cli:sites,local_queues,local_buckets
+cli/src/sigv4.rs                        static unit cli:sites,local_template,local_queues,local_buckets,local_mail
+cli/src/dates.rs                        static unit cli:local_template,local_queues,local_buckets,local_mail
+cli/src/site_files.rs                   static unit cli:sites,local_buckets,local_apps
+cli/src/mcp/*                           static unit cli:mcp
+cli/tests/mcp.rs                        static unit cli:mcp
 cli/*                                   static unit cli
 
 # What the platform deploys, and the servers beside it.
@@ -57,13 +77,17 @@ deploy/k8s/*                            static images platform
 deploy/cache/*                          static unit db security images l4:caches,caches_sampled cli:small_app
 deploy/mail/*                           static unit security images l4:mail,mail_sent
 deploy/data-db/*                        static db security images l4:databases,databases_sampled cli:databases
-deploy/keycloak/*                       static security l5 images
+deploy/keycloak/*                       static security l5 cli:login images
 deploy/backup/*                         static security images platform
+deploy/dev-server/updater/*             static unit
+deploy/dev-server/status/web/*          static security images
+deploy/dev-server/status/*              static unit
 deploy/dev-server/*                     static platform
 infrastructure/*                        static l4 l5 cli
 
 # The examples: the small app's handlers and the ff suite's functions.
-examples/orders-app/*                   static unit cli:small_app_db,small_app
+examples/orders-app/*                   static unit cli:small_app_db,small_app,local_apps,local_small_app
+examples/ci/*                           static cli:ci,downloads
 examples/*                              static cli
 
 # The suites and the pipeline: each suite runs itself; the rest is the pipeline's, which static tests.
@@ -75,14 +99,24 @@ hack/lib/provider_log.py                static aws-tools
 hack/e2e-platform.sh                    static platform
 hack/test-images.sh                     static images
 hack/test-sam-fixtures.sh               static unit
+hack/test-updater.sh                    static unit
+hack/test-status.sh                     static unit
 hack/test-evidence.sh                   static l3
 hack/k8s/test-it.sh                     static l3
 hack/lib/s3-clients/*                   static l4:buckets
 hack/lib/sqs-clients/*                  static l4:queues
+hack/lib/local-functions/*              static cli:local_queues,local_buckets,local_mail
 hack/lib/mail-receiver.mjs              static l4:mail_sent
 hack/lib/orders-app.sh                  static cli:small_app
+hack/lib/keycloak.sh                    static l5 cli:login
+hack/test-install.sh                    static cli:downloads
+hack/downloads-site.sh                  static cli:downloads,local_images,ci
+hack/release.sh                         static cli:downloads,local_images,ci
+hack/runtime-images.sh                  static cli:local_images
+hack/lib/ff-builds.sh                   static cli:downloads
 hack/lib/dkim-verify.mjs                static l4:mail_sent
 hack/lib/e2e-stack.sh                   static l4 l5 cli aws-tools
+hack/lib/e2e-compose.yml                static l4 l5 cli aws-tools
 hack/lib/backend-build.sh               static l4 l5 cli aws-tools
 hack/lib/sections.sh                    static l4 l5 cli aws-tools
 hack/lib/checks.sh                      static l4 l5 cli aws-tools
@@ -102,3 +136,4 @@ docker-compose.yml                      static db l4 l5 cli aws-tools
 .gitleaksignore                         static
 .gitleaks.toml                           static
 .gitignore                              static
+.gitattributes                          static

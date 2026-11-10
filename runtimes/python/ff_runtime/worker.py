@@ -180,26 +180,30 @@ def to_json(value):
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def log_error(request_id, error):
+def log_error(request_id, trace_id, error):
     frames = traceback.extract_tb(error.__traceback__)[1:]  # without this module's frame
     protocol.log(
         level="error",
         msg="function error",
         requestId=request_id,
+        traceId=trace_id,
         errorType=type(error).__name__,
         errorMessage=str(error),
         stackTrace=[line.rstrip() for line in traceback.format_list(frames)],
     )
 
 
-def run_once(handler, request_id, event, deadline_ms, client_context=None):
+def run_once(handler, request_id, event, deadline_ms, client_context=None, trace_id=None):
     """Runs one invocation and returns the message for main.py. MemoryError propagates."""
+    trace_id = protocol.trace_id_of(trace_id)
+    # Set for each call, as Lambda's Python runtime sets it: this process runs one call at a time.
+    os.environ["_X_AMZN_TRACE_ID"] = protocol.lambda_trace_header(trace_id)
     try:
         value = handler(event, Context(request_id, deadline_ms, client_context))
     except MemoryError:
         raise
     except Exception as error:
-        log_error(request_id, error)
+        log_error(request_id, trace_id, error)
         return ["error", type(error).__name__, str(error)]
     try:
         # NaN and Infinity are not JSON: refuse them rather than send invalid JSON.
@@ -234,11 +238,11 @@ def end_output(request_id):
 def serve(sock, handler):
     while True:
         try:
-            _, request_id, event, deadline_ms, client_context = protocol.recv(sock)
+            _, request_id, event, deadline_ms, client_context, trace_id = protocol.recv(sock)
         except EOFError:
             return  # main.py went away
         try:
-            message = run_once(handler, request_id, event, deadline_ms, client_context)
+            message = run_once(handler, request_id, event, deadline_ms, client_context, trace_id)
         except MemoryError:
             message = None  # leave the except block first so the hoarded memory is released
         end_output(request_id)

@@ -48,8 +48,18 @@ d6b35baee2313b05035542fe86b825cfa8e6d80e:hack/spikes/cache/README.md:generic-api
 d6b35baee2313b05035542fe86b825cfa8e6d80e:hack/spikes/cache/valkey.sh:generic-api-key:16
 7b40ee9fd31cc819b3a8398d2d6b363de50f50c9:deploy/cache/Dockerfile:generic-api-key:6
 7b40ee9fd31cc819b3a8398d2d6b363de50f50c9:deploy/cache/README.md:generic-api-key:8
+# The same, in the plan's log of the step's local data services, a line each commit of the step rewrites until the tag
+# was written in words.
+e7f76420f1eab6a6dd24eb5a01791abe5e79032d:docs/dev-tools-plan.md:generic-api-key:409
+58750e62a60312684dfbf8d9ca718d7da802d30e:docs/dev-tools-plan.md:generic-api-key:409
+6348544955f2140cc9d081b4fb771fc0a1f9af9f:docs/dev-tools-plan.md:generic-api-key:409
 
 # "Authorization: Bearer ff-cache-dev": the development cache server's own token (docker-compose.yml), which
 # production refuses; the second where its check moved, to a section of its own.
 7b40ee9fd31cc819b3a8398d2d6b363de50f50c9:hack/e2e.sh:curl-auth-header:903
 eeac5b66167ddd553bc86087553e1ac4528d3c3d:hack/e2e.sh:curl-auth-header:1775
+
+# ZIG_KEY: zig's public key, which checks the signature of its releases, as ziglang.org/download gives it: the spike's,
+# then hack/install-tools.sh's.
+4ee381fcbbddc7c5909077fb7cb2d150f016801c:hack/spikes/cross-build/run.sh:generic-api-key:20
+858b9593067cff2c1eb984e233a4e0eb25da0150:hack/install-tools.sh:generic-api-key:44

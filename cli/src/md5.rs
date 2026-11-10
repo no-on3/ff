@@ -1,5 +1,7 @@
-//! MD5 (RFC 1321), for one use: a file's digest as S3 gives it in the ETag of an object uploaded
-//! in one piece, so that `ff sites deploy` sends only the files that changed. Never for security.
+//! MD5 (RFC 1321), for three uses: a file's digest as S3 gives it in the ETag of an object uploaded
+//! in one piece, so that `ff sites deploy` sends only the files that changed; the ETag `ff local`'s
+//! buckets give an object as it streams in; and the sums SQS answers of a message's body and
+//! attributes, which AWS's SDKs check. Never for security.
 
 const SHIFTS: [u32; 64] = [
     7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
@@ -21,22 +23,70 @@ const K: [u32; 64] = [
 
 /// The digest of `data`, in lower-case hexadecimal, as an ETag holds it.
 pub fn hex(data: &[u8]) -> String {
-    digest(data).iter().map(|byte| format!("{byte:02x}")).collect()
+    hex_of(&digest(data))
+}
+
+/// A digest in lower-case hexadecimal.
+pub fn hex_of(digest: &[u8; 16]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn digest(data: &[u8]) -> [u8; 16] {
-    let mut state: [u32; 4] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
-    // The message, a 1 bit, zeros to 56 bytes of 64, then its length in bits, little-endian.
-    let mut message = data.to_vec();
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
+    let mut md5 = Md5::default();
+    md5.update(data);
+    md5.finish()
+}
+
+/// A running MD5, fed piece by piece as a body streams, so that an object's ETag needs no copy of it whole.
+#[derive(Clone)]
+pub struct Md5 {
+    state: [u32; 4],
+    /// The bytes of a block not yet whole.
+    block: [u8; 64],
+    buffered: usize,
+    length: u64,
+}
+
+impl Default for Md5 {
+    fn default() -> Self {
+        Self { state: [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476], block: [0; 64], buffered: 0, length: 0 }
     }
-    message.extend_from_slice(&((data.len() as u64).wrapping_mul(8)).to_le_bytes());
-    // The padding makes the message whole blocks of 64 bytes: nothing is left over.
-    for block in message.as_chunks::<64>().0 {
+}
+
+impl Md5 {
+    pub fn update(&mut self, mut data: &[u8]) {
+        self.length = self.length.wrapping_add(data.len() as u64);
+        while !data.is_empty() {
+            let take = (64 - self.buffered).min(data.len());
+            self.block[self.buffered..self.buffered + take].copy_from_slice(&data[..take]);
+            self.buffered += take;
+            data = &data[take..];
+            if self.buffered == 64 {
+                let block = self.block;
+                self.compress(&block);
+                self.buffered = 0;
+            }
+        }
+    }
+
+    pub fn finish(mut self) -> [u8; 16] {
+        // A 1 bit, zeros to 56 bytes of 64, then the message's length in bits, little-endian.
+        let bits = self.length.wrapping_mul(8);
+        self.update(&[0x80]);
+        while self.buffered != 56 {
+            self.update(&[0]);
+        }
+        self.update(&bits.to_le_bytes());
+        let mut out = [0; 16];
+        for (word, bytes) in self.state.iter().zip(out.as_chunks_mut::<4>().0) {
+            *bytes = word.to_le_bytes();
+        }
+        out
+    }
+
+    fn compress(&mut self, block: &[u8; 64]) {
         let words: Vec<u32> = block.as_chunks::<4>().0.iter().map(|word| u32::from_le_bytes(*word)).collect();
-        let [mut a, mut b, mut c, mut d] = state;
+        let [mut a, mut b, mut c, mut d] = self.state;
         for i in 0..64 {
             let (f, g) = match i / 16 {
                 0 => ((b & c) | (!b & d), i),
@@ -47,14 +97,10 @@ pub fn digest(data: &[u8]) -> [u8; 16] {
             let rotated = a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(words[g]).rotate_left(SHIFTS[i]);
             (a, b, c, d) = (d, b.wrapping_add(rotated), b, c);
         }
-        state =
-            [state[0].wrapping_add(a), state[1].wrapping_add(b), state[2].wrapping_add(c), state[3].wrapping_add(d)];
+        for (state, value) in self.state.iter_mut().zip([a, b, c, d]) {
+            *state = state.wrapping_add(value);
+        }
     }
-    let mut out = [0; 16];
-    for (i, word) in state.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
-    }
-    out
 }
 
 #[cfg(test)]
@@ -91,5 +137,17 @@ mod tests {
             assert_eq!(hex(&vec![b'x'; length]), expected, "{length} bytes");
         }
         assert_eq!(hex(&vec![b'a'; 1_000_000]), "7707d6ae4e027c70eea2a935c2296f21");
+    }
+
+    #[test]
+    fn digests_a_message_fed_in_pieces_as_it_does_whole() {
+        let message: Vec<u8> = (0..1_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        for piece in [1, 3, 63, 64, 65, 200, 1_000] {
+            let mut md5 = Md5::default();
+            for part in message.chunks(piece) {
+                md5.update(part);
+            }
+            assert_eq!(hex_of(&md5.finish()), hex(&message), "in pieces of {piece}");
+        }
     }
 }

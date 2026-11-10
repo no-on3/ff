@@ -30,6 +30,18 @@ ureq = { version = "3.4", default-features = false, features = ["rustls", "platf
 # so without the decoder of other encodings.
 yaml-rust2 = { version = "0.13", default-features = false }
 
+# Windows's own calls, for a file its owner alone may read: the version the lock already holds for ctrlc, mio and
+# others, with the parts of the API that file needs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
@@ -41,8 +53,11 @@ codegen-units = 1
 strip = true
 
 # The ff suite's build (hack/cli-e2e.sh): release's, without the optimizations made across the whole program at link
-# time, which take most of a build after each commit (the commit is built in, so every commit builds ff again).
+# time, which take most of a build after each commit (the commit is built in, so every commit builds ff again). With
+# debug assertions, as a test build: it then takes the tests' release key and runtime images (FF_TEST_RELEASE_KEY,
+# FF_TEST_RUNTIME_IMAGES), as a release's build never does.
 [profile.e2e]
 inherits = "release"
 lto = false
 codegen-units = 16
+debug-assertions = true

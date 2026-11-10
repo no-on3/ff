@@ -1,0 +1,4 @@
+# Text checked out with LF line ends on every system, Windows included, where Git would otherwise turn them into CRLF:
+# ff's tests compare its output with files they embed, and the shell scripts run in Git's bash. Git tells binary
+# files apart by their content, and leaves them as they are.
+* text=auto eol=lf

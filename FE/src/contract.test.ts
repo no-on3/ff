@@ -12,6 +12,7 @@ import proFormaSource from '../../BE/src/billing/payments/pro-forma.ts?raw';
 import invoicesDtoSource from '../../BE/src/billing/invoices/invoices.dto.ts?raw';
 import logsDtoSource from '../../BE/src/functions/dto/function-logs.dto.ts?raw';
 import invokeDtoSource from '../../BE/src/functions/dto/invoke-function.dto.ts?raw';
+import traceDtoSource from '../../BE/src/functions/dto/trace.dto.ts?raw';
 import eventInvokeConfigDtoSource from '../../BE/src/functions/dto/event-invoke-config.dto.ts?raw';
 import functionsServiceSource from '../../BE/src/functions/functions.service.ts?raw';
 import functionEntitySource from '../../BE/src/functions/entities/function.entity.ts?raw';
@@ -105,7 +106,10 @@ import {
   EMAIL_LANGUAGES,
   WEBHOOK_SECRET_FIELDS,
   INVOCATION_FIELDS,
+  INVOCATION_TRIGGER_FIELDS,
   ASYNC_INVOCATION_FIELDS,
+  TRACE_CALL_FIELDS,
+  TRACE_FIELDS,
   EVENT_INVOKE_CONFIG_FIELDS,
   INVOCATION_SOURCES,
   INVOCATION_STATUSES,
@@ -238,6 +242,17 @@ describe('an invocation', () => {
     // `function` is the relation, which the API never loads into an invocation it returns.
     expect(fields.filter((field) => field !== 'function')).toEqual([...INVOCATION_FIELDS]);
     expect(INVOCATION_FIELDS).toEqual(expect.arrayContaining(['inputTruncated', 'outputTruncated', 'errorTruncated']));
+  });
+});
+
+describe('a trace', () => {
+  it("has the API's fields, its calls' and what brought each, which the trace's page reads", () => {
+    expect(dtoFields(traceDtoSource, 'export class TraceView {')).toEqual([...TRACE_FIELDS]);
+    expect(dtoFields(traceDtoSource, 'export class TraceCallView {')).toEqual([...TRACE_CALL_FIELDS]);
+    expect(dtoFields(traceDtoSource, 'export class InvocationTriggerView {')).toEqual([...INVOCATION_TRIGGER_FIELDS]);
+    const trigger = invocationSource.slice(invocationSource.indexOf('export interface InvocationTrigger {'));
+    const kept = [...trigger.slice(0, trigger.indexOf('\n}')).matchAll(/^ {2}(\w+)\??: /gm)].map((match) => match[1]);
+    expect(kept).toEqual([...INVOCATION_TRIGGER_FIELDS]);
   });
 });
 

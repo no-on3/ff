@@ -161,6 +161,28 @@ bucket another `BucketName` or a schedule another `Name`, by the
 new template's policy. What is left is the account's, as any function made with `ff`: a template that names it again is
 refused, as CloudFormation refuses a name that exists, until `ff delete` deletes it or the template names another.
 
+## The templates `ff init` writes
+
+`ff init <name> --template <template> --runtime nodejs|python` writes an app inside the subset, with its code, its tests
+and a README for here, FF and AWS ([the guide's "Templates"](getting-started.md#templates)). What of the subset each
+uses:
+
+- `sam`: `sam init`'s hello world, above: one function and its `FunctionUrlConfig`.
+- `rest-api`: `Globals`; one function at its URL, its `Cors` for one origin, the parameter `AllowedOrigin` in its
+  `AllowOrigins`; `DATABASE_URL`, FF's secret, out of the template.
+- `cron-job`: a `Schedule` event, `cron(0 6 * * ? *)`; a bucket named CloudFormation's way, `!Ref` in `S3CrudPolicy`; a
+  queue kept 14 days (`MessageRetentionPeriod`), the destination of `EventInvokeConfig`'s `OnFailure`.
+- `queue-worker`: two functions, one at its URL sending to the queue (`SQSSendMessagePolicy`), the other reading it by
+  its `SQS` event, `BatchSize` and `ReportBatchItemFailures`; the queue's `RedrivePolicy` to a dead-letter queue; the
+  parameter `JobsVisibilityTimeout`, a `Number`, its `VisibilityTimeout`.
+- `site-with-api`: one function at its URL, its `Cors` for any origin; a bucket for its entries, `!Ref` in its
+  variables; a bucket with `WebsiteConfiguration` and its `AWS::S3::BucketPolicy`, kept without effect, the site's
+  `WebsiteURL` in `Outputs`.
+- `image-resize`: an `S3` event for `s3:ObjectCreated:*`, its `Filter` the prefix `uploads/`; the bucket's `BucketName`
+  made with `!Sub` from the stack's name and `AWS::AccountId`, as its `S3CrudPolicy` names it.
+- `webhook`: one function at its URL; three `String` parameters in its `Environment`, two empty unless given;
+  `DATABASE_URL` and `KONNECT_API_KEY`, FF's secrets, out of the template, and on AWS parameters with `NoEcho`.
+
 ## Checking a template
 
 `ff doctor template.yaml` reads it as `ff deploy` does, with the parameters' values `sam deploy` would take: what is
@@ -171,7 +193,7 @@ checks it too, with one of AWS's regions, since FF's isn't in its list:
 sam validate --lint --region eu-west-3
 ```
 
-Every SAM template the repository keeps, the fixtures of `ff`'s tests, `ff init --template sam`'s and the one `ff export`
+Every SAM template the repository keeps, the fixtures of `ff`'s tests, `ff init`'s templates and the one `ff export`
 writes among them, passes it in the unit tests (`hack/test-sam-fixtures.sh`).
 
 ## A template `ff export` wrote

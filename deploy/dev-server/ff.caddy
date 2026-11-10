@@ -1,9 +1,9 @@
 # FF's route in this server's host-wide proxy (/data/proxy), from FF's repository (deploy/dev-server/ff.caddy):
 # server.sh fills in its three values, installs it as /data/proxy/sites/ff.caddy and reloads the proxy. Every
-# hostname of FF's goes to FF's own edge in the cluster, at the address the cluster keeps for it, which routes the
-# rest (deploy/k8s/platform/edge/Caddyfile): the hosts as the callers sent them, and the caller's address in
-# X-Forwarded-For, which the edge believes from this proxy alone. The edge's own TLS comes from its own authority,
-# checked against its root, given here.
+# hostname of FF's but the status page's goes to FF's own edge in the cluster, at the address the cluster keeps for
+# it, which routes the rest (deploy/k8s/platform/edge/Caddyfile): the hosts as the callers sent them, and the
+# caller's address in X-Forwarded-For, which the edge believes from this proxy alone. The edge's own TLS comes from
+# its own authority, checked against its root, given here.
 (ff-edge) {
 	header -Server
 	reverse_proxy https://@EDGE_ADDRESS@ {
@@ -18,9 +18,16 @@
 	}
 }
 
-# FF's eight fixed names: certificates from Let's Encrypt, which this proxy gets and renews by itself.
+# FF's fixed names: certificates from Let's Encrypt, which this proxy gets and renews by itself.
 api.@DOMAIN@, console.@DOMAIN@, admin.@DOMAIN@, login.@DOMAIN@, sqs.@DOMAIN@, s3.@DOMAIN@, email.@DOMAIN@, lambda.@DOMAIN@ {
 	import ff-edge
+}
+
+# The status page, the ninth: not through the edge but from a web server of its own beside the cluster (status/web),
+# on this proxy's network under FF's alias for it, so that the page answers when the cluster or the backend doesn't.
+status.@DOMAIN@ {
+	header -Server
+	reverse_proxy ff-status-web:8080
 }
 
 # Function URLs, buckets and sites, a host each: one certificate for each wildcard, from this proxy's own authority,
