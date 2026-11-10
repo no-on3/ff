@@ -241,11 +241,14 @@ jobs:
           if-no-files-found: ignore
 
   # The branch's last SBOMs and the lockfiles checked again with the day's advisories (hack/ci.sh advisories): an image
-  # or a package unchanged since its push can have a new one, and the nightly builds no image.
+  # or a package unchanged since its push can have a new one, and the nightly builds no image. In a run that builds
+  # them too, as one of every job started by hand, it waits for the security job, so that it reads that run's SBOMs
+  # and not the run's before; it runs when that job was skipped, as on the nightly, or failed.
   advisories:
+    needs: security
     if: >-
-      github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.jobs == 'all' ||
-      inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',advisories,')))
+      !cancelled() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' &&
+      (inputs.jobs == 'all' || inputs.jobs == 'nightly' || contains(format(',{0},', inputs.jobs), ',advisories,'))))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

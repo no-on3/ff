@@ -27,8 +27,9 @@
 #     aws-tools  AWS's tools on the stack: the project ff init --template terraform writes, applied by OpenTofu and by
 #             Terraform's CLI, each pinned, planned again with nothing to change, destroyed; a throttled change retried
 #     images  the platform's images, run as the cluster runs them, and its manifests, without deploying them
-#   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last push's) and the lockfiles,
-#             checked again with the day's advisories, for an image or a package unchanged since its push: nightly
+#   advisories  the last security run's SBOMs (hack/.ci/sbom; on GitHub, the branch's last security job's) and the
+#             lockfiles, checked again with the day's advisories, for an image or a package unchanged since its push:
+#             nightly
 #   tools     the latest release of each tool the tests pin (the AWS CLI, the SDK for JavaScript, boto3, OpenTofu,
 #             Terraform and its AWS provider, the SAM CLI, Rust's stable toolchain), tried as the pinned ones run,
 #             and what changed said: nightly
