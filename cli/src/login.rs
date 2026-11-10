@@ -95,9 +95,13 @@ impl Login {
         file.set(profile, "expires_at", humantime::format_rfc3339_seconds(self.expires_at).to_string());
     }
 
-    /// Removed from the profile: whether it had one.
+    /// Removed from the profile, every key of it: whether it had one.
     pub fn remove_from(file: &mut ProfileFile, profile: &str) -> bool {
-        KEYS.iter().fold(false, |removed, key| file.remove(profile, key) || removed)
+        let mut removed = false;
+        for key in KEYS {
+            removed |= file.remove(profile, key);
+        }
+        removed
     }
 
     /// Whether a call made at `now` renews the access token first.
