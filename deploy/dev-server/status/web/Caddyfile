@@ -1,0 +1,43 @@
+# Serves the status page on :8080: /srv/index.html at / and nothing else, never cached, as it is made again each
+# minute; before the first, a 503 that says so. The page carries its own Content-Security-Policy, which names the
+# hashes of its style and script (render.py). A non-root user, a read-only root: Caddy keeps nothing on disk, and its
+# admin API is off. The server's proxy terminates TLS (ff.caddy).
+{
+	admin off
+	auto_https off
+	persist_config off
+	log {
+		output stdout
+		format json
+	}
+}
+
+:8080 {
+	root * /srv
+	header {
+		Cache-Control "no-cache"
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		-Server
+	}
+	# For Compose's health check.
+	handle /healthz {
+		respond "ok" 200
+	}
+	@made {
+		path /
+		file /index.html
+	}
+	handle @made {
+		rewrite * /index.html
+		file_server
+	}
+	handle / {
+		respond "The status page is made each minute: its first is on its way." 503
+	}
+	handle {
+		respond 404
+	}
+}

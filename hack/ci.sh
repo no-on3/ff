@@ -271,8 +271,9 @@ stage_db() {
   docker rm -f -v "$name" "$data" "$s3" "$cache" >/dev/null
 }
 
-# Every image FF builds: the platform's, the runtimes', the edge's, the backup's, and customers' database, cache and
-# mail servers', each with its build arguments. The apps bake their addresses in: any will do for a scan.
+# Every image FF builds: the platform's, the runtimes', the edge's, the backup's, customers' database, cache and mail
+# servers', and the status page's web server, each with its build arguments. The apps bake their addresses in: any
+# will do for a scan.
 apps=(--build-arg VITE_API_URL=https://api.ff.test --build-arg VITE_OIDC_AUTHORITY=https://login.ff.test/realms/ff)
 IMAGES=(
   "ff-backend:ci BE"
@@ -285,6 +286,7 @@ IMAGES=(
   "ff-data-db:ci deploy/data-db"
   "ff-cache:ci deploy/cache"
   "ff-mail:ci deploy/mail"
+  "ff-status-web:ci deploy/dev-server/status/web"
 )
 
 npm_audit() { # <directory>: what ships, high and critical advisories, but those .npmauditignore accepts until a date

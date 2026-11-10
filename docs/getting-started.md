@@ -1809,7 +1809,7 @@ hack/e2e.sh --only queues                                # one of its sections, 
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 7 min
 hack/cli-e2e.sh                                          # the ff command on the stack, and in Docker, about 15 min
 hack/e2e-aws-tools.sh                                    # ff init's Terraform project applied by OpenTofu and Terraform's CLI, about 11 min
-hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, about 3 min
+hack/test-images.sh                                      # the backend's, console's and admin app's images, run as the cluster runs them, and the status page's web server, about 3 min
 hack/k8s/test-platform-manifests.sh                      # deploy/k8s/platform checked without deploying it, about 1 min
 hack/e2e-platform.sh                                     # FF deployed from deploy/k8s on a cluster of its own, through its edge, about 15 min
 hack/backup-drill.sh                                     # the restore drill: both databases to a moment, the legal records, the packages, about 2 min
@@ -1891,6 +1891,8 @@ docker compose down -v
 ```
 
 ## 6. When something goes wrong
+
+**Is it FF?** On FF's development server, its status page says: `https://status.dev.ffunc.cloud` shows each piece of FF as a customer meets it (the API, the console, the login, the Lambda, S3, SQS and SES endpoints, function URLs and sites), probed every minute, its last 90 days and the incidents ([the server's README](../deploy/dev-server/README.md#the-status-page)).
 
 **Where the logs are.** Look there first: most problems name themselves.
 

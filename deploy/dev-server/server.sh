@@ -4,9 +4,9 @@
 # mail, and customers' database, cache and mail servers beside the cluster, in Docker Compose; FF's passwords and
 # keys, made once, in /data/ff/secrets; the images built here and given to k3s, and ff for the smoke test; deploy/k8s
 # applied and the platform deployed by its deploy.sh; the first operator; FF's route in the server's own proxy
-# (/data/proxy); every hostname checked through that proxy; then the status page's probe and the updater, each on a
-# timer. A step already done does nothing, so that an update is the same run. No password is ever printed, or put on
-# a command line.
+# (/data/proxy); every hostname checked through that proxy; then the status page, its probe on a timer and its web
+# server beside the cluster; and the updater, on a timer. A step already done does nothing, so that an update is the
+# same run. No password is ever printed, or put on a command line.
 #   FF_VERSION=<the images' tag> FF_ADMIN_ALLOW=<address>/32 /data/ff/src/deploy/dev-server/server.sh
 set -euo pipefail
 home=/data/ff
@@ -389,9 +389,10 @@ else
 fi
 
 step "every hostname, through the server's proxy, as from the internet"
-# Let's Encrypt's certificates for the eight fixed names, which the proxy asks for once it has the route: a minute
+# Let's Encrypt's certificates for the nine fixed names, which the proxy asks for once it has the route: a minute
 # or so the first time. Checked against the system's roots alone. Each name needs its record in the DNS (README.md).
-for name in api console admin login s3 sqs email lambda; do
+# The status page answers once its own step has started its web server; the proxy has its certificate before.
+for name in api console admin login s3 sqs email lambda status; do
   for i in $(seq 1 60); do
     curl -s -o /dev/null --cacert /etc/ssl/certs/ca-certificates.crt --resolve "$name.$domain:443:127.0.0.1" "https://$name.$domain/" && break
     [ "$i" -lt 60 ] || fail "no certificate from Let's Encrypt for $name.$domain after 3 minutes: the proxy's log says why (docker compose --project-directory $proxy logs caddy)"
@@ -457,9 +458,18 @@ timer() {
   fi
 }
 
-step "the status page's probe: each piece of FF, as a customer meets it, every minute (status/, $home/status)"
+step "the status page: each piece of FF, as a customer meets it, every minute, at https://status.$domain (status/)"
 "$src/deploy/dev-server/status/setup.sh" || fail "the status page's probe wasn't set up"
 timer ff-status-probe "$src/deploy/dev-server/status" "every minute"
+# Its web server, beside the cluster on the proxy's network, once the page's folder is there: built without BuildKit's
+# provenance, as customers' servers are, so that an update starts it again only when it changed.
+docker build -q --provenance=false -t ff-status-web:dev-server "$src/deploy/dev-server/status/web" >/dev/null
+"${compose[@]}" up -d --no-build --wait status-web >"$work/compose.log" 2>&1 ||
+  { tail -20 "$work/compose.log" >&2; fail "the status page's web server didn't start"; }
+# The probe once, so that the page is there now, not in a minute; then the page through the proxy.
+systemctl start ff-status-probe.service || fail "the status page's probe failed: journalctl -u ff-status-probe says why"
+check "the status page, through the proxy: made, never cached" "200 true no-cache" \
+  "$(at "status.$domain" /) $(grep -q '<title>FF status</title>' "$work/body" && echo true || echo false) $(header cache-control)"
 
 step "the updater: master's newest commit that passed, installed at night (updater/update.sh, $home/updater)"
 # Its settings: the admin allow list, which it gives this script; the server's mail and the operator, for a failure.

@@ -7,8 +7,9 @@
 # to and read; a database and a cache, reached from a function at the addresses FF gave it; a function made with the
 # AWS CLI at FF's Lambda endpoint, two versions of it and an alias moved; a SAM template deployed with ff, which
 # server.sh builds; an address proved by its link, and an e-mail from it handed to the server of customers' mail,
-# which gives it to Mailpit. Then everything deleted, the account closed and both users removed, whether the checks
-# passed or not.
+# which gives it to Mailpit; and the status page's probe run once, every piece of FF found up, and its page through the
+# proxy saying so. Then everything deleted, the account closed and both users removed, whether the checks passed or
+# not.
 #   /data/ff/src/deploy/dev-server/smoke.sh        (on the server, as root: install.sh runs it after server.sh)
 set -euo pipefail
 here="$(dirname "${BASH_SOURCE[0]}")"
@@ -258,3 +259,16 @@ check "in Mailpit, from the server of customers' mail, its return path FF's own 
     mailpit "message/$message/headers" | jq --arg host "mail.$domain" '[.Received[]? | contains("by " + $host)] | any'
     mailpit "message/$message" | jq --arg domain "@bounces.mail.$domain" '.ReturnPath | endswith($domain)'
   else echo none; fi | paste -sd' ')"
+
+echo "== the status page: the probe run once, then its page through the proxy"
+# As its timer runs it each minute: every piece of FF, as a customer meets it, then the page made from that minute,
+# whose banner says what the probe found: up, up and slow in part (a function's first call after an update can take
+# over 2 s), or down, naming what is.
+systemctl start ff-status-probe.service || fail "the status page's probe failed: journalctl -u ff-status-probe says why"
+check "the page through the proxy, never cached, with its own Content-Security-Policy" "200 no-cache true" \
+  "$(at "status.$domain" "https://status.$domain/") $(header cache-control) $(grep -q '<meta http-equiv="Content-Security-Policy" content="default-src '"'none'"';' "$work/page" && echo true || echo false)"
+banner="$(python3 -c 'import html, re, sys
+m = re.search(r"<p class=\"banner (\w+)\">([^<]*)</p>", open(sys.argv[1], encoding="utf-8").read())
+print(f"{m[1]}: {html.unescape(m[2])}" if m else "no banner")' "$work/page")"
+check "the probe found every piece of FF up, and the page says so" true \
+  "$(case "$banner" in up:* | slow:*) echo true ;; *) echo "false ($banner)" ;; esac)"

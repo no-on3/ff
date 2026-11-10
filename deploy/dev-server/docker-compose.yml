@@ -1,12 +1,12 @@
 # What FF finds beside the cluster on its development server (README.md): its own PostgreSQL (the backend's and
-# Keycloak's databases), S3, a mail catcher, and the servers of customers' databases, caches and mail. server.sh
-# installs this file as /data/ff/docker-compose.yml, beside the checkout in /data/ff/src, and writes /data/ff/.env,
-# these variables. No port is public: each listens on the Docker bridge's address on the host (FF_HOST_ADDRESS,
-# docker0's), which the cluster's pods reach and the internet doesn't; Mailpit's pages on the loopback alone, through
-# SSH. Customers' servers are on a network of their own, each at a fixed address there: Docker sends a connection to
-# docker0's address on to that one, which is the address the cluster's firewall sees, and functions' NetworkPolicy
-# opens (server.sh). server.sh builds their images itself, so that an install starts none of them again when nothing
-# of theirs changed (it says why).
+# Keycloak's databases), S3, a mail catcher, the servers of customers' databases, caches and mail, and the status
+# page's web server. server.sh installs this file as /data/ff/docker-compose.yml, beside the checkout in /data/ff/src,
+# and writes /data/ff/.env, these variables. No port is public: each listens on the Docker bridge's address on the
+# host (FF_HOST_ADDRESS, docker0's), which the cluster's pods reach and the internet doesn't; Mailpit's pages on the
+# loopback alone, through SSH; the status page through the server's proxy alone. Customers' servers are on a network
+# of their own, each at a fixed address there: Docker sends a connection to docker0's address on to that one, which is
+# the address the cluster's firewall sees, and functions' NetworkPolicy opens (server.sh). server.sh builds their
+# images itself, so that an install starts none of them again when nothing of theirs changed (it says why).
 name: ff
 
 services:
@@ -131,7 +131,32 @@ services:
       timeout: 3s
       retries: 30
 
+  # The status page (status/web): Caddy serving the page the probe's renderer writes, read-only, beside the cluster,
+  # so that it answers when the cluster or the backend doesn't. On the server's proxy's network alone, under an alias
+  # of its own, which status.<domain> reaches (ff.caddy); no port of its own, and nothing else of FF's reachable from
+  # it. In a profile of its own: server.sh starts it in the status page's step, once the probe's user has its folder.
+  status-web:
+    build: src/deploy/dev-server/status/web
+    image: ff-status-web:dev-server
+    profiles: [status]
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    cpus: 0.25
+    volumes:
+      - ./status/page:/srv:ro
+    networks:
+      proxy:
+        aliases: [ff-status-web]
+
 networks:
+  # The server's proxy's (/data/proxy), which every project's web container joins.
+  proxy:
+    external: true
   # Customers' database, cache and mail servers', and Mailpit's, to which the mail server hands every message: each at
   # its own address, so that none takes another's.
   customers:

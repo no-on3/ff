@@ -80,6 +80,7 @@ deploy/data-db/*                        static db security images l4:databases,d
 deploy/keycloak/*                       static security l5 cli:login images
 deploy/backup/*                         static security images platform
 deploy/dev-server/updater/*             static unit
+deploy/dev-server/status/web/*          static security images
 deploy/dev-server/status/*              static unit
 deploy/dev-server/*                     static platform
 infrastructure/*                        static l4 l5 cli

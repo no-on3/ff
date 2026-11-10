@@ -13,7 +13,9 @@ counts for nothing.
 Its tests (hack/test-status.sh) give FF_STATUS_HOME, in place of the server's folder, and FF_STATUS_NOW, the time to
 render at.
 """
+import base64
 import datetime as dt
+import hashlib
 import html
 import io
 import json
@@ -44,6 +46,66 @@ CHECKS = {
     "canary": ("Function URLs", "a function called at its URL"),
     "site": ("Sites", "a bucket's site"),
 }
+# The page's style and script, inline, and the policy that lets them alone run: no other script, style, frame or
+# request, as the page needs none (its icon is empty, a data: URL).
+STYLE = f"""
+  :root {{
+    --bg: #f6f6f3; --surface: #ffffff; --text: #1d201c; --muted: #5f645d; --border: #d8dbd4;
+    --up: #1a7f37; --slow: #e5a50a; --partial: #d9730d; --down: #b42318; --none: #d8dbd4;
+    color-scheme: light dark;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{
+      --bg: #121412; --surface: #1b1e1b; --text: #e7e9e4; --muted: #a2a89f; --border: #343933;
+      --up: #3fb950; --slow: #e3b341; --partial: #f0883e; --down: #f85149; --none: #343933;
+    }}
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }}
+  main {{ max-width: 860px; margin: 0 auto; padding: 32px 16px 48px; }}
+  h1 {{ font-size: 22px; margin: 0 0 4px; }}
+  h1 small {{ color: var(--muted); font-weight: 400; font-size: 15px; }}
+  .banner {{ margin: 20px 0; padding: 14px 16px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
+    border-left: 6px solid var(--none); font-size: 17px; font-weight: 600; }}
+  .banner.up {{ border-left-color: var(--up); }} .banner.slow {{ border-left-color: var(--slow); }}
+  .banner.down {{ border-left-color: var(--down); }}
+  .warnings {{ margin: 0 0 20px; padding: 0 0 0 20px; color: var(--down); }}
+  .check {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin: 0 0 12px; }}
+  .check.whole {{ border-width: 2px; }}
+  .head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }}
+  h2 {{ font-size: 16px; margin: 0; }}
+  .now {{ font-size: 13px; font-weight: 600; white-space: nowrap; }}
+  .now.up {{ color: var(--up); }} .now.slow {{ color: var(--slow); }} .now.down {{ color: var(--down); }} .now.none {{ color: var(--muted); }}
+  .what, .month {{ margin: 2px 0 8px; color: var(--muted); font-size: 13px; }}
+  .month {{ margin: 6px 0 0; text-align: right; }}
+  .bars {{ display: grid; grid-template-columns: repeat({DAYS}, 1fr); gap: 1px; list-style: none; margin: 0; padding: 0; height: 30px; }}
+  .bars li, .legend span {{ border-radius: 1px; }}
+  .up {{ --c: var(--up); }} .slow {{ --c: var(--slow); }} .partial {{ --c: var(--partial); }} .down {{ --c: var(--down); }} .none {{ --c: var(--none); }}
+  .bars li, .legend span {{ background: var(--c); }}
+  .legend {{ display: flex; flex-wrap: wrap; gap: 4px 16px; list-style: none; padding: 0; margin: 8px 0 24px; color: var(--muted); font-size: 13px; }}
+  .legend span {{ display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; }}
+  .incidents h3 {{ font-size: 15px; margin: 16px 0 4px; }}
+  .incidents p, .incidents ul {{ margin: 4px 0; }}
+  code {{ font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  a {{ color: inherit; }}
+  footer {{ margin-top: 28px; color: var(--muted); font-size: 13px; }}
+  #late {{ color: var(--down); font-weight: 600; }}
+"""
+SCRIPT = """
+  // A page that stopped being made says so, as a browser keeps showing it.
+  var made = Date.parse(document.querySelector("footer time").getAttribute("datetime"));
+  var minutes = Math.floor((Date.now() - made) / 60000);
+  if (minutes > 5) document.getElementById("late").textContent = "That was " + minutes + " minutes ago: the page hasn't been made since.";
+"""
+
+
+def digest(text: str) -> str:
+    return "'sha256-" + base64.b64encode(hashlib.sha256(text.encode("utf-8")).digest()).decode() + "'"
+
+
+POLICY = (f"default-src 'none'; style-src {digest(STYLE)}; script-src {digest(SCRIPT)}; img-src data:; "
+          "base-uri 'none'; form-action 'none'")
+
 STATES = {
     "up": "up",
     "slow": "slow",
@@ -286,53 +348,12 @@ def page(now: dt.datetime) -> str:
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="{POLICY}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="60">
 <link rel="icon" href="data:,">
 <title>FF status</title>
-<style>
-  :root {{
-    --bg: #f6f6f3; --surface: #ffffff; --text: #1d201c; --muted: #5f645d; --border: #d8dbd4;
-    --up: #1a7f37; --slow: #e5a50a; --partial: #d9730d; --down: #b42318; --none: #d8dbd4;
-    color-scheme: light dark;
-  }}
-  @media (prefers-color-scheme: dark) {{
-    :root {{
-      --bg: #121412; --surface: #1b1e1b; --text: #e7e9e4; --muted: #a2a89f; --border: #343933;
-      --up: #3fb950; --slow: #e3b341; --partial: #f0883e; --down: #f85149; --none: #343933;
-    }}
-  }}
-  * {{ box-sizing: border-box; }}
-  body {{ margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }}
-  main {{ max-width: 860px; margin: 0 auto; padding: 32px 16px 48px; }}
-  h1 {{ font-size: 22px; margin: 0 0 4px; }}
-  h1 small {{ color: var(--muted); font-weight: 400; font-size: 15px; }}
-  .banner {{ margin: 20px 0; padding: 14px 16px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
-    border-left: 6px solid var(--none); font-size: 17px; font-weight: 600; }}
-  .banner.up {{ border-left-color: var(--up); }} .banner.slow {{ border-left-color: var(--slow); }}
-  .banner.down {{ border-left-color: var(--down); }}
-  .warnings {{ margin: 0 0 20px; padding: 0 0 0 20px; color: var(--down); }}
-  .check {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin: 0 0 12px; }}
-  .check.whole {{ border-width: 2px; }}
-  .head {{ display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }}
-  h2 {{ font-size: 16px; margin: 0; }}
-  .now {{ font-size: 13px; font-weight: 600; white-space: nowrap; }}
-  .now.up {{ color: var(--up); }} .now.slow {{ color: var(--slow); }} .now.down {{ color: var(--down); }} .now.none {{ color: var(--muted); }}
-  .what, .month {{ margin: 2px 0 8px; color: var(--muted); font-size: 13px; }}
-  .month {{ margin: 6px 0 0; text-align: right; }}
-  .bars {{ display: grid; grid-template-columns: repeat({DAYS}, 1fr); gap: 1px; list-style: none; margin: 0; padding: 0; height: 30px; }}
-  .bars li, .legend span {{ border-radius: 1px; }}
-  .up {{ --c: var(--up); }} .slow {{ --c: var(--slow); }} .partial {{ --c: var(--partial); }} .down {{ --c: var(--down); }} .none {{ --c: var(--none); }}
-  .bars li, .legend span {{ background: var(--c); }}
-  .legend {{ display: flex; flex-wrap: wrap; gap: 4px 16px; list-style: none; padding: 0; margin: 8px 0 24px; color: var(--muted); font-size: 13px; }}
-  .legend span {{ display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px; }}
-  .incidents h3 {{ font-size: 15px; margin: 16px 0 4px; }}
-  .incidents p, .incidents ul {{ margin: 4px 0; }}
-  code {{ font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }}
-  a {{ color: inherit; }}
-  footer {{ margin-top: 28px; color: var(--muted); font-size: 13px; }}
-  #late {{ color: var(--down); font-weight: 600; }}
-</style>
+<style>{STYLE}</style>
 </head>
 <body>
 <main>
@@ -350,12 +371,7 @@ def page(now: dt.datetime) -> str:
 <p>Made at <time datetime="{made}">{clock(made)}</time>{f", from the minute of {clock(last['at'])}" if last else ""}. <span id="late"></span></p>
 </footer>
 </main>
-<script>
-  // A page that stopped being made says so, as a browser keeps showing it.
-  var made = Date.parse(document.querySelector("footer time").getAttribute("datetime"));
-  var minutes = Math.floor((Date.now() - made) / 60000);
-  if (minutes > 5) document.getElementById("late").textContent = "That was " + minutes + " minutes ago: the page hasn't been made since.";
-</script>
+<script>{SCRIPT}</script>
 </body>
 </html>
 """

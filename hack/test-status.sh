@@ -335,17 +335,20 @@ with open(out, "w") as lines:
                 lines.write(json.dumps(minute, separators=(",", ":")) + "\n")
                 at += dt.timedelta(minutes=1)
 PY
-# The page as its reader sees it: the banner, the warnings, each check's state now, bars and month, the incidents.
+# The page as its reader sees it: the banner, the warnings, each check's state now, bars and month, the incidents;
+# and as its browser does: its Content-Security-Policy, and the hashes of its inline style and script.
 cat >"$work/page.py" <<'PY'
-import html.parser, json, sys
+import base64, hashlib, html.parser, json, sys
 class Page(html.parser.HTMLParser):
     def __init__(self):
         super().__init__()
-        self.open, self.elements = [], []
+        self.open, self.elements, self.policy = [], [], ""
     def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "meta" and (attrs.get("http-equiv") or "").lower() == "content-security-policy":
+            self.policy = attrs.get("content") or ""
         if tag in ("meta", "link"):  # elements without an end
             return
-        attrs = dict(attrs)
         element = {"tag": tag, "class": (attrs.get("class") or "").split(), "title": attrs.get("title"), "href": attrs.get("href"),
                    "parent": self.open[-1]["class"] if self.open else [], "text": ""}
         self.open.append(element)
@@ -380,6 +383,9 @@ for element in page.elements:
         check["month"] = text
     elif section == "incidents" and tag in seen["incidents"]:
         seen["incidents"][tag].append([element["href"], text] if tag == "a" else text)
+seen["policy"] = dict((part.split() + [""])[:2] for part in page.policy.split(";") if part.strip())
+digest = lambda text: "'sha256-" + base64.b64encode(hashlib.sha256(text.encode("utf-8")).digest()).decode() + "'"
+seen["inline"] = {tag: " ".join(digest(e["text"]) for e in page.elements if e["tag"] == tag) for tag in ("style", "script")}
 json.dump(seen, sys.stdout)
 PY
 rendered() { # <the last minute's kind> [now]: the page made from the minutes, its status printed, as read in page.json
@@ -420,6 +426,9 @@ check "the line that says the probe runs on the server itself, and the minute th
   "$(seen '.footer | contains("Probed every minute from the server FF runs on") and contains("so is this page")') $(seen '.footer | contains("Made at 2026-11-10 12:00 UTC, from the minute of 2026-11-10 12:00 UTC")')"
 check "written whole, readable by all, no incident written; its script parses" "644 false None written. 0" \
   "$(stat -c %a "$status/page/index.html") $([ -e "$status/page/index.html.new" ] && echo true || echo false) $(seen '.incidents.p | join(" ")') $(python3 -I "$repo/hack/check-docs.py" "$status/page/index.html" >/dev/null 2>&1; echo $?)"
+check "its own Content-Security-Policy: nothing loads or runs but its style and script, each named by its hash, and its empty icon" \
+  "'none' true true data: 'none' 'none' base-uri default-src form-action img-src script-src style-src" \
+  "$(seen '.policy["default-src"]') $(seen '.policy["style-src"] == .inline.style') $(seen '.policy["script-src"] == .inline.script') $(seen '.policy["img-src"], .policy["base-uri"], .policy["form-action"]' | paste -sd' ') $(seen '.policy | keys | join(" ")')"
 
 section "the page: the state now, from the last minute"
 check "checks answered wrong: part of FF down, each named; the others up" \

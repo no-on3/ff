@@ -7,7 +7,7 @@
 # the site's bucket; the queue), then the site's page; its key, made once, which reaches that bucket, queue and
 # function alone; what probe.sh reads; and copies of probe.sh and render.py outside the checkout, which ff-status
 # can't read.
-# server.sh installs its timer after.
+# server.sh installs its timer after, and starts the page's web server.
 #   /data/ff/src/deploy/dev-server/status/setup.sh       (as root: server.sh runs it, once it has built ff)
 set -euo pipefail
 here="$(dirname "${BASH_SOURCE[0]}")"
@@ -26,9 +26,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Its folder, which only it and root read: the minutes it writes, and what it reads, which this script writes.
+# Its folder, which only it and root read: the minutes it writes, and what it reads, which this script writes. In it,
+# the page's, which others read: the page's web server mounts it, read-only (../docker-compose.yml).
 id ff-status >/dev/null 2>&1 || useradd --system --user-group --home-dir "$status" --no-create-home --shell /usr/sbin/nologin ff-status
 install -d -o ff-status -g ff-status -m 0750 "$status"
+install -d -o ff-status -g ff-status -m 0755 "$status/page"
 echo "  the user ff-status, its folder $status"
 
 kubectl -n ff-system port-forward service/keycloak 18082:8080 >/dev/null 2>&1 &
