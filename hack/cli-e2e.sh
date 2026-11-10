@@ -138,22 +138,31 @@ at() {
   curl -s -o "$work/at.body" -D "$work/at.head" -w '%{http_code}' "$@" "$url"
   echo " $(cat "$work/at.body")"
 }
+# location: where the last answer of at sends the browser.
+location() { sed -n 's/^location: //Ip' "$work/at.head" | tr -d '\r'; }
+# until_said <file> <text> [<pid>] [<tries>]: waits, half a second at a time, 60 times unless told, for the file to
+# hold the text, a line that a command in the background writes: 0 once it does; 1 when the tries run out, or when
+# the process named ends first.
+until_said() {
+  local file="$1" text="$2" pid="${3:-}" tries="${4:-60}" _
+  for _ in $(seq 1 "$tries"); do
+    grep -F "$text" "$file" >/dev/null 2>&1 && return 0
+    [ -z "$pid" ] || kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  grep -F "$text" "$file" >/dev/null 2>&1
+}
 # local_started <listing> <its stderr> <ff local start's args...>: ff local start in the background, its pid in
 # $starter, until it says how to stop it: 120 s at most, as a first start with --with pulls its images, and less if it
 # ends. Its pid is kept in a file until local_stopped, so that one a stopped section left running is stopped.
 local_started() {
-  local listing="$1" errors="$2" _
+  local listing="$1" errors="$2"
   shift 2
   local_left_stopped
   "$ff_bin" local start "$@" >"$listing" 2>"$errors" &
   starter=$!
   echo "$starter" >"$work/local-start.pid"
-  for _ in $(seq 1 240); do
-    grep -F "Ctrl-C stops" "$listing" >/dev/null 2>&1 && return 0
-    kill -0 "$starter" 2>/dev/null || break
-    sleep 0.5
-  done
-  grep -F "Ctrl-C stops" "$listing" >/dev/null 2>&1 ||
+  until_said "$listing" "Ctrl-C stops" "$starter" 240 ||
     fail "ff local start $* said nothing in 120 s, or ended: $(cat "$errors")"
 }
 # local_stopped: Ctrl-C to the ff local start local_started made, its end waited for.
@@ -176,6 +185,27 @@ local_left_stopped() {
   done
 }
 on_exit local_left_stopped
+# konnect_started <listing> <its stderr> <ff local konnect's args...>: Konnect's stand-in in the background, its pid in
+# $konnect_pid, until it prints its addresses, 30 s at most. konnect_stopped ends it, waited for, so that its port is
+# free again; and at the suite's end, one a stopped section left running. A script's job in the background ignores
+# Ctrl-C, which the stand-in doesn't handle: it is ended by SIGTERM.
+konnect_pid=""
+konnect_started() {
+  local listing="$1" errors="$2"
+  shift 2
+  konnect_stopped
+  "$ff_bin" local konnect "$@" >"$listing" 2>"$errors" &
+  konnect_pid=$!
+  until_said "$listing" "Ctrl-C stops it" "$konnect_pid" 60 ||
+    fail "ff local konnect $* said nothing in 30 s, or ended: $(cat "$errors")"
+}
+konnect_stopped() {
+  [ -n "$konnect_pid" ] || return 0
+  kill "$konnect_pid" 2>/dev/null || true
+  wait "$konnect_pid" 2>/dev/null || true
+  konnect_pid=""
+}
+on_exit konnect_stopped
 # local_aws <project> <port> <aws args...>: the AWS CLI with the local key's file of ff local's project alone, none of
 # this machine's settings, the front door at the port the endpoint of each service.
 local_aws() {
@@ -973,7 +1003,7 @@ $(grep -E '^  postgres  postgresql://' "$work/rest.out" >/dev/null && echo true 
   id="$(at "$base/items" -d '{"name": "Harissa, 2 jars"}' >"$work/rest-post"; jq -r .id "$work/at.body")"
   check "  ... its README's curl keeps an item: 201, its address in Location, kept in that PostgreSQL" \
     "201 /items/$id Harissa, 2 jars $id|Harissa, 2 jars" \
-    "$(sed 's/ .*//' "$work/rest-post") $(sed -n 's/^location: //Ip' "$work/at.head" | tr -d '\r') $(jq -r .name "$work/at.body") \
+    "$(sed 's/ .*//' "$work/rest-post") $(location) $(jq -r .name "$work/at.body") \
 $(local_psql "$work/rest.out" 'select id, name from items')"
   check "  ... lists it, gives it at its address, deletes it, then has none, and answers 405 with Allow" \
     "200 Harissa, 2 jars 200 Harissa, 2 jars 204 404 405 GET, DELETE" \
@@ -1386,8 +1416,8 @@ done
 section_def template_image_resize section_template_image_resize backend budget=300
 
 section_template_webhook() {
-section "ff init --template webhook: orders paid through Konnect, its notifications received right; the Node.js one deployed on FF as its README says, its database ff db's and Konnect's key a secret; then each runtime's run here as its README says, with ff local start --with postgres; Konnect out of reach in both, as its answers come with its stand-in"
-local runtime app url db_conn made base port starter id
+section "ff init --template webhook: orders paid through Konnect, its notifications received right; the Node.js one deployed on FF as its README says, its database ff db's and Konnect's key a secret, Konnect out of reach; then each runtime's run here as its README says, ff local konnect standing in for Konnect, with ff local start --with postgres: an order paid at its page, and the faults a webhook must survive"
+local runtime app url db_conn made base port starter id log konnect_port pay ref forged browser second second_pay
 declare -A written=(
   [nodejs]=".gitignore README.md events/create-order.json events/notification.json samconfig.toml src/app.mjs src/package-lock.json src/package.json template.yaml tests/app.test.mjs"
   [python]=".gitignore README.md events/create-order.json events/notification.json samconfig.toml src/app.py src/requirements.txt template.yaml tests/__init__.py tests/test_app.py"
@@ -1412,7 +1442,7 @@ done
 
 # On FF, the Node.js one as its README says, its commands as written: its wallet's placeholder given, and Konnect's
 # address a port of the function's own where nothing listens, so that nothing leaves the cluster; Konnect's key on
-# stdin, as the prompt takes it. A payment Konnect makes and confirms is tried against its stand-in.
+# stdin, as the prompt takes it. A payment Konnect makes and confirms is tried here, below, against ff local konnect.
 app="$work/cli-pay-nodejs"
 made="$(readme_after "$app" '^## On FF$' "s|<your wallet's ID>|suite-wallet KonnectApiUrl=http://127.0.0.1:9|" <<<'suite-key')"
 db_conn="$(grep -m1 -E '^postgres(ql)?://' "$work/after.out" || true)"
@@ -1447,36 +1477,79 @@ check "ff delete-stack deletes its function with its URL, ff db delete its datab
   "0 deleted the function cli-pay-nodejs-payments (Payments) deleted the stack cli-pay-nodejs 0 deleted the database cli-pay-nodejs, with its data" \
   "$made $(code) $(out)"
 
-# Here, each runtime as its README says: its commands before ff local start install its library and run its tests;
-# Konnect's key in .env.local; ff local start --with postgres, Konnect out of reach as on FF; then its curl.
+# Here, each runtime as its README says: its commands before ff local start install its library, run its tests and
+# write .env.local; Konnect's stand-in, which the README starts first, on a port of its own; ff local start as the
+# README writes it, but for the two ports and the template's folder; then its curl, the order paid at the stand-in's
+# page, and each fault the page sends. Then the stand-in again with --delay, a Konnect too slow to wait for.
+# holds <file> <text>...: true when the file holds each text, else what it lacks.
+holds() {
+  local file="$1" text lacks=()
+  shift
+  for text in "$@"; do grep -F -- "$text" "$file" >/dev/null || lacks+=("$text"); done
+  if [ ${#lacks[@]} -eq 0 ]; then echo true; else echo "lacking: ${lacks[*]}"; fi
+}
+konnect_port="$(free_port)"
 for runtime in python nodejs; do
   app="$work/cli-pay-$runtime"
-  check "cli-pay-$runtime's README: its commands install its library and run its 13 tests, which pass" "0 13" "$(readme_here "$app")"
-  printf 'KONNECT_API_KEY=suite-key\n' >"$app/.env.local"
+  log="$app/.ff/local/logs/cli-pay-$runtime-payments.log"
+  check "cli-pay-$runtime's README: its commands install its library, run its 13 tests, which pass, and give .env.local the stand-in's key" \
+    "0 13 KONNECT_API_KEY=ff-local-konnect" "$(readme_here "$app") $(cat "$app/.env.local")"
+  konnect_started "$work/konnect.out" "$work/konnect.err" --port "$konnect_port"
+  check "  ... ff local konnect prints the address ff local start's functions reach it at, its key and its wallet, which the README names" \
+    "KONNECT_API_URL=http://host.docker.internal:$konnect_port/api/v2|KONNECT_API_KEY=ff-local-konnect|KONNECT_WALLET_ID=ff0000000000000000000001" \
+    "$(sed -n 's/^  \(KONNECT_API_URL=http:\/\/host[^ ]*\).*/\1/p; s/^  \(KONNECT_\(API_KEY\|WALLET_ID\)=.*\)/\1/p' "$work/konnect.out" | paste -sd'|')"
   port="$(free_port)"
   base="http://cli-pay-$runtime-payments.fn.localhost:$port"
-  local_started "$work/pay.out" "$work/pay.err" "$app/template.yaml" --port "$port" --with postgres \
-    --parameter-overrides KonnectWalletId=suite-wallet KonnectApiUrl=http://127.0.0.1:9
+  read -ra started_with <<<"$(sed -n 's/^ff local start //p' "$app/README.md" |
+    sed "s|^template\.yaml |$app/template.yaml |; s|host\.docker\.internal:3800/|host.docker.internal:$konnect_port/|")"
+  local_started "$work/pay.out" "$work/pay.err" "${started_with[@]}" --port "$port"
   check "  ... ff local start --with postgres runs it at the address its README names, a PostgreSQL beside it" "true true" \
     "$(grep -E "^  cli-pay-$runtime-payments +$runtime +256 MB, 15 s  $base/$" "$work/pay.out" >/dev/null && echo true || echo false) \
 $(grep -E '^  postgres  postgresql://' "$work/pay.out" >/dev/null && echo true || echo false)"
-  check "  ... its README's curl: 502, Konnect out of reach, no order kept, its log saying why" \
-    "0 Konnect made no payment: try again 0 true" \
-    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g") $(jq -r .message "$work/after.out") \
+  check "  ... its README's curl: 201, the order pending, its payUrl the stand-in's page for a payment of Konnect's 24 hex digits" \
+    "0 pending http://127.0.0.1:$konnect_port/pay 24" \
+    "$(readme_after "$app" '^ff local start' "s/:3700/:$port/g") $(jq -r .status "$work/after.out") \
+$(jq -r '.payUrl | sub("[?].*"; "")' "$work/after.out") $(jq -r '.payUrl | sub(".*payment_ref="; "") | length' "$work/after.out")"
+  id="$(jq -r .id "$work/after.out")"
+  pay="$(jq -r .payUrl "$work/after.out")"
+  ref="${pay##*payment_ref=}"
+  check "  ... its page: the amount, the description, Pay and Fail" "200 true" \
+    "$(at "$pay" | sed -n '1s/ .*//p') $(holds "$work/at.body" '12.500 TND' '2 jars of harissa' '<button>Pay</button>' '<button>Fail</button>')"
+  check "  ... Fail: the webhook called, Konnect asked, saying pending, the order left so, its log saying why; the browser sent to the webhook" \
+    "303 $base/webhooks/konnect?payment_ref=$ref pending Konnect says pending" \
+    "$(at "$pay&outcome=failed" | sed 's/ .*//') $(location) $(local_psql "$work/pay.out" "select status from orders where id = '$id'") \
+$(logged "select(.left == \"$ref\") | .why" cat "$log")"
+  at "$pay&fault=unknown" >/dev/null
+  forged="$(sed -n 's/.*payment_ref=\([0-9a-f]*\), which no payment has.*/\1/p' "$work/at.body")"
+  check "  ... a notification for a payment that doesn't exist, the page's fault: kept as it came, left, Konnect not asked" \
+    "24 1 no order has this payment" \
+    "${#forged} $(local_psql "$work/pay.out" "select count(*) from notifications where payment_ref = '$forged'") \
+$(logged "select(.left == \"$forged\") | .why" cat "$log")"
+  check "  ... Pay, notified before the payment is completed: kept, Konnect asked, saying pending, the order still pending" \
+    "303 2 pending" \
+    "$(at "$pay&outcome=paid&fault=early" | sed 's/ .*//') \
+$(local_psql "$work/pay.out" "select count(*) from notifications where payment_ref = '$ref'") \
+$(local_psql "$work/pay.out" "select status from orders where id = '$id'")"
+  browser="$(location)"
+  check "  ... then the browser, sent to the webhook, finds it completed: the order paid, once, its log saying so; GET /orders/<id> paid" \
+    "200 Received paid $ref 200 paid" \
+    "$(at "$browser") $(local_psql "$work/pay.out" "select status from orders where id = '$id'") \
+$(logged "select(.paid == \"$id\") | .paymentRef" cat "$log") $(at "$base/orders/$id" | sed 's/ .*//') $(jq -r .status "$work/at.body")"
+  curl -s -d '{"amount": 4000, "description": "a bottle of olive oil"}' "$base/orders" >"$work/second.json"
+  second="$(jq -r .id "$work/second.json")"
+  second_pay="$(jq -r .payUrl "$work/second.json")"
+  check "  ... a second order paid, notified twice: paid once, the second notification finding it paid already" \
+    "303 paid $second $second" \
+    "$(at "$second_pay&outcome=paid&fault=twice" | sed 's/ .*//') \
+$(local_psql "$work/pay.out" "select status from orders where id = '$second'") \
+$(logged "select(.paid == \"$second\") | .paid" cat "$log") $(logged "select(.already == \"$second\") | .already" cat "$log")"
+  konnect_started "$work/konnect.out" "$work/konnect.err" --port "$konnect_port" --delay 6s
+  check "  ... ff local konnect --delay 6s, a Konnect too slow for the function's 5 s: the README's curl 502, no order kept, its log saying why" \
+    "502 Konnect made no payment: try again 2 true" \
+    "$(at "$base/orders" -d '{"amount": 900, "description": "a slow Konnect"}' | sed 's/ .*//') $(jq -r .message "$work/at.body") \
 $(local_psql "$work/pay.out" 'select count(*) from orders') \
-$(logged 'select(.unpaid) | .why | startswith("no payment made: Konnect didn\u0027t answer: ")' cat "$app/.ff/local/logs/cli-pay-$runtime-payments.log")"
-  check "  ... a notification no order has: 200 Received, kept as it came, left" \
-    "200 Received konnect|forged-0001|payment_ref=forged-0001|suite/1 no order has this payment" \
-    "$(at "$base/webhooks/konnect?payment_ref=forged-0001" -A suite/1) \
-$(local_psql "$work/pay.out" 'select provider, payment_ref, query, user_agent from notifications') \
-$(logged 'select(.left == "forged-0001") | .why' cat "$app/.ff/local/logs/cli-pay-$runtime-payments.log")"
-  local_psql "$work/pay.out" "insert into orders (id, amount, currency, description, payment_ref)
-    values ('$id', 12500, 'TND', '2 jars of harissa', 'suite-ref-1')" >/dev/null
-  check "  ... an order's notification, Konnect not answering: 200, the order left pending, GET /orders/<id> pending still" \
-    "200 Received pending true 200 pending" \
-    "$(at "$base/webhooks/konnect?payment_ref=suite-ref-1") $(local_psql "$work/pay.out" "select status from orders where id = '$id'") \
-$(logged 'select(.left == "suite-ref-1") | .why | startswith("Konnect didn\u0027t answer: ")' cat "$app/.ff/local/logs/cli-pay-$runtime-payments.log") \
-$(at "$base/orders/$id" | sed 's/ .*//') $(jq -r .status "$work/at.body")"
+$(logged 'select(.unpaid) | .why | startswith("no payment made: Konnect didn\u0027t answer: ")' cat "$log")"
+  konnect_stopped
   local_stopped
   ff local reset "$app" --data --yes
   check "  ... Ctrl-C leaving no container, ff local reset --data its database's volume gone" "0 0 0" \
@@ -2564,15 +2637,6 @@ section_def local section_local backend budget=45
 section_local_template() {
 section "ff local start template.yaml: the template's functions behind one front door, each started at its first call"
 local app="$work/shop" port starter
-# until_said <text> <file>: waits up to 30 s for the line ff local start says.
-until_said() {
-  local _
-  for _ in $(seq 1 60); do
-    grep -F "$1" "$2" >/dev/null 2>&1 && return 0
-    sleep 0.5
-  done
-  return 1
-}
 # invoked <function> <event>: Lambda's Invoke at the front door, its status and its answer.
 invoked() {
   curl -s -o "$work/invoked" -w '%{http_code}' -X POST "http://127.0.0.1:$port/2015-03-31/functions/$1/invocations" -d "$2"
@@ -2709,11 +2773,11 @@ check "a function this machine hasn't is Lambda's 404" \
   "404 Function not found: arn:aws:lambda:tn-tunis-1:000000000000:function:Payments" \
   "$(invoked Payments '{}' | sed 's/ .*//') $(jq -r .message "$work/invoked")"
 greeter second
-until_said "Greeter: its code changed: starting it again" "$work/start.err" || true
+until_said "$work/start.err" "Greeter: its code changed: starting it again" || true
 check "--watch starts a running function again when its code changes" "true 200 second" \
   "$(grep -F 'Greeter: its code changed' "$work/start.err" >/dev/null && echo true || echo false) $(invoked Greeter '{}' | sed 's/ .*//') $(jq -r .code "$work/invoked")"
-until_said "Greeter: no call for 4s: stopped" "$work/start.err" || true
-until_said "Caller: no call for 4s: stopped" "$work/start.err" || true
+until_said "$work/start.err" "Greeter: no call for 4s: stopped" || true
+until_said "$work/start.err" "Caller: no call for 4s: stopped" || true
 check "--idle stops each function after that long without a call" 0 "$(leftover)"
 check "  ... and its next call starts it again" "200 second 0" \
   "$(invoked Greeter '{}' | sed 's/ .*//') $(jq -r .code "$work/invoked") $(grep -c 'its code failed' "$work/start.err")"
@@ -2754,7 +2818,7 @@ check "  ... and takes one signed with it, as curl --aws-sigv4 signs it" "200 Ho
   "$(at_url caller --aws-sigv4 aws:amz:tn-tunis-1:lambda --user "$key_id:$(sed -n 's/^aws_secret_access_key = //p' "$app/.ff/local/credentials")" | sed 's/ .*//') $(jq -r .called.greeting "$work/url.body")"
 check "an asynchronous call is answered 202" 202 \
   "$(lambda_cli invoke --function-name Failing --invocation-type Event --payload '{"n": 1}' --cli-binary-format raw-in-base64-out "$work/event.json" | jq -r .StatusCode)"
-until_said "Recorder | recorded" "$work/start.err" || true
+until_said "$work/start.err" "Recorder | recorded" || true
 check "  ... retried as FF retries it, as many times as its function says, then its record is its OnFailure destination's" \
   "true true true" \
   "$(grep -E '^Failing: the asynchronous call [^ ]+ failed: RuntimeError: no luck; tried again in 60 s$' "$work/start.err" >/dev/null && echo true || echo false) \
@@ -2770,12 +2834,12 @@ FF_TEST_NOW=2026-11-10T01:59:57Z \
 check "the start lists each schedule, its expression and its next run" "true true" \
   "$(grep -E '^  Reporter/Nightly +cron\(0 2 \* \* \? \*\)  next 2026-11-10T02:00:00Z$' "$work/scheduled.out" >/dev/null && echo true || echo false) \
 $(grep -E '^  Reporter/Hourly +rate\(1 hour\)  disabled$' "$work/scheduled.out" >/dev/null && echo true || echo false)"
-until_said "Reporter | ran aws.events" "$work/scheduled.err" || true
+until_said "$work/scheduled.err" "Reporter | ran aws.events" || true
 check "a schedule runs on time, its function called without waiting with EventBridge's Scheduled Event" "true true" \
   "$(grep -E '^Reporter: its schedule Nightly runs, due at 2026-11-10T02:00:00Z: the asynchronous call [0-9a-f-]{36}$' "$work/scheduled.err" >/dev/null && echo true || echo false) \
 $(grep -F 'Reporter | ran aws.events 2026-11-10T02:00:00Z arn:aws:events:tn-tunis-1:000000000000:rule/Reporter-Nightly' "$work/scheduled.err" >/dev/null && echo true || echo false)"
 ff local run Hourly "$app"
-until_said "Reporter | ran None None hourly" "$work/scheduled.err" || true
+until_said "$work/scheduled.err" "Reporter | ran None None hourly" || true
 check "ff local run runs one now, a disabled one too, with its own input" "0 Reporter's schedule Hourly runs now true" \
   "$(code) $(out | sed 's/: the asynchronous call.*//') $(grep -F 'Reporter | ran None None hourly' "$work/scheduled.err" >/dev/null && echo true || echo false)"
 ff local run Weekly "$app"

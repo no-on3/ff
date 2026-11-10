@@ -63,7 +63,7 @@ Proposed; §9 lists the choices to confirm.
   - `POST /payments/init-payment`, with amounts in millimes and FF's payment ID as `orderId`, answering `payUrl` and `paymentRef`;
   - `GET /payments/:id`, answering `completed` or `pending`.
 - **Every provider call** has a timeout, and a failed one is said to the payer as "try again" without crediting anything. The parent plan's §8.4 rules hold for every adapter.
-- **The suites use a stand-in Konnect,** a small server that answers as Konnect's documentation says, each answer naming its source. L4 also runs against Konnect's sandbox once you have its credentials (§9, 3).
+- **The suites use a stand-in Konnect,** a small server that answers as Konnect's documentation says, each answer naming its source: `ff local konnect`, built with the developer tools' step ([its plan](dev-tools-plan.md), D6), its faults on demand, a notification twice, early or for a payment that doesn't exist, and `--delay`. L4 runs the built `ff`'s, and also runs against Konnect's sandbox once you have its credentials (§9, 3). Konnect's documentation has no `failed`: a payment whose try failed stays `pending`.
 
 ### D2. A top-up, from the pack to the credit
 - **The methods:** Konnect's four (§9, 9): Tunisian and international cards, e-DINAR and its wallet.
@@ -235,7 +235,7 @@ The order follows what waits least. Phase 1 waits only for your answers. Phases 
 
 #### G-05: The providers' interface, Konnect's adapter, its notification and the payments left pending (P-34, B-03)
 - D1 to D3 in the backend.
-- **Tests:** L1 with Konnect's answers recorded: success, failure, an amount that differs, a notification twice, and a forged one for a payment that doesn't exist. L2 for the payment and its posting in one transaction. L4 against the stand-in, and against Konnect's sandbox when its credentials exist. L5's rules.
+- **Tests:** L1 with Konnect's answers recorded: success, failure, an amount that differs, a notification twice, and a forged one for a payment that doesn't exist. L2 for the payment and its posting in one transaction. L4 against the stand-in, `ff local konnect` (D1), its faults sent by its page's address, and against Konnect's sandbox when its credentials exist. L5's rules.
 
 #### G-06: Top-ups in the console and the admin app
 - **The console:** the Billing page's packs paid by card, each showing the credit, its VAT and the total; the redirect; and the result page.

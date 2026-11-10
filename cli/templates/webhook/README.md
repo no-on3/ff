@@ -25,16 +25,19 @@ In a shop, the amount of `POST /orders` comes from its own prices, never from th
 
 ## Here
 
-Konnect's sandbox key goes in `.env.local`, `KONNECT_API_KEY=…`, from Konnect's dashboard: `ff local start` gives its lines to the function, and the `.gitignore` leaves the file out.
+Konnect stays out of it here: `ff local konnect`, in a terminal of its own, stands in for it on port 3800 until Ctrl-C, its API as Konnect's documentation describes it and a page for each payment, nothing paid. Its key goes in `.env.local`: `ff local start` gives the file's lines to the function, and the `.gitignore` leaves it out.
 
 ```bash
 {{install}}
 {{test}}# the payments' tests, no Konnect and no database needed
-ff local start template.yaml --with postgres --parameter-overrides KonnectWalletId=<your sandbox wallet's ID>
+echo KONNECT_API_KEY=ff-local-konnect >.env.local   # the stand-in's key, which ff local konnect prints
+ff local start template.yaml --with postgres --parameter-overrides KonnectWalletId=ff0000000000000000000001 KonnectApiUrl=http://host.docker.internal:3800/api/v2
 curl -d '{"amount": 12500, "description": "2 jars of harissa"}' http://{{name_lower}}-payments.fn.localhost:3700/orders
 ```
 
-The answer's `payUrl` is Konnect's sandbox page, where nothing is really paid. Konnect's own call can't reach this machine, but the payer's browser, sent to the same address after paying, does: that is the notification here. `curl http://{{name_lower}}-payments.fn.localhost:3700/orders/<id>` then says the order, asking Konnect again while it is pending. `--with postgres` runs a PostgreSQL in Docker, its data kept from a start to the next, and gives the function its address as `DATABASE_URL`; `ff local reset --data` removes it.
+The answer's `payUrl` is the stand-in's page for the payment. Its Pay button calls `/webhooks/konnect` with the payment's reference, as Konnect does, then sends the browser there; `curl http://{{name_lower}}-payments.fn.localhost:3700/orders/<id>` then says the order `paid`. Fail leaves the payment, and the order, `pending`. Its smaller buttons try the webhook against what may come: a notification sent twice, one sent before the payment is completed, and one for a payment that doesn't exist. `ff local konnect --delay 6s` is a Konnect too slow to wait for, which `POST /orders` answers with 502. `--with postgres` runs a PostgreSQL in Docker, its data kept from a start to the next, and gives the function its address as `DATABASE_URL`; `ff local reset --data` removes it.
+
+With Konnect's sandbox instead, its key from Konnect's dashboard goes in `.env.local`, and `ff local start` takes `KonnectWalletId=<your sandbox wallet's ID>` alone, `KonnectApiUrl` being the sandbox's unless given. The page is then Konnect's, where nothing is really paid; Konnect's own call can't reach this machine, but the payer's browser, sent to the same address after paying, does: that is the notification here.
 
 ## On FF
 
