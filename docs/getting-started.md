@@ -1799,6 +1799,7 @@ kubectl -n "$NS" rollout restart deploy/fn-$ID
 (cd runtimes/python && python3 -m unittest discover -s tests)   # Python runtime protocol
 (cd cli && cargo test --locked)                          # the ff command: unit tests, then its binary against a scripted API, seconds
 hack/test-sam-fixtures.sh                                # every SAM template kept as a fixture, which sam validate --lint takes (hack/install-tools.sh sam), about 20 s
+hack/test-updater.sh                                     # the development server's updater against a stand-in for GitHub, seconds
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 6 min
 hack/k8s/test-logging-filter.sh                          # the log collector's configuration and filter, in its image, seconds
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions

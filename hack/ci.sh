@@ -213,6 +213,7 @@ stage_unit() {
   step "the small app: its handlers, their clients stubbed" node --test examples/orders-app/test/handlers.test.js
   step "ff: unit tests, and its binary's against a scripted API (L1, L2)" in_dir cli cargo test --locked
   step "the SAM fixtures, which sam validate --lint takes, cfn-lint inside it" hack/test-sam-fixtures.sh
+  step "the development server's updater, against a stand-in for GitHub" hack/test-updater.sh
   step "alert rules and dashboards" hack/k8s/test-monitoring-rules.sh
   step "log collector: configuration and filter" hack/k8s/test-logging-filter.sh
 }
