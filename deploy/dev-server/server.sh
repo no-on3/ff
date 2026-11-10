@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# FF on its development server (README.md), as root, from the checkout install.sh copied to /data/ff/src: k3s and
-# gVisor; PostgreSQL, S3, mail, and customers' database, cache and mail servers beside the cluster, in Docker Compose;
-# FF's passwords and keys, made once, in /data/ff/secrets; the images built here and given to k3s, and ff for the
-# smoke test; deploy/k8s applied and the platform deployed by its deploy.sh; the first operator; FF's route in the
-# server's own proxy (/data/proxy); then every hostname checked through that proxy. A step already done does nothing,
-# so that an update is the same run. No password is ever printed, or put on a command line.
+# FF on its development server (README.md), as root, from the checkout it is in: /data/ff/src, where install.sh
+# copies one, or the directory the updater fetched a commit into (updater/update.sh). k3s and gVisor; PostgreSQL, S3,
+# mail, and customers' database, cache and mail servers beside the cluster, in Docker Compose; FF's passwords and
+# keys, made once, in /data/ff/secrets; the images built here and given to k3s, and ff for the smoke test; deploy/k8s
+# applied and the platform deployed by its deploy.sh; the first operator; FF's route in the server's own proxy
+# (/data/proxy); every hostname checked through that proxy; then the updater's timer. A step already done does
+# nothing, so that an update is the same run. No password is ever printed, or put on a command line.
 #   FF_VERSION=<the images' tag> FF_ADMIN_ALLOW=<address>/32 /data/ff/src/deploy/dev-server/server.sh
 set -euo pipefail
 home=/data/ff
-src=$home/src
+src="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 secrets=$home/secrets
 proxy=/data/proxy
 # FF's names on this server, as the edge's settings give them (k8s/edge.env): api.<domain> and the others.
@@ -430,9 +431,33 @@ check "Lambda's endpoint: Lambda's refusal of an unsigned request" "403 MissingA
 echo "server.sh: $passed checks passed; FF $version is up at https://console.$domain"
 
 step "ff, built here as one static binary, which the smoke test deploys a template with"
-# Last, as FF's install needs none of it. In Rust's image (hack/build-cli.sh --container), on half the server's
+# After FF's install, which needs none of it. In Rust's image (hack/build-cli.sh --container), on half the server's
 # processors, as other projects share them; Cargo's downloads and build kept in cli/target, which install.sh's copy
 # leaves alone, so that an update builds what changed.
 FF_BUILD_COMMIT="$version" CARGO_BUILD_JOBS="$(($(nproc) / 2))" "$src/hack/build-cli.sh" --container >"$work/ff-build.log" 2>&1 ||
   { tail -n 20 "$work/ff-build.log" >&2; fail "ff's build failed"; }
 echo "  $("$src/cli/target/dist/ff-linux-x86_64" version | head -1)"
+
+step "the updater: master's newest commit that passed, installed at night (updater/update.sh, $home/updater)"
+# Its settings: the admin allow list, which it gives this script; the server's mail and the operator, for a failure.
+# Then the version installed, last, as everything above passed.
+updater="$home/updater"
+install -d -m 0700 "$updater"
+write_if_changed "$updater/settings" "admin_allow=$admin_allow
+mail=smtp://$host_address:1025
+operator=operator@$domain" 0600 || true
+units_changed=false
+for unit in ff-updater.service ff-updater.timer; do
+  write_if_changed "/etc/systemd/system/$unit" "$(cat "$src/deploy/dev-server/updater/$unit")" 0644 && units_changed=true
+done
+if $units_changed; then systemctl daemon-reload; fi
+# A failure stops the timer until someone looks; this script, run by hand once someone has, starts it again.
+if systemctl is-enabled --quiet ff-updater.timer && systemctl is-active --quiet ff-updater.timer; then
+  echo "  its timer runs, every 10 minutes"
+else
+  systemctl enable --now --quiet ff-updater.timer
+  echo "  its timer started, every 10 minutes"
+fi
+[ -s "$updater/deploy-key" ] || echo "  no deploy key, which install.sh carries: git reaches GitHub over HTTPS, as a public repository allows"
+[ -s "$updater/github-token" ] || echo "  no GitHub token, which install.sh carries: the workflow's runs asked as anyone, as a public repository allows"
+printf '%s\n' "$version" >"$updater/installed"

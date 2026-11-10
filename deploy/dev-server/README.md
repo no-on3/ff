@@ -30,7 +30,7 @@ From a checkout, with the server in your SSH config (here `next`, whose address 
 deploy/dev-server/install.sh next      # the first time, about 20 minutes; an update, a few
 ```
 
-The same command installs and updates. It copies the checkout's files to `/data/ff/src` (those git tracks and those it doesn't ignore: never a `.env`, a key or `node_modules`), then runs [`server.sh`](server.sh) there as root. Each step of it does nothing when already done:
+The same command installs and updates; once installed, the server also updates itself at night (step 10). It copies the checkout's files to `/data/ff/src` (those git tracks and those it doesn't ignore: never a `.env`, a key or `node_modules`), then runs [`server.sh`](server.sh) there as root. Each step of it does nothing when already done:
 1. FF's passwords and keys, made once in `/data/ff/secrets`.
 2. The Compose project, and the backend's and Keycloak's databases; the agents of customers' caches and mail checked with the backend's tokens.
 3. k3s and gVisor, at the versions the development cluster runs (`hack/k8s/env.sh`, `hack/k8s/gvisor-up.sh`), each checked against its release's checksum; the firewall's rules for pods; the names of customers' database, cache and mail servers in the cluster's DNS.
@@ -39,11 +39,14 @@ The same command installs and updates. It copies the checkout's files to `/data/
 6. The first operator, `operator@dev.ffunc.cloud`, once: FF's realm makes each user's e-mail address its username.
 7. The route file, installed and the proxy reloaded. The proxy checks a configuration as it loads it; a route it refuses is put back as it was, so that no other project's next reload meets it.
 8. Every hostname, through the proxy, as from the internet, once Let's Encrypt has given the eight fixed names their certificates (a minute or so the first time).
-9. `ff`, last, as nothing above needs it: one static binary built on the server (`hack/build-cli.sh --container`, on half its processors), which the smoke test deploys a template with. The first build takes a few minutes; Cargo's downloads and build stay in `/data/ff/src/cli/target`, which the copy leaves alone, so an update builds what changed.
+9. `ff`, as nothing above needs it: one static binary built on the server (`hack/build-cli.sh --container`, on half its processors), which the smoke test deploys a template with. The first build takes a few minutes; Cargo's downloads and build stay in `/data/ff/src/cli/target`, which the copy leaves alone, so an update builds what changed.
+10. The updater ([`updater/`](updater/update.sh)), last: its systemd timer, `ff-updater.timer`, every 10 minutes, and its settings in `/data/ff/updater` (the admin allow list this run was given, the server's mail and the operator), then the version installed, which tells it what is there. Each round asks GitHub for `master`'s newest commit and its push's run; a commit newer than the one installed, whose every job passed, is installed between 01:00 and 05:00 in Tunis: FF's databases dumped into `/data/ff/backups`, the commit's files in a directory of their own, that directory's `server.sh`, then its `smoke.sh`, then the directory made `/data/ff/src` (the one before kept as `/data/ff/src.previous`). A failure stops the timer and e-mails the operator through Mailpit; this script, run again, starts it. Each update's commit, time and result are in `/data/ff/updater/updates.log`, its output in `runs/` beside it, and each round's line in `journalctl -u ff-updater`. A commit installed by hand that `master` doesn't hold, a branch's, stays until `master` holds it.
 
 Then [`smoke.sh`](smoke.sh) takes a customer's path through the proxy: an operator and a customer of its own, each signed in as a browser signs in; an account asked for, the operator told by e-mail, the account approved; a function in gVisor, invoked and called at its URL; a bucket at its own host, and its site; a queue sent to and read; a database and a cache, which a function reaches at the addresses FF gave it; a function made with the AWS CLI at FF's Lambda endpoint (the `amazon/aws-cli` image the suites use), a second version published and an alias moved from the first to it; `ff init`'s SAM hello world deployed with `ff deploy`, called at its URL, and its stack deleted with `ff delete-stack`; an address proved by the link FF e-mails it, and an e-mail from it, which the server of customers' mail hands to Mailpit. Then it deletes all of it, closes the account and removes both users, whether its checks passed or not. `--no-smoke` skips it.
 
 The admin app and Keycloak's administration answer only the address the server sees you connect from; `FF_ADMIN_ALLOW='<address>/32 …' deploy/dev-server/install.sh next` gives others.
+
+The updater reaches GitHub with the repository's read-only deploy key and a token that reads the workflow's results, which `install.sh` carries from your machine, once: `FF_UPDATER_KEY=<the key's private file> FF_UPDATER_TOKEN=<a file holding the token> deploy/dev-server/install.sh next`. The server keeps them, root's alone, in `/data/ff/updater`, until others are given. While the repository is public it needs neither: git reaches GitHub over HTTPS, and its API answers anyone. `install.sh` runs `server.sh` under the updater's lock, so the two never run at once.
 
 ## Reaching it
 
@@ -70,8 +73,9 @@ They come from the proxy's own authority: one certificate for `*.fn.dev.ffunc.cl
 | `k8s/` | The overlay of `deploy/k8s/platform` with FF's names under `dev.ffunc.cloud`, the edge's Service at its fixed address, the services beside the cluster, and the CAs of customers' database, cache and mail servers mounted for the backend |
 | `ff.caddy` | The route, which `server.sh` fills in with the edge's root and installs as `/data/proxy/sites/ff.caddy` |
 | `alertmanager.yaml` | The operator's alerts, to Mailpit |
+| `updater/` | The updater: `update.sh`, its systemd service and timer, which `server.sh` installs in `/etc/systemd/system`, and GitHub's SSH host keys, which its git checks GitHub against; `hack/test-updater.sh` runs it against a stand-in for GitHub |
 
-On the server: `/data/ff/secrets` (the passwords and keys, readable by root and `deploy` alone, but `s3.json`, which SeaweedFS's own user reads too), `/data/ff/overlay` (made on each run), `/data/kubernetes/k3s` (the cluster), `/etc/rancher/k3s` (its settings, and the nodes' login to the code registry), and the Docker volumes `ff_postgres`, `ff_s3`, `ff_mail`, `ff_data_db`, `ff_cache` and `ff_customer_mail`. The server's own rules are in `/data/proxy/README.md` there.
+On the server: `/data/ff/secrets` (the passwords and keys, readable by root and `deploy` alone, but `s3.json`, which SeaweedFS's own user reads too), `/data/ff/overlay` (made on each run), `/data/ff/updater` (the updater's settings, key, token, lock, log and runs, root's alone), `/data/ff/backups` (the databases' dumps, root's alone), `/data/kubernetes/k3s` (the cluster), `/etc/rancher/k3s` (its settings, and the nodes' login to the code registry), and the Docker volumes `ff_postgres`, `ff_s3`, `ff_mail`, `ff_data_db`, `ff_cache` and `ff_customer_mail`. The server's own rules are in `/data/proxy/README.md` there.
 
 ## Removing it
 
@@ -87,4 +91,4 @@ ssh next 'for p in 5433 8333 1025; do sudo ufw delete allow proto tcp from 10.42
 
 - **A function with internet access reaches the node's public address,** as in production: tenants' NetworkPolicy blocks private addresses only. Here the firewall then lets it reach the API server and the kubelet, which ask for credentials it doesn't have. Production's nodes need the same narrow rules, or the node's addresses among those blocked.
 - **Anything on the server itself can reach the edge and name any caller:** the allowlist of the admin app keeps the internet out, not the server's other projects. The operator's password and one-time password still stand.
-- **No backup:** the data here are tests.
+- **No backup to another site:** the updater dumps FF's databases into `/data/ff/backups` before each update, on the server's own disk; S3's data aren't dumped.
