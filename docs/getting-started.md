@@ -501,6 +501,8 @@ ff usage --aws                                    # the last three months at AWS
 ff metrics hello --since 6h                       # its invocations, errors, durations, a row a minute
 ```
 
+**The developer's tools, in one place:** installing `ff`, logging in and `ff` in your CI, just below; [the whole app on your laptop](#the-whole-app-on-your-laptop-ff-local), with `ff local`; [the templates](#templates), with `ff init`; [FF from your AI coding agent](#ff-from-your-ai-coding-agent-ff-mcp), with `ff mcp`; [following one request](#following-one-request-ff-trace), with `ff trace`; and the status page, in section 6's "Is it FF?". [`cli/README.md`](../cli/README.md) has every command, and [Les outils du développeur](fr/outils.md) says the same in French, for customers.
+
 **Installing `ff`.** Here it is built from the checkout, as above. Elsewhere, once FF publishes releases ("A release of `ff`", below), it installs from the downloads site: the script picks the build for the system and the processor, checks its SHA-256 against the site's `latest.json` and, when [minisign](https://jedisct1.github.io/minisign/) is on the machine, its signature against the release's key, and installs nothing when a check fails.
 
 ```bash
@@ -948,7 +950,7 @@ hack/k8s/app-database.sh down                               # afterwards: the da
 |---|---|---|
 | Functions | Each in its runtime's image, with a pod's hardening (a read-only root, no capability), its memory, CPU and timeout; started at its first call, stopped after `--idle`, started again by `--watch` when its code changes | gVisor around each; instances added as calls come, and kept warm by `ff scale --min`; versions and aliases (here an alias is a name for the function as it is) |
 | Calls | Lambda's `Invoke`, waiting, or `Event` with its retries and destinations, or `DryRun`; `GetFunctionConfiguration` | Lambda's other operations, which make and change functions (here the template makes them); the plan's rate and concurrency; the account's credit |
-| Logs | On stderr after the function's name, and in `.ff/local/logs/` | The log store, `ff logs` and `ff history`; metrics and alarms |
+| Logs | On stderr after the function's name, and in `.ff/local/logs/` | The log store, `ff logs` and `ff history`; a request followed across its functions, `ff trace`; metrics and alarms |
 | URLs and sites | `http://<function>.fn.localhost:3700` and `http://<bucket>.site.localhost:3700`; CORS and `AWS_IAM` as on FF | HTTPS, custom domains, a site's visits counted |
 | Schedules | Run on time while `ff local start` runs; `ff local run` runs one now | Run at their time whether or not your laptop is on |
 | Queues | In memory, with SQS's operations, delays, visibility, retention and dead-letter queue; a function's `SQS` event, one batch at a time | Messages kept in FF's database for their retention, whatever stops; up to the event's `MaximumConcurrency` batches at once |
@@ -1202,9 +1204,10 @@ Each folder has the same shape: `template.yaml`; `src/`, the functions' code, it
 
 - **Their libraries here** are installed for Linux, as Lambda's and FF's runtimes are: `npm ci --os=linux --cpu=x64 --libc=glibc` in Node.js, whatever this machine is, so that `ff local start` loads them in its containers. `image-resize`'s `sharp` and Pillow are native: `ff deploy --container` builds them in the runtime's image and `samconfig.toml`'s `use_container` has `sam build` do the same; on macOS and Windows that needs Docker Desktop.
 - **A database and a key are secrets on FF,** never in the template: `ff db create <name> --secret-for <function>` sets `DATABASE_URL`, and `ff secrets set <function> KONNECT_API_KEY` Konnect's key. Here they come from `--with postgres` and `.env.local`; on AWS they are parameters CloudFormation doesn't show back, as each README shows.
+- **`queue-worker`'s API passes its call's trace on** with each job, its SDK's client sending `X-Amzn-Trace-Id`, which SQS keeps with the message, so that the worker's call joins the API's trace and `ff trace` shows a job from one to the other ([Following one request](#following-one-request-ff-trace)).
 - **`webhook` receives a payment provider's notification as it should be received:** each one kept as it came, the payment asked of Konnect itself, never the notification's or the browser's word, and each order paid once, by its reference. Its README says why each rule is there. Here it runs against `ff local konnect`, its order paid at the stand-in's page and its webhook tried against each fault.
 
-The `ff` suite's `template_*` sections deploy each of the six on FF, call it and delete its stack, and run each here as its README says.
+The `ff` suite's `template_*` sections deploy each of the six after `sam` on FF, call it and delete its stack, and run each here as its README says.
 
 ### FF from your AI coding agent: ff mcp
 

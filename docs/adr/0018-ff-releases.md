@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| **Status** | Accepted: the [developer tools plan](../dev-tools-plan.md)'s D2 and its choices 3 and 4, confirmed on 2026-11-08 (the [decision log](../decisions.md)'s 72 and 73); the builds and the signatures measured by M-01's spikes the same day; the hash written by hand, your choice on 2026-11-09 (84) |
+| **Status** | Accepted: the [developer tools plan](../dev-tools-plan.md)'s D2 and its choices 3 and 4, confirmed on 2026-11-08 (the [decision log](../decisions.md)'s 72 and 73); the builds and the signatures measured by M-01's spikes the same day; the hash written by hand, your choice on 2026-11-09 (84). Built, every part of it, by M-03 and M-04 (below, under each "As built"); the first release waits for the signing key and the downloads site's bucket, which are yours to make (the plan's M-15) |
 | **Date** | 2026-11-09 |
-| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's parts 1, the builds and Windows, 2, the release job, 3, the downloads site and the install scripts, and 4, the update notice; M-04's part 1, the runtime images (below) |
+| **Implementation** | Developer tools plan: decision D2; tasks M-03 (the builds, the release, the downloads site, the update notice) and M-04 (the runtime images, `ff` in a customer's CI), whose last parts record here what was built; the CLI plan's C-41 to C-43. As built: M-03's parts 1, the builds and Windows, 2, the release job, 3, the downloads site and the install scripts, and 4, the update notice; M-04's parts 1, the runtime images, and 2, the CI examples (below); M-14 read them together with the guide |
 | **Related** | [ADR 0002](0002-cli.md) (the `ff` command); [ADR 0011](0011-static-sites.md) (the sites that serve the downloads); the spikes, [`hack/spikes/cross-build`](../../hack/spikes/cross-build/README.md) and [`hack/spikes/minisign`](../../hack/spikes/minisign/README.md) |
 
 ## Context
@@ -144,6 +144,13 @@ Each release pins its two images by digest in a manifest, in place of the two co
 - **The release job's `images` job** runs before the builds, which take its manifest. `hack/release.sh` signs the archives the manifest names, lists them in `SHA256SUMS`, and refuses a release where one is missing or isn't a file of `images/`. The site serves them under `images/`; GitHub's release holds a copy. The site holds the latest release's alone: an older `ff` pulls its own from `ghcr.io`, or finds it on the machine.
 - **`ghcr.io`'s packages** may be private when the first release pushes them: making them public is yours, once (the guide's "A release of `ff`"). Until then, a pull is refused and `ff local` loads the archive.
 - **`ff sites deploy` uploads each archive in one request,** as it uploads every file, held in memory: 43 MiB for Python's, 83 MiB for Node.js's, as measured.
+
+### As built (M-04, part 2): `ff` in a customer's CI
+
+- **`examples/ci/github-actions.yml` and `gitlab-ci.yml`** deploy a repository's `template.yaml` at each push to its main branch: `ff` installed from the downloads site by `install.sh`, then `ff deploy template.yaml --yes --output json`, with `FF_ENDPOINT`, `FF_DOWNLOADS_URL` and the secret `FF_TOKEN`, a key with `stacks:read`, `stacks:write`, `functions:read` and `functions:write`.
+- **A failure fails the job with `ff`'s code and its message,** read from the error document on stderr: on GitHub as the job's error annotation, a 6 titled as the account's refusal; on GitLab as the log's last line. GitHub's job lists the stack's outputs in its summary.
+- **GitLab's image is Alpine with minisign,** so that `install.sh` checks the signatures there too; GitHub's runner checks the SHA-256.
+- **The site serves both under `ci/`,** its page linking them, as §5 says; actionlint checks the GitHub one in `static`, and the `ff` suite's `ci` section runs each example's own lines, read from its file, against a release on a site FF serves, with a deploy's key and then a reader's, which is refused.
 
 ## Consequences
 

@@ -1,8 +1,8 @@
 # `ff`, FF's command-line tool
 
-One Rust binary that deploys, invokes and reads FF's functions, through FF's API only: no storage keys, no cluster access ([ADR 0002](../docs/adr/0002-cli.md)). It is being built task by task, as the [CLI plan](../docs/cli-plan.md) says; its progress log says what works.
+One Rust binary that deploys, invokes and reads FF's functions, through FF's API only: no storage keys, no cluster access ([ADR 0002](../docs/adr/0002-cli.md)). The [CLI plan](../docs/cli-plan.md) and the [developer tools plan](../docs/dev-tools-plan.md) built it task by task; their progress logs say how, and the getting-started guide's [developer's tools](../docs/getting-started.md#3-use-ff) how to use it.
 
-## Commands so far
+## Commands
 
 | Command | What it does |
 |---|---|
@@ -253,7 +253,7 @@ Rust 1.91.0, which `rust-toolchain.toml` names: rustup installs it on first use 
 
 ```bash
 cargo build --release --locked                                    # target/release/ff
-cargo build --release --locked --target x86_64-unknown-linux-musl  # a static binary, with musl-gcc installed
+../hack/build-cli.sh                                              # a static Linux binary, through zig: target/dist/ff-linux-x86_64
 cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked                                                # unit tests, then the binary's own (tests/)
 ```

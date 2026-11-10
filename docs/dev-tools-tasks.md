@@ -100,8 +100,8 @@ Each task, or part of one, is one commit with its tests and its documents, as th
   - [x] part 3, `ff trace <id>` as a timeline, `ff logs --trace <id>` across functions, `ff history`'s column; the console's "Trace" link on a history row, checked in a browser at a phone's width; `cargo test` and the console's Vitest with the DTO's name mirrored; the templates' two lines that pass the ID on, the SDK's middleware in Node.js and botocore's hook in Python, with a test each; the guide's page "Following one request".
 
 ### Phase 6: close
-- [ ] **M-14** Documentation:
-  - [ ] the guide's pages, each written with its task, read together here: installing `ff`, logging in, the whole app on your laptop, the templates, `ff mcp`, `ff` in your CI, the status page, following one request; a French page for the developer's tools under `fr/`, linked from `fr/README.md`; `cli/README.md`; the CLI plan's C-40 to C-43 marked done and its §10's questions 3, 5 and 7 answered; ADR 0018 as built; `docs/README.md`'s rows; `hack/check-docs.py` on all of it.
+- [x] **M-14** Documentation:
+  - [x] the guide's pages, each written with its task, read together here: installing `ff`, logging in, the whole app on your laptop, the templates, `ff mcp`, `ff` in your CI, the status page, following one request; a French page for the developer's tools under `fr/`, linked from `fr/README.md`; `cli/README.md`; the CLI plan's C-40 to C-43 marked done and its §10's questions 3, 5 and 7 answered; ADR 0018 as built; `docs/README.md`'s rows; `hack/check-docs.py` on all of it.
 - [ ] **M-15** The step closed:
   - [ ] part 1, the branch merged into `master` after a green run of every job, and the first release tagged (`ff-v0.1.0`, `cli/Cargo.toml`'s version today, or the one you choose), its files on the downloads site;
   - [ ] part 2, the development server: installed by hand once more with `install.sh`, both databases dumped first, the updater and the status page with it; then the updater takes over, its first update logged; with your go-ahead;
