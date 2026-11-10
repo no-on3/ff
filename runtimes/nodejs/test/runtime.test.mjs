@@ -11,6 +11,8 @@ import path from 'node:path';
 import { after, describe, it } from 'node:test';
 
 const root = path.resolve(import.meta.dirname, '..');
+/** A trace as the backend sends one in X-FF-Trace-Id. */
+const TRACE = '1-6730a1f2-0123456789abcdef01234567';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const running = new Set();
 
@@ -193,6 +195,32 @@ describe('successful invocations', () => {
     await rt.stop();
   });
 
+  it("sets _X_AMZN_TRACE_ID for each call, as Lambda does: X-FF-Trace-Id's trace, else a new one, each call's Parent its own", async () => {
+    const rt = await startRuntime('trace');
+    await readyz(rt, 200);
+    const other = '1-6730a1f3-fedcba9876543210fedcba98';
+    const lambdaValue = (root) => new RegExp(`^Root=${root};Parent=[0-9a-f]{16};Sampled=0$`);
+
+    const given = await invoke(rt, {}, { 'x-ff-trace-id': TRACE });
+    const again = await invoke(rt, {}, { 'x-ff-trace-id': TRACE });
+    const next = await invoke(rt, {}, { 'x-ff-trace-id': other });
+    const seconds = Math.floor(Date.now() / 1000);
+    const none = await invoke(rt, {});
+    const malformed = await invoke(rt, {}, { 'x-ff-trace-id': 'Root=1-6730a1f2-0123456789abcdef01234567' });
+
+    assert.match(given.json.trace, lambdaValue(TRACE));
+    assert.match(again.json.trace, lambdaValue(TRACE));
+    assert.notEqual(again.json.trace, given.json.trace);
+    assert.match(next.json.trace, lambdaValue(other));
+    for (const res of [none, malformed]) {
+      const [, root, time] = res.json.trace.match(/^Root=(1-([0-9a-f]{8})-[0-9a-f]{24});/) ?? [];
+      assert.match(res.json.trace, lambdaValue(root));
+      assert.ok(Math.abs(parseInt(time, 16) - seconds) <= 5, res.json.trace);
+    }
+    assert.notEqual(none.json.trace.slice(0, 40), malformed.json.trace.slice(0, 40));
+    await rt.stop();
+  });
+
   // The compiler is about 9 MB of JavaScript, the longest step of a cold start at 0.1 CPU: only a .ts file loads it.
   it('loads the TypeScript compiler for a .ts handler only', async () => {
     const rt = await startRuntime('ts-compiler');
@@ -365,13 +393,13 @@ describe('function errors', () => {
     const rt = await startRuntime('throws');
     await readyz(rt, 200);
 
-    await invoke(rt, {}, { 'x-ff-request-id': 'req-err' });
+    await invoke(rt, {}, { 'x-ff-request-id': 'req-err', 'x-ff-trace-id': TRACE });
 
     const [line] = logLines(rt, 'function error');
     assert.ok(line, `no "function error" line in:\n${rt.logs()}`);
     assert.deepEqual(
-      { requestId: line.requestId, errorType: line.errorType, errorMessage: line.errorMessage, level: line.level },
-      { requestId: 'req-err', errorType: 'TypeError', errorMessage: 'bad input', level: 'error' },
+      { requestId: line.requestId, traceId: line.traceId, errorType: line.errorType, errorMessage: line.errorMessage, level: line.level },
+      { requestId: 'req-err', traceId: TRACE, errorType: 'TypeError', errorMessage: 'bad input', level: 'error' },
     );
     // Line 2 of function.ts: the source map is applied, and the runtime's own frames are left out.
     assert.match(line.stackTrace[0], /function\.ts:2:\d+/);
@@ -434,10 +462,10 @@ describe('timeouts and crashes recycle the worker', () => {
     const rt = await startRuntime('async-timeout', { FUNCTION_TIMEOUT: '300' });
     await readyz(rt, 200);
 
-    await invoke(rt, {}, { 'x-ff-request-id': 'req-slow' });
+    await invoke(rt, {}, { 'x-ff-request-id': 'req-slow', 'x-ff-trace-id': TRACE });
 
     const [line] = logLines(rt, 'task timed out; restarting worker');
-    assert.deepEqual([line?.requestId, line?.timeoutMs], ['req-slow', 300]);
+    assert.deepEqual([line?.requestId, line?.traceId, line?.timeoutMs], ['req-slow', TRACE, 300]);
     const stdout = rt.stdout();
     assert.ok(stdout.indexOf('"task timed out') < stdout.indexOf('END RequestId: req-slow'), stdout);
     await rt.stop();
@@ -795,9 +823,9 @@ describe("what a caller of Lambda's Invoke asks for: the call's log's tail, its 
     const late = await invoke(timesOut, {}, { 'x-ff-request-id': 'req-late', 'x-ff-log-type': 'Tail' });
 
     assert.equal(threw.status, 500);
-    assert.match(tailOf(threw).toString('utf8'), /"msg":"function error","requestId":"req-threw","errorType":"TypeError"[^\n]*\nEND RequestId: req-threw\n/);
+    assert.match(tailOf(threw).toString('utf8'), /"msg":"function error","requestId":"req-threw","traceId":"1-[0-9a-f]{8}-[0-9a-f]{24}","errorType":"TypeError"[^\n]*\nEND RequestId: req-threw\n/);
     assert.equal(late.status, 504);
-    assert.match(tailOf(late).toString('utf8'), /"msg":"task timed out; restarting worker","requestId":"req-late"[\s\S]*\nEND RequestId: req-late\n/);
+    assert.match(tailOf(late).toString('utf8'), /"msg":"task timed out; restarting worker","requestId":"req-late","traceId":"1-[0-9a-f]{8}-[0-9a-f]{24}"[\s\S]*\nEND RequestId: req-late\n/);
     await throws.stop();
     await timesOut.stop();
   });

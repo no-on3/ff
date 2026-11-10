@@ -89,6 +89,7 @@ class Call:
     """One call of POST /invoke, as its request asked for it."""
 
     request_id: str
+    trace_id: str  # the call's trace, X-FF-Trace-Id's, else a new one, which the worker sets in _X_AMZN_TRACE_ID
     event: object
     client_context: dict | None = None  # Lambda's ClientContext, the JSON object the caller sent; None when it sent none
     tail: LogTail | None = None  # the call's log, kept while it runs when the caller asked for its tail
@@ -273,7 +274,8 @@ class Supervisor:
         OUTPUT.line(f"START RequestId: {request_id} Version: {FUNCTION_VERSION}")
         started = time.perf_counter()
         try:
-            protocol.send(sock, "invoke", request_id, call.event, time.time() * 1000 + TIMEOUT_MS, call.client_context)
+            protocol.send(sock, "invoke", request_id, call.event, time.time() * 1000 + TIMEOUT_MS, call.client_context,
+                          call.trace_id)
             message = protocol.recv(sock) if protocol.wait_readable(sock, TIMEOUT_MS / 1000) else ["timeout"]
         except (EOFError, OSError):
             message = ["exited"]
@@ -295,20 +297,21 @@ class Supervisor:
             replace = error_type == "Runtime.OutOfMemory"  # the worker exits after reporting it
             if replace:  # the same line as the Node.js runtime writes
                 log(level="error", msg="function worker crashed; restarting", errorType=error_type,
-                    errorMessage=error_message, requestId=request_id)
+                    errorMessage=error_message, requestId=request_id, traceId=call.trace_id)
         elif message[0] == "timeout":
             status, error_type = 504, "Sandbox.Timedout"
             error_message = f"Task timed out after {TIMEOUT_MS / 1000:.2f} seconds"
             self.stop_worker(process, sock)
             streams.wait_for_end(OUTPUT_WAIT_S)  # what the call wrote before it was stopped comes first
-            log(level="error", msg="task timed out; restarting worker", requestId=request_id, timeoutMs=TIMEOUT_MS)
+            log(level="error", msg="task timed out; restarting worker", requestId=request_id, traceId=call.trace_id,
+                timeoutMs=TIMEOUT_MS)
             replace = True
         elif message[0] == "exited":
             # The socket closes while the interpreter is still exiting: wait for its exit status.
             status, (error_type, error_message) = 500, crash_error(self.stop_worker(process, sock, grace_s=2))
             streams.wait_for_end(OUTPUT_WAIT_S)
             log(level="error", msg="function worker crashed; restarting", errorType=error_type,
-                errorMessage=error_message, requestId=request_id)
+                errorMessage=error_message, requestId=request_id, traceId=call.trace_id)
             replace = True
         if status != 200:
             headers["x-ff-function-error"] = "Unhandled"
@@ -425,6 +428,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.send_json(*SUPERVISOR.invoke(Call(
                 request_id=self.headers.get("x-ff-request-id") or str(uuid.uuid4()),
+                trace_id=protocol.trace_id_of(self.headers.get("x-ff-trace-id")),
                 event=body if protocol.EVENT_FORMAT == "lambda" else self.wrapped(body, url),
                 client_context=client_context,
                 tail=LogTail() if self.headers.get("x-ff-log-type") == "Tail" else None,

@@ -1362,11 +1362,15 @@ section_def from_package section_from_package package budget=30
 section_environment() {
 section "environment variables"
 # A variable of its own for the function, as each section's: the usage section reads $python_id, the Python function's.
-reader='export async function handler() { return { table: process.env.TABLE ?? null, tz: process.env.TZ }; }'
+reader='export async function handler() { return { table: process.env.TABLE ?? null, tz: process.env.TZ, trace: process.env._X_AMZN_TRACE_ID }; }'
 created="$(http POST /functions "$(jq -n --arg code "$reader" '{name: "e2e-environment", runtime: "nodejs", code: $code, memory: 128, timeout: 5, environment: {TABLE: "orders"}}')")"
 check "a function created with a variable answers with it" "201 ACTIVE orders" "$(status) $(jq -r '"\(.status) \(.environment.TABLE)"' <<<"$created")"
 env_fn="$(jq -r .id <<<"$created")"
 check "the function reads it, in UTC by default" "orders UTC" "$(http POST "/functions/$env_fn/invoke" '{"input":{}}' | jq -r '"\(.output.table) \(.output.tz)"')"
+env_trace="$(new_trace)"
+check "  ... and its call's trace in _X_AMZN_TRACE_ID, as Lambda sets it: the caller's Root, a Parent of the call's own, Sampled=0" true \
+  "$(http POST "/functions/$env_fn/invoke" '{"input":{}}' -H "X-Amzn-Trace-Id: Root=$env_trace" |
+    jq -r --arg root "$env_trace" '.output.trace | test("^Root=" + $root + ";Parent=[0-9a-f]{16};Sampled=0$")')"
 check "GET answers with it; the list doesn't load it" "orders null" \
   "$(http GET "/functions/$env_fn" | jq -r .environment.TABLE) $(http GET /functions | jq -r --arg id "$env_fn" '.[] | select(.id == $id) | .environment')"
 http PUT "/functions/$env_fn" '{"environment": {"TABLE": "invoices", "TZ": "Africa/Tunis"}}' >/dev/null
@@ -1396,7 +1400,8 @@ section "secrets"
 sec_reader='import os
 
 def handler(event, context):
-    return {"user": os.environ.get("DB_USER"), "password": os.environ.get("DB_PASSWORD"), "token": os.environ.get("API_TOKEN")}
+    return {"user": os.environ.get("DB_USER"), "password": os.environ.get("DB_PASSWORD"), "token": os.environ.get("API_TOKEN"),
+            "trace": os.environ.get("_X_AMZN_TRACE_ID")}
 '
 created="$(http POST /functions "$(jq -n --arg code "$sec_reader" '{name: "e2e-secrets", runtime: "python", code: $code, memory: 128, timeout: 5,
   environment: {DB_USER: "ff"}, secrets: {DB_PASSWORD: "e2e-first-password"}}')")"
@@ -1405,6 +1410,10 @@ check "a function created with a secret answers with its variable, never the sec
 sec_fn="$(jq -r .id <<<"$created")"
 check "the Python function reads both, as variables" "ff e2e-first-password null" \
   "$(http POST "/functions/$sec_fn/invoke" '{"input":{}}' | jq -r '"\(.output.user) \(.output.password) \(.output.token)"')"
+sec_trace="$(new_trace)"
+check "  ... and its call's trace in _X_AMZN_TRACE_ID, as Lambda's Python runtime sets it" true \
+  "$(http POST "/functions/$sec_fn/invoke" '{"input":{}}' -H "X-Amzn-Trace-Id: Root=$sec_trace" |
+    jq -r --arg root "$sec_trace" '.output.trace | test("^Root=" + $root + ";Parent=[0-9a-f]{16};Sampled=0$")')"
 http GET "/functions/$sec_fn/secrets" >/dev/null
 check "GET .../secrets names it, with when it was set, never its value" '200 ["DB_PASSWORD"] true 0' \
   "$(status) $(jq -c '[.secrets[].name]' "$work/body") $(jq -r '.secrets[0].updatedAt | test("^20[0-9-]{8}T")' "$work/body") $(grep -c e2e-first-password "$work/body")"

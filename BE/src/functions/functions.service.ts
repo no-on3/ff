@@ -1320,6 +1320,7 @@ export class FunctionsService {
     // The history keeps a capped copy of the input, output and error (P-45); the caller gets them whole.
     const keptInput = keptJson(options.history === undefined ? payload : options.history);
     const requestId = options.requestId ?? randomUUID();
+    const traceId = options.traceId ?? newTraceId();
     const attempt = options.attempt ?? 1;
     const invocation = this.invocationsRepository.create({
       // A request's first attempt is the invocation of its ID, as every call before retries was; a retry is an invocation of its own.
@@ -1330,7 +1331,7 @@ export class FunctionsService {
       source: options.source,
       version: running.version ?? null,
       alias: alias ?? null,
-      traceId: options.traceId ?? newTraceId(),
+      traceId,
       trigger: options.trigger ?? null,
       input: keptInput.value,
       inputTruncated: keptInput.truncated,
@@ -1352,7 +1353,7 @@ export class FunctionsService {
       // A version's first call, or its first since it went idle, makes its pods of its workload whole; $LATEST at
       // zero starts with a fresh key when its key is due a renewal.
       const start = version ? () => this.versionWorkload(running, version.version) : () => this.withFreshKey(function_.id);
-      const result = await this.orchestrator.invoke(running, payload, { requestId: invocation.requestId, start, ...options.asks });
+      const result = await this.orchestrator.invoke(running, payload, { requestId: invocation.requestId, traceId, start, ...options.asks });
       const duration = Date.now() - startTime;
 
       // Record metrics (end-to-end latency, as seen by callers)

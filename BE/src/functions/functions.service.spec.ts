@@ -1167,14 +1167,15 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(created().requestId).toBe(created().id);
     });
 
-    it("records an asynchronous call's retry as an invocation of its own, under the request's ID with its attempt, which the runtime and the record name", async () => {
+    it("records an asynchronous call's retry as an invocation of its own, under the request's ID with its attempt and in its trace, which the runtime and the record name", async () => {
       orchestrator.invoke.mockResolvedValue({ output: 'done', durationMs: 4 });
+      const traceId = '1-6730a1f2-0123456789abcdef01234567';
 
-      const outcome = await service.call(activeFunction(), { n: 1 }, { source: InvocationSource.ASYNC, requestId: 'req-3', attempt: 2 });
+      const outcome = await service.call(activeFunction(), { n: 1 }, { source: InvocationSource.ASYNC, requestId: 'req-3', attempt: 2, traceId });
 
-      expect(outcome.invocation).toMatchObject({ requestId: 'req-3', attempt: 2, source: InvocationSource.ASYNC, status: InvocationStatus.COMPLETED });
+      expect(outcome.invocation).toMatchObject({ requestId: 'req-3', attempt: 2, traceId, source: InvocationSource.ASYNC, status: InvocationStatus.COMPLETED });
       expect(outcome.invocation.id).toMatch(UUID);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, { requestId: 'req-3', start: expect.any(globalThis.Function) });
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { n: 1 }, { requestId: 'req-3', traceId, start: expect.any(globalThis.Function) });
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-3' }), ending);
     });
 
@@ -1194,7 +1195,13 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       expect(inserted).toEqual([
         expect.objectContaining({ id: 'req-1', source: InvocationSource.URL, input: { version: '2.0', headers: { authorization: '***' } }, status: InvocationStatus.RUNNING }),
       ]);
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, { requestId: 'req-1', start: expect.any(globalThis.Function) });
+      // A trace of its own, as the caller named none: the one its record keeps.
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), event, {
+        requestId: 'req-1',
+        traceId: outcome.invocation.traceId,
+        start: expect.any(globalThis.Function),
+      });
+      expect(outcome.invocation.traceId).toMatch(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/);
       expect(outcome).toMatchObject({ ok: true, output: { statusCode: 204 }, invocation: { id: 'req-1', status: InvocationStatus.COMPLETED } });
       expect(usage.record).toHaveBeenCalledWith(expect.objectContaining({ requestId: 'req-1' }), ending);
     });
@@ -1216,8 +1223,8 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       const failed = await service.call(activeFunction(), {}, { source: InvocationSource.API, requestId: 'req-5', asks: { logTail: true } });
 
       expect(orchestrator.invoke.mock.calls.map(([, , options]) => options)).toEqual([
-        { requestId: 'req-4', start: expect.any(globalThis.Function), logTail: true, clientContext: 'e30=' },
-        { requestId: 'req-5', start: expect.any(globalThis.Function), logTail: true },
+        { requestId: 'req-4', traceId: answered.invocation.traceId, start: expect.any(globalThis.Function), logTail: true, clientContext: 'e30=' },
+        { requestId: 'req-5', traceId: failed.invocation.traceId, start: expect.any(globalThis.Function), logTail: true },
       ]);
       expect(answered).toMatchObject({ ok: true, output: { n: 1 }, outputJson: '{ "n": 1 }', logResult: 'U1RBUlQK' });
       expect(failed).toMatchObject({ ok: false, visible: 'TypeError: bad input', logResult: 'RU5ECg==' });
@@ -1241,7 +1248,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1', { a: 1 });
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, { requestId: created().requestId, start: expect.any(globalThis.Function) });
+      expect(orchestrator.invoke).toHaveBeenCalledWith(fn, { a: 1 }, { requestId: created().requestId, traceId: created().traceId, start: expect.any(globalThis.Function) });
       expect(invocation).toMatchObject({
         status: InvocationStatus.COMPLETED,
         output: { hello: 'world' },
@@ -1280,7 +1287,7 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
 
       const invocation = await service.invoke('user-1', 'fn-1');
 
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, { requestId: created().requestId, start: expect.any(globalThis.Function) });
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.anything(), {}, { requestId: created().requestId, traceId: created().traceId, start: expect.any(globalThis.Function) });
       expect(invocation.duration).toBeGreaterThanOrEqual(0);
     });
 
@@ -1839,7 +1846,11 @@ describe('FunctionsService (orchestrator-agnostic)', () => {
       await service.invoke('user-1', 'fn-1', { name: 'x' });
 
       // $LATEST's pods are there: nothing to make at a cold start.
-      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, { requestId: created().requestId, start: expect.any(globalThis.Function) });
+      expect(orchestrator.invoke).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), { name: 'x' }, {
+        requestId: created().requestId,
+        traceId: created().traceId,
+        start: expect.any(globalThis.Function),
+      });
       expect(usage.record).toHaveBeenCalledWith(
         {
           requestId: created().requestId,

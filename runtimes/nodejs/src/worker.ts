@@ -10,6 +10,7 @@ import { pathToFileURL } from 'node:url';
 import { parentPort, workerData } from 'node:worker_threads';
 import { END_OF_CALL } from './protocol';
 import type { FunctionError, InvokeMessage, WorkerConfig, WorkerMessage } from './protocol';
+import { lambdaTraceHeader } from './trace';
 import { registerTypeScript } from './ts-hook';
 
 type Handler = (event: unknown, context: unknown) => unknown;
@@ -164,6 +165,8 @@ port.on('message', async (message: InvokeMessage) => {
 
 /** Runs the handler once: the result message, the handler's value as JSON, or its error. */
 async function run(handler: Handler, message: InvokeMessage): Promise<WorkerMessage> {
+  // Set for each call, as Lambda's Node.js runtime sets it: this thread's environment is its own, and runs one call.
+  process.env._X_AMZN_TRACE_ID = lambdaTraceHeader(message.traceId);
   const context = {
     functionName: config.functionName,
     functionVersion: config.functionVersion,

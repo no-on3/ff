@@ -134,6 +134,11 @@ export interface InvokeOptions {
    */
   requestId?: string;
   /**
+   * The call's trace, in AWS X-Ray's format, which goes to the runtime (X-FF-Trace-Id), so that the function gets it in
+   * _X_AMZN_TRACE_ID, as on Lambda, and its log lines name it.
+   */
+  traceId?: string;
+  /**
    * What a cold start starts from, which the call asks for only then: a version's workload whole, its code image and
    * environment, when the version has nothing to run on (its first call, or its first since it went idle); $LATEST's
    * at zero with a fresh key when its key is due a renewal, else nothing, its Deployment then scaled up as it is.

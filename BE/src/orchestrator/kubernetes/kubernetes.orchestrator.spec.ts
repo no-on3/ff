@@ -967,15 +967,16 @@ describe('KubernetesOrchestrator', () => {
     });
 
     describe("what a caller of Lambda's Invoke asks for", () => {
-      it("asks the runtime for the call's log and passes the caller's client context on, and neither when not asked", async () => {
+      it("asks the runtime for the call's log and passes the caller's client context and the call's trace on, and none when not asked", async () => {
         api.objects.set(deploymentPath, rolledOut(1));
         api.responses.push({ status: 200, headers: { 'x-ff-log-result': 'U1RBUlQK' }, body: '{ "spaced" : 1 }' }, { status: 200, headers: {}, body: '' });
 
-        const asked = await orchestrator.invoke(fn, {}, { requestId: 'inv-1', logTail: true, clientContext: 'e30=' });
+        const traceId = '1-6730a1f2-0123456789abcdef01234567';
+        const asked = await orchestrator.invoke(fn, {}, { requestId: 'inv-1', traceId, logTail: true, clientContext: 'e30=' });
         const plain = await orchestrator.invoke(fn, {}, { requestId: 'inv-2' });
 
         expect(api.requests.map((request) => request.options?.headers)).toEqual([
-          { 'x-ff-request-id': 'inv-1', 'x-ff-log-type': 'Tail', 'x-ff-client-context': 'e30=' },
+          { 'x-ff-request-id': 'inv-1', 'x-ff-trace-id': traceId, 'x-ff-log-type': 'Tail', 'x-ff-client-context': 'e30=' },
           { 'x-ff-request-id': 'inv-2' },
         ]);
         // The answer as the runtime sent it, its spacing kept; an empty one is null, as its output.

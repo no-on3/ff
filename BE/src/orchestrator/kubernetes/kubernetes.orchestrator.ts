@@ -115,6 +115,8 @@ const NOT_RUN_HEADER = 'x-ff-not-run';
 /** What a call asks of both runtimes, as Lambda's LogType and ClientContext, and the log they give back (their protocol 3). */
 const LOG_TYPE_HEADER = 'x-ff-log-type';
 const CLIENT_CONTEXT_HEADER = 'x-ff-client-context';
+/** The call's trace, which both runtimes give the function in _X_AMZN_TRACE_ID, as Lambda does, and name in their log lines. */
+const TRACE_ID_HEADER = 'x-ff-trace-id';
 const LOG_RESULT_HEADER = 'x-ff-log-result';
 
 /** The newest of the pods, by creation time; undefined when there are none. */
@@ -731,13 +733,14 @@ export class KubernetesOrchestrator implements Orchestrator {
     }
   }
 
-  private async post(fn: FunctionWorkload, payload: unknown, { requestId, logTail, clientContext }: InvokeOptions): Promise<KubeResponse> {
+  private async post(fn: FunctionWorkload, payload: unknown, { requestId, traceId, logTail, clientContext }: InvokeOptions): Promise<KubeResponse> {
     const ns = this.namespaceOf(fn);
     const name = workloadResourceName(fn);
     const body = JSON.stringify(payload);
     const headers: Record<string, string> = {
       // The runtime logs the call under this ID, and answers with it, so that its log, its record and its usage share it.
       ...(requestId ? { [REQUEST_ID_HEADER]: requestId } : {}),
+      ...(traceId ? { [TRACE_ID_HEADER]: traceId } : {}),
       ...(logTail ? { [LOG_TYPE_HEADER]: 'Tail' } : {}),
       ...(clientContext !== undefined ? { [CLIENT_CONTEXT_HEADER]: clientContext } : {}),
     };

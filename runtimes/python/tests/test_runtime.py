@@ -21,6 +21,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "fixtures"
+# A trace as the backend sends one in X-FF-Trace-Id.
+TRACE = "1-6730a1f2-0123456789abcdef01234567"
 sys.path.insert(0, str(ROOT))  # for the in-process tests
 
 
@@ -262,17 +264,44 @@ class SuccessfulInvocations(RuntimeTest):
         self.assertGreaterEqual(b["start"], a["end"], f"overlap: {a} {b}")
 
 
+class Traces(RuntimeTest):
+    def test_sets_x_amzn_trace_id_for_each_call_as_lambda_does_the_given_trace_else_a_new_one_each_call_s_parent_its_own(self):
+        rt = self.start("trace")
+        rt.ready()
+        other = "1-6730a1f3-fedcba9876543210fedcba98"
+
+        def lambda_value(root):
+            return rf"^Root={root};Parent=[0-9a-f]{{16}};Sampled=0$"
+
+        given = rt.invoke({}, {"x-ff-trace-id": TRACE}).json["trace"]
+        again = rt.invoke({}, {"x-ff-trace-id": TRACE}).json["trace"]
+        following = rt.invoke({}, {"x-ff-trace-id": other}).json["trace"]
+        seconds = int(time.time())
+        none = rt.invoke({}).json["trace"]
+        malformed = rt.invoke({}, {"x-ff-trace-id": f"Root={TRACE}"}).json["trace"]
+
+        self.assertRegex(given, lambda_value(TRACE))
+        self.assertRegex(again, lambda_value(TRACE))
+        self.assertNotEqual(again, given)
+        self.assertRegex(following, lambda_value(other))
+        for made in (none, malformed):
+            root = made.split(";")[0].removeprefix("Root=")
+            self.assertRegex(made, lambda_value(r"1-[0-9a-f]{8}-[0-9a-f]{24}"))
+            self.assertLessEqual(abs(int(root[2:10], 16) - seconds), 5, made)
+        self.assertNotEqual(none[:40], malformed[:40])
+
+
 class FunctionErrors(RuntimeTest):
     def test_maps_a_raised_exception_to_500_and_logs_its_traceback(self):
         rt = self.start("throws")
         rt.ready()
 
-        res = rt.invoke({})
+        res = rt.invoke({}, {"x-ff-trace-id": TRACE})
 
         self.assertFunctionError(res, 500, "TypeError")
         self.assertEqual(res.json, {"errorType": "TypeError", "errorMessage": "bad input"})
         error_log = next(json.loads(line) for line in rt.logs().splitlines() if '"function error"' in line)
-        self.assertEqual(error_log["errorType"], "TypeError")
+        self.assertEqual([error_log["errorType"], error_log["traceId"]], ["TypeError", TRACE])
         self.assertIn("function.py", error_log["stackTrace"][0])
 
     def test_rejects_responses_above_6_mb(self):
@@ -723,13 +752,15 @@ class WhatLambdasCallerAsksFor(RuntimeTest):
         times_out.ready()
 
         raised = raises.invoke({}, {"x-ff-request-id": "req-raised", "x-ff-log-type": "Tail"})
-        late = times_out.invoke({}, {"x-ff-request-id": "req-late", "x-ff-log-type": "Tail"})
+        late = times_out.invoke({}, {"x-ff-request-id": "req-late", "x-ff-trace-id": TRACE, "x-ff-log-type": "Tail"})
 
         self.assertFunctionError(raised, 500, "TypeError")
         self.assertRegex(self.tail_of(raised),
-                         r'"msg": "function error", "requestId": "req-raised", "errorType": "TypeError"[^\n]*\nEND RequestId: req-raised\n')
+                         r'"msg": "function error", "requestId": "req-raised", "traceId": "1-[0-9a-f]{8}-[0-9a-f]{24}", '
+                         r'"errorType": "TypeError"[^\n]*\nEND RequestId: req-raised\n')
         self.assertFunctionError(late, 504, "Sandbox.Timedout")
-        self.assertRegex(self.tail_of(late), r'(?s)"msg": "task timed out; restarting worker", "requestId": "req-late".*\nEND RequestId: req-late\n')
+        self.assertRegex(self.tail_of(late),
+                         r'(?s)"msg": "task timed out; restarting worker", "requestId": "req-late", "traceId": "' + TRACE + r'".*\nEND RequestId: req-late\n')
 
     def test_hands_the_caller_s_client_context_to_the_handler_as_lambda_s_objects_and_refuses_one_that_is_no_json_object(self):
         rt = self.start("client-context")

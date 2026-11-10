@@ -27,6 +27,7 @@ import type { EventFormat, FunctionError, WorkerConfig, WorkerMessage } from './
 import { LogTail } from './log-tail';
 import type { Stream } from './log-tail';
 import { OutputRelay } from './relay';
+import { traceIdOf } from './trace';
 
 type ResultMessage = Extract<WorkerMessage, { type: 'result' }>;
 
@@ -113,6 +114,8 @@ try {
 interface Invocation {
   id: number;
   requestId: string;
+  /** The call's trace: X-FF-Trace-Id's, else a new one (trace.ts). */
+  traceId: string;
   event: unknown;
   res: http.ServerResponse;
   startedAt?: number;
@@ -325,6 +328,7 @@ function complete(inv: Invocation): void {
       level: 'error',
       msg: 'function error',
       requestId: inv.requestId,
+      traceId: inv.traceId,
       errorType: message.errorType,
       errorMessage: message.errorMessage,
       stackTrace: message.stackTrace,
@@ -358,7 +362,7 @@ function onCrash(errorType: string, errorMessage: string): void {
     complete(inv);
     inv = undefined;
   }
-  log({ level: 'error', msg: 'function worker crashed; restarting', errorType, errorMessage, requestId: inv?.requestId });
+  log({ level: 'error', msg: 'function worker crashed; restarting', errorType, errorMessage, requestId: inv?.requestId, traceId: inv?.traceId });
   if (inv) {
     finish(inv);
     respondError(inv, 500, { errorType, errorMessage });
@@ -383,7 +387,7 @@ function finish(inv: Invocation): void {
 function onTimeout(inv: Invocation): void {
   if (current !== inv) return;
   // Before END, as the Python runtime writes it: the log store tags a call's lines up to its REPORT.
-  log({ level: 'error', msg: 'task timed out; restarting worker', requestId: inv.requestId, timeoutMs });
+  log({ level: 'error', msg: 'task timed out; restarting worker', requestId: inv.requestId, traceId: inv.traceId, timeoutMs });
   finish(inv);
   respondError(inv, 504, {
     errorType: 'Sandbox.Timedout',
@@ -414,6 +418,7 @@ function dispatch(): void {
     type: 'invoke',
     id: inv.id,
     requestId: inv.requestId,
+    traceId: inv.traceId,
     event: inv.event,
     deadlineMs: Date.now() + timeoutMs,
     clientContext: inv.clientContext,
@@ -497,6 +502,7 @@ async function acceptInvocation(req: http.IncomingMessage, res: http.ServerRespo
   const inv: Invocation = {
     id: nextId++,
     requestId: headerOf(req.headers['x-ff-request-id']) || randomUUID(),
+    traceId: traceIdOf(headerOf(req.headers['x-ff-trace-id'])),
     res,
     ...(headerOf(req.headers['x-ff-log-type']) === 'Tail' ? { tail: new LogTail() } : {}),
     ...(clientContext !== undefined ? { clientContext } : {}),
