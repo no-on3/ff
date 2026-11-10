@@ -69,6 +69,7 @@ They come from the proxy's own authority: one certificate for `*.fn.dev.ffunc.cl
 | `install.sh` | From a checkout: the copy, `server.sh`, `smoke.sh` |
 | `server.sh` | On the server, as root: everything above, step by step |
 | `smoke.sh` | On the server, as root: a customer's path through the proxy, then nothing of it left |
+| `lib.sh` | What the scripts on the server share: FF's names, Keycloak's administration, a user signed in as a browser signs in, FF's API and `ff` as that user |
 | `docker-compose.yml` | What runs beside the cluster, installed as `/data/ff/docker-compose.yml`; `server.sh` writes its `.env` |
 | `k8s/` | The overlay of `deploy/k8s/platform` with FF's names under `dev.ffunc.cloud`, the edge's Service at its fixed address, the services beside the cluster, and the CAs of customers' database, cache and mail servers mounted for the backend |
 | `ff.caddy` | The route, which `server.sh` fills in with the edge's root and installs as `/data/proxy/sites/ff.caddy` |
