@@ -188,8 +188,7 @@ with zipfile.ZipFile(sys.argv[1], "w") as archive:
 check "a key that may change the account's functions, which AWS's tools sign with" 201 \
   "$(api "$customer" POST /storage-keys "{\"name\": \"smoke-$run-lambda\", \"functions\": [\"*\"], \"functionAccess\": \"write\"}")"
 lambda_key="$(jq -r .id "$work/page")"
-# FF's region, the backend's own, which k8s/backend.env leaves as it is.
-jq -r '"AWS_ACCESS_KEY_ID=\(.id)\nAWS_SECRET_ACCESS_KEY=\(.secretAccessKey)\nAWS_DEFAULT_REGION=tn-tunis-1\nAWS_CONFIG_FILE=/dev/null\nAWS_SHARED_CREDENTIALS_FILE=/dev/null"' \
+jq -r --arg region "$region" '"AWS_ACCESS_KEY_ID=\(.id)\nAWS_SECRET_ACCESS_KEY=\(.secretAccessKey)\nAWS_DEFAULT_REGION=\($region)\nAWS_CONFIG_FILE=/dev/null\nAWS_SHARED_CREDENTIALS_FILE=/dev/null"' \
   "$work/page" >"$work/lambda.env"
 lambda_zip "$work/made-1.zip" 1
 lambda_zip "$work/made-2.zip" 2

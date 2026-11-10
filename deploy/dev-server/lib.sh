@@ -12,6 +12,7 @@ proxy=/data/proxy
 # FF's names on this server, as the edge's settings give them (k8s/edge.env): api.<domain> and the others.
 domain="$(sed -n 's/^FF_API_HOST=api\.//p' "$lib_dir/k8s/edge.env")"
 [ -n "$domain" ] || { echo "$(basename "$0"): no FF_API_HOST=api.<domain> in k8s/edge.env" >&2; exit 1; }
+region=tn-tunis-1 # FF's region, the backend's own, which k8s/backend.env leaves as it is
 export KUBECONFIG=/etc/rancher/k3s/k3s.yaml PATH="/usr/local/bin:$PATH"
 hex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 
@@ -21,15 +22,21 @@ admin() { # <method> <path> [JSON file]: the answer's body in $work/admin-body; 
     --data-urlencode "password@$secrets/keycloak-admin-password" | jq -r '"authorization: Bearer " + .access_token' >"$work/admin-header"
   curl -sS -H "@$work/admin-header" -H 'content-type: application/json' -X "$1" ${3:+-d "@$3"} -o "$work/admin-body" -w '%{http_code}' "$kc$2"
 }
-users=() # each user make_user made, by ID, for the script to remove
-make_user() { # <username> <e-mail> [realm role]: the user's ID; its password in $work/<username>.password
-  head -c 18 /dev/urandom | base64 | tr -d '/+=\n' >"$work/$1.password"
-  jq -n --arg username "$1" --arg email "$2" --rawfile password "$work/$1.password" '{username: $username, email: $email,
+user_id() { # <username>: the user's ID, or nothing when the realm hasn't it
+  admin GET "/admin/realms/ff/users?username=$1&exact=true" >/dev/null
+  jq -r '.[0].id // empty' "$work/admin-body"
+}
+keycloak_user() { # <username> <e-mail> <password file>: the user made, with that password; its ID printed
+  jq -n --arg username "$1" --arg email "$2" --rawfile password "$3" '{username: $username, email: $email,
     emailVerified: true, enabled: true, firstName: "FF", lastName: ($username | split("@")[0]), credentials: [{type: "password", value: $password, temporary: false}]}' >"$work/user.json"
   [ "$(admin POST /admin/realms/ff/users "$work/user.json")" = 201 ] || fail "Keycloak didn't make $1: $(cat "$work/admin-body")"
-  admin GET "/admin/realms/ff/users?username=$1&exact=true" >/dev/null
+  user_id "$1"
+}
+users=() # each user make_user made, by ID, for the script to remove
+make_user() { # <username> <e-mail> [realm role]: a user of the script's own; its ID; its password in $work/<username>.password
+  head -c 18 /dev/urandom | base64 | tr -d '/+=\n' >"$work/$1.password"
   local id
-  id="$(jq -r '.[0].id' "$work/admin-body")"
+  id="$(keycloak_user "$1" "$2" "$work/$1.password")"
   users+=("$id")
   if [ -n "${3:-}" ]; then
     admin GET "/admin/realms/ff/roles/$3" >/dev/null

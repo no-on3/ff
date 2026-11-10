@@ -26,7 +26,8 @@ for file in "${FF_UPDATER_KEY:-}" "${FF_UPDATER_TOKEN:-}"; do
 done
 
 echo "== the checkout, to $host:/data/ff/src ($version)"
-ssh "$host" 'sudo install -d -o deploy -g deploy -m 0750 /data/ff /data/ff/src && sudo install -d -m 0700 /data/ff/updater'
+ssh "$host" 'sudo install -d -o deploy -g deploy -m 0751 /data/ff && sudo install -d -o deploy -g deploy -m 0750 /data/ff/src &&
+  sudo install -d -m 0700 /data/ff/updater'
 rsync -a --delete --filter=':- .gitignore' --exclude=.git --rsync-path='sudo -u deploy rsync' ./ "$host:/data/ff/src/"
 # <name> <file>: the file, given on stdin, as root's alone in the updater's folder; never on a command line.
 carry() {

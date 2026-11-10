@@ -4,8 +4,9 @@
 # mail, and customers' database, cache and mail servers beside the cluster, in Docker Compose; FF's passwords and
 # keys, made once, in /data/ff/secrets; the images built here and given to k3s, and ff for the smoke test; deploy/k8s
 # applied and the platform deployed by its deploy.sh; the first operator; FF's route in the server's own proxy
-# (/data/proxy); every hostname checked through that proxy; then the updater's timer. A step already done does
-# nothing, so that an update is the same run. No password is ever printed, or put on a command line.
+# (/data/proxy); every hostname checked through that proxy; then the status page's probe and the updater, each on a
+# timer. A step already done does nothing, so that an update is the same run. No password is ever printed, or put on
+# a command line.
 #   FF_VERSION=<the images' tag> FF_ADMIN_ALLOW=<address>/32 /data/ff/src/deploy/dev-server/server.sh
 set -euo pipefail
 home=/data/ff
@@ -52,7 +53,9 @@ host_address="$(ip -4 -o addr show docker0 | awk '{print $4}' | cut -d/ -f1)"
 [ -n "$host_address" ] || fail "no address on docker0, where the services beside the cluster listen"
 
 step "FF's passwords and keys, made once ($secrets)"
-install -d -o deploy -g deploy -m 0750 "$home"
+# Others may pass through FF's folder, and list nothing, so that the status page's probe reaches its own, status/:
+# everything else in it is deploy's or root's alone, by its own mode.
+install -d -o deploy -g deploy -m 0751 "$home"
 install -d -o deploy -g deploy -m 0700 "$secrets"
 # <name> <command...>: secrets/<name>, made by the command when there is none, readable by root and deploy alone.
 secret() {
@@ -65,7 +68,7 @@ password() { head -c 24 /dev/urandom | base64 | tr -d '/+=\n'; }
 hex() { head -c "$1" /dev/urandom | od -An -tx1 | tr -d ' \n'; }
 for name in postgres-password ff-db-password keycloak-db-password keycloak-admin-password operator-password \
   s3-secret-key registry-backend-password registry-node-password data-db-superuser-password data-db-admin-password \
-  grafana-password; do
+  grafana-password status-probe-password; do
   secret "$name" password
 done
 secret s3-access-key sh -c "printf 'ffdev%s' '$(hex 8)'"
@@ -438,6 +441,26 @@ FF_BUILD_COMMIT="$version" CARGO_BUILD_JOBS="$(($(nproc) / 2))" "$src/hack/build
   { tail -n 20 "$work/ff-build.log" >&2; fail "ff's build failed"; }
 echo "  $("$src/cli/target/dist/ff-linux-x86_64" version | head -1)"
 
+# <unit> <its folder> <when>: its service and its timer installed, systemd told when either changed, and the timer
+# started unless it runs.
+timer() {
+  local changed=false file
+  for file in "$1.service" "$1.timer"; do
+    write_if_changed "/etc/systemd/system/$file" "$(cat "$2/$file")" 0644 && changed=true
+  done
+  if $changed; then systemctl daemon-reload; fi
+  if systemctl is-enabled --quiet "$1.timer" && systemctl is-active --quiet "$1.timer"; then
+    echo "  its timer runs, $3"
+  else
+    systemctl enable --now --quiet "$1.timer"
+    echo "  its timer started, $3"
+  fi
+}
+
+step "the status page's probe: each piece of FF, as a customer meets it, every minute (status/, $home/status)"
+"$src/deploy/dev-server/status/setup.sh" || fail "the status page's probe wasn't set up"
+timer ff-status-probe "$src/deploy/dev-server/status" "every minute"
+
 step "the updater: master's newest commit that passed, installed at night (updater/update.sh, $home/updater)"
 # Its settings: the admin allow list, which it gives this script; the server's mail and the operator, for a failure.
 # Then the version installed, last, as everything above passed.
@@ -446,18 +469,8 @@ install -d -m 0700 "$updater"
 write_if_changed "$updater/settings" "admin_allow=$admin_allow
 mail=smtp://$host_address:1025
 operator=operator@$domain" 0600 || true
-units_changed=false
-for unit in ff-updater.service ff-updater.timer; do
-  write_if_changed "/etc/systemd/system/$unit" "$(cat "$src/deploy/dev-server/updater/$unit")" 0644 && units_changed=true
-done
-if $units_changed; then systemctl daemon-reload; fi
-# A failure stops the timer until someone looks; this script, run by hand once someone has, starts it again.
-if systemctl is-enabled --quiet ff-updater.timer && systemctl is-active --quiet ff-updater.timer; then
-  echo "  its timer runs, every 10 minutes"
-else
-  systemctl enable --now --quiet ff-updater.timer
-  echo "  its timer started, every 10 minutes"
-fi
+# A failure stops its timer until someone looks; this script, run by hand once someone has, starts it again.
+timer ff-updater "$src/deploy/dev-server/updater" "every 10 minutes"
 [ -s "$updater/deploy-key" ] || echo "  no deploy key, which install.sh carries: git reaches GitHub over HTTPS, as a public repository allows"
 [ -s "$updater/github-token" ] || echo "  no GitHub token, which install.sh carries: the workflow's runs asked as anyone, as a public repository allows"
 printf '%s\n' "$version" >"$updater/installed"

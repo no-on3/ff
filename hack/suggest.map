@@ -80,6 +80,7 @@ deploy/data-db/*                        static db security images l4:databases,d
 deploy/keycloak/*                       static security l5 cli:login images
 deploy/backup/*                         static security images platform
 deploy/dev-server/updater/*             static unit
+deploy/dev-server/status/*              static unit
 deploy/dev-server/*                     static platform
 infrastructure/*                        static l4 l5 cli
 
@@ -98,6 +99,7 @@ hack/e2e-platform.sh                    static platform
 hack/test-images.sh                     static images
 hack/test-sam-fixtures.sh               static unit
 hack/test-updater.sh                    static unit
+hack/test-status.sh                     static unit
 hack/test-evidence.sh                   static l3
 hack/k8s/test-it.sh                     static l3
 hack/lib/s3-clients/*                   static l4:buckets
