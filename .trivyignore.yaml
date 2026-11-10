@@ -2,11 +2,6 @@
 # from expired_at on, the scan reports it again. Anything else, anywhere, fails the scan.
 vulnerabilities:
   - id: CVE-2026-78661
-    paths: [usr/bin/caddy]
-    statement: >-
-      golang.org/x/net v0.60.0 in Caddy, which the console's, the admin app's and the edge's images build: a denial of service in x/net/html's parser. Their Caddyfiles serve built files and proxy requests, and none turns on a handler that parses HTML (templates, or a response body's rewrite): nothing reaches it. Fixed in v0.62.0 (2026-10-27), two weeks old on 2026-11-10: Caddy built with it then.
-    expired_at: 2026-11-10
-  - id: CVE-2026-78661
     paths: [usr/local/bin/wal-g]
     statement: >-
       WAL-G v3.0.9, the latest release (2026-08-20), was built with golang.org/x/net v0.58.0: a denial of service in x/net/html's parser. Here WAL-G reaches the second site's S3 and serves nothing, parsing no HTML: accepted, as its other advisories are, until a release built with v0.62.0 or newer, or WAL-G built from source with it (a cgo build, for libsodium). Only the reference servers of deploy/backup and deploy/data-db run it.
