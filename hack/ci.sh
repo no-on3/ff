@@ -227,7 +227,10 @@ stage_db() {
   admin="$(head -c 18 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')"
   s3_key="ci$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   ci_cleanups+=("docker rm -f -v $name $data $s3 $cache >/dev/null 2>&1 || true")
-  docker run -d --name "$name" -e POSTGRES_PASSWORD="$password" -p 127.0.0.1::5432 "$POSTGRES_IMAGE" >/dev/null
+  # A server thrown away after the stage: no commit waits for the disk, which on a spinning one held each suite's 84
+  # migrations past its hook's 20 s.
+  docker run -d --name "$name" -e POSTGRES_PASSWORD="$password" -p 127.0.0.1::5432 "$POSTGRES_IMAGE" \
+    -c fsync=off -c synchronous_commit=off -c full_page_writes=off >/dev/null
   port="$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')"
   # Customers' database server (ADR 0008), its certificate from a CA of its own, for the suites that make databases.
   docker build -q -t ff-data-db:ci "$repo/deploy/data-db" >/dev/null
