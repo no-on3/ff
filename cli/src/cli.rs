@@ -832,6 +832,10 @@ pub enum LocalCommand {
         /// The ID of its one wallet, which receiverWalletId must name
         #[arg(long, default_value = crate::local::konnect::DEFAULT_WALLET)]
         wallet: String,
+
+        /// How long each answer of its API waits first, a slow Konnect: a duration, such as 2s or 500ms
+        #[arg(long, value_name = "DURATION")]
+        delay: Option<String>,
     },
 }
 

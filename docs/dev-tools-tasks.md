@@ -80,7 +80,7 @@ Each task, or part of one, is one commit with its tests and its documents, as th
   - [x] part 4, the guide's page "FF from your AI coding agent": the one line for Claude Code, Cursor's and VS Code's JSON, what an agent may do; `cli/README.md`.
 - [ ] **M-10** `ff local konnect`, and the `webhook` template's tests (the plan's D6; the step-6 plan's D1):
   - [x] part 1, the server: `x-api-key` checked; `POST /payments/init-payment` with amounts in millimes, answering `payUrl` and `paymentRef`; `GET /payments/:id` answering `pending` or `completed`, as Konnect's documentation has no `failed`; the payer's page at `payUrl` with its two buttons and `?outcome=paid` or `failed`, which calls the merchant's webhook with `payment_ref` and sends the browser to the merchant's address; each answer naming its source document and section in a header; `cargo test` through the whole flow;
-  - [ ] part 2, the faults: `--delay`, a notification sent twice, one for a payment that doesn't exist, the webhook called before `GET /payments/:id` says `completed`;
+  - [x] part 2, the faults: `--delay`, a notification sent twice, one for a payment that doesn't exist, the webhook called before `GET /payments/:id` says `completed`;
   - [ ] part 3, the `webhook` template's tests through it, both runtimes, on `ff local` in the `ff` suite; the guide's section; the step-6 plan's D1 and G-05 pointed at it.
 
 ### Phase 4: the server and the public

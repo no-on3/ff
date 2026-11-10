@@ -58,6 +58,34 @@ const OWN_ERROR: Source = Source::Own("Konnect's documentation gives no error's 
 /// Nor the payer's page, which the stand-in makes two buttons of.
 const OWN_PAGE: Source = Source::Own("the payer's page isn't in Konnect's documentation: two buttons stand for it");
 
+/// Nor the faults, which the stand-in sends where the documentation asks a shop to expect them, or where anyone could.
+const OWN_FAULT: Source =
+    Source::Own("a call with a reference no payment has, which anyone can make to a webhook: the stand-in's fault");
+
+/// What the payer's page can do instead of notifying the shop once, as it should, for a webhook to be tried against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fault {
+    /// The notification sent twice, which Konnect's documentation asks a shop to expect.
+    Twice,
+    /// The webhook called while the payment is still pending, and the payment completed only once it has answered.
+    Early,
+    /// The webhook called with a reference no payment has, as anyone can call it.
+    Unknown,
+}
+
+impl Fault {
+    /// Each fault, its name in the page's `fault=`, and its button's label.
+    const ALL: [(Fault, &'static str, &'static str); 3] = [
+        (Fault::Twice, "twice", "Pay, notified twice"),
+        (Fault::Early, "early", "Pay, notified before it is completed"),
+        (Fault::Unknown, "unknown", "Notify a payment that doesn't exist"),
+    ];
+
+    fn named(name: &str) -> Option<Fault> {
+        Fault::ALL.iter().find(|(_, named, _)| *named == name).map(|(fault, _, _)| *fault)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
     /// Not paid: failed, or not tried yet, which Konnect's documentation says alike.
@@ -106,6 +134,9 @@ pub struct Konnect {
     /// Each payment's events, a line each for the developer.
     say: Box<dyn Fn(&str) + Send + Sync>,
     now: Box<dyn Fn() -> SystemTime + Send + Sync>,
+    /// How long each answer of its API waits, `--delay`: a slow Konnect, which a shop's calls must survive.
+    delay: Duration,
+    pause: Box<dyn Fn(Duration) + Send + Sync>,
 }
 
 impl Konnect {
@@ -119,7 +150,14 @@ impl Konnect {
             notify: Box::new(call_webhook),
             say,
             now: Box::new(SystemTime::now),
+            delay: Duration::ZERO,
+            pause: Box::new(std::thread::sleep),
         }
+    }
+
+    /// The same, each answer of its API waiting `delay` first.
+    pub fn delayed(self, delay: Duration) -> Konnect {
+        Konnect { delay, ..self }
     }
 
     fn pay_url(&self, id: &str) -> String {
@@ -331,10 +369,33 @@ impl Konnect {
                 "<p>The stand-in has no payment of that reference: its payments are gone when it stops.</p>",
             );
         };
-        match parameter("outcome") {
-            None => page_response(200, OWN_PAGE, "A payment", &self.form(&payment)),
-            Some(outcome @ ("paid" | "failed")) => self.end(payment, outcome == "paid"),
-            Some(other) => page_response(
+        let fault = match parameter("fault") {
+            None => None,
+            Some(name) => match Fault::named(name) {
+                Some(fault) => Some(fault),
+                None => {
+                    let names: Vec<&str> = Fault::ALL.iter().map(|(_, name, _)| *name).collect();
+                    let message = format!("fault is {}, not {}.", names.join(", "), escape(name));
+                    return page_response(400, OWN_PAGE, "No such fault", &format!("<p>{message}</p>"));
+                }
+            },
+        };
+        if fault.is_some() && payment.webhook.is_none() {
+            let message = "This payment has no webhook: its faults are its webhook's calls.";
+            return page_response(400, OWN_PAGE, "No webhook", &format!("<p>{message}</p>"));
+        }
+        let refused =
+            |message: &str| page_response(400, OWN_PAGE, "Not a fault of this outcome", &format!("<p>{message}</p>"));
+        match (parameter("outcome"), fault) {
+            (None, None) => page_response(200, OWN_PAGE, "A payment", &self.form(&payment)),
+            (None, Some(Fault::Unknown)) => self.notify_unknown(&payment),
+            (None, Some(_)) => refused("twice and early go with an outcome, outcome=paid&amp;fault=twice."),
+            (Some(_), Some(Fault::Unknown)) => refused("unknown goes without an outcome: it changes no payment."),
+            (Some("failed"), Some(Fault::Early)) => {
+                refused("early goes with outcome=paid: a failed payment stays pending.")
+            }
+            (Some(outcome @ ("paid" | "failed")), fault) => self.end(payment, outcome == "paid", fault),
+            (Some(other), _) => page_response(
                 400,
                 OWN_PAGE,
                 "No such outcome",
@@ -343,9 +404,27 @@ impl Konnect {
         }
     }
 
+    /// The fault `unknown`: the payment's webhook called with a reference no payment has; the payment as it was.
+    fn notify_unknown(&self, payment: &Payment) -> Response {
+        let webhook = payment.webhook.as_deref().unwrap_or_default();
+        let reference = random_hex(12);
+        let answered = answered((self.notify)(&with_reference(webhook, &reference)));
+        (self.say)(&format!(
+            "{}: its webhook called for {reference}, a payment that doesn't exist; it {answered}",
+            payment.id
+        ));
+        let content = format!(
+            "<p>The shop's webhook was called with payment_ref={reference}, which no payment has: it {}. This payment is as it was: <a href=\"/pay?payment_ref={}\">back to it</a>.</p>",
+            escape(&answered),
+            escape(&payment.id)
+        );
+        page_response(200, OWN_FAULT, "A payment that doesn't exist", &content)
+    }
+
     /// The payer's choice: the payment paid, or a failed try that leaves it pending; then its webhook called, and the
-    /// browser sent to the merchant's address.
-    fn end(&self, payment: Payment, paid: bool) -> Response {
+    /// browser sent to the merchant's address. With the fault `twice`, the webhook is called a second time; with
+    /// `early`, it is called first, while the payment is pending, and the payment completed once it has answered.
+    fn end(&self, payment: Payment, paid: bool, fault: Option<Fault>) -> Response {
         let id = payment.id.clone();
         if payment.status == Status::Completed {
             return page_response(200, OWN_PAGE, "Paid already", "<p>This payment is paid: nothing more is done.</p>");
@@ -359,46 +438,63 @@ impl Konnect {
                 "<p>This payment has expired: the shop makes another.</p>",
             );
         }
-        {
-            let mut payments = self.payments.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some(kept) = payments.get_mut(&id) else {
-                return page_response(
-                    404,
-                    OWN_PAGE,
-                    "No such payment",
-                    "<p>The stand-in has no payment of that reference.</p>",
-                );
-            };
-            if kept.status == Status::Completed {
-                return page_response(
-                    200,
-                    OWN_PAGE,
-                    "Paid already",
-                    "<p>This payment is paid: nothing more is done.</p>",
-                );
-            }
-            kept.transactions.push(Transaction { id: random_hex(12), succeeded: paid, at: now });
-            if paid {
-                kept.status = Status::Completed;
-            }
-        }
         let what = if paid { "paid at its page" } else { "failed at its page, pending still" };
         let Some(webhook) = &payment.webhook else {
+            if let Err(refused) = self.record(&id, paid, now) {
+                return refused;
+            }
             (self.say)(&format!("{id}: {what}; no webhook to call"));
             return self.sent_on(&payment, paid);
         };
         let notification = with_reference(webhook, &id);
-        let answered = match (self.notify)(&notification) {
-            Ok(status) => format!("its webhook answered {status}"),
-            Err(why) => format!("its webhook didn't answer: {why}"),
-        };
-        (self.say)(&format!("{id}: {what}; {answered}"));
+        if fault == Some(Fault::Early) {
+            let answered = answered((self.notify)(&notification));
+            if let Err(refused) = self.record(&id, paid, now) {
+                return refused;
+            }
+            (self.say)(&format!(
+                "{id}: its webhook called while the payment was pending, notified early; it {answered}; then {what}"
+            ));
+        } else {
+            if let Err(refused) = self.record(&id, paid, now) {
+                return refused;
+            }
+            let mut said = format!("{id}: {what}; its webhook {}", answered((self.notify)(&notification)));
+            if fault == Some(Fault::Twice) {
+                let again = answered((self.notify)(&notification));
+                let _ = write!(said, ", then, notified twice, {again}");
+            }
+            (self.say)(&said);
+        }
         if payment.silent {
             return self.sent_on(&payment, paid);
         }
         // The deprecated successUrl and failUrl are ignored while a webhook is active and not silent: the payer goes to
         // the webhook's address.
         redirect(&notification, Source::Initiate("request-body-parameters"))
+    }
+
+    /// The payer's try, kept: a transaction, and the payment completed when it paid; refused when the payment is gone,
+    /// or paid since its page was read.
+    fn record(&self, id: &str, paid: bool, at: SystemTime) -> Result<(), Response> {
+        let mut payments = self.payments.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(kept) = payments.get_mut(id) else {
+            let message = "<p>The stand-in has no payment of that reference.</p>";
+            return Err(page_response(404, OWN_PAGE, "No such payment", message));
+        };
+        if kept.status == Status::Completed {
+            return Err(page_response(
+                200,
+                OWN_PAGE,
+                "Paid already",
+                "<p>This payment is paid: nothing more is done.</p>",
+            ));
+        }
+        kept.transactions.push(Transaction { id: random_hex(12), succeeded: paid, at });
+        if paid {
+            kept.status = Status::Completed;
+        }
+        Ok(())
     }
 
     /// The browser's way on without a webhook that takes it, or with a silent one: successUrl or failUrl, else a page.
@@ -438,12 +534,16 @@ impl Konnect {
             "<p>By {}. Nothing is paid: ff local konnect stands in for Konnect's page.</p>",
             escape(&payment.methods.join(", "))
         );
+        let id = escape(&payment.id);
         for (outcome, label) in [("paid", "Pay"), ("failed", "Fail")] {
-            let _ = write!(
-                html,
-                "<form method=\"get\" action=\"/pay\"><input type=\"hidden\" name=\"payment_ref\" value=\"{}\"><input type=\"hidden\" name=\"outcome\" value=\"{outcome}\"><button>{label}</button></form>",
-                escape(&payment.id)
-            );
+            html.push_str(&button(&id, &[("outcome", outcome)], label));
+        }
+        if payment.webhook.is_some() {
+            html.push_str("<p class=\"faults\">Faults a shop's webhook must survive:</p>");
+            for (fault, name, label) in Fault::ALL {
+                let outcome = if fault == Fault::Unknown { Vec::new() } else { vec![("outcome", "paid")] };
+                html.push_str(&button(&id, &[outcome.as_slice(), &[("fault", name)]].concat(), label));
+            }
         }
         html
     }
@@ -458,6 +558,9 @@ impl Answers for Konnect {
                 "GET" | "HEAD" => self.page(query),
                 _ => not_allowed("GET, HEAD"),
             };
+        }
+        if !self.delay.is_zero() {
+            (self.pause)(self.delay);
         }
         let Some(route) = path.strip_prefix(API_PATH).and_then(|rest| rest.strip_prefix("/payments/")) else {
             return json_response(
@@ -513,6 +616,25 @@ fn flag(fields: &Map<String, Value>, name: &str) -> Result<bool, (u16, String)> 
     }
 }
 
+/// A button of the payer's page: a form that reads the page again with the payment's reference and `fields`.
+fn button(id: &str, fields: &[(&str, &str)], label: &str) -> String {
+    let hidden: String = fields
+        .iter()
+        .map(|(name, value)| format!("<input type=\"hidden\" name=\"{name}\" value=\"{value}\">"))
+        .collect();
+    format!(
+        "<form method=\"get\" action=\"/pay\"><input type=\"hidden\" name=\"payment_ref\" value=\"{id}\">{hidden}<button>{label}</button></form>"
+    )
+}
+
+/// What a webhook's call came to, for the developer's line.
+fn answered(result: Result<u16, String>) -> String {
+    match result {
+        Ok(status) => format!("answered {status}"),
+        Err(why) => format!("didn't answer: {why}"),
+    }
+}
+
 /// The webhook's address with the payment's reference, as Konnect's documentation's example has it.
 fn with_reference(webhook: &str, id: &str) -> String {
     let separator = if webhook.contains('?') { '&' } else { '?' };
@@ -560,8 +682,10 @@ fn json_response(status: u16, source: Source, body: Value) -> Response {
 fn page_response(status: u16, source: Source, title: &str, content: &str) -> Response {
     let page = format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <link rel=\"icon\" href=\"data:,\">\
          <title>{title}: Konnect's stand-in</title><style>body{{font-family:system-ui,sans-serif;max-width:28rem;margin:3rem auto;padding:0 1rem}}\
-         .amount{{font-size:2rem;font-weight:600}}form{{display:inline-block;margin-right:.5rem}}button{{font-size:1rem;padding:.5rem 1.5rem}}</style></head>\
+         .amount{{font-size:2rem;font-weight:600}}form{{display:inline-block;margin:0 .5rem .5rem 0}}button{{font-size:1rem;padding:.5rem 1.5rem}}\
+         .faults{{margin-top:2rem;color:#666}}.faults~form button{{font-size:.875rem;padding:.25rem .75rem}}</style></head>\
          <body><h1>{title}</h1>{content}</body></html>\n"
     );
     Response {
@@ -959,6 +1083,160 @@ mod tests {
         assert_eq!(odd.status, 400);
         assert_eq!(money(12500, "TND"), "12.500 TND");
         assert_eq!(money(1999, "USD"), "19.99 USD");
+    }
+
+    /// The stand-in whose webhook, as a shop's, asks it for the payment's status at each call, and keeps what it was
+    /// told: the reference and the status, or the status code of a payment it hasn't.
+    fn asked_at_each_call() -> (Arc<Konnect>, Lines) {
+        let seen: Lines = Arc::new(Mutex::new(Vec::new()));
+        let konnect = Arc::new_cyclic(|itself: &std::sync::Weak<Konnect>| {
+            let (mut konnect, _, _) = stand_in(200, now());
+            let (itself, seen) = (itself.clone(), Arc::clone(&seen));
+            konnect.notify = Box::new(move |address: &str| {
+                let reference = address.rsplit_once("payment_ref=").unwrap().1;
+                let konnect = itself.upgrade().unwrap();
+                let asked = call(&konnect, "GET", &format!("/api/v2/payments/{reference}"), Some(KEY), Value::Null);
+                let status = match asked.status {
+                    200 => json_of(&asked)["payment"]["status"].as_str().unwrap().to_owned(),
+                    status => status.to_string(),
+                };
+                seen.lock().unwrap().push(format!("{reference} {status}"));
+                Ok(200)
+            });
+            konnect
+        });
+        (konnect, seen)
+    }
+
+    #[test]
+    fn a_notification_sent_twice_is_the_same_call_twice_the_payment_completed_before_either() {
+        let (konnect, seen) = asked_at_each_call();
+        let id = made(
+            &konnect,
+            json!({ "receiverWalletId": WALLET, "amount": 1000, "webhook": "https://shop.example.tn/hook" }),
+        );
+
+        let paid = call(&konnect, "GET", &format!("/pay?payment_ref={id}&outcome=paid&fault=twice"), None, Value::Null);
+
+        let notification = format!("https://shop.example.tn/hook?payment_ref={id}");
+        assert_eq!((paid.status, header(&paid, "location")), (303, Some(notification.as_str())));
+        assert_eq!(*seen.lock().unwrap(), [format!("{id} completed"), format!("{id} completed")]);
+    }
+
+    #[test]
+    fn a_notification_sent_early_finds_the_payment_pending_the_browser_then_finds_it_completed() {
+        let (konnect, seen) = asked_at_each_call();
+        let id = made(
+            &konnect,
+            json!({ "receiverWalletId": WALLET, "amount": 1000, "webhook": "https://shop.example.tn/hook" }),
+        );
+
+        let paid = call(&konnect, "GET", &format!("/pay?payment_ref={id}&outcome=paid&fault=early"), None, Value::Null);
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [format!("{id} pending")],
+            "the webhook was called before the payment completed"
+        );
+        assert_eq!(header(&paid, "location"), Some(format!("https://shop.example.tn/hook?payment_ref={id}").as_str()));
+        let payment =
+            &json_of(&call(&konnect, "GET", &format!("/api/v2/payments/{id}"), Some(KEY), Value::Null))["payment"];
+        assert_eq!(payment["status"], "completed", "what the browser's arrival at the webhook finds");
+    }
+
+    #[test]
+    fn a_notification_for_a_payment_that_doesn_t_exist_changes_none() {
+        let (konnect, seen) = asked_at_each_call();
+        let id = made(
+            &konnect,
+            json!({ "receiverWalletId": WALLET, "amount": 1000, "webhook": "https://shop.example.tn/hook" }),
+        );
+
+        let page = call(&konnect, "GET", &format!("/pay?payment_ref={id}&fault=unknown"), None, Value::Null);
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        let (reference, status) = seen[0].split_once(' ').unwrap();
+        assert!(reference != id && reference.len() == 24, "{reference}");
+        assert_eq!(status, "404", "Konnect's API has no payment of that reference");
+        assert_eq!(page.status, 200);
+        assert_eq!(header(&page, SOURCE_HEADER), Some(OWN_FAULT.header().as_str()));
+        let html = String::from_utf8(page.body).unwrap();
+        assert!(html.contains(&format!("payment_ref={reference}, which no payment has: it answered 200")), "{html}");
+        let payment =
+            &json_of(&call(&konnect, "GET", &format!("/api/v2/payments/{id}"), Some(KEY), Value::Null))["payment"];
+        assert_eq!([&payment["status"], &payment["transactions"]], [&json!("pending"), &json!([])]);
+    }
+
+    #[test]
+    fn the_faults_buttons_are_the_page_s_with_a_webhook_and_a_fault_that_isn_t_one_is_refused() {
+        let (konnect, called, said) = stand_in(200, now());
+        let hooked = made(
+            &konnect,
+            json!({ "receiverWalletId": WALLET, "amount": 1000, "webhook": "https://shop.example.tn/hook" }),
+        );
+        let bare = made(&konnect, json!({ "receiverWalletId": WALLET, "amount": 1000 }));
+
+        let page =
+            String::from_utf8(call(&konnect, "GET", &format!("/pay?payment_ref={hooked}"), None, Value::Null).body)
+                .unwrap();
+        for (fields, label) in [
+            (
+                "<input type=\"hidden\" name=\"outcome\" value=\"paid\"><input type=\"hidden\" name=\"fault\" value=\"twice\">",
+                "Pay, notified twice",
+            ),
+            (
+                "<input type=\"hidden\" name=\"outcome\" value=\"paid\"><input type=\"hidden\" name=\"fault\" value=\"early\">",
+                "Pay, notified before it is completed",
+            ),
+            ("<input type=\"hidden\" name=\"fault\" value=\"unknown\">", "Notify a payment that doesn't exist"),
+        ] {
+            assert!(page.contains(&format!("{fields}<button>{label}</button>")), "{label}: {page}");
+        }
+        let page =
+            String::from_utf8(call(&konnect, "GET", &format!("/pay?payment_ref={bare}"), None, Value::Null).body)
+                .unwrap();
+        assert!(!page.contains("name=\"fault\"") && !page.contains("Faults a shop"), "{page}");
+
+        for (query, message) in [
+            (format!("payment_ref={hooked}&fault=slow"), "fault is twice, early, unknown, not slow."),
+            (format!("payment_ref={bare}&outcome=paid&fault=twice"), "This payment has no webhook"),
+            (format!("payment_ref={hooked}&fault=twice"), "twice and early go with an outcome"),
+            (format!("payment_ref={hooked}&outcome=paid&fault=unknown"), "unknown goes without an outcome"),
+            (format!("payment_ref={hooked}&outcome=failed&fault=early"), "early goes with outcome=paid"),
+        ] {
+            let refused = call(&konnect, "GET", &format!("/pay?{query}"), None, Value::Null);
+            assert_eq!(refused.status, 400, "{query}");
+            assert!(String::from_utf8_lossy(&refused.body).contains(message), "{query}");
+        }
+        assert!(called.lock().unwrap().is_empty(), "a fault refused calls nothing");
+        assert_eq!(said.lock().unwrap().len(), 2, "the two payments made, nothing else");
+
+        let paid =
+            call(&konnect, "GET", &format!("/pay?payment_ref={hooked}&outcome=failed&fault=twice"), None, Value::Null);
+        assert_eq!(paid.status, 303);
+        assert_eq!(called.lock().unwrap().len(), 2, "twice goes with a failed try too");
+        let line = format!(
+            "{hooked}: failed at its page, pending still; its webhook answered 200, then, notified twice, answered 200"
+        );
+        assert_eq!(said.lock().unwrap().last(), Some(&line));
+    }
+
+    #[test]
+    fn delay_holds_each_answer_of_the_api_and_not_the_page() {
+        let (konnect, _, _) = stand_in(200, now());
+        let paused: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut konnect = konnect.delayed(Duration::from_millis(1500));
+        konnect.pause = {
+            let paused = Arc::clone(&paused);
+            Box::new(move |delay| paused.lock().unwrap().push(delay))
+        };
+
+        let id = made(&konnect, json!({ "receiverWalletId": WALLET, "amount": 1000 }));
+        call(&konnect, "GET", &format!("/api/v2/payments/{id}"), Some(KEY), Value::Null);
+        call(&konnect, "GET", &format!("/pay?payment_ref={id}"), None, Value::Null);
+
+        assert_eq!(*paused.lock().unwrap(), [Duration::from_millis(1500); 2]);
     }
 
     #[test]

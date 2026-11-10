@@ -2,6 +2,7 @@
 
 use std::net::TcpListener;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -17,15 +18,22 @@ struct Started {
     api_url_from_functions: Option<String>,
     api_key: String,
     wallet_id: String,
+    /// How long each answer of its API waits first, as `--delay` gave it.
+    delay: Option<String>,
 }
 
-pub fn start(port: u16, key: String, wallet: String, context: &Context) -> Result<(), Error> {
+pub fn start(port: u16, key: String, wallet: String, delay: Option<&str>, context: &Context) -> Result<(), Error> {
     if key.is_empty() || key.chars().any(|character| character.is_control() || character == ' ') {
         return Err(Error::usage("--key must be a word, without spaces"));
     }
     if wallet.is_empty() || !wallet.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         return Err(Error::usage("--wallet must be letters and digits, as a Konnect wallet's ID"));
     }
+    let pause = match delay {
+        None => Duration::ZERO,
+        Some(text) => humantime::parse_duration(text)
+            .map_err(|error| Error::usage(format!("--delay {text}: {error}: a duration, such as 2s or 500ms")))?,
+    };
     let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|error| {
         Error::new(
             Kind::Failed,
@@ -43,7 +51,7 @@ pub fn start(port: u16, key: String, wallet: String, context: &Context) -> Resul
         }
     });
     let stand_in: Arc<dyn http::Answers> =
-        Arc::new(konnect::Konnect::new(key.clone(), wallet.clone(), address.clone(), say));
+        Arc::new(konnect::Konnect::new(key.clone(), wallet.clone(), address.clone(), say).delayed(pause));
     http::serve(listener, Arc::clone(&stand_in));
     // Where containers reach this machine on Linux, which Docker Desktop leads to 127.0.0.1 itself.
     let from_functions = match local::docker_gateway().map(|gateway| TcpListener::bind((gateway, port))) {
@@ -58,6 +66,7 @@ pub fn start(port: u16, key: String, wallet: String, context: &Context) -> Resul
         api_url_from_functions: from_functions,
         api_key: key,
         wallet_id: wallet,
+        delay: delay.map(str::to_owned),
     };
     context.out.result(&started, || {
         let mut lines = vec![
@@ -69,8 +78,11 @@ pub fn start(port: u16, key: String, wallet: String, context: &Context) -> Resul
         }
         lines.push(format!("  KONNECT_API_KEY={}", started.api_key));
         lines.push(format!("  KONNECT_WALLET_ID={}", started.wallet_id));
+        if let Some(delay) = &started.delay {
+            lines.push(format!("Each answer of its API waits {delay} first, as --delay says"));
+        }
         lines.push(format!(
-            "Each payment's page, its payUrl, is under {address}/pay, its Pay and Fail buttons calling the shop's webhook. Ctrl-C stops it"
+            "Each payment's page, its payUrl, is under {address}/pay: Pay and Fail call the shop's webhook, and its faults' buttons try the webhook against a notification sent twice, before the payment is completed, or for one that doesn't exist. Ctrl-C stops it"
         ));
         lines.join("\n")
     })?;

@@ -20,10 +20,11 @@ impl Drop for Running {
     }
 }
 
-/// `ff local konnect --port 0 --output json` started, and the document it printed once listening.
-fn started(settings: &TempDir) -> (Running, Value) {
+/// `ff local konnect --port 0 --output json` started with `options`, and the document it printed once listening.
+fn started(settings: &TempDir, options: &[&str]) -> (Running, Value) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ff"))
         .args(["local", "konnect", "--port", "0", "--output", "json"])
+        .args(options)
         .env("FF_CONFIG_DIR", settings.path())
         .env("FF_NO_UPDATE_CHECK", "1")
         .stdout(Stdio::piped())
@@ -52,7 +53,7 @@ fn a_payment_made_paid_at_its_page_notifies_the_shop_and_is_then_completed() {
     let shop = Server::bind();
     let webhook = format!("http://shop.fn.localhost:{}/webhooks/konnect", shop.port());
     let shop = shop.serve(vec![Reply::text(200, "text/plain", "noted")]);
-    let (mut running, document) = started(&settings);
+    let (mut running, document) = started(&settings, &[]);
     let api = document["apiUrl"].as_str().unwrap().to_owned();
     assert!(api.starts_with("http://127.0.0.1:") && api.ends_with("/api/v2"), "{document}");
     assert_eq!(
@@ -111,7 +112,7 @@ fn a_payment_made_paid_at_its_page_notifies_the_shop_and_is_then_completed() {
 }
 
 #[test]
-fn a_port_another_program_has_is_said_and_a_key_with_a_space_refused() {
+fn a_port_another_program_has_is_said_and_a_key_with_a_space_or_a_delay_that_isn_t_one_refused() {
     let settings = TempDir::new().unwrap();
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port().to_string();
@@ -133,4 +134,49 @@ fn a_port_another_program_has_is_said_and_a_key_with_a_space_refused() {
     let spaced = run(&["--port", "0", "--key", "a key"]);
     assert_eq!(spaced.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&spaced.stderr).contains("--key must be a word, without spaces"));
+
+    let unclear = run(&["--port", "0", "--delay", "soon"]);
+    assert_eq!(unclear.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&unclear.stderr).contains("--delay soon: "),
+        "{}",
+        String::from_utf8_lossy(&unclear.stderr)
+    );
+}
+
+#[test]
+fn delay_holds_the_api_s_answers_and_the_page_s_faults_reach_the_shop() {
+    let settings = TempDir::new().unwrap();
+    let shop = Server::bind();
+    let webhook = format!("http://shop.fn.localhost:{}/webhooks/konnect", shop.port());
+    let shop = shop.serve((0..3).map(|_| Reply::text(200, "text/plain", "noted")).collect());
+    let (_running, document) = started(&settings, &["--delay", "300ms"]);
+    assert_eq!(document["delay"], "300ms");
+    let api = document["apiUrl"].as_str().unwrap().to_owned();
+    let agent = agent();
+
+    let order = json!({ "receiverWalletId": "ff0000000000000000000001", "amount": 900, "webhook": webhook });
+    let asked_at = std::time::Instant::now();
+    let made = agent
+        .post(format!("{api}/payments/init-payment"))
+        .header("x-api-key", "ff-local-konnect")
+        .content_type("application/json")
+        .send(order.to_string())
+        .unwrap();
+    assert!(asked_at.elapsed() >= std::time::Duration::from_millis(300), "{:?}", asked_at.elapsed());
+    let made: Value = serde_json::from_str(&body(made)).unwrap();
+    let (reference, pay_url) = (made["paymentRef"].as_str().unwrap(), made["payUrl"].as_str().unwrap());
+
+    let unknown = agent.get(format!("{pay_url}&fault=unknown")).call().unwrap();
+    assert_eq!(unknown.status(), 200);
+    let twice = agent.get(format!("{pay_url}&outcome=paid&fault=twice")).call().unwrap();
+    assert_eq!(twice.status(), 303);
+
+    let paths: Vec<String> = shop.requests().into_iter().map(|request| request.path).collect();
+    assert_eq!(paths.len(), 3, "{paths:?}");
+    assert!(paths[0].starts_with("/webhooks/konnect?payment_ref=") && !paths[0].ends_with(reference), "{paths:?}");
+    assert_eq!(
+        paths[1..],
+        [format!("/webhooks/konnect?payment_ref={reference}"), format!("/webhooks/konnect?payment_ref={reference}")]
+    );
 }
