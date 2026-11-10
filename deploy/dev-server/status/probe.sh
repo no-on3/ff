@@ -5,8 +5,8 @@
 # receiving the message, the SES endpoint refusing a request that isn't signed, the canary at its URL, and the
 # probe's site. Its key reaches the probe's bucket, queue and function alone. The checks run at once, each within
 # 10 s; each minute is one line of /data/ff/status/minutes.log, in JSON: the minute, and each check's answer (whether
-# it was the one expected, its status, its time in milliseconds, and the days its certificate has left). Lines over
-# 90 days old are removed. What it reads, setup.sh writes: probe.env, the probe's names and addresses;
+# it was the one expected, its status, its time in milliseconds, and the days its certificate has left). Once a day,
+# the day 91 days old is removed. What it reads, setup.sh writes: probe.env, the probe's names and addresses;
 # probe-key.curl, its key as curl's settings, so that it is never on a command line; roots.pem, the CAs it trusts,
 # the proxy's own among them.
 #   /usr/local/lib/ff-status/probe.sh       (as ff-status: ff-status-probe.service runs setup.sh's copy, every minute)
@@ -98,8 +98,9 @@ sqs_round_trip() {
 jq -cn --arg at "$minute" '{at: $at, checks: (reduce inputs as $check ({}; . + $check))}' \
   "$work"/{api,console,login,lambda,s3,sqs,ses,canary,site}.json >>"$dir/minutes.log"
 
-# The minutes kept 90 days: the file rewritten when its first line is older.
-cutoff="$(date -u -d "$keep_days days ago" +%Y-%m-%dT%H:%M:00Z)"
+# The minutes kept 90 days, by whole days: the file rewritten once a day, without the day 91 days old, rather than
+# each minute, without the minute.
+cutoff="$(date -u -d "$keep_days days ago" +%Y-%m-%d)"
 if [[ "$(head -n 1 "$dir/minutes.log" | jq -r .at)" < "$cutoff" ]]; then
   jq -c --arg cutoff "$cutoff" 'select(.at >= $cutoff)' "$dir/minutes.log" >"$dir/minutes.log.new" && mv "$dir/minutes.log.new" "$dir/minutes.log"
 fi

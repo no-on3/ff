@@ -5,7 +5,8 @@
 # server.sh makes once; its own account, which an operator of the script's own approves, that operator removed
 # after; in that account, with ff as that user, its stack (probe/template.yaml: the canary, a function at its URL;
 # the site's bucket; the queue), then the site's page; its key, made once, which reaches that bucket, queue and
-# function alone; what probe.sh reads; and a copy of probe.sh outside the checkout, which ff-status can't read.
+# function alone; what probe.sh reads; and copies of probe.sh and render.py outside the checkout, which ff-status
+# can't read.
 # server.sh installs its timer after.
 #   /data/ff/src/deploy/dev-server/status/setup.sh       (as root: server.sh runs it, once it has built ff)
 set -euo pipefail
@@ -94,10 +95,10 @@ if [ -z "$key_id" ] || ! jq -e --arg id "$key_id" 'any(.[]; .id == $id)' "$work/
   echo "  its key made, which reaches its bucket, queue and function alone"
 fi
 
-# What probe.sh reads, and probe.sh itself.
+# What probe.sh reads, and probe.sh and render.py themselves.
 printf '%s\n' "domain=$domain" "region=$region" "function=status-canary" "bucket=$bucket" "queue_url=$queue_url" \
   "canary_url=$canary_url" "site_url=$site_url" >"$work/probe.env"
 install -o ff-status -g ff-status -m 0640 "$work/probe.env" "$status/probe.env"
 install -o ff-status -g ff-status -m 0640 "$work/roots.pem" "$status/roots.pem"
 install -d -m 0755 /usr/local/lib/ff-status
-install -m 0755 "$here/probe.sh" /usr/local/lib/ff-status/probe.sh
+install -m 0755 -t /usr/local/lib/ff-status "$here/probe.sh" "$here/render.py"

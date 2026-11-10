@@ -1,6 +1,6 @@
-# The status page's probe (probe.sh, which setup.sh copies to /usr/local/lib/ff-status), each time
-# ff-status-probe.timer says, as ff-status, a user of its own: it writes /data/ff/status/minutes.log, and nothing
-# else. server.sh installs both in /etc/systemd/system. Its output: journalctl -u ff-status-probe.
+# The status page's probe (probe.sh), then the page (render.py), each time ff-status-probe.timer says, as ff-status, a
+# user of its own, from the copies setup.sh puts in /usr/local/lib/ff-status: they write in /data/ff/status alone.
+# server.sh installs both units in /etc/systemd/system. Their output: journalctl -u ff-status-probe.
 [Unit]
 Description=FF's status probe: each piece of FF, as a customer meets it
 Wants=network-online.target
@@ -10,8 +10,10 @@ After=network-online.target docker.service
 Type=oneshot
 User=ff-status
 Group=ff-status
-ExecStart=/bin/bash /usr/local/lib/ff-status/probe.sh
-# Its checks run at once, each ended at 10 s; a minute's run still going after 50 s is ended, before the next.
+ExecStart=-/bin/bash /usr/local/lib/ff-status/probe.sh
+# Then the page, whatever the probe did, so that a probe that stopped writing shows on it as one.
+ExecStart=/usr/bin/python3 -I /usr/local/lib/ff-status/render.py
+# The probe's checks run at once, each ended at 10 s; a minute's run still going after 50 s is ended, before the next.
 TimeoutStartSec=50s
 NoNewPrivileges=yes
 PrivateTmp=yes

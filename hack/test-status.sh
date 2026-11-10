@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
-# The status page's probe (deploy/dev-server/status/probe.sh) against a stand-in for FF behind the server's proxy: one
-# TLS server for all of FF's names, its certificate from an authority of the test's own and five days from its end,
-# which answers each as FF does when it is up, and as the test says otherwise: an answer of the wrong status, the
-# wrong body, or both, one too slow, a message SQS loses. It checks the signature of each request signed with the probe's key, as FF
-# would. Then nothing listening, the minutes kept 90 days, and settings without the probe's names. Needs curl, jq,
-# openssl and Python, no cluster; in a few seconds.
+# The status page (deploy/dev-server/status). Its probe, probe.sh, against a stand-in for FF behind the server's proxy:
+# one TLS server for all of FF's names, its certificate from an authority of the test's own and five days from its
+# end, which answers each as FF does when it is up, and as the test says otherwise: an answer of the wrong status, the
+# wrong body, or both, one too slow, a message SQS loses or refuses. It checks the signature of each request signed
+# with the probe's key, as FF would. Then nothing listening, the minutes kept 90 days, and settings without the
+# probe's names. Then its renderer, render.py, against 90 days of minutes made from those the probe recorded: up,
+# down, down a while, slow, a certificate about to end, a day with no minutes, the month's uptime; the state now in
+# each case, and with no recent minute; the incidents; and the days it keeps. Needs curl, jq, openssl and Python, no
+# cluster; in a few seconds.
 #   hack/test-status.sh
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 probe="$repo/deploy/dev-server/status/probe.sh"
+render="$repo/deploy/dev-server/status/render.py"
 work="$(mktemp -d)"
 source "$repo/hack/lib/checks.sh"
 on_exit 'rm -rf "$work"'
 status="$work/status" domain=status.test account=000000000001
-mkdir -p "$status" "$work/modes"
+mkdir -p "$status" "$work/modes" "$work/recorded"
 
 # The authority, and the stand-in's certificate for FF's fixed names, function URLs and sites, five days from its end.
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=the test's authority" -days 30 \
@@ -234,6 +238,7 @@ check "Lambda, S3 and SQS signed with the probe's key, for their service in FF's
   "api unsigned,canary unsigned,console unsigned,lambda $key_id/tn-tunis-1/lambda,login unsigned,s3 $key_id/tn-tunis-1/s3,ses unsigned,site unsigned,sqs $key_id/tn-tunis-1/sqs" \
   "$(requests)"
 check "SQS: the message sent, received, then deleted: the queue empty" "" "$(in_queue)"
+minute >"$work/recorded/up.json"
 
 section "a message an earlier minute left in the queue: deleted with the minute's own"
 curl -s -X POST --data-binary "probe 2026-11-10T09:59:00Z" "http://127.0.0.1:$queue_port/" >/dev/null
@@ -250,6 +255,7 @@ check "the probe ends well: it says what it found in the minutes, not in its sta
 check "the checks answered wrong, not ok, with their status; the others ok" \
   "api false 503, canary true 200, console false 200, lambda false 503, login false 500, s3 true 200, ses false 403, site false 503, sqs true 200" \
   "$(each '"\(.ok) \(.code)"')"
+minute >"$work/recorded/wrong.json"
 modes_cleared
 
 section "FF too slow: checks that take longer than their time, ended"
@@ -276,14 +282,16 @@ closed="$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1"
 check "the probe ends well, a line more" "0 7" "$(probed "$closed") $(wc -l <"$status/minutes.log")"
 check "each check not ok, without a status or a certificate, with curl's error" "true" \
   "$(minute | jq '[.checks[] | .ok == false and .code == 0 and .days == null and (.error | test("connect|Connection refused"; "i"))] | all and (length == 9)')"
+minute >"$work/recorded/down.json"
 
-section "the minutes kept 90 days"
-old="$(date -u -d '91 days ago' +%Y-%m-%dT%H:%M:00Z)" kept="$(date -u -d '89 days ago' +%Y-%m-%dT%H:%M:00Z)"
-printf '{"at": "%s", "checks": {}}\n{"at": "%s", "checks": {}}\n' "$old" "$kept" >"$status/minutes.log"
-check "a line over 90 days old removed, one under kept, the minute's added" "0 $kept true" \
-  "$(probed) $(head -n 1 "$status/minutes.log" | jq -r .at) $([ "$(wc -l <"$status/minutes.log")" -eq 2 ] && echo true || echo false)"
-check "a file whose first line is under 90 days old kept as it was, the minute's added" "0 3 $kept" \
-  "$(probed) $(wc -l <"$status/minutes.log") $(head -n 1 "$status/minutes.log" | jq -r .at)"
+section "the minutes kept 90 days, by whole days"
+old="$(date -u -d '91 days ago' +%Y-%m-%dT%H:%M:00Z)" first="$(date -u -d '90 days ago' +%Y-%m-%d)T00:00:00Z"
+printf '{"at": "%s", "checks": {}}\n{"at": "%s", "checks": {}}\n' "$old" "$first" >"$status/minutes.log"
+check "the day 91 days old removed, the day after kept, the minute's added" "0 $first 2" \
+  "$(probed) $(head -n 1 "$status/minutes.log" | jq -r .at) $(wc -l <"$status/minutes.log")"
+inode="$(stat -c %i "$status/minutes.log")"
+check "the next minute added to the file, not a copy of it, though its first minute is over 90 days old: once a day" "0 3 $inode" \
+  "$(probed) $(wc -l <"$status/minutes.log") $(stat -c %i "$status/minutes.log")"
 
 section "settings without the probe's names: the probe stops, saying which file, and writes no minute"
 printf 'domain=%s\n' "$domain" >"$status/probe.env"
@@ -291,5 +299,175 @@ lines="$(wc -l <"$status/minutes.log")"
 check "its status, its words, the minutes as they were" "1 true $lines" \
   "$(probed) $(grep -q "probe.env lacks the probe's names: setup.sh writes them" "$work/out" && echo true || echo false) $(wc -l <"$status/minutes.log")"
 settings
+
+# The page, from 90 days of minutes made from those the probe recorded above, each at a minute of its own; the last
+# minute, at 12:00 on the day the page is made, the one named, and the page made at 12:00:30.
+now=2026-11-10T12:00:30Z
+cat >"$work/minutes.py" <<'PY'
+import copy, datetime as dt, json, sys
+recorded, out, final = sys.argv[1:4]
+minutes = {name: json.load(open(f"{recorded}/{name}.json")) for name in ("up", "wrong", "down")}
+minutes["slow"] = copy.deepcopy(minutes["up"])
+minutes["slow"]["checks"]["api"]["ms"] = 2500
+days = {day: [("up", 24)] for day in (dt.date(2026, 8, 13) + dt.timedelta(days=n) for n in range(80))}
+days.update({
+    dt.date(2026, 8, 12): [("down", 24)],              # before the 90 days: left out
+    dt.date(2026, 10, 30): [("up", 2), ("down", 1)],   # 66.66...% up
+    dt.date(2026, 11, 1): [("slow", 24)],              # the API slow all day
+    dt.date(2026, 11, 2): [("up", 24)],
+    # 2026-11-03: no minute at all
+    dt.date(2026, 11, 4): [("up", 24)],
+    dt.date(2026, 11, 5): [("up", 1000), ("wrong", 5)],  # down a while: 99.5 % up, where the wrong answers were
+    dt.date(2026, 11, 6): [("up", 24)],
+    dt.date(2026, 11, 7): [("up", 18), ("down", 6)],   # down: 75 % up, for every check
+    dt.date(2026, 11, 8): [("up", 24)],
+    dt.date(2026, 11, 9): [("up", 24)],
+    dt.date(2026, 11, 10): [("up", 12), (final, 1)],   # today, to 12:00
+})
+with open(out, "w") as lines:
+    for day, runs in sorted(days.items()):
+        count = sum(n for _, n in runs)
+        at = dt.datetime.combine(day, dt.time(12 if day == dt.date(2026, 11, 10) else 0)) - dt.timedelta(minutes=count - 1 if day == dt.date(2026, 11, 10) else 0)
+        for name, n in runs:
+            for _ in range(n):
+                minute = copy.deepcopy(minutes[name])
+                minute["at"] = at.strftime("%Y-%m-%dT%H:%M:00Z")
+                lines.write(json.dumps(minute, separators=(",", ":")) + "\n")
+                at += dt.timedelta(minutes=1)
+PY
+# The page as its reader sees it: the banner, the warnings, each check's state now, bars and month, the incidents.
+cat >"$work/page.py" <<'PY'
+import html.parser, json, sys
+class Page(html.parser.HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.open, self.elements = [], []
+    def handle_starttag(self, tag, attrs):
+        if tag in ("meta", "link"):  # elements without an end
+            return
+        attrs = dict(attrs)
+        element = {"tag": tag, "class": (attrs.get("class") or "").split(), "title": attrs.get("title"), "href": attrs.get("href"),
+                   "parent": self.open[-1]["class"] if self.open else [], "text": ""}
+        self.open.append(element)
+        self.elements.append(element)
+    def handle_endtag(self, tag):
+        while self.open and self.open.pop()["tag"] != tag:
+            pass
+    def handle_data(self, data):
+        for element in self.open:
+            element["text"] += data
+page = Page()
+page.feed(open(sys.argv[1], encoding="utf-8").read())
+seen = {"banner": None, "warnings": [], "checks": {}, "incidents": {"h3": [], "strong": [], "code": [], "a": [], "li": [], "p": []}, "footer": ""}
+section = check = None
+for element in page.elements:
+    tag, classes, text = element["tag"], element["class"], " ".join(element["text"].split())
+    if tag == "section":
+        section = "incidents" if "incidents" in classes else "check"
+    elif tag == "footer":
+        seen["footer"], section = text, None
+    elif tag == "p" and "banner" in classes:
+        seen["banner"] = [classes[1], text]
+    elif tag == "li" and "warnings" in element["parent"]:
+        seen["warnings"].append(text)
+    elif section == "check" and tag == "h2":
+        check = seen["checks"][text] = {"now": None, "bars": [], "month": None}
+    elif section == "check" and tag == "span" and "now" in classes:
+        check["now"] = [classes[1], text]
+    elif section == "check" and tag == "li" and "bars" in element["parent"]:
+        check["bars"].append([classes[0], element["title"]])
+    elif section == "check" and tag == "p" and "month" in classes:
+        check["month"] = text
+    elif section == "incidents" and tag in seen["incidents"]:
+        seen["incidents"][tag].append([element["href"], text] if tag == "a" else text)
+json.dump(seen, sys.stdout)
+PY
+rendered() { # <the last minute's kind> [now]: the page made from the minutes, its status printed, as read in page.json
+  local code=0
+  python3 -I "$work/minutes.py" "$work/recorded" "$status/minutes.log" "$1"
+  rm -f "$status/days.json"
+  FF_STATUS_HOME="$status" FF_STATUS_NOW="${2:-$now}" python3 -I "$render" >"$work/out" 2>&1 || code=$?
+  python3 -I "$work/page.py" "$status/page/index.html" >"$work/page.json"
+  echo "$code"
+}
+seen() { jq -r "$1" "$work/page.json"; } # <jq filter>
+day() { seen "[.checks[\"$1\"].bars[] | select(.[1] | startswith(\"$2\"))][0] | join(\" | \")"; } # <check> <day>
+
+section "the page: FF up, from 90 days of the minutes the probe recorded"
+check "made, saying nothing; FF up now, in the banner" "0 up All of FF is up." "$(rendered up) $(cat "$work/out")$(seen '.banner | join(" ")')"
+check "every check, in order, up now" \
+  "All of FF up, API up, Console up, Login up, Lambda endpoint up, S3 endpoint up, SQS endpoint up, SES endpoint up, Function URLs up, Sites up" \
+  "$(seen '.checks | to_entries | map("\(.key) \(.value.now[1])") | join(", ")')"
+check "a bar a day for 90 days, each check, from the first day of the 90: the day before them left out" "90 2026-08-13: up, 100% of 24 minutes up" \
+  "$(seen '[.checks[].bars | length] | unique | join(" ")') $(seen '.checks.API.bars[0][1]')"
+check "a day with no minutes says so" "none | 2026-11-03: no minutes" "$(day API 2026-11-03)"
+check "a day down: every check down, its uptime and minutes in its title" "down | 2026-11-07: down, 75.00% of 24 minutes up | down" \
+  "$(day API 2026-11-07) | $(seen '[.checks[].bars[] | select(.[1] | startswith("2026-11-07")) | .[0]] | unique | join(" ")')"
+check "a day down a while: the checks answered wrong, the others up; FF down a while" \
+  "partial | 2026-11-05: down a while, 99.50% of 1005 minutes up, up | 2026-11-05: up, 100% of 1005 minutes up, partial" \
+  "$(day API 2026-11-05), $(day 'Function URLs' 2026-11-05), $(day 'All of FF' 2026-11-05 | cut -d' ' -f1)"
+check "an uptime rounded down, so that a minute down never reads as 100%: 2 of 3 minutes, 66.66%" "down | 2026-10-30: down, 66.66% of 3 minutes up" \
+  "$(day API 2026-10-30)"
+check "a day slow: the API's minutes up, each after more than 2 s; the console's up" \
+  "slow | 2026-11-01: slow, 100% of 24 minutes up, 24 slow, up" "$(day API 2026-11-01), $(day Console 2026-11-01 | cut -d' ' -f1)"
+check "the month's uptime, rounded down, its minutes alone: FF's, the API's, the function URLs'" \
+  "99.07% up this month, 99.07% up this month, 99.49% up this month" \
+  "$(seen '[.checks["All of FF"], .checks.API, .checks["Function URLs"]] | map(.month) | join(", ")')"
+check "the certificates about to end, Let's Encrypt's: FF's fixed names', 4 days left; not the proxy's own, for URLs and sites" \
+  "api console login lambda s3 sqs email: ends in 4 days." \
+  "$(seen '.warnings | map(split(".")[0]) | join(" ")'): $(seen '.warnings[0] | split("certificate ")[1]')"
+check "the line that says the probe runs on the server itself, and the minute the page is made from" "true true" \
+  "$(seen '.footer | contains("Probed every minute from the server FF runs on") and contains("so is this page")') $(seen '.footer | contains("Made at 2026-11-10 12:00 UTC, from the minute of 2026-11-10 12:00 UTC")')"
+check "written whole, readable by all, no incident written; its script parses" "644 false None written. 0" \
+  "$(stat -c %a "$status/page/index.html") $([ -e "$status/page/index.html.new" ] && echo true || echo false) $(seen '.incidents.p | join(" ")') $(python3 -I "$repo/hack/check-docs.py" "$status/page/index.html" >/dev/null 2>&1; echo $?)"
+
+section "the page: the state now, from the last minute"
+check "checks answered wrong: part of FF down, each named; the others up" \
+  "down Part of FF is down: API, Console, Login, Lambda endpoint, SES endpoint, Sites. | API down, S3 endpoint up, Function URLs up" \
+  "$(rendered wrong >/dev/null; seen '.banner | join(" ")') | $(seen '[.checks | to_entries[] | select(.key | IN("API", "S3 endpoint", "Function URLs")) | "\(.key) \(.value.now[1])"] | join(", ")')"
+check "a check slow: FF up, slow in part" "slow FF is up, and slow in part: API. | slow" \
+  "$(rendered slow >/dev/null; seen '.banner | join(" ")') | $(seen '.checks.API.now[1]')"
+check "nothing answering: FF down; no certificate to warn of" "down FF is down. | 0" \
+  "$(rendered down >/dev/null; seen '.banner | join(" ")') | $(seen '.warnings | length')"
+check "no minute for 10 minutes: the probe's silence said, nothing claimed of FF now" \
+  "none The probe hasn't written a minute since 2026-11-10 12:00 UTC: what FF is doing now isn't known. | not known | 0" \
+  "$(rendered up 2026-11-10T12:10:30Z >/dev/null; seen '.banner | join(" ")') | $(seen '[.checks[].now[1]] | unique | join(" ")') | $(seen '.warnings | length')"
+mkdir "$work/empty"
+check "no minutes at all: none yet, every day without, no uptime" \
+  "0 none The probe hasn't written a minute yet: what FF is doing now isn't known. | none | No minutes this month" \
+  "$(FF_STATUS_HOME="$work/empty" FF_STATUS_NOW="$now" python3 -I "$render"; echo $?) $(python3 -I "$work/page.py" "$work/empty/page/index.html" >"$work/page.json"; seen '.banner | join(" ")') | $(seen '[.checks[].bars[][0]] | unique | join(" ")') | $(seen '[.checks[].month] | unique | join(" ")')"
+
+section "the page: the incidents, as the operator writes them on the server"
+cat >"$status/incidents.md" <<'MD'
+## 2026-11-07 09:00 UTC: FF down for **6 minutes**
+The server restarted; [the log](https://example.com/log?a=1&b=2) and `journalctl -u ff-status-probe` say why.
+
+- the API, the console, everything
+- back at 09:06
+
+<script>alert("not run")</script> [not a link](javascript:alert(1))
+MD
+rendered up >/dev/null
+check "a heading, bold, a link, code and a list" \
+  "2026-11-07 09:00 UTC: FF down for 6 minutes | 6 minutes | https://example.com/log?a=1&b=2 the log | journalctl -u ff-status-probe | 2" \
+  "$(seen '.incidents | [.h3[0], .strong[0], (.a[0] | join(" ")), .code[0], (.li | length | tostring)] | join(" | ")')"
+check "HTML of its own shown as text, a link to anything but a web page left a text" "true true 1" \
+  "$(grep -F '&lt;script&gt;alert' "$status/page/index.html" >/dev/null && echo true || echo false) $(seen '.incidents.p | last | contains("[not a link](javascript:alert(1))")') $(grep -c '<script>' "$status/page/index.html")"
+rm "$status/incidents.md"
+
+section "the page: the days before today kept, as they never change"
+rendered up >/dev/null
+cp "$status/page/index.html" "$work/first.html"
+check "each day before today with minutes kept, today not" "88 false" "$(jq -r 'keys | length' "$status/days.json") $(jq -r 'has("2026-11-10")' "$status/days.json")"
+FF_STATUS_HOME="$status" FF_STATUS_NOW="$now" python3 -I "$render"
+check "the page the same made from them" "same" "$(cmp -s "$work/first.html" "$status/page/index.html" && echo same || echo different)"
+grep -v '"at":"2026-11-07' "$status/minutes.log" >"$work/minutes.log" && cp "$work/minutes.log" "$status/minutes.log"
+FF_STATUS_HOME="$status" FF_STATUS_NOW="$now" python3 -I "$render"
+python3 -I "$work/page.py" "$status/page/index.html" >"$work/page.json"
+check "a day kept, its minutes not read again" "down" "$(day API 2026-11-07 | cut -d' ' -f1)"
+printf '{"2026-11-0' >"$status/days.json"
+python3 -I "$work/minutes.py" "$work/recorded" "$status/minutes.log" up
+FF_STATUS_HOME="$status" FF_STATUS_NOW="$now" python3 -I "$render"
+check "a file of them cut short: each day read again, the page the same" "same" "$(cmp -s "$work/first.html" "$status/page/index.html" && echo same || echo different)"
 
 checks_done status
