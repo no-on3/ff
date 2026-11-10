@@ -197,6 +197,63 @@ pub struct Invocation {
     pub output: serde_json::Value,
     #[serde(default)]
     pub error: Option<String>,
+    /// The trace it is part of, which `ff trace` reads: missing from an older API, null for a call made before traces.
+    #[serde(default)]
+    pub trace_id: Option<String>,
+    /// What brought it, beyond its source: null when its source says all.
+    #[serde(default)]
+    pub trigger: Option<Trigger>,
+    pub created_at: String,
+}
+
+/// What brought a call, beyond its source: each field for the source it belongs to.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Trigger {
+    /// A schedule's run: the schedule's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    /// A queue's batch: the queue's name, and the message whose trace the call joined, else the batch's first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    /// A bucket's notification: the bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+    /// An asynchronous call's record, as its destination got it: that call's request ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub record_of: Option<String>,
+}
+
+/// One request's trail, as `GET /traces/:id` answers it: the account's calls in a trace, oldest first.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Trace {
+    pub trace_id: String,
+    pub calls: Vec<TraceCall>,
+    /// Whether the trace has more calls than these, its first.
+    pub truncated: bool,
+}
+
+/// One call of a trace.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceCall {
+    pub id: String,
+    pub request_id: String,
+    pub attempt: u32,
+    pub function_id: String,
+    pub function_name: String,
+    pub source: String,
+    pub trigger: Option<Trigger>,
+    /// The version that ran it; null for $LATEST.
+    pub version: Option<u32>,
+    /// The alias the call named.
+    pub alias: Option<String>,
+    pub status: String,
+    /// Milliseconds.
+    pub duration: f64,
     pub created_at: String,
 }
 

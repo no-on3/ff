@@ -389,7 +389,7 @@ curl -s "$FF/traces/$TRACE" | jq -c '.calls[] | {functionName, source, trigger, 
 ```
 
 - **Each call** in it says how it came (`source`), what brought it beyond that (`trigger`: a schedule's name; a queue, and the message whose trace the batch joined, else its first; a bucket; the call whose record it is), its function, the version and the alias that ran, its attempt, its status and its duration. The history's rows have `traceId` and `trigger` too; a call made before traces has none. A trace's answer holds its first 1,000 calls, `truncated` saying when there are more, and keeps them as long as the history does.
-- **Inside the function.** The call runs with `_X_AMZN_TRACE_ID` set, as Lambda sets it: `Root=<the trace>;Parent=<16 hex digits>;Sampled=0`, so that code and tools that read it there read it here. AWS's SDKs pass it on in `X-Amzn-Trace-Id` when told to, so that a call the function makes joins the trace. The runtime's JSON lines of a call, an error or a timeout, name its `traceId` beside its `requestId`.
+- **Inside the function.** The call runs with `_X_AMZN_TRACE_ID` set, as Lambda sets it: `Root=<the trace>;Parent=<16 hex digits>;Sampled=0`, so that code and tools that read it there read it here. AWS's SDKs pass it on in `X-Amzn-Trace-Id` when told to, so that a call the function makes joins the trace: [Following one request](#following-one-request-ff-trace), below, shows the two lines. The runtime's JSON lines of a call, an error or a timeout, name its `traceId` beside its `requestId`.
 - **Who reads it.** Every member, and API keys with `logs:read`. A trace's ID is its caller's to choose, so two accounts' calls can share one: each reads its own, and a trace with none of the account's calls is a 404. The ID can be given as the header gives it, `Root=1-…`.
 
 **Update.** Edit `examples/hello.ts` and send the new code, or change settings. A change of code, runtime, handler, memory, or timeout rolls out a new version. The call returns once the new version is live (a few seconds), and the old one keeps serving until then. The new version is always checked on a running instance, even when the function was scaled to zero. If it can't start, the call answers 400 with the reason, and the previous version is put back: the function keeps working, and nothing changes.
@@ -1231,7 +1231,7 @@ Cursor reads `.cursor/mcp.json` in the project (or `~/.cursor/mcp.json`), and VS
 
 | Tools | The commands they run |
 |---|---|
-| `ff_list_functions`, `ff_get_function`, `ff_logs`, `ff_history`, `ff_metrics` | `ff list`, `ff get`, `ff logs` (not `--follow`: a tool's call ends), `ff history`, `ff metrics` |
+| `ff_list_functions`, `ff_get_function`, `ff_logs`, `ff_history`, `ff_trace`, `ff_metrics` | `ff list`, `ff get`, `ff logs` (not `--follow`: a tool's call ends), `ff history`, `ff trace`, `ff metrics` |
 | `ff_usage`, `ff_balance`, `ff_estimate` | `ff usage`, `ff balance`, `ff usage --aws` |
 | `ff_list_queues`, `ff_get_queue`, `ff_list_buckets`, `ff_get_bucket`, `ff_list_databases`, `ff_get_database`, `ff_list_caches`, `ff_get_cache` | `ff queues`, `ff buckets`, `ff db` and `ff caches`, `list` and `get` |
 | `ff_doctor` | `ff doctor`, on a folder, a file or a template, or `--deployed` |
@@ -1248,6 +1248,55 @@ Cursor reads `.cursor/mcp.json` in the project (or `~/.cursor/mcp.json`), and VS
 - **A long call,** such as a deploy that builds in a container, may outlast what an agent waits for a tool: Claude Code waits as long as `MCP_TOOL_TIMEOUT` says, in milliseconds.
 
 `cargo test` runs scripted sessions, in `ff` itself and over a pipe against a scripted API; the `ff` suite's `mcp` section runs a small client over a pipe against FF: the tools listed, a deploy refused without `--allow-write`, then allowed, called and read.
+
+### Following one request: ff trace
+
+A request often runs more than one function: a function's URL takes a job into a queue, a worker reads it, and the worker calls another. Each call is part of a trace, as AWS X-Ray names one ("Follow one request", above, says where a trace starts and what joins it), and `ff` shows a trace's calls together, whichever functions they ran:
+
+```bash
+ff history orders-api                                  # each call with its trace, in the TRACE column
+ff trace 1-6912b0a3-5f1e2d3c4b5a69788796a5b4           # the trace's calls as a timeline
+ff logs --trace 1-6912b0a3-5f1e2d3c4b5a69788796a5b4    # their lines, across the functions, each named
+ff logs orders-worker --trace 1-6912b0a3-5f1e2d3c4b5a69788796a5b4    # one function's lines of it
+```
+
+A job's trail: the API's call at its URL, through the alias `live`; the worker's first try, which failed; its second, once the queue's visibility timeout gave the job back; and the e-mail the worker then asked for, calling `orders-mailer` with `InvocationType: Event`:
+
+```text
+Trace 1-6912b0a3-5f1e2d3c4b5a69788796a5b4: 4 calls of 3 functions, from 2026-11-10 09:15:03 UTC, over 12.13 s
+
+AT        TIMELINE                  FUNCTION         SOURCE                  STATUS     DURATION  REQUEST ID
++0 ms     █                         orders-api:live  url                     COMPLETED  84 ms     3f9c2a1e-8b7d-4c6a-9e5f-1a2b3c4d5e6f
++120 ms   ███                       orders-worker    sqs, queue orders-jobs  ERROR      1.21 s    7d1e5c1a-0b2c-4d3e-8f9a-0b1c2d3e4f5a
++11.40 s                        ██  orders-worker    sqs, queue orders-jobs  COMPLETED  640 ms    9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d
++12.10 s                         █  orders-mailer    async, attempt 1        COMPLETED  35 ms     1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e
+```
+
+- **The timeline** has a row a call: its start after the first call's, its bar on the trace's span, the function with the alias or the version that ran, how it came (a queue's batch, an asynchronous call's attempt, a schedule, a bucket, or the call whose record it is), its status, its duration and its request ID. The ID is taken as `ff history` shows it, or as the header gives it, `Root=1-…;Parent=…`. A trace of more than 1,000 calls shows its first, with a warning; `--output json` gives the API's answer.
+- **A trace's logs** are each call's lines, read by its request ID, by time, each naming its function; `--grep` narrows them, and a function's name keeps its lines alone. The trace's calls choose the window, so `--tail`, `--since`, `--start`, `--end`, `--all` and `--follow` don't go with `--trace`.
+- **In the console,** a call in a function's history has a "Trace" link beside "Its logs", to the trace's page: its calls by time, each with its bar, its status, its function, how it came, its duration, and a link to its logs.
+- **For `ff mcp`,** `ff_trace` reads a trace, and `ff_logs` takes `trace`.
+
+**A function's own calls join its trace** when they send it in `X-Amzn-Trace-Id`. AWS's SDKs do that on AWS Lambda, where `AWS_LAMBDA_FUNCTION_NAME` is set, but not on FF, so the function tells its client, in two lines: SQS keeps the header with the message as its `AWSTraceHeader`, and the worker's call joins the trace, on FF as on AWS. The same lines on a Lambda client have a function called with `Invoke` join it. The `queue-worker` template has them, each with its test:
+
+```js
+// Node.js, AWS's SDK v3: a middleware on the client, reading the call's trace at each request.
+sqs.middlewareStack.add((next) => (args) => {
+  if (process.env._X_AMZN_TRACE_ID) args.request.headers['X-Amzn-Trace-Id'] ??= process.env._X_AMZN_TRACE_ID;
+  return next(args);
+}, { step: 'build', name: 'passTraceOn' });
+```
+
+```python
+# Python, boto3: botocore's event hook, reading the call's trace at each request.
+def add_trace(params, **_):
+    if os.environ.get("_X_AMZN_TRACE_ID"):
+        params["headers"].setdefault("X-Amzn-Trace-Id", os.environ["_X_AMZN_TRACE_ID"])
+
+sqs.meta.events.register("before-call", add_trace)
+```
+
+On AWS Lambda the SDK's own header comes first and these leave it as it is, so the code is the same in both places. `cargo test` runs `ff trace` and `ff logs --trace` against a scripted API; the `ff` suite's `template_queue_worker` section follows a job of the deployed template from the API's call to the worker's, in `ff history`, `ff trace` and `ff logs --trace`.
 
 ### Moving to AWS: ff export
 

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 
-import { route } from '../src/api.mjs';
+import { passTraceOn, route } from '../src/api.mjs';
 
 const event = async (name) => JSON.parse(await readFile(new URL(`../events/${name}`, import.meta.url), 'utf8'));
 const request = (method, path, body) => ({ rawPath: path, requestContext: { http: { method, path } }, body });
@@ -55,4 +55,31 @@ test('a path without a route is 404, and a method /jobs lacks 405 with Allow', a
   assert.deepEqual([none.statusCode, JSON.parse(none.body)], [404, { message: 'No route for /orders' }]);
   assert.deepEqual([wrong.statusCode, wrong.headers.allow], [405, 'POST']);
   assert.deepEqual(sent, []);
+});
+
+test("the queue's client sends the call's trace in X-Amzn-Trace-Id, read at each request, and keeps one the request has", async () => {
+  const added = [];
+  const client = { middlewareStack: { add: (middleware, options) => added.push({ middleware, options }) } };
+  assert.equal(passTraceOn(client), client);
+  const [{ middleware, options }] = added;
+  const sent = async (headers) => (await middleware(async (args) => args)({ request: { headers } })).request.headers;
+  const before = process.env._X_AMZN_TRACE_ID;
+  try {
+    process.env._X_AMZN_TRACE_ID = 'Root=1-6912b0a3-5f1e2d3c4b5a69788796a5b4;Parent=53995c3f42cd8ad8;Sampled=0';
+    const first = await sent({});
+    process.env._X_AMZN_TRACE_ID = 'Root=1-6912b0a4-000000000000000000000001;Parent=0000000000000001;Sampled=0';
+    const next = await sent({});
+    const kept = await sent({ 'X-Amzn-Trace-Id': 'Root=1-6912b0a3-aaaaaaaaaaaaaaaaaaaaaaaa' });
+    delete process.env._X_AMZN_TRACE_ID;
+    const none = await sent({});
+
+    assert.deepEqual(options, { step: 'build', name: 'passTraceOn' });
+    assert.equal(first['X-Amzn-Trace-Id'], 'Root=1-6912b0a3-5f1e2d3c4b5a69788796a5b4;Parent=53995c3f42cd8ad8;Sampled=0');
+    assert.equal(next['X-Amzn-Trace-Id'], 'Root=1-6912b0a4-000000000000000000000001;Parent=0000000000000001;Sampled=0');
+    assert.deepEqual(kept, { 'X-Amzn-Trace-Id': 'Root=1-6912b0a3-aaaaaaaaaaaaaaaaaaaaaaaa' });
+    assert.deepEqual(none, {});
+  } finally {
+    if (before === undefined) delete process.env._X_AMZN_TRACE_ID;
+    else process.env._X_AMZN_TRACE_ID = before;
+  }
 });

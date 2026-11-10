@@ -684,8 +684,8 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"cli-e2e","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
   "$deploy_hello" "$(mcp_call 4 ff_list_functions '{}')" | ff mcp
-check "the handshake at its version, its 24 tools listed, a deploy refused without --allow-write, the list read" \
-  "0 2025-11-25 24 true ff_deploy changes the account false false" \
+check "the handshake at its version, its 25 tools listed, a deploy refused without --allow-write, the list read" \
+  "0 2025-11-25 25 true ff_deploy changes the account false false" \
   "$(code) $(mcp_answer 1 .result.protocolVersion) $(mcp_answer 2 '.result.tools | length') $(mcp_answer 3 .result.isError) \
 $(mcp_answer 3 .result.structuredContent.error.message | cut -d, -f1) $(mcp_answer 4 .result.isError) \
 $(mcp_answer 4 '.result.structuredContent.functions | any(.name == "cli-mcp")')"
@@ -1126,7 +1126,7 @@ section_def template_cron_job section_template_cron_job backend budget=70
 
 section_template_queue_worker() {
 section "ff init --template queue-worker: a URL that takes jobs into a queue, a worker reading it in batches, a dead-letter queue; the Node.js one deployed on FF, a job done and one of a task it hasn't failed three times then dead-lettered; then each runtime's run here as its README says, the same"
-local runtime app url failing_on_ff good bad port base starter jobs
+local runtime app url failing_on_ff good bad port base starter jobs trace
 declare -A written=(
   [nodejs]=".gitignore README.md events/batch.json events/post-job.json samconfig.toml src/api.mjs src/package-lock.json src/package.json src/worker.mjs template.yaml tests/api.test.mjs tests/worker.test.mjs"
   [python]=".gitignore README.md events/batch.json events/post-job.json samconfig.toml src/api.py src/requirements.txt src/worker.py template.yaml tests/__init__.py tests/test_api.py tests/test_worker.py"
@@ -1171,7 +1171,7 @@ check "  ... the worker reads the jobs' queue in batches of 10, naming the jobs 
 # Here, each runtime as its README says, the same 10 s.
 for runtime in python nodejs; do
   app="$work/cli-jobs-$runtime"
-  check "cli-jobs-$runtime's README: its commands install its library and run its 9 tests, which pass" "0 9" "$(readme_here "$app")"
+  check "cli-jobs-$runtime's README: its commands install its library and run its 10 tests, which pass" "0 10" "$(readme_here "$app")"
   port="$(free_port)"
   base="http://cli-jobs-$runtime-api.fn.localhost:$port"
   local_started "$work/jobs.out" "$work/jobs.err" "$app/template.yaml" --port "$port" --parameter-overrides JobsVisibilityTimeout=10
@@ -1212,6 +1212,28 @@ ff logs cli-jobs-nodejs-worker
 check "  ... its three tries' lines in ff logs, each failed" "1,2,3 No task \"resize\"" \
   "$(out | json_lines | jq -r --arg job "$failing_on_ff" 'select(.job == $job) | .tries' | paste -sd,) \
 $(out | json_lines | jq -r --arg job "$failing_on_ff" 'select(.job == $job) | .failed' | sort -u)"
+# One trace from the API's call to the worker's: the API's client sends its call's trace with the job, which the queue
+# keeps, and the worker's call joins it. Its second and third tries come in batches of their own; its first may share
+# one with the greeting, whose trace the batch may take.
+ff history cli-jobs-nodejs-api --limit 20 --output json
+trace="$(out | jq -r --arg job "$failing_on_ff" '[.invocations[] | select(((.output.body // "{}") | fromjson? | .id) == $job) | .traceId][0] // ""')"
+ff history cli-jobs-nodejs-api --limit 20
+check "  ... the API's call that took it, its trace in ff history's TRACE column" "0 true true" \
+  "$(code) $([[ $trace =~ ^1-[0-9a-f]{8}-[0-9a-f]{24}$ ]] && echo true || echo false) $(out | grep -F " $trace " >/dev/null && echo true || echo false)"
+ff trace "$trace" --output json
+check "  ... ff trace: the API's call first, then the worker's, called with the queue's batches, two of them at least" \
+  "0 $trace cli-jobs-nodejs-api cli-jobs-nodejs-worker sqs cli-jobs-nodejs-jobs true" \
+  "$(code) $(out | jq -r '"\(.traceId) \(.calls[0].functionName) \([.calls[1:][] | .functionName] | unique | join(","))"') \
+$(out | jq -r '"\([.calls[1:][] | .source] | unique | join(",")) \([.calls[1:][] | .trigger.queue] | unique | join(","))"') \
+$(out | jq -r '[.calls[1:][] | select(.functionName == "cli-jobs-nodejs-worker")] | length >= 2')"
+ff trace "$trace"
+check "  ... as a timeline, its header naming its calls and their two functions" "0 true" \
+  "$(code) $(out | head -1 | grep -E "^Trace $trace: [0-9]+ calls of 2 functions, from .+ UTC, over " >/dev/null && echo true || echo false)"
+ff logs --trace "$trace"
+check "  ... ff logs --trace: the two functions' lines, by time, each named, the API's first, the worker's tries' among them" \
+  "0 cli-jobs-nodejs-api cli-jobs-nodejs-api,cli-jobs-nodejs-worker 2,3" \
+  "$(code) $(out | head -1 | awk '{print $3}') $(out | awk '{print $3}' | sort -u | paste -sd,) \
+$(out | json_lines | jq -r --arg job "$failing_on_ff" 'select(.job == $job) | .tries' | tail -2 | paste -sd,)"
 in_folder "$work/cli-jobs-nodejs" delete-stack --yes
 check "ff delete-stack deletes both functions, with the URL and the worker's reading of the queue, and the two queues" \
   "0 deleted the function cli-jobs-nodejs-api (Api) deleted the function cli-jobs-nodejs-worker (Worker) deleted the queue cli-jobs-nodejs-jobs-dead-letters (DeadLetters) deleted the queue cli-jobs-nodejs-jobs (Jobs) deleted the stack cli-jobs-nodejs" \

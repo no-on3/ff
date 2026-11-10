@@ -250,6 +250,7 @@ mod tests {
                 "ff_get_function",
                 "ff_logs",
                 "ff_history",
+                "ff_trace",
                 "ff_metrics",
                 "ff_usage",
                 "ff_balance",
@@ -275,13 +276,21 @@ mod tests {
         let logs = tools.iter().find(|tool| tool["name"] == "ff_logs").unwrap();
         assert_eq!(
             logs["description"],
-            "Show a function's log lines: the newest of a window, every page of it, or the live tail"
+            "Show a function's log lines: the newest of a window, every page of it, or the live tail; or a trace's, \
+             across the functions it called"
         );
         let schema = &logs["inputSchema"];
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["additionalProperties"], false);
-        assert_eq!(schema["required"], json!(["name"]));
-        assert_eq!(schema["properties"]["name"], json!({ "type": "string", "description": "The function's name" }));
+        assert!(schema.get("required").is_none(), "a trace's lines name no function");
+        assert_eq!(
+            schema["properties"]["name"],
+            json!({ "type": "string", "description": "The function's name; with --trace, its lines of the trace alone" })
+        );
+        assert_eq!(schema["properties"]["trace"]["type"], "string");
+        let trace = tools.iter().find(|tool| tool["name"] == "ff_trace").unwrap();
+        assert_eq!(trace["inputSchema"]["required"], json!(["id"]));
+        assert_eq!(trace["annotations"]["readOnlyHint"], true);
         assert_eq!(schema["properties"]["tail"]["type"], "integer");
         assert_eq!(schema["properties"]["tail"]["default"], 100);
         assert_eq!(schema["properties"]["requestId"]["type"], "string");
@@ -354,7 +363,7 @@ mod tests {
         };
         assert_eq!(
             said(&answers[0]),
-            "ff_logs takes no argument follow: it takes name, tail, since, start, end, grep, requestId, all"
+            "ff_logs takes no argument follow: it takes name, tail, since, start, end, grep, requestId, all, trace"
         );
         assert_eq!(said(&answers[1]), "ff_logs's tail is a whole number");
         assert!(

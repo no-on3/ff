@@ -25,6 +25,7 @@ import Onboarding from '../components/Onboarding';
 import PendingApproval from '../components/PendingApproval';
 import ProFormaPage from '../components/ProForma';
 import Shell from '../components/Shell';
+import TraceDetail from '../components/TraceDetail';
 import Usage from '../components/Usage';
 import { config } from '../config';
 import { accountView, chooseAccount, loadErrorMessage, rememberAccount, rememberedAccount } from '../lib/session';
@@ -60,6 +61,7 @@ const AccountRoutes: React.FC<{ account: MeAccount | null }> = ({ account }) => 
               <Route path="/functions" element={<FunctionList />} />
               <Route path="/functions/new" element={<CreateFunction />} />
               <Route path="/functions/:id" element={<FunctionDetail />} />
+              <Route path="/traces/:id" element={<TraceDetail />} />
               <Route path="/databases" element={<Databases />} />
               <Route path="/databases/:id" element={<DatabaseDetail />} />
               <Route path="/caches" element={<Caches />} />

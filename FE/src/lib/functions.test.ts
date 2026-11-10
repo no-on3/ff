@@ -225,6 +225,22 @@ describe('what brought a call', () => {
     expect((['api', 'url', 'schedule', 'sqs'] as const).map((source) => sourceText(source))).toEqual(['through the API', 'through its URL', 'by a schedule', 'with a batch of a queue it reads']);
     expect([sourceText('async'), sourceText('async', 3)]).toEqual(['asynchronously, attempt 1', 'asynchronously, attempt 3']);
   });
+
+  it('names the schedule, the queue, the bucket or the call it came from, when the API says', () => {
+    expect([
+      sourceText('schedule', 1, { schedule: 'nightly' }),
+      sourceText('sqs', 1, { queue: 'jobs', messageId: 'm-1' }),
+      sourceText('async', 1, { bucket: 'photos' }),
+      sourceText('async', 2, { recordOf: '7d1e5c1a' }),
+      sourceText('url', 1, null),
+    ]).toEqual([
+      'by the schedule nightly',
+      'with a batch of the queue jobs',
+      'asynchronously, attempt 1, for a notification of the bucket photos',
+      'asynchronously, attempt 2, with the record of request 7d1e5c1a',
+      'through its URL',
+    ]);
+  });
 });
 
 describe('codeText', () => {

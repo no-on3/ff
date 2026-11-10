@@ -74,6 +74,19 @@ def send(body):
         # Loaded here, so that the tests run without it installed.
         import boto3
 
-        _queue = (boto3.client("sqs"), url)
+        _queue = (pass_trace_on(boto3.client("sqs")), url)
     sqs, url = _queue
     return sqs.send_message(QueueUrl=url, MessageBody=body)["MessageId"]
+
+
+def pass_trace_on(client):
+    """The client, sending the call's trace, _X_AMZN_TRACE_ID, in each request's X-Amzn-Trace-Id, which SQS keeps with
+    the message as its AWSTraceHeader: the worker's call joins the trace, and `ff trace` shows both. boto3 does it
+    itself on AWS Lambda, not on FF; the trace is read at each request, as each call has its own."""
+
+    def add_trace(params, **_):
+        if os.environ.get("_X_AMZN_TRACE_ID"):
+            params["headers"].setdefault("X-Amzn-Trace-Id", os.environ["_X_AMZN_TRACE_ID"])
+
+    client.meta.events.register("before-call", add_trace)
+    return client

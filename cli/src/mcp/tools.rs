@@ -63,7 +63,7 @@ const TOOLS: &[Tool] = &[
         name: "ff_logs",
         title: "A function's logs",
         command: &["logs"],
-        options: &["name", "tail", "since", "start", "end", "grep", "request_id", "all"],
+        options: &["name", "tail", "since", "start", "end", "grep", "request_id", "all", "trace"],
         many: "lines",
         effect: Reads,
     },
@@ -73,6 +73,14 @@ const TOOLS: &[Tool] = &[
         command: &["history"],
         options: &["name", "limit"],
         many: "invocations",
+        effect: Reads,
+    },
+    Tool {
+        name: "ff_trace",
+        title: "A request's trail",
+        command: &["trace"],
+        options: &["id"],
+        many: "calls",
         effect: Reads,
     },
     Tool {

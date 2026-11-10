@@ -136,10 +136,11 @@ pub enum Command {
         name: String,
     },
 
-    /// Show a function's log lines: the newest of a window, every page of it, or the live tail
+    /// Show a function's log lines: the newest of a window, every page of it, or the live tail; or a trace's, across
+    /// the functions it called
     Logs(LogsArgs),
 
-    /// Show a function's recent calls, newest first, with their request IDs
+    /// Show a function's recent calls, newest first, with their request IDs and their traces
     History {
         /// The function's name
         name: String,
@@ -147,6 +148,13 @@ pub enum Command {
         /// How many calls
         #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
+    },
+
+    /// Show one request's trail as a timeline: the account's calls in a trace, by time, across its functions
+    Trace {
+        /// The trace's ID, as ff history, the console and an answer's X-Amzn-Trace-Id name it: 1-<time>-<random>, or
+        /// the header's Root=1-…
+        id: String,
     },
 
     /// Set how many instances a function keeps running when idle, and runs at most
@@ -685,8 +693,9 @@ pub struct AsyncConfigArgs {
 
 #[derive(Args)]
 pub struct LogsArgs {
-    /// The function's name
-    pub name: String,
+    /// The function's name; with --trace, its lines of the trace alone
+    #[arg(required_unless_present = "trace")]
+    pub name: Option<String>,
 
     /// How many lines: the newest of the window
     #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..=1000))]
@@ -723,6 +732,11 @@ pub struct LogsArgs {
     /// With --follow, ask every 2 s rather than hold a stream open, through a proxy that holds streams back
     #[arg(long, requires = "follow")]
     pub poll: bool,
+
+    /// Every line of one request's trail, by time, across the functions it called, each line naming its function: the
+    /// trace's ID, as ff trace takes it
+    #[arg(long, conflicts_with_all = ["tail", "since", "start", "end", "request_id", "all", "follow"])]
+    pub trace: Option<String>,
 }
 
 #[derive(Subcommand)]

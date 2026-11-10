@@ -2,8 +2,11 @@
 # queue is a stand-in that keeps what it is sent and answers each with an ID.
 import base64
 import json
+import os
 import pathlib
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from src import api
 
@@ -62,6 +65,30 @@ class ApiTest(unittest.TestCase):
         self.assertEqual((none["statusCode"], json.loads(none["body"])), (404, {"message": "No route for /orders"}))
         self.assertEqual((wrong["statusCode"], wrong["headers"]["allow"]), (405, "POST"))
         self.assertEqual(queue.sent, [])
+
+    def test_the_queues_client_sends_the_calls_trace_in_x_amzn_trace_id_read_at_each_request_and_keeps_one_it_has(self):
+        registered = []
+        client = SimpleNamespace(meta=SimpleNamespace(events=SimpleNamespace(register=lambda *added: registered.append(added))))
+        self.assertIs(api.pass_trace_on(client), client)
+        [(event, add_trace)] = registered
+
+        def sent(headers, trace=None):
+            params = {"headers": dict(headers)}
+            with mock.patch.dict(os.environ):
+                os.environ.pop("_X_AMZN_TRACE_ID", None)
+                if trace:
+                    os.environ["_X_AMZN_TRACE_ID"] = trace
+                add_trace(model=None, params=params, request_signer=None, context={})
+            return params["headers"]
+
+        first = "Root=1-6912b0a3-5f1e2d3c4b5a69788796a5b4;Parent=53995c3f42cd8ad8;Sampled=0"
+        later = "Root=1-6912b0a4-000000000000000000000001;Parent=0000000000000001;Sampled=0"
+        own = {"X-Amzn-Trace-Id": "Root=1-6912b0a3-aaaaaaaaaaaaaaaaaaaaaaaa"}
+        self.assertEqual(event, "before-call")
+        self.assertEqual(sent({}, first), {"X-Amzn-Trace-Id": first})
+        self.assertEqual(sent({}, later), {"X-Amzn-Trace-Id": later})
+        self.assertEqual(sent(own, first), own)
+        self.assertEqual(sent({}), {})
 
 
 if __name__ == "__main__":

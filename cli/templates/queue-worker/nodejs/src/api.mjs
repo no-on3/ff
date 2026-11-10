@@ -64,6 +64,22 @@ async function opened(url) {
   if (!url) throw new Error('JOBS_QUEUE_URL is not set: template.yaml sets it to the queue it makes');
   // Loaded here, so that the tests run without it installed.
   const { SendMessageCommand, SQSClient } = await import('@aws-sdk/client-sqs');
-  const sqs = new SQSClient({});
+  const sqs = passTraceOn(new SQSClient({}));
   return async (body) => (await sqs.send(new SendMessageCommand({ QueueUrl: url, MessageBody: body }))).MessageId;
+}
+
+/**
+ * The client, sending the call's trace, _X_AMZN_TRACE_ID, in each request's X-Amzn-Trace-Id, which SQS keeps with the
+ * message as its AWSTraceHeader: the worker's call joins the trace, and `ff trace` shows both. AWS's SDK does it itself
+ * on AWS Lambda, not on FF; the trace is read at each request, as each call has its own.
+ */
+export function passTraceOn(client) {
+  client.middlewareStack.add(
+    (next) => (args) => {
+      if (process.env._X_AMZN_TRACE_ID) args.request.headers['X-Amzn-Trace-Id'] ??= process.env._X_AMZN_TRACE_ID;
+      return next(args);
+    },
+    { step: 'build', name: 'passTraceOn' },
+  );
+  return client;
 }

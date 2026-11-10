@@ -94,10 +94,10 @@ Each task, or part of one, is one commit with its tests and its documents, as th
   - [ ] part 3, the route: `status.<domain>` in `ff.caddy`, FF's ninth fixed name, serving `/data/ff/status/`; its DNS record as the README lists the others; the smoke test checks the page; on the server with your go-ahead; the README's section; the guide's line.
 
 ### Phase 5: one request's trail
-- [ ] **M-13** Tracing (the plan's D8):
+- [x] **M-13** Tracing (the plan's D8):
   - [x] part 1, the backend: `trace_id` on `function_invocations` by a migration, indexed with the account and the time; the ID started at each entry: a URL's request from `X-Amzn-Trace-Id` or new, and given back; `POST /functions/:id/invoke` and Lambda's `Invoke` from the header or new; a schedule's run; a bucket notification; a queue message's `AWSTraceHeader` joined by the reader's call; carried to each attempt and to the destination's record; `traceId` in the history's DTO; `GET /traces/:id` with `logs:read`, the calls in time order with how each came, its function, version, duration and status, in both of L5's loops; L1, L2, L4;
   - [x] part 2, the runtimes: `_X_AMZN_TRACE_ID` set for each call, as Lambda sets it, and in the structured log lines; both runtimes' tests;
-  - [ ] part 3, `ff trace <id>` as a timeline, `ff logs --trace <id>` across functions, `ff history`'s column; the console's "Trace" link on a history row, checked in a browser at a phone's width; `cargo test` and the console's Vitest with the DTO's name mirrored; the templates' two lines that pass the ID on, the SDK's middleware in Node.js and botocore's hook in Python, with a test each; the guide's page "Following one request".
+  - [x] part 3, `ff trace <id>` as a timeline, `ff logs --trace <id>` across functions, `ff history`'s column; the console's "Trace" link on a history row, checked in a browser at a phone's width; `cargo test` and the console's Vitest with the DTO's name mirrored; the templates' two lines that pass the ID on, the SDK's middleware in Node.js and botocore's hook in Python, with a test each; the guide's page "Following one request".
 
 ### Phase 6: close
 - [ ] **M-14** Documentation:

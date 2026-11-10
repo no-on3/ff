@@ -440,6 +440,7 @@ fn get_shows_the_handler_and_the_code_as_aws_lambda_describes_them() {
 fn history_lists_the_calls_with_their_request_ids() {
     let page = json!({ "invocations": [
         { "id": "inv-12", "requestId": "req-5", "attempt": 2, "status": "COMPLETED", "source": "async", "duration": 4,
+          "traceId": "1-6730a1f2-0123456789abcdef01234567", "trigger": { "bucket": "photos" },
           "output": null, "createdAt": "2026-10-21T09:11:00.000Z" },
         invocation(),
         { "id": "inv-9", "status": "ERROR", "source": "url", "duration": 3,
@@ -447,13 +448,49 @@ fn history_lists_the_calls_with_their_request_ids() {
     let api = Server::start(vec![Reply::json(200, json!([function(CODE)])), Reply::json(200, page)]);
 
     ff(&with_key(&api.url)).args(["history", "hello", "--limit", "3"]).assert().success().stdout(
-        "TIME (UTC)           REQUEST ID  STATUS     DURATION  SOURCE            ERROR\n\
-         2026-10-21 09:11:00  req-5       COMPLETED  4 ms      async, attempt 2\n\
-         2026-10-21 09:10:00  7d1e5c1a    COMPLETED  12 ms     api\n\
-         2026-10-21 09:09:00  inv-9       ERROR      3 ms      url               Error: boom\n\
-         3 of 7 calls, newest first\n",
+        "TIME (UTC)           REQUEST ID  TRACE                                STATUS     DURATION  SOURCE                           ERROR\n\
+         2026-10-21 09:11:00  req-5       1-6730a1f2-0123456789abcdef01234567  COMPLETED  4 ms      async, attempt 2, bucket photos\n\
+         2026-10-21 09:10:00  7d1e5c1a                                         COMPLETED  12 ms     api\n\
+         2026-10-21 09:09:00  inv-9                                            ERROR      3 ms      url                              Error: boom\n\
+         3 of 7 calls, newest first\n\
+         ff trace <trace> shows a call's trail across the functions it reached\n",
     );
     assert_eq!(api.requests()[1].path, "/functions/f1/invocations?limit=3");
+}
+
+#[test]
+fn trace_prints_a_requests_trail_as_a_timeline_or_the_apis_answer_as_json() {
+    let trace = json!({ "traceId": "1-6730a1f2-0123456789abcdef01234567", "truncated": true, "calls": [
+        { "id": "r1", "requestId": "r1", "attempt": 1, "functionId": "f1", "functionName": "api", "source": "url",
+          "trigger": null, "version": null, "alias": null, "status": "COMPLETED", "duration": 40.0,
+          "createdAt": "2026-11-10T09:15:03.000Z" },
+        { "id": "r2", "requestId": "r2", "attempt": 1, "functionId": "f2", "functionName": "worker", "source": "sqs",
+          "trigger": { "queue": "jobs", "messageId": "m-1" }, "version": 2, "alias": null, "status": "ERROR",
+          "duration": 60.0, "createdAt": "2026-11-10T09:15:03.040Z" }] });
+    let api = Server::start(vec![Reply::json(200, trace.clone()), Reply::json(200, trace.clone())]);
+    let dir = with_key(&api.url);
+
+    ff(&dir)
+        .args(["trace", "Root=1-6730A1F2-0123456789ABCDEF01234567;Parent=53995c3f42cd8ad8;Sampled=0"])
+        .assert()
+        .success()
+        .stdout(
+            "Trace 1-6730a1f2-0123456789abcdef01234567: 2 calls of 2 functions, from 2026-11-10 09:15:03 UTC, over 100 ms\n\
+             \n\
+             AT      TIMELINE                  FUNCTION  SOURCE           STATUS     DURATION  REQUEST ID\n\
+             +0 ms   ██████████                api       url              COMPLETED  40 ms     r1\n\
+             +40 ms           ███████████████  worker:2  sqs, queue jobs  ERROR      60 ms     r2\n",
+        )
+        .stderr(predicate::str::contains("warning: Trace 1-6730a1f2-0123456789abcdef01234567 has more calls than these, its first 2"));
+    assert_eq!(api.requests()[0].path, "/traces/1-6730a1f2-0123456789abcdef01234567");
+    let output = ff(&dir).args(["trace", "1-6730a1f2-0123456789abcdef01234567", "--output", "json"]).output().unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap(), trace);
+    ff(&dir)
+        .args(["trace", "1-6730a1f2"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("\"1-6730a1f2\" is no trace ID"));
+    assert_eq!(api.requests().len(), 2, "an ID that isn't one is refused before any call");
 }
 
 #[test]

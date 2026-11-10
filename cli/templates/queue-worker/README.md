@@ -26,6 +26,8 @@ ff invoke {{name}}-api --http POST /jobs --data '{"task": "greet", "name": "Amir
 ff logs {{name}}-worker                       # the job done: {"job": "…", "task": "greet", "done": "Hello Amira"}
 ff invoke {{name}}-api --http POST /jobs --data '{"task": "resize"}'
 ff queues receive {{name}}-jobs-dead-letters --wait 20s    # after three tries, the job the worker failed
+ff history {{name}}-api                       # the API's calls, each with its trace
+ff trace <trace>                              # one job's trail: the API's call, then the worker's
 ```
 
 `ff queues get {{name}}-jobs` shows the jobs waiting and those being done, and `ff event-sources list --function {{name}}-worker` how the worker reads them. `ff delete-stack` deletes both functions, the URL and the queues.
@@ -40,4 +42,4 @@ sam build && sam deploy --guided              # the same template, the stack {{n
 
 ## The same as on AWS
 
-The template is SAM's, within what FF takes of it; the API's handler is AWS Lambda's, given Lambda's URL event (version 2.0) and answering a URL's response; the queues are SQS's, the API's client AWS's SDK, which finds the endpoint and the key in the function's environment, a role's on AWS and the function's own on FF; the worker is given SQS's event, ten messages at most, and its answer's `batchItemFailures` keeps the jobs it names, as Lambda's `ReportBatchItemFailures` does; the dead-letter queue takes a job at its fourth receive, as SQS's `RedrivePolicy` says.
+The template is SAM's, within what FF takes of it; the API's handler is AWS Lambda's, given Lambda's URL event (version 2.0) and answering a URL's response; the queues are SQS's, the API's client AWS's SDK, which finds the endpoint and the key in the function's environment, a role's on AWS and the function's own on FF, and sends the call's trace, `_X_AMZN_TRACE_ID`, in `X-Amzn-Trace-Id`, which SQS keeps with the message as its `AWSTraceHeader`, so that the worker's call joins the API's trace, on AWS as on FF; the worker is given SQS's event, ten messages at most, and its answer's `batchItemFailures` keeps the jobs it names, as Lambda's `ReportBatchItemFailures` does; the dead-letter queue takes a job at its fourth receive, as SQS's `RedrivePolicy` says.

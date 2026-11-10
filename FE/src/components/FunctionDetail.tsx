@@ -480,7 +480,7 @@ const FunctionDetail: React.FC = () => {
                           <Icon name="chevron" className="-rotate-90 text-gray-400 transition-transform group-open:rotate-0" />
                           <StatusPill tone={info.tone} label={info.label} title={info.note} />
                           <span className="text-gray-800 tabular-nums">{new Date(invocation.createdAt).toLocaleString()}</span>
-                          <span className="text-gray-500">{sourceText(invocation.source, invocation.attempt)}</span>
+                          <span className="text-gray-500">{sourceText(invocation.source, invocation.attempt, invocation.trigger)}</span>
                           <span className="ml-auto flex gap-4 text-[13px] text-gray-600 tabular-nums">
                             <span title="Duration">{formatDuration(invocation.duration)}</span>
                             <span title="Most memory used">{formatMemory(invocation.memoryUsed)}</span>
@@ -493,6 +493,11 @@ const FunctionDetail: React.FC = () => {
                             </span>
                             <span>Ended {new Date(invocation.updatedAt).toLocaleTimeString()}</span>
                             <Link to={`?${searchForFilter({ range: 'all', q: '', requestId: invocation.requestId }).toString()}`}>Its logs</Link>
+                            {invocation.traceId && (
+                              <Link to={`/traces/${invocation.traceId}`} title="The request's trail across the functions it reached">
+                                Trace
+                              </Link>
+                            )}
                           </div>
                           <div className="grid gap-3 lg:grid-cols-2">
                             <HistoryValue label="Input" text={historyText(invocation.input, invocation.inputTruncated)} truncated={invocation.inputTruncated} />

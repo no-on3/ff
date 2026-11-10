@@ -32,6 +32,7 @@ mod secrets;
 mod sites;
 mod stack;
 mod template;
+mod trace;
 mod url;
 mod version;
 mod versions;
@@ -84,6 +85,7 @@ pub fn run(command: Command, context: &Context) -> Result<(), Error> {
         Command::Get { name } => functions::get(&name, context),
         Command::Logs(args) => logs::run(args, context),
         Command::History { name, limit } => functions::history(&name, limit, context),
+        Command::Trace { id } => trace::run(&id, context),
         Command::Scale { name, min, max } => functions::scale(&name, min, max, context),
         Command::Delete { name, yes } => functions::delete(&name, yes, context),
         Command::DeleteStack { name, yes } => stack::delete_stack(name.as_deref(), yes, context),
