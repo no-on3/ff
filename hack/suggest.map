@@ -116,6 +116,7 @@ hack/runtime-images.sh                  static cli:local_images
 hack/lib/ff-builds.sh                   static cli:downloads
 hack/lib/dkim-verify.mjs                static l4:mail_sent
 hack/lib/e2e-stack.sh                   static l4 l5 cli aws-tools
+hack/lib/e2e-compose.yml                static l4 l5 cli aws-tools
 hack/lib/backend-build.sh               static l4 l5 cli aws-tools
 hack/lib/sections.sh                    static l4 l5 cli aws-tools
 hack/lib/checks.sh                      static l4 l5 cli aws-tools

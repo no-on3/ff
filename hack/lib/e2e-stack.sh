@@ -16,9 +16,9 @@ source "$FF_REPO_ROOT/hack/lib/evidence.sh"
 source "$FF_REPO_ROOT/hack/lib/backend-build.sh"
 work="$FF_REPO_ROOT/hack/.$E2E_NAME"
 # With the "auth", "data", "cache", "mail" and "mail-test" profiles, so that cleaning up also removes Keycloak, Mailpit,
-# the data, cache and mail servers and the mail's receiver when they ran.
-compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" --profile auth --profile data --profile cache
-  --profile mail --profile mail-test)
+# the data, cache and mail servers and the mail's receiver when they ran; and with the suites' own settings on top.
+compose=(docker compose -p "$E2E_PROJECT" -f "$FF_REPO_ROOT/docker-compose.yml" -f "$FF_REPO_ROOT/hack/lib/e2e-compose.yml"
+  --profile auth --profile data --profile cache --profile mail --profile mail-test)
 e2e_pids=()
 e2e_namespaces=()
 # Containers a test starts beside the compose project, such as a DNS server: removed on exit.

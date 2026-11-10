@@ -110,7 +110,7 @@ cd BE && npm run migration:run && npm run start:dev
 ## End-to-end test
 
 ```bash
-hack/e2e.sh                # L4: the whole stack through the REST API (about 20 min)
+hack/e2e.sh                # L4: the whole stack through the REST API (about 20 min; 25 with Docker's data on a spinning disk)
 hack/e2e.sh --teardown     # … and delete the cluster afterwards
 hack/e2e.sh --list         # its sections: each one's id, its seconds on the last run, its title, what it needs
 hack/e2e.sh --only queues  # one section, after what it needs: the stack, the backend, buckets (about 6 min)
@@ -120,7 +120,7 @@ hack/e2e.sh --only queues --reuse --keep   # again, against the stack kept, and 
 hack/e2e-tenancy.sh        # L5: every route as another account and anonymously, a function's logs, then the operator's routes, bank transfers, invoices and credit grants, and last, closing an account and deleting its data (about 7 min)
 ```
 
-The script starts its own compose project (`ff-e2e`, ports 25432 and 29003, which `FF_E2E_PG_PORT` and `FF_E2E_S3_PORT` move when another program holds one: the suite names it before compose starts; L5 has 25433, 29004, 28180, 21026 and 28026, the `ff` suite 25436 and 29007, each under Linux's range for outgoing connections, 32768 to 60999, where a connection of the machine's can hold a port for a moment and Docker then refuses to publish it, as it once refused L5's Mailpit; a start that fails says compose's own words), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
+The script starts its own compose project (`ff-e2e`, ports 25432 and 29003, which `FF_E2E_PG_PORT` and `FF_E2E_S3_PORT` move when another program holds one: the suite names it before compose starts; L5 has 25433, 29004, 28180, 21026 and 28026, the `ff` suite 25436 and 29007, each under Linux's range for outgoing connections, 32768 to 60999, where a connection of the machine's can hold a port for a moment and Docker then refuses to publish it, as it once refused L5's Mailpit; a start that fails says compose's own words; its PostgreSQL, thrown away after the run, commits without waiting for the disk: `hack/lib/e2e-compose.yml`, on top of `docker-compose.yml`, whose database for development keeps every commit), ensures the cluster and runtime images are ready, builds the backend, and starts it on a free port. It then runs:
 1. create (waits for ACTIVE);
 2. invoke;
 3. history (with duration);

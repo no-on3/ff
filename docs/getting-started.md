@@ -1817,7 +1817,7 @@ hack/test-status.sh                                      # the status page: its 
 hack/k8s/test-it.sh                                      # the Kubernetes driver on the dev cluster, about 6 min
 hack/k8s/test-logging-filter.sh                          # the log collector's configuration and filter, in its image, seconds
 hack/k8s/test-rbac.sh                                    # the backend's cluster permissions
-hack/e2e.sh                                              # the whole stack through the API, about 20 min
+hack/e2e.sh                                              # the whole stack through the API, about 20 min; 25 with Docker's data on a spinning disk
 hack/e2e.sh --only queues                                # one of its sections, after what it needs; --list names them, --from runs on from one, in each of the three
 hack/e2e-tenancy.sh                                      # every route as another account and anonymously, about 7 min
 hack/cli-e2e.sh                                          # the ff command on the stack, and in Docker, about 15 min
