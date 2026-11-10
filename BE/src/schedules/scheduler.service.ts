@@ -9,10 +9,11 @@ import { InsufficientCreditException } from '../billing/credit-policy';
 import { CreditService } from '../billing/credit.service';
 import { describeError } from '../common/describe-error';
 import { unlessGone } from '../common/unless-gone';
-import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY, qualifierAttributes } from '../functions/async-invoke';
+import { EXPIRY_GRACE_SECONDS, LAMBDA_RETRY_POLICY, qualifierAttributes, scheduleAttributes } from '../functions/async-invoke';
 import { EventFormat, Function, FunctionStatus } from '../functions/entities/function.entity';
 import { FunctionsService } from '../functions/functions.service';
 import { qualifierText } from '../functions/qualifier';
+import { newTraceId, traceAttributes } from '../functions/trace';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { refusals } from '../monitoring/operator-metrics';
 import { PlansService } from '../plans/plans.service';
@@ -27,9 +28,6 @@ const BATCH = 50;
 
 /** A megabyte, as the plans count what messages hold. */
 const MB = 1024 * 1024;
-
-/** What its function's queue keeps beside a schedule's run: that it is the schedule's, which its worker says on the schedule. */
-export const SCHEDULE_ORIGIN = 'schedule';
 
 /** A run that can be made: its function, and the event it sends. */
 interface Admitted {
@@ -152,9 +150,10 @@ export class SchedulerService implements OnModuleInit, OnModuleDestroy {
     );
     if (typeof admitted === 'string') return undefined;
     const expiresAt = new Date(now.getTime() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
+    // Each run starts a trace, as EventBridge's does, which its attempts keep.
     await this.queues.sendEvent(admitted.fn, requestId, JSON.stringify(admitted.event), expiresAt, {
       manager,
-      attributes: { origin: SCHEDULE_ORIGIN, scheduleId: schedule.id, ...qualifierAttributes(schedule.qualifier) },
+      attributes: { ...scheduleAttributes(schedule), ...qualifierAttributes(schedule.qualifier), ...traceAttributes(newTraceId(now)) },
     });
     return admitted.fn;
   }

@@ -4,7 +4,8 @@
  * outcome, the version that ran, the call's log when asked); Event queued,
  * DryRun checked; the payload, the headers and the function refused as
  * Lambda refuses them, and the plan's rate, the function's instances and the
- * account's credit as Lambda's throttles. The requests and their answers are
+ * account's credit as Lambda's throttles; the call's trace, the caller's or a
+ * new one, given back. The requests and their answers are
  * lambda-invoke-examples.json's, which ff local's front door reads too.
  */
 import { readFileSync } from 'node:fs';
@@ -19,6 +20,7 @@ import { FunctionVersion } from '../functions/entities/function-version.entity';
 import { InvocationSource } from '../functions/entities/function-invocation.entity';
 import { Function, FunctionStatus } from '../functions/entities/function.entity';
 import { CallOutcome, CallTarget, FunctionsService } from '../functions/functions.service';
+import { TRACE_HEADER } from '../functions/trace';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { FunctionRuntimeError, FunctionThrottledError, FunctionTimeoutError, OrchestratorError } from '../orchestrator/orchestrator.errors';
 import { plan } from '../plans/test-fixtures';
@@ -38,6 +40,8 @@ interface Example {
   payload?: unknown;
 }
 const table = JSON.parse(readFileSync(join(__dirname, 'lambda-invoke-examples.json'), 'utf8')) as Record<string, Example[]>;
+/** A trace the call started, as AWS X-Ray writes one. */
+const NEW_TRACE = expect.stringMatching(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/);
 
 /** What the call did, as FunctionsService says it. */
 function outcomeOf({ output, error, logResult }: NonNullable<Example['ran']>): Partial<CallOutcome> {
@@ -88,9 +92,12 @@ describe("Lambda's Invoke (L1)", () => {
   let admit: jest.Mock;
   let refusedCount: jest.Mock;
   let invoke: LambdaInvoke;
+  /** The trace header each answer gave back, which send() takes off it: the examples' answers, ff local's too, have none. */
+  let traces: Array<string | undefined>;
 
   beforeEach(() => {
     function_ = fn();
+    traces = [];
     outcomes = [];
     throttled = false;
     functions = {
@@ -102,7 +109,7 @@ describe("Lambda's Invoke (L1)", () => {
       }),
       call: jest.fn(async () => ({ invocation: {}, ok: true, output: null, ...outcomes.shift() })),
     };
-    queue = jest.fn(async () => ({ requestId: 'req-1' }));
+    queue = jest.fn(async (...call: unknown[]) => ({ requestId: 'req-1', traceId: call[4] }));
     admit = jest.fn(async () => undefined);
     refusedCount = jest.fn();
     const throttler = {
@@ -122,7 +129,14 @@ describe("Lambda's Invoke (L1)", () => {
     const caller = lambdaCaller({ plan: plan({ invokesPerSecond: 5 }), function_, named: { name: 'orders', ...(qualifier ? { qualifier } : {}) } });
     const lowered = Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
     const call = { ...lambdaCall('POST', '/2015-03-31/functions/orders/invocations'), body: Buffer.from(body), headers: lowered };
-    return withRequestContext({ requestId: 'req-1' }, () => invoke.handlers.Invoke(call, caller));
+    return withRequestContext({ requestId: 'req-1' }, () => invoke.handlers.Invoke(call, caller)).then(untraced);
+  }
+
+  /** The answer without its trace header, which `traces` keeps. */
+  function untraced({ headers, ...answer }: LambdaAnswer): LambdaAnswer {
+    const { [TRACE_HEADER]: trace, ...others } = headers ?? {};
+    traces.push(trace);
+    return Object.keys(others).length > 0 ? { ...answer, headers: others } : answer;
   }
 
   /** The error an Invoke throws, as the front door answers it: its status, its type, its message, and its Reason. */
@@ -156,7 +170,7 @@ describe("Lambda's Invoke (L1)", () => {
 
       expect(answer).toEqual(expected(example.answer!));
       expect(callOptions()).toEqual([
-        { payload: JSON.parse(example.request.body!), source: InvocationSource.API, requestId: 'req-1', target: {}, asks: { logTail: false } },
+        { payload: JSON.parse(example.request.body!), source: InvocationSource.API, requestId: 'req-1', target: {}, asks: { logTail: false }, traceId: NEW_TRACE },
       ]);
       expect(admit).toHaveBeenCalledWith(ACCOUNT);
     });
@@ -210,7 +224,7 @@ describe("Lambda's Invoke (L1)", () => {
       const [example] = table.events;
 
       expect(await sendExample(example)).toEqual(expected(example.answer!));
-      expect(queue).toHaveBeenCalledWith(ACCOUNT, 'f-orders', JSON.parse(example.request.body!), example.request.qualifier);
+      expect(queue).toHaveBeenCalledWith(ACCOUNT, 'f-orders', JSON.parse(example.request.body!), example.request.qualifier, NEW_TRACE);
       // The queue checks the credit, as for the API's asynchronous calls; nothing runs now.
       expect([admit.mock.calls.length, functions.call.mock.calls.length]).toEqual([0, 0]);
     });
@@ -218,6 +232,23 @@ describe("Lambda's Invoke (L1)", () => {
     it('checks a DryRun as a call, and answers 204, nothing run or queued', async () => {
       await answersAsItSays(table.dryRuns);
       expect([queue.mock.calls.length, functions.call.mock.calls.length]).toEqual([0, 0]);
+    });
+  });
+
+  describe('the trace', () => {
+    it('makes the call part of the trace X-Amzn-Trace-Id names, as the AWS SDKs send it from _X_AMZN_TRACE_ID, else of a new one', async () => {
+      const trace = '1-5759e988-bd862e3fe1be46a994272793';
+
+      await send({ headers: { 'X-Amzn-Trace-Id': `Root=${trace};Parent=53995c3f42cd8ad8;Sampled=0` } });
+      await send();
+      await send({ headers: { 'X-Amzn-Trace-Id': `Root=${trace}`, 'X-Amz-Invocation-Type': 'Event' } });
+      await send({ headers: { 'X-Amz-Invocation-Type': 'DryRun' } });
+
+      const ran = callOptions().map(({ traceId }) => traceId);
+      expect([...ran, queue.mock.calls[0][4]]).toEqual([trace, NEW_TRACE, trace]);
+      expect(ran[1]).not.toBe(trace);
+      // Given back by an answer that ran the call or kept it; a DryRun runs nothing.
+      expect(traces).toEqual([`Root=${trace}`, `Root=${ran[1]}`, `Root=${trace}`, undefined]);
     });
   });
 

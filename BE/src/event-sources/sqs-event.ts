@@ -1,4 +1,5 @@
 import { Received } from '../queues/customer-queues';
+import { TRACE_ATTRIBUTE } from '../functions/trace';
 import { MessageAttribute, attributesMd5, md5Hex, receiptHandle } from '../queues/sqs-messages';
 
 /** A message attribute as Lambda's SQS event gives it: its value, the lists SQS keeps empty, and its type. */
@@ -37,8 +38,8 @@ export function sqsRecord(message: Received, queueArn: string, region: string): 
     SenderId: message.meta.senderId ?? '',
     ApproximateFirstReceiveTimestamp: String(message.firstReceivedAt.getTime()),
   };
-  const trace = message.meta.systemAttributes?.AWSTraceHeader?.StringValue;
-  if (trace) attributes.AWSTraceHeader = trace;
+  const trace = message.meta.systemAttributes?.[TRACE_ATTRIBUTE]?.StringValue;
+  if (trace) attributes[TRACE_ATTRIBUTE] = trace;
   const sent: Record<string, MessageAttribute> = message.meta.messageAttributes ?? {};
   const messageAttributes = Object.fromEntries(
     Object.entries(sent).map(([name, value]): [string, SqsRecordAttribute] => [

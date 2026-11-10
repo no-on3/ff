@@ -3,11 +3,13 @@
  * server, in a scratch database dropped after, through the real invoke path
  * (the orchestrator is a stand-in): at most 64 KiB of each input, output and
  * error, marked when cut, and only what PostgreSQL can store; the caller gets
- * them whole. What ran each call: the version, and the alias it named.
+ * them whole. What ran each call: the version, and the alias it named. Each
+ * call's trace and what brought it, and a trace's calls read back, each account
+ * its own.
  *   docker compose up -d --wait postgres && npm run test:db
  */
 import 'dotenv/config';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Account, AccountStatus } from '../accounts/entities/account.entity';
 import { databaseConfiguration } from '../config/configuration';
@@ -16,14 +18,17 @@ import { FunctionRuntimeError } from '../orchestrator/orchestrator.errors';
 import { InvokeResult, Orchestrator } from '../orchestrator/orchestrator.types';
 import { UsageRecord } from '../usage/usage-record.entity';
 import { UsageService } from '../usage/usage.service';
-import { FunctionInvocation, InvocationStatus } from './entities/function-invocation.entity';
+import { FunctionInvocation, InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
 import { Function, FunctionStatus, Runtime } from './entities/function.entity';
 import { FunctionsService } from './functions.service';
 import { HISTORY_FIELD_BYTES } from './history';
 import { memoryEnvironments, noFunctionKeys, noPackages } from './test-fixtures';
+import { TracesService } from './traces.service';
 
 const run = process.env.FF_DB_IT === '1' ? describe : describe.skip;
 const ACCOUNT = '300000000045';
+/** Another account, whose calls may share a trace with the first's: a trace's ID is its caller's to choose. */
+const OTHER = '300000000046';
 /** Equal strings, or a failure that names the first difference instead of printing 64 KiB. */
 function expectSame(actual: unknown, expected: string): void {
   if (actual === expected) return;
@@ -47,10 +52,10 @@ run('the invocation history (L2)', () => {
   const inHistory = async (fn: Function, id: string) =>
     (await functions.getInvocations(ACCOUNT, fn.id, { limit: 100, offset: 0 })).invocations.find((invocation) => invocation.id === id);
 
-  async function newFunction(): Promise<Function> {
+  async function newFunction(accountId = ACCOUNT): Promise<Function> {
     return db.dataSource.getRepository(Function).save({
       name: `fn-${++n}`,
-      accountId: ACCOUNT,
+      accountId,
       runtime: Runtime.NODEJS,
       code: 'export const handler = async () => 1;',
       memory: 128,
@@ -62,7 +67,10 @@ run('the invocation history (L2)', () => {
   beforeAll(async () => {
     db = await createScratchDatabase(databaseConfiguration(), 'ff_test');
     await db.dataSource.runMigrations({ transaction: 'each' });
-    await db.dataSource.getRepository(Account).save({ id: ACCOUNT, name: 'History', planId: 'beta', status: AccountStatus.ACTIVE });
+    await db.dataSource.getRepository(Account).save([
+      { id: ACCOUNT, name: 'History', planId: 'beta', status: AccountStatus.ACTIVE },
+      { id: OTHER, name: 'Other', planId: 'beta', status: AccountStatus.ACTIVE },
+    ]);
     const config = { get: (_key: string, fallback?: unknown) => fallback } as unknown as ConfigService;
     const usage = new UsageService(db.dataSource.getRepository(UsageRecord), db.dataSource, config);
     await usage.ensurePartitions();
@@ -206,5 +214,53 @@ run('the invocation history (L2)', () => {
     expectSame(kept.error, start + '€'.repeat(Math.floor((HISTORY_FIELD_BYTES - Buffer.byteLength(start)) / 3)));
     expect(Buffer.byteLength(kept.error as string)).toBeLessThanOrEqual(HISTORY_FIELD_BYTES);
     expect(await records(kept.id)).toEqual([{ status: 'error' }]);
+  });
+
+  it("keeps each call's trace and what brought it; a trace's calls are read back in time order, each account its own", async () => {
+    const [first, second] = [await newFunction(), await newFunction()];
+    const others = await newFunction(OTHER);
+    invoke.mockResolvedValue({ output: 1, durationMs: 3, memoryUsedMb: 30 });
+    const trace = '1-6730a1f2-0123456789abcdef01234567';
+
+    const called = await functions.invoke(ACCOUNT, first.id, {}, undefined, trace);
+    const batch = await functions.call(second, {}, { source: InvocationSource.SQS, traceId: trace, trigger: { queue: 'orders', messageId: 'm-1' } });
+    await functions.call(others, {}, { source: InvocationSource.API, traceId: trace });
+    const untraced = await functions.invoke(ACCOUNT, first.id, {});
+
+    expect(await inHistory(first, called.id)).toMatchObject({ traceId: trace, trigger: null });
+    expect(batch.invocation).toMatchObject({ traceId: trace, trigger: { queue: 'orders', messageId: 'm-1' } });
+    expect(untraced.traceId).toMatch(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/);
+    expect(untraced.traceId).not.toBe(trace);
+
+    const traces = new TracesService(invocations());
+    const read = await traces.get(ACCOUNT, trace);
+    expect(read).toEqual({
+      traceId: trace,
+      truncated: false,
+      calls: [
+        {
+          id: called.id,
+          requestId: called.id,
+          attempt: 1,
+          functionId: first.id,
+          functionName: first.name,
+          source: InvocationSource.API,
+          trigger: null,
+          version: null,
+          alias: null,
+          status: InvocationStatus.COMPLETED,
+          duration: 3,
+          createdAt: expect.any(Date),
+        },
+        expect.objectContaining({ id: batch.invocation.id, functionName: second.name, source: InvocationSource.SQS, trigger: { queue: 'orders', messageId: 'm-1' } }),
+      ],
+    });
+    expect(read.calls[0].createdAt.getTime()).toBeLessThanOrEqual(read.calls[1].createdAt.getTime());
+    // The other account's call, in the same trace, is its own to read.
+    expect((await traces.get(OTHER, trace)).calls.map((call) => call.functionName)).toEqual([others.name]);
+    // A header naming the trace finds it too, in any case.
+    expect((await traces.get(ACCOUNT, `Root=${trace.toUpperCase()};Sampled=1`)).calls).toHaveLength(2);
+    await expect(traces.get(ACCOUNT, '1-6730a1f2-000000000000000000000000')).rejects.toThrow(NotFoundException);
+    await expect(traces.get(ACCOUNT, 'not-a-trace')).rejects.toThrow(BadRequestException);
   });
 });

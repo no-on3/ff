@@ -452,8 +452,9 @@ code='export async function handler(event: { name?: string }) {
 created="$(as_a POST /functions "$(function_body l5-a)")"
 check "A creates a function" "201 ACTIVE" "$(status) $(jq -r .status <<<"$created")"
 id="$(jq -r .id <<<"$created")"
-as_a POST "/functions/$id/invoke" '{"input":{"name":"A"}}' >/dev/null
+invoked_a="$(as_a POST "/functions/$id/invoke" '{"input":{"name":"A"}}')"
 check "A invokes it" 201 "$(status)"
+trace_a="$(jq -r .traceId <<<"$invoked_a")"
 check "A's usage counts the call (P-22)" "1" \
   "$(as_a GET /usage | jq -r --arg id "$id" '.functions[] | select(.functionId == $id) | .requests')"
 url_a="$(as_a POST "/functions/$id/url" '{"authType": "NONE"}' | jq -r .functionUrl)"
@@ -616,6 +617,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
     "GET /api-keys" | "POST /api-keys" | "DELETE /api-keys/{id}")
       as_b "$method" "$(path_for "$template" "$method" "$id" "$account_a")" "$(body_for "$method" "$template")" >/dev/null
       check "$route: needs a logged-in user" "$needs_user_for_keys" "$(status) $(message)"
+      ;;
+    "GET /traces/{id}")
+      as_b GET "/traces/$trace_a" >/dev/null
+      check "$route: B gets 404 for the trace of A's call" "404 The account has no call in trace $trace_a" "$(status) $(message)"
+      check "  ... which A reads: its call, its function's" "l5-a api 200" "$(as_a GET "/traces/$trace_a" | jq -r '"\(.calls[0].functionName) \(.calls[0].source)"') $(status)"
       ;;
     "GET /audit-log")
       log_b="$(as_b GET /audit-log)"
@@ -1329,8 +1335,9 @@ created="$(as_user_1 POST /functions "$(function_body l5-one)")"
 check "approved, account 1 deploys a function" "201 ACTIVE $account_1" \
   "$(status) $(jq -r '"\(.status) \(.accountId)"' <<<"$created")"
 fn_1="$(jq -r .id <<<"$created")"
-as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"one"}}' >/dev/null
+invoked_1="$(as_user_1 POST "/functions/$fn_1/invoke" '{"input":{"name":"one"}}')"
 check "and invokes it" 201 "$(status)"
+trace_1="$(jq -r .traceId <<<"$invoked_1")"
 # PostgreSQL stores no NUL in text: refused with a 400 naming it, never the database's 500.
 as_user_1 POST /functions "$(jq -cn '{name: "l5-nul", runtime: "nodejs", code: "export const handler = async () => \"a\u0000b\";", memory: 128, timeout: 5}')" >/dev/null
 check "code with a NUL character is refused, named, and nothing is created" "400 code must not contain the NUL character (U+0000) 1" \
@@ -1741,6 +1748,11 @@ for route in "${routes[@]}" "DELETE /functions/{id} (last)"; do
       alarm_now="$(as_user_1 GET "/alarms/$alarm_1")"
       check "  ... which account 1 still has, unchanged" "200 l5 Errors $fn_1" "$(status) $(jq -r '"\(.name) \(.metric) \(.functionId)"' <<<"$alarm_now")"
       ;;
+    "GET /traces/{id}")
+      as_user_2 GET "/traces/$trace_1" >/dev/null
+      check "$route: account 2 gets 404 for the trace of account 1's call" "404 The account has no call in trace $trace_1" "$(status) $(message)"
+      check "  ... which account 1 reads" "l5-one 200" "$(as_user_1 GET "/traces/$trace_1" | jq -r '.calls[0].functionName') $(status)"
+      ;;
     *'{'*)
       as_user_2 "$method" "$(path_for "$template" "$method" "$fn_1" "$account_1")" "$(body_for "$method" "$template")" >/dev/null
       check "$method $template: 404, as for a missing function" "404 Function with ID $fn_1 not found" "$(status) $(message)"
@@ -1852,6 +1864,8 @@ with_token "$key_1" GET /billing/invoices >/dev/null
 check "a key without usage:read can't list invoices" "403 This API key lacks the scope usage:read" "$(status) $(message)"
 with_token "$key_1" GET "/functions/$fn_1/logs" >/dev/null
 check "a key without logs:read can't read a function's logs (P-40)" "403 This API key lacks the scope logs:read" "$(status) $(message)"
+with_token "$key_1" GET "/traces/$trace_1" >/dev/null
+check "  ... nor a trace" "403 This API key lacks the scope logs:read" "$(status) $(message)"
 with_token "$key_1" GET /billing/pro-formas >/dev/null
 check "a key without usage:read can't list them" "403 This API key lacks the scope usage:read" "$(status) $(message)"
 with_token "$key_1" GET /databases >/dev/null
@@ -2138,6 +2152,7 @@ check "the live tail streams a call's START, END and REPORT as events, as they c
 key_logs="$(as_user_1 POST /api-keys '{"name": "l5 logs", "scopes": ["logs:read"]}' | jq -r .key)"
 by_key="$(with_token "$key_logs" GET "/functions/$fn_1/logs?tail=5")"
 check "a key with logs:read reads them" "200 5" "$(status) $(jq '.lines | length' <<<"$by_key")"
+check "  ... and a trace: its account's calls in it" "l5-one 200" "$(with_token "$key_logs" GET "/traces/$trace_1" | jq -r '.calls[0].functionName') $(status)"
 with_token "$key_logs" GET "/functions/$fn_1" >/dev/null
 check "and only them" "403 This API key lacks the scope functions:read" "$(status) $(message)"
 beta_limits="$(with_token "$operator_token" GET /admin/plans | jq -c '.[] | select(.id == "beta") | .limits')"

@@ -47,8 +47,14 @@ export class InvokeFunctionDto {
   qualifier?: string;
 }
 
-/** The answer to an asynchronous call: 202, and its request ID, which each of its attempts keeps. */
+/** The answer to an asynchronous call: 202, its request ID and its trace, which each of its attempts keeps. */
 export class AsyncInvocationView {
   @ApiProperty({ format: 'uuid', description: "The call's request ID: its attempts' in the history and its log lines, and the answer's x-ff-request-id" })
   requestId: string;
+
+  @ApiProperty({
+    example: '1-6730a1f2-0123456789abcdef01234567',
+    description: "The call's trace, in AWS X-Ray's format: X-Amzn-Trace-Id's, else a new one; its attempts and its destination's record keep it",
+  })
+  traceId: string;
 }

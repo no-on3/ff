@@ -3,6 +3,7 @@
  * event's attempts, and when its next attempt comes, or why it has none.
  */
 import { MessageAttribute } from '../queues/sqs-messages';
+import type { InvocationTrigger } from './entities/function-invocation.entity';
 import { LATEST, storedQualifier } from './qualifier';
 
 /** Lambda's limit on an asynchronous call's event, once serialized: 1 MB. */
@@ -77,6 +78,50 @@ export function qualifierOf(attributes: Record<string, unknown> | null): string 
 export function qualifierAttributes(qualifier: string | null | undefined): { qualifier: string } | undefined {
   const kept = storedQualifier(qualifier);
   return kept === null ? undefined : { qualifier: kept };
+}
+
+/** What its queue keeps beside a schedule's run (SchedulerService): that it is the schedule's, which its worker says on the schedule. */
+export const SCHEDULE_ORIGIN = 'schedule';
+/** ... beside a bucket's notification of a function (BucketEventDelivery). */
+const NOTIFICATION_ORIGIN = 'notification';
+/** ... beside a call's record, sent to the function its destination names. */
+const RECORD_ORIGIN = 'record';
+
+/** What its queue keeps beside a schedule's run: the schedule, by its ID, which its outcome is told, and its name. */
+export function scheduleAttributes(schedule: { id: string; name: string }): Record<string, string> {
+  return { origin: SCHEDULE_ORIGIN, scheduleId: schedule.id, scheduleName: schedule.name };
+}
+
+/** What its queue keeps beside a bucket's notification of a function: the bucket. */
+export function notificationAttributes(bucket: string): Record<string, string> {
+  return { origin: NOTIFICATION_ORIGIN, bucket };
+}
+
+/** What its queue keeps beside a call's record for the function its destination names: the call's request ID. */
+export function recordAttributes(requestId: string): Record<string, string> {
+  return { origin: RECORD_ORIGIN, recordOf: requestId };
+}
+
+/**
+ * What brought an asynchronous call beyond its source, from what its queue kept beside it: a schedule's name, a
+ * bucket's, the call whose record it is; undefined for a call of FF's API or Lambda's, or one kept before calls said.
+ */
+export function triggerOf(attributes: Record<string, unknown> | null): InvocationTrigger | undefined {
+  const named = (field: string) => {
+    const value = attributes?.[field];
+    return typeof value === 'string' ? value : undefined;
+  };
+  const said = (trigger: InvocationTrigger) => (Object.values(trigger).every((value) => value !== undefined) ? trigger : undefined);
+  switch (attributes?.origin) {
+    case SCHEDULE_ORIGIN:
+      return said({ schedule: named('scheduleName') });
+    case NOTIFICATION_ORIGIN:
+      return said({ bucket: named('bucket') });
+    case RECORD_ORIGIN:
+      return said({ recordOf: named('recordOf') });
+    default:
+      return undefined;
+  }
 }
 
 /** How an attempt answered, as a destination's record gives it: Lambda's status, and the function's output or the error. */

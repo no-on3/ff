@@ -22,6 +22,7 @@ import { InvocationSource } from '../functions/entities/function-invocation.enti
 import { FunctionUrl, UrlAuthType, UrlCors } from '../functions/entities/function-url.entity';
 import { EventFormat, Function, FunctionStatus } from '../functions/entities/function.entity';
 import { CallTarget, FunctionsService } from '../functions/functions.service';
+import { TRACE_HEADER, rootHeader, traceOf } from '../functions/trace';
 import { RefusedInvocationsService } from '../metrics/refused-invocations.service';
 import { S3FrontDoor } from '../storage/front-door';
 import { functionAccessOf, keyLabel, mayInvoke } from '../storage/key-reach';
@@ -46,6 +47,14 @@ export const TLS_ALLOWED_PATH = '/tls/allowed';
 
 /** The header that names each answer's request, as AWS's function URLs name it: the invocation's ID. */
 export const URL_REQUEST_ID_HEADER = 'x-amzn-RequestId';
+
+/** What the gateway knows of a request as it comes: its ID, which the event and the answer name; its trace, which the answer names; its caller's address; its time. */
+interface RequestFacts {
+  requestId: string;
+  traceId: string;
+  sourceIp: string;
+  time: Date;
+}
 
 /** An answer the gateway gives itself rather than the function's, as AWS's function URLs do: a status, and a JSON body with a Message. */
 class Refusal extends Error {
@@ -179,11 +188,13 @@ export class FunctionUrlGateway implements OnModuleDestroy {
   private async serve(request: IncomingMessage, response: ServerResponse): Promise<void> {
     // The request's ID is the invocation's, chosen first: the event names it, and so does every answer, a refusal too.
     const requestId = randomUUID();
+    // Its trace too, the caller's when its X-Amzn-Trace-Id names one, as a function URL takes it.
+    const traceId = traceOf(request.headers[TRACE_HEADER]);
     const time = new Date();
     let answer: UrlAnswer | null;
     try {
       const sourceIp = plainAddress(proxyAddr(request, this.trusted) ?? '');
-      answer = await withRequestContext({ requestId, ip: sourceIp }, () => this.answer(request, response, { requestId, sourceIp, time }));
+      answer = await withRequestContext({ requestId, ip: sourceIp }, () => this.answer(request, response, { requestId, traceId, sourceIp, time }));
     } catch (error) {
       // Not a refusal: the gateway itself failed. The details go to the log, under the request's ID.
       this.logger.error(`A function URL's request failed (request ${requestId}): ${describeError(error)}`, error instanceof Error ? error.stack : undefined);
@@ -192,7 +203,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     // A site's answer, which the website server sent itself.
     if (answer === null) return;
     try {
-      this.send(request, response, answer, requestId);
+      this.send(request, response, answer, { requestId, traceId });
     } catch (error) {
       this.logger.error(`Could not answer a function URL's request (request ${requestId}): ${describeError(error)}`);
       response.destroy();
@@ -200,7 +211,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
   }
 
   /** The answer to send; null once the website server has answered a site's request itself. */
-  private async answer(request: IncomingMessage, response: ServerResponse, context: { requestId: string; sourceIp: string; time: Date }): Promise<UrlAnswer | null> {
+  private async answer(request: IncomingMessage, response: ServerResponse, context: RequestFacts): Promise<UrlAnswer | null> {
     const target = await this.targetOf(request.headers.host);
     // A customer's own domain for a bucket's site: the website server answers it, as it answers the site's own host.
     if (target && 'site' in target) {
@@ -259,7 +270,7 @@ export class FunctionUrlGateway implements OnModuleDestroy {
   }
 
   /** One call of the URL's function, as the API's invoke makes it; a Refusal when it can't be made. */
-  private async call(url: FunctionUrl, request: IncomingMessage, context: { requestId: string; sourceIp: string; time: Date }): Promise<UrlAnswer> {
+  private async call(url: FunctionUrl, request: IncomingMessage, context: RequestFacts): Promise<UrlAnswer> {
     const caller = url.authType === UrlAuthType.AWS_IAM ? await this.callerOf(request, url) : undefined;
     const account = caller?.account ?? (await this.accountOf(url));
     if (account.status !== AccountStatus.ACTIVE) throw new Refusal(HttpStatus.FORBIDDEN, 'Forbidden');
@@ -291,7 +302,13 @@ export class FunctionUrlGateway implements OnModuleDestroy {
       throw new Refusal(HttpStatus.PAYLOAD_TOO_LARGE, 'Request Entity Too Large', [['connection', 'close']]);
     }
 
-    const outcome = await this.functions.call(function_, event, { source: InvocationSource.URL, requestId: context.requestId, history: eventForHistory(event), target });
+    const outcome = await this.functions.call(function_, event, {
+      source: InvocationSource.URL,
+      requestId: context.requestId,
+      traceId: context.traceId,
+      history: eventForHistory(event),
+      target,
+    });
     if (!outcome.ok) {
       // No instance free in time: the caller may try again. The function's own error is its account's to read, in the history.
       if (outcome.error instanceof FunctionThrottledError) throw new Refusal(HttpStatus.TOO_MANY_REQUESTS, 'Too Many Requests');
@@ -418,12 +435,14 @@ export class FunctionUrlGateway implements OnModuleDestroy {
     return answer;
   }
 
-  private send(request: IncomingMessage, response: ServerResponse, answer: UrlAnswer, requestId: string): void {
+  /** The answer, naming the request and its trace, as a function URL's does: the trace FF's, whatever the function said of it. */
+  private send(request: IncomingMessage, response: ServerResponse, answer: UrlAnswer, named: { requestId: string; traceId: string }): void {
     // No Content and Not Modified have no body, and say no length.
     const bodiless = [204, 304].includes(answer.status);
     const headers: Array<[string, string]> = [
-      [URL_REQUEST_ID_HEADER, requestId],
-      ...answer.headers,
+      [URL_REQUEST_ID_HEADER, named.requestId],
+      [TRACE_HEADER, rootHeader(named.traceId)],
+      ...answer.headers.filter(([name]) => name.toLowerCase() !== TRACE_HEADER),
       ...(bodiless ? [] : [['content-length', String(answer.body.length)] as [string, string]]),
     ];
     response.writeHead(answer.status, headers.flat());

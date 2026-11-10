@@ -9,6 +9,10 @@ import { MAX_INPUT_BYTES } from './limits';
 const ACCOUNT = '000000000001';
 const MB = 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** A trace the call started, as AWS X-Ray writes one. */
+const NEW_TRACE = expect.stringMatching(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/);
+/** The answer to a call kept outside a request: a new request ID, and a new trace. */
+const QUEUED = { requestId: expect.stringMatching(UUID), traceId: NEW_TRACE };
 /** A JSON string value whose JSON text, with its two quotes, is exactly `size` bytes. */
 const jsonOfSize = (size: number) => 'a'.repeat(size - 2);
 
@@ -35,9 +39,9 @@ describe('AsyncInvocationsService: the invocation types Event and DryRun (L1)', 
 
     const answer = await withRequestContext({ requestId: 'req-9' }, () => service.queue(ACCOUNT, 'fn-1', { order: 42 }));
 
-    expect(answer).toEqual({ requestId: 'req-9' });
+    expect(answer).toEqual({ requestId: 'req-9', traceId: NEW_TRACE });
     const [kept, requestId, body, expiresAt, options] = queues.sendEvent.mock.calls[0];
-    expect([kept, requestId, body, options]).toEqual([fn, 'req-9', '{"order":42}', { attributes: undefined }]);
+    expect([kept, requestId, body, options]).toEqual([fn, 'req-9', '{"order":42}', { attributes: { trace: answer.traceId } }]);
     expect((expiresAt as Date).getTime() - before).toBeGreaterThanOrEqual(7 * 3600 * 1000);
     expect((expiresAt as Date).getTime() - Date.now()).toBeLessThanOrEqual(7 * 3600 * 1000);
     expect([functions.findOne.mock.calls[0], credit.admit.mock.calls[0]]).toEqual([[ACCOUNT, 'fn-1'], [ACCOUNT]]);
@@ -51,7 +55,7 @@ describe('AsyncInvocationsService: the invocation types Event and DryRun (L1)', 
   });
 
   it("refuses an event over Lambda's 1 MB as JSON, as Lambda names it, before anything else", async () => {
-    expect(await service.queue(ACCOUNT, 'fn-1', jsonOfSize(MAX_ASYNC_INPUT_BYTES))).toEqual({ requestId: expect.stringMatching(UUID) });
+    expect(await service.queue(ACCOUNT, 'fn-1', jsonOfSize(MAX_ASYNC_INPUT_BYTES))).toEqual(QUEUED);
 
     const refused = (await failure(service.queue(ACCOUNT, 'fn-1', jsonOfSize(MAX_ASYNC_INPUT_BYTES + 1)))) as HttpException;
 
@@ -81,12 +85,23 @@ describe('AsyncInvocationsService: the invocation types Event and DryRun (L1)', 
     await service.queue(ACCOUNT, 'fn-1', {}, '3');
     await service.queue(ACCOUNT, 'fn-1', {}, '$LATEST');
 
-    expect(queues.sendEvent.mock.calls.map((call) => call[4])).toEqual([{ attributes: { qualifier: 'live' } }, { attributes: { qualifier: '3' } }, { attributes: undefined }]);
+    expect(queues.sendEvent.mock.calls.map((call) => call[4])).toEqual([
+      { attributes: { qualifier: 'live', trace: NEW_TRACE } },
+      { attributes: { qualifier: '3', trace: NEW_TRACE } },
+      { attributes: { trace: NEW_TRACE } },
+    ]);
     expect(functions.callTarget.mock.calls).toEqual([
       [fn, 'live'],
       [fn, '3'],
       [fn, '$LATEST'],
     ]);
+  });
+
+  it("keeps the caller's trace beside the event, which each attempt and its record keep, and answers it", async () => {
+    const answer = await service.queue(ACCOUNT, 'fn-1', {}, 'live', '1-5759e988-bd862e3fe1be46a994272793');
+
+    expect(answer).toEqual({ requestId: expect.stringMatching(UUID), traceId: '1-5759e988-bd862e3fe1be46a994272793' });
+    expect(queues.sendEvent.mock.calls[0][4]).toEqual({ attributes: { qualifier: 'live', trace: '1-5759e988-bd862e3fe1be46a994272793' } });
   });
 
   it("refuses a version or an alias the function hasn't, and keeps nothing; keeps one that names a version while $LATEST isn't ACTIVE", async () => {
@@ -97,7 +112,7 @@ describe('AsyncInvocationsService: the invocation types Event and DryRun (L1)', 
     // A version runs whatever $LATEST's state, as a rollback needs; an alias naming $LATEST doesn't.
     functions.findOne.mockResolvedValue({ ...fn, status: FunctionStatus.ERROR });
     functions.callTarget.mockResolvedValueOnce({ version: { version: 2 }, alias: 'live' });
-    expect(await service.queue(ACCOUNT, 'fn-1', {}, 'live')).toEqual({ requestId: expect.stringMatching(UUID) });
+    expect(await service.queue(ACCOUNT, 'fn-1', {}, 'live')).toEqual(QUEUED);
     functions.callTarget.mockResolvedValueOnce({ alias: 'edge' });
     expect(await failure(service.queue(ACCOUNT, 'fn-1', {}, 'edge'))).toBeInstanceOf(BadRequestException);
     expect(queues.sendEvent).toHaveBeenCalledTimes(1);
@@ -114,7 +129,7 @@ describe('AsyncInvocationsService: the invocation types Event and DryRun (L1)', 
   it("keeps an event while the account's messages hold the plan's limit with it, and refuses one past it with 429, naming the plan", async () => {
     // Two bytes: the event {}.
     queues.accountBytes.mockResolvedValueOnce(100 * MB - 2);
-    expect(await service.queue(ACCOUNT, 'fn-1')).toEqual({ requestId: expect.stringMatching(UUID) });
+    expect(await service.queue(ACCOUNT, 'fn-1')).toEqual(QUEUED);
 
     queues.accountBytes.mockResolvedValueOnce(100 * MB - 1);
     const refused = (await failure(service.queue(ACCOUNT, 'fn-1'))) as HttpException;

@@ -29,6 +29,7 @@ import {
   afterAttempt,
   attemptsOf,
   RecordedEnd,
+  SCHEDULE_ORIGIN,
   deadLetterAttributes,
   invocationRecord,
   isRecorded,
@@ -37,6 +38,8 @@ import {
   onClaim,
   qualifierAttributes,
   qualifierOf,
+  recordAttributes,
+  triggerOf,
 } from './async-invoke';
 import { Schedule } from '../schedules/schedule.entity';
 import { InvocationSource, InvocationStatus } from './entities/function-invocation.entity';
@@ -44,6 +47,7 @@ import { Function, FunctionStatus } from './entities/function.entity';
 import { AsyncSettings, EventInvokeConfigService } from './event-invoke-config.service';
 import { CallTarget, FunctionsService } from './functions.service';
 import { LATEST } from './qualifier';
+import { newTraceId, traceAttributes, traceOfAttributes, traceSystemAttributes } from './trace';
 
 /** Why an event ended without succeeding, as the server log says it. */
 const ENDS: Record<Exclude<EventEnd, EventEnd.SUCCEEDED>, string> = {
@@ -62,7 +66,21 @@ interface Attempted {
 
 /** What its queue keeps beside a schedule's run (SchedulerService): its schedule. */
 const scheduleOf = (attributes: Record<string, unknown> | null): string | undefined =>
-  attributes?.origin === 'schedule' && typeof attributes.scheduleId === 'string' ? attributes.scheduleId : undefined;
+  attributes?.origin === SCHEDULE_ORIGIN && typeof attributes.scheduleId === 'string' ? attributes.scheduleId : undefined;
+
+/** A claimed event with its trace, which its attempt, its record and its dead letter carry. */
+type TracedEvent = ClaimedEvent & { traceId: string };
+
+/**
+ * The event with its trace: the one its call started; else, for an event kept before calls had traces, a new one,
+ * kept beside it with its attempts, so that its retries keep it too.
+ */
+function traced(event: ClaimedEvent): TracedEvent {
+  const kept = traceOfAttributes(event.attributes);
+  if (kept) return { ...event, traceId: kept };
+  const traceId = newTraceId();
+  return { ...event, traceId, attributes: { ...event.attributes, ...traceAttributes(traceId) } };
+}
 
 /** A megabyte, as the plans count what messages hold. */
 const MB = 1024 * 1024;
@@ -165,7 +183,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       const events = await this.queues.claimEvents(room, now, this.coldStartSeconds);
       this.more = events.length === room;
       for (const event of events) {
-        const started = this.attempt(event, now).finally(() => {
+        const started = this.attempt(traced(event), now).finally(() => {
           this.running.delete(started);
           if (this.more) this.wake();
         });
@@ -190,7 +208,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   /** One claim of an event: its attempt, unless it has none left, then what comes after. A failure here leaves the event to its lease. */
-  private async attempt(event: ClaimedEvent, claimedAt: Date): Promise<void> {
+  private async attempt(event: TracedEvent, claimedAt: Date): Promise<void> {
     // The claim's clock, which a test may set, as the attempt goes on.
     const offset = claimedAt.getTime() - Date.now();
     const now = () => new Date(Date.now() + offset);
@@ -220,7 +238,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
    * own failure when the function or the account can't take one now, which calls nothing and counts no age. Each
    * answer names the version it was for.
    */
-  private async run(fn: Function, target: CallTarget, event: ClaimedEvent, now: () => Date): Promise<Attempted> {
+  private async run(fn: Function, target: CallTarget, event: TracedEvent, now: () => Date): Promise<Attempted> {
     const executedVersion = target.version ? String(target.version.version) : LATEST;
     const answer = (outcome: AttemptOutcome, response: Omit<AttemptResponse, 'executedVersion'>, word: string): Attempted => ({
       outcome,
@@ -251,6 +269,8 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       requestId: event.requestId,
       attempt: event.receiveCount,
       target,
+      traceId: event.traceId,
+      trigger: triggerOf(event.attributes),
     });
     if (outcome.ok) return answer(AttemptOutcome.SUCCESS, { statusCode: 200, payload: outcome.output }, 'success');
     if (outcome.error instanceof FunctionThrottledError) {
@@ -268,7 +288,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   /** A schedule's run: its attempt's outcome on the schedule, unless a later run has replaced it there. */
-  private async tellSchedule(event: ClaimedEvent, word: string): Promise<void> {
+  private async tellSchedule(event: TracedEvent, word: string): Promise<void> {
     const scheduleId = scheduleOf(event.attributes);
     if (!scheduleId) return;
     await this.schedules
@@ -282,7 +302,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
    * lease ended and another claim has it.
    */
   private async settle(
-    event: ClaimedEvent,
+    event: TracedEvent,
     settlement: Settlement,
     context?: { fn: Function; settings: AsyncSettings; response?: AttemptResponse; at: Date },
   ): Promise<void> {
@@ -314,7 +334,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
    * the function's dead-letter queue, as Lambda sends both. One that can't be
    * handed on is said, and the event deleted all the same.
    */
-  private async handOver(event: ClaimedEvent, end: RecordedEnd, context: { fn: Function; settings: AsyncSettings; response?: AttemptResponse; at: Date }): Promise<boolean> {
+  private async handOver(event: TracedEvent, end: RecordedEnd, context: { fn: Function; settings: AsyncSettings; response?: AttemptResponse; at: Date }): Promise<boolean> {
     const destination = end === EventEnd.SUCCEEDED ? context.settings.onSuccess : context.settings.onFailure;
     const deadLetterQueue = end === EventEnd.SUCCEEDED ? null : context.fn.deadLetterTargetArn;
     const handOvers = [
@@ -337,7 +357,7 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
    * while FF has the account's queues off) is said and counted; none then.
    */
   private async recordFor(
-    event: ClaimedEvent,
+    event: TracedEvent,
     end: RecordedEnd,
     destination: string,
     context: { fn: Function; response?: AttemptResponse; at: Date },
@@ -360,7 +380,8 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
       this.asyncCounts.count({ functionId: event.functionId, accountId: event.accountId, destinationFailures: 1 });
     };
     if (destination.startsWith('arn:aws:sqs:')) {
-      return this.toQueue(event.accountId, { arn: destination, said: `its destination ${destination}` }, { body, meta: { senderId: functionArn }, what: 'record' }, context.at, undelivered);
+      const meta: MessageMeta = { senderId: functionArn, systemAttributes: traceSystemAttributes(event.traceId) };
+      return this.toQueue(event.accountId, { arn: destination, said: `its destination ${destination}` }, { body, meta, what: 'record' }, context.at, undelivered);
     }
     const room = await this.roomFor(event.accountId, size);
     if (room) return undelivered(room);
@@ -368,8 +389,9 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
     if (!target) return undelivered(`its destination ${destination} is no function of the account, or no version or alias of it, any more`);
     if (size > MAX_ASYNC_INPUT_BYTES) return undelivered(`its record is ${size} bytes, over an asynchronous call's ${MAX_ASYNC_INPUT_BYTES}`);
     const expiresAt = new Date(context.at.getTime() + (LAMBDA_RETRY_POLICY.maximumEventAgeSeconds + EXPIRY_GRACE_SECONDS) * 1000);
-    // The record is a call that doesn't wait of what the destination names, as Lambda's: its version or alias.
-    const attributes = qualifierAttributes(target.qualifier);
+    // The record is a call that doesn't wait of what the destination names, as Lambda's: its version or alias; in the
+    // call's trace.
+    const attributes = { ...qualifierAttributes(target.qualifier), ...recordAttributes(event.requestId), ...traceAttributes(event.traceId) };
     return {
       write: (manager) => this.queues.sendEvent(target.function_, randomUUID(), body, expiresAt, { manager, attributes }),
       committed: () => this.queues.kept(target.function_),
@@ -382,8 +404,12 @@ export class AsyncInvokeWorker implements OnModuleInit, OnModuleDestroy {
    * attempt's status and error when one ran. One that can't be sent is said,
    * and counted nowhere: FF has no DeadLetterErrors metric.
    */
-  private deadLetterFor(event: ClaimedEvent, arn: string, context: { fn: Function; response?: AttemptResponse; at: Date }): Promise<HandOver | undefined> {
-    const meta: MessageMeta = { messageAttributes: deadLetterAttributes(event.requestId, context.response), senderId: this.configs.arnOf(context.fn) };
+  private deadLetterFor(event: TracedEvent, arn: string, context: { fn: Function; response?: AttemptResponse; at: Date }): Promise<HandOver | undefined> {
+    const meta: MessageMeta = {
+      messageAttributes: deadLetterAttributes(event.requestId, context.response),
+      systemAttributes: traceSystemAttributes(event.traceId),
+      senderId: this.configs.arnOf(context.fn),
+    };
     return this.toQueue(event.accountId, { arn, said: arn }, { body: event.body, meta, what: 'event' }, context.at, (reason) => {
       this.logger.warn(`Asynchronous call ${event.requestId} of function ${event.functionId} was not sent to its dead-letter queue: ${reason}`);
       return undefined;

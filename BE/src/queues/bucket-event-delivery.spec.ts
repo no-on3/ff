@@ -7,6 +7,8 @@ import { Queue } from './queue.entity';
 const ACCOUNT = '000000000001';
 const QUEUE_ARN = `arn:aws:sqs:tn-tunis-1:${ACCOUNT}:uploads`;
 const FUNCTION_ARN = `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:thumbnails`;
+/** A trace the notification started, as S3's do. */
+const NEW_TRACE = expect.stringMatching(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/);
 const uploads = { id: 'q-1', accountId: ACCOUNT, name: 'uploads', maximumMessageSize: 1_048_576, delaySeconds: 0 } as Queue;
 const record = (target: 'queue' | 'function', arn: string): BucketEvent => ({
   kind: 'record',
@@ -64,11 +66,11 @@ describe("the delivery of buckets' events", () => {
     expect(expiresAt.getTime() - Date.now()).toBeGreaterThan(6 * 3600 * 1000);
   });
 
-  it("calls the version or the alias the function's ARN names, kept beside the event for the worker; drops it once that is gone", async () => {
+  it("calls the version or the alias the function's ARN names, kept beside the event for the worker with its bucket and a trace of its own; drops it once that is gone", async () => {
     await events.publish(record('function', `${FUNCTION_ARN}:live`));
     await events.publish(record('function', `${FUNCTION_ARN}:gone`));
 
-    expect(store.sendEvent.mock.calls.map((call) => call[4])).toEqual([{ attributes: { qualifier: 'live' } }]);
+    expect(store.sendEvent.mock.calls.map((call) => call[4])).toEqual([{ attributes: { qualifier: 'live', origin: 'notification', bucket: 'photos', trace: NEW_TRACE } }]);
     expect(warnings).toHaveBeenCalledWith(`An event of bucket photos was not delivered to ${FUNCTION_ARN}:gone: the function has no alias gone any more`);
   });
 

@@ -39,6 +39,8 @@ const PRIVATE = 'k0000000000000000000000000000001';
 const ALIASED = 'a0000000000000000000000000000001';
 const host = (urlId: string) => `${urlId}.fn.localhost:3001`;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** A trace header naming a trace the request started, as AWS X-Ray writes one. */
+const NEW_ROOT = /^Root=1-[0-9a-f]{8}-[0-9a-f]{24}$/;
 
 const urlRow = (urlId: string, authType: UrlAuthType, cors: UrlCors | null = null, alias: string | null = null): FunctionUrl =>
   ({ functionId: `fn-${alias ? 'p' : urlId[0]}`, alias, accountId: ACCOUNT, urlId, authType, cors, invokeMode: UrlInvokeMode.BUFFERED }) as FunctionUrl;
@@ -127,7 +129,7 @@ describe('the function URL gateway (L1)', () => {
   /** The function's answer to the next calls, and the calls it got. */
   let output: unknown;
   const calls = () =>
-    functions.call.mock.calls as Array<[Function, FunctionUrlEvent, { source: InvocationSource; requestId: string; history: FunctionUrlEvent; target: CallTarget }]>;
+    functions.call.mock.calls as Array<[Function, FunctionUrlEvent, { source: InvocationSource; requestId: string; traceId: string; history: FunctionUrlEvent; target: CallTarget }]>;
   const lastEvent = () => calls().at(-1)![1];
 
   const send = (
@@ -307,6 +309,20 @@ describe('the function URL gateway (L1)', () => {
     expect(event.cookies).toEqual(['session=abc']);
     expect(history.headers.authorization).toBe('***');
     expect(history).not.toHaveProperty('cookies');
+  });
+
+  it("makes the call part of the trace the caller's X-Amzn-Trace-Id names, else of a new one, and names it on every answer, whatever the function said", async () => {
+    output = { statusCode: 200, headers: { 'x-amzn-trace-id': 'Root=1-00000000-000000000000000000000000' }, body: 'ok' };
+
+    const traced = await send(PUBLIC, '/', { headers: { 'x-amzn-trace-id': 'Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1' } });
+    const started = await send(PUBLIC);
+    const refused = await send('z0000000000000000000000000000001');
+
+    const [first, second] = calls().map(([, , { traceId }]) => traceId);
+    expect([first, `Root=${second}`]).toEqual(['1-5759e988-bd862e3fe1be46a994272793', expect.stringMatching(NEW_ROOT)]);
+    expect([traced, started, refused].map((answer) => answer.headers['x-amzn-trace-id'])).toEqual(['Root=1-5759e988-bd862e3fe1be46a994272793', `Root=${second}`, expect.stringMatching(NEW_ROOT)]);
+    // The caller's header reaches the function as sent, as a function URL passes it.
+    expect(calls()[0][1].headers['x-amzn-trace-id']).toBe('Root=1-5759e988-bd862e3fe1be46a994272793;Parent=53995c3f42cd8ad8;Sampled=1');
   });
 
   it.each(table.gateway.calls)('$title', answersAsItSays);

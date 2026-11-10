@@ -143,6 +143,8 @@ export const INVOCATION_FIELDS = [
   'source',
   'version',
   'alias',
+  'traceId',
+  'trigger',
   'duration',
   'memoryUsed',
   'error',
@@ -152,6 +154,19 @@ export const INVOCATION_FIELDS = [
   'createdAt',
   'updatedAt',
 ] as const satisfies ReadonlyArray<keyof FunctionInvocation>;
+
+/** What brought an invocation, beyond its source: each field for the source it belongs to. */
+export interface InvocationTrigger {
+  /** A schedule's run: the schedule's name. */
+  schedule?: string;
+  /** A queue's batch: the queue's name, and the message whose trace the call joined, else the batch's first. */
+  queue?: string;
+  messageId?: string;
+  /** A bucket's notification: the bucket. */
+  bucket?: string;
+  /** An asynchronous call's record, as its destination gets it: that call's request ID. */
+  recordOf?: string;
+}
 
 /** An invocation, as the API returns it: from POST /functions/:id/invoke, and in the history. */
 export interface FunctionInvocation {
@@ -172,6 +187,10 @@ export interface FunctionInvocation {
   version: number | null;
   /** The alias the call named, which chose its version: null for none. */
   alias: string | null;
+  /** The trace the call is part of, as AWS X-Ray writes one (1-<time>-<random>): null for a call made before calls had one. */
+  traceId: string | null;
+  /** What brought it, beyond its source: null when its source says all. */
+  trigger: InvocationTrigger | null;
   /** Milliseconds, as the runtime measured it. */
   duration: number;
   /** MB: the runtime's peak memory. */
@@ -191,10 +210,11 @@ type UnlistedInvocationField = Exclude<keyof FunctionInvocation, (typeof INVOCAT
 const everyInvocationFieldListed: [UnlistedInvocationField] extends [never] ? true : never = true;
 void everyInvocationFieldListed;
 
-/** The answer to an asynchronous call, 202: its request ID, which each of its attempts keeps. contract.test.ts checks it. */
-export const ASYNC_INVOCATION_FIELDS = ['requestId'] as const satisfies ReadonlyArray<keyof AsyncInvocation>;
+/** The answer to an asynchronous call, 202: its request ID and its trace, which each of its attempts keeps. contract.test.ts checks it. */
+export const ASYNC_INVOCATION_FIELDS = ['requestId', 'traceId'] as const satisfies ReadonlyArray<keyof AsyncInvocation>;
 export interface AsyncInvocation {
   requestId: string;
+  traceId: string;
 }
 
 /** One page of GET /functions/:id/invocations, newest first. */

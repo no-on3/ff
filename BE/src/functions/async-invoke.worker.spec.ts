@@ -14,6 +14,10 @@ import { FunctionStatus } from './entities/function.entity';
 const ACCOUNT = '000000000001';
 const NOW = new Date('2026-10-23T10:00:00Z');
 const later = (seconds: number) => new Date(NOW.getTime() + seconds * 1000);
+/** The trace the call started, which its queue keeps beside its event. */
+const TRACE = '1-5759e988-bd862e3fe1be46a994272793';
+/** A trace the worker started, for an event kept before calls had traces. */
+const NEW_TRACE = expect.stringMatching(/^1-[0-9a-f]{8}-[0-9a-f]{24}$/);
 
 describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
   const fn = { id: 'fn-1', name: 'orders', accountId: ACCOUNT, status: FunctionStatus.ACTIVE };
@@ -51,7 +55,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     accountId: ACCOUNT,
     requestId: 'req-1',
     body: '{"order":42}',
-    attributes: null,
+    attributes: { trace: TRACE },
     sentAt: NOW,
     receiveCount: 1,
     ...values,
@@ -126,19 +130,19 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
-  it("runs a claimed event as the API's invoke makes a call, under its request ID, its attempt the claim's, then deletes it", async () => {
+  it("runs a claimed event as the API's invoke makes a call, under its request ID, its attempt the claim's, in its trace, then deletes it", async () => {
     expect(await tick(event())).toBe(1);
 
     expect(queues.claimEvents).toHaveBeenCalledWith(10, NOW, 90);
     expect(functions.findOne).toHaveBeenCalledWith(ACCOUNT, 'fn-1');
     expect(credit.admit).toHaveBeenCalledWith(ACCOUNT);
     expect(functions.callTarget).toHaveBeenCalledWith(fn, undefined);
-    expect(functions.call).toHaveBeenCalledWith(fn, { order: 42 }, { source: InvocationSource.ASYNC, requestId: 'req-1', attempt: 1, target: {} });
+    expect(functions.call).toHaveBeenCalledWith(fn, { order: 42 }, { source: InvocationSource.ASYNC, requestId: 'req-1', attempt: 1, target: {}, traceId: TRACE });
     expect(queues.deleteEvent).toHaveBeenCalledWith(expect.objectContaining({ id: '7', receiveCount: 1 }));
     expect(warnings).not.toHaveBeenCalled();
   });
 
-  it("puts back a function's failure, a timeout too, for a retry a minute after it ended, with what it keeps of its attempts", async () => {
+  it("puts back a function's failure, a timeout too, for a retry a minute after it ended, with what it keeps of its attempts and its trace", async () => {
     functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'boom'), invocation: {} });
     functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionTimeoutError('Task timed out after 5.00 seconds'), invocation: {} });
 
@@ -147,16 +151,21 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     const [[first, firstAt, firstKept], [second, secondAt, secondKept]] = queues.retryEvent.mock.calls;
     expect([first.id, second.id]).toEqual(['7', '8']);
     for (const at of [firstAt, secondAt]) expect(Math.abs((at as Date).getTime() - later(60).getTime())).toBeLessThan(1000);
-    // Each keeps its failure, for its record should it end at a later claim.
+    // Each keeps its failure, for its record should it end at a later claim, and its trace: one kept before calls had
+    // traces is given one, which its retries keep.
+    const firstTrace = functions.call.mock.calls[0][2].traceId as string;
+    expect([firstTrace, functions.call.mock.calls[1][2].traceId]).toEqual([NEW_TRACE, TRACE]);
     expect([firstKept, secondKept]).toEqual([
       {
         other: 'kept as it was',
+        trace: firstTrace,
         failures: 1,
         throttles: 0,
         settled: 1,
         lastResponse: { statusCode: 200, functionError: 'Unhandled', executedVersion: '$LATEST', payload: { errorType: 'Error', errorMessage: 'boom' } },
       },
       {
+        trace: TRACE,
         failures: 1,
         throttles: 0,
         settled: 1,
@@ -201,7 +210,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       invocation: {},
     });
 
-    await tick(event(), event({ id: '8', requestId: 'req-2', attributes: { failures: 0, throttles: 3, settled: 3 }, receiveCount: 4 }));
+    await tick(event(), event({ id: '8', requestId: 'req-2', attributes: { trace: TRACE, failures: 0, throttles: 3, settled: 3 }, receiveCount: 4 }));
 
     const [[, throttledAt, throttled], [, failedAt, failed]] = queues.retryEvent.mock.calls;
     expect(Math.round(((throttledAt as Date).getTime() - NOW.getTime()) / 1000)).toBe(1);
@@ -209,12 +218,14 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     // FF's own failure keeps only what the caller may see of it.
     expect([throttled, failed]).toEqual([
       {
+        trace: TRACE,
         failures: 0,
         throttles: 1,
         settled: 1,
         lastResponse: { statusCode: 429, executedVersion: '$LATEST', payload: { errorType: 'TooManyRequestsException', errorMessage: 'Rate exceeded' } },
       },
       {
+        trace: TRACE,
         failures: 0,
         throttles: 4,
         settled: 4,
@@ -258,13 +269,14 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     functions.callTarget.mockResolvedValue({ version: version2, alias: 'live' });
     functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'boom'), invocation: {} });
 
-    await tick(event({ attributes: { qualifier: 'live' } }));
+    await tick(event({ attributes: { qualifier: 'live', trace: TRACE } }));
 
     expect(functions.callTarget).toHaveBeenCalledWith(expect.objectContaining({ id: 'fn-1' }), 'live');
-    expect(functions.call.mock.calls[0][2]).toEqual({ source: InvocationSource.ASYNC, requestId: 'req-1', attempt: 1, target: { version: version2, alias: 'live' } });
+    expect(functions.call.mock.calls[0][2]).toEqual({ source: InvocationSource.ASYNC, requestId: 'req-1', attempt: 1, target: { version: version2, alias: 'live' }, traceId: TRACE });
     // Its retry keeps what it named, and the failure says which version it was.
     expect(queues.retryEvent.mock.calls[0][2]).toEqual({
       qualifier: 'live',
+      trace: TRACE,
       failures: 1,
       throttles: 0,
       settled: 1,
@@ -376,7 +388,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     expect([queues.retryEvent.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([0, 1]);
   });
 
-  it("hands the record to the version or the alias its destination's ARN names, as a call of it that doesn't wait", async () => {
+  it("hands the record to the version or the alias its destination's ARN names, as a call of it that doesn't wait, in the call's trace", async () => {
     configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: `${RECORDS_ARN}:live`, onFailure: null });
     configs.destinationFunction.mockResolvedValueOnce({ function_: records, qualifier: 'live' });
     functions.call.mockResolvedValueOnce({ ok: true, output: 'done', invocation: {} });
@@ -385,14 +397,14 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
 
     expect(configs.destinationFunction).toHaveBeenCalledWith(ACCOUNT, `${RECORDS_ARN}:live`);
     expect(queues.sendEvent.mock.calls[0][0]).toBe(records);
-    expect(queues.sendEvent.mock.calls[0][4]).toEqual({ manager: 'the transaction', attributes: { qualifier: 'live' } });
+    expect(queues.sendEvent.mock.calls[0][4]).toEqual({ manager: 'the transaction', attributes: { qualifier: 'live', origin: 'record', recordOf: 'req-1', trace: TRACE } });
   });
 
   it("hands a call that succeeded to its onSuccess destination, Lambda's record of it, in the transaction that deletes the event", async () => {
     configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: RECORDS_ARN, onFailure: null });
     functions.call.mockResolvedValueOnce({ ok: true, output: { receipt: 'r-42' }, invocation: {} });
 
-    await tick(event({ receiveCount: 2, attributes: { failures: 1, throttles: 0, settled: 1 } }));
+    await tick(event({ receiveCount: 2, attributes: { trace: TRACE, failures: 1, throttles: 0, settled: 1 } }));
 
     const [[ended]] = queues.deleteEventAnd.mock.calls;
     const [[target, requestId, , expiresAt, { manager, attributes }]] = queues.sendEvent.mock.calls;
@@ -401,7 +413,8 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       records,
       expect.stringMatching(/^[0-9a-f-]{36}$/),
       'the transaction',
-      undefined,
+      // The call whose record it is, and its trace, which the destination's call names.
+      { origin: 'record', recordOf: 'req-1', trace: TRACE },
       0,
     ]);
     // Counted as the destination's AsyncEventsReceived once the transaction committed.
@@ -516,7 +529,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     configs.settingsFor.mockResolvedValueOnce({ policy: LAMBDA_RETRY_POLICY, onSuccess: null, onFailure: QUEUE_ARN });
     functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('TypeError', 'x is undefined'), invocation: {} });
 
-    await tick(event({ receiveCount: 3, attributes: { failures: 2, throttles: 0, settled: 2 } }));
+    await tick(event({ receiveCount: 3, attributes: { trace: TRACE, failures: 2, throttles: 0, settled: 2 } }));
 
     expect(configs.destinationQueue).toHaveBeenCalledWith(ACCOUNT, QUEUE_ARN);
     expect([queues.deleteEventAnd.mock.calls[0][0].id, queues.deleteEvent.mock.calls.length, queues.sendEvent.mock.calls.length]).toEqual(['7', 0, 0]);
@@ -525,7 +538,8 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
     expect(message).toEqual({
       messageId: expect.stringMatching(/^[0-9a-f-]{36}$/),
       body: expect.any(String),
-      meta: { senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders` },
+      // The call's trace, as SQS keeps a message's AWSTraceHeader.
+      meta: { senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders`, systemAttributes: { AWSTraceHeader: { DataType: 'String', StringValue: `Root=${TRACE}` } } },
       sizeBytes: Buffer.byteLength(message.body as string),
       delaySeconds: 0,
     });
@@ -581,7 +595,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       configs.destinationQueue.mockImplementation(async (_account: string, arn: string) => (arn === QUEUE_ARN ? failedOrders : deadOrders));
       functions.call.mockResolvedValueOnce({ ok: false, error: new FunctionRuntimeError('Error', 'no stock for order 42'), invocation: {} });
 
-      await tick(event({ receiveCount: 3, attributes: { failures: 2, throttles: 0, settled: 2 } }));
+      await tick(event({ receiveCount: 3, attributes: { trace: TRACE, failures: 2, throttles: 0, settled: 2 } }));
 
       expect([queues.deleteEventAnd.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([1, 0]);
       const sent = customerQueues.send.mock.calls.map(([queue, [message], , manager]) => ({ queue: (queue as { name: string }).name, manager, message: message as Record<string, unknown> }));
@@ -597,7 +611,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       expect(sent[1].message).toEqual({
         messageId: expect.stringMatching(/^[0-9a-f-]{36}$/),
         body: '{"order":42}',
-        meta: { messageAttributes, senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders` },
+        meta: { messageAttributes, senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders`, systemAttributes: { AWSTraceHeader: { DataType: 'String', StringValue: `Root=${TRACE}` } } },
         sizeBytes: messageSize('{"order":42}', messageAttributes),
         delaySeconds: 0,
       });
@@ -612,7 +626,7 @@ describe('AsyncInvokeWorker: the attempts of asynchronous calls (L1)', () => {
       await tick(event({ id: '8', requestId: 'req-2' }));
 
       expect(customerQueues.send.mock.calls.map(([, [message]]) => (message as { meta: unknown }).meta)).toEqual([
-        { messageAttributes: { RequestID: { DataType: 'String', StringValue: 'req-1' } }, senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders` },
+        { messageAttributes: { RequestID: { DataType: 'String', StringValue: 'req-1' } }, senderId: `arn:aws:lambda:tn-tunis-1:${ACCOUNT}:function:orders`, systemAttributes: { AWSTraceHeader: { DataType: 'String', StringValue: `Root=${TRACE}` } } },
       ]);
       expect([queues.deleteEventAnd.mock.calls.length, queues.deleteEvent.mock.calls.length]).toEqual([1, 1]);
     });
