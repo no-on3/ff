@@ -1103,6 +1103,8 @@ $(grep -E "^  files  $job/\.ff/local/buckets/files$" "$work/cron.out" >/dev/null
     "$(readme_after "$job" '^In another terminal' "s/:3700/:$port/g") $(at "http://127.0.0.1:$port/files/reports/$today.json" | sed -n '1s/ .*//p') \
 $(jq -r '"\(.day) \(.files) \(.bytes) \(.largest.key)"' "$work/at.body")"
   until_found "http://127.0.0.1:$port/files/reports/$yesterday.json" || true
+  # The run's line comes a moment after the file it writes, through ff local's stream of the function's output.
+  until_said "$work/cron.err" "reported $yesterday: 0 files, 0 bytes" "$starter" || true
   check "  ... and ff local run EveryMorning, the schedule's run now, yesterday's report, with none of today's files" \
     "200 $yesterday 0 null true" \
     "$(at "http://127.0.0.1:$port/files/reports/$yesterday.json" | sed -n '1s/ .*//p') $(jq -r '"\(.day) \(.files) \(.largest)"' "$work/at.body") \
