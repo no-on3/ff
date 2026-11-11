@@ -245,7 +245,7 @@ A `latest.json` signed before the last one ff verified is ignored, by the signin
 
 Linux's and Windows's build anywhere with zig as the C compiler and the linker, through cargo-zigbuild, both pinned and installed by `hack/install-tools.sh zig cargo-zigbuild`, which the script runs; macOS's only on a Mac, whose link needs Apple's SDK. `--container` builds the first in the Rust image instead, with musl's own compiler, as the development server does. Copy the file as `ff` (`ff.exe`) anywhere on the `PATH`; it needs nothing else, and `ff version` names the commit it was built from.
 
-A release signs the five and publishes them on the downloads site with the two install scripts, [`release/install.sh`](release/install.sh) and [`release/install.ps1`](release/install.ps1), which the site serves with its address and the release's public key put in; the five are built with the site's address (`FF_BUILD_DOWNLOADS_URL`) and the public key, `release/minisign.pub` once the signing key is made, for the update notice. The getting-started guide's "A release of `ff`" says how a release is made.
+A release signs the five and publishes them on the downloads site with the two install scripts, [`release/install.sh`](release/install.sh) and [`release/install.ps1`](release/install.ps1), which the site serves with its address and the release's public key put in; the five are built with the site's address (`FF_BUILD_DOWNLOADS_URL`) and the public key, `release/minisign.pub`, for the update notice. The getting-started guide's "A release of `ff`" says how a release is made.
 
 ## Build and test
 

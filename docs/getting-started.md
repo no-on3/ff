@@ -1937,6 +1937,8 @@ gh variable set FF_DOWNLOADS_BUCKET --body <bucket>
 gh secret set FF_DOWNLOADS_KEY                                         # asks for the key
 ```
 
+FF's development server has its own, `https://get.dev.ffunc.cloud`, which its proxy gives a certificate from Let's Encrypt, where its sites' wildcard has the proxy's own ([`deploy/dev-server/README.md`](../deploy/dev-server/README.md), "The downloads site").
+
 To release, raise the version in `cli/Cargo.toml` on `master`, with `cli/Cargo.lock`, which `cargo check` updates, then `git tag ff-v<version> && git push origin ff-v<version>`. After the first release, see that the two packages it made on `ghcr.io`, `ff-runtime-nodejs` and `ff-runtime-python`, are public (the package's settings on GitHub, "Change visibility"): a private one refuses customers' pulls, and their `ff local` then downloads the archive from the site instead.
 
 **The platform's images** (P-60): `BE/Dockerfile`, `FE/Dockerfile` and `admin/Dockerfile`. The two apps bake their addresses into the bundle, so each environment builds its own:
