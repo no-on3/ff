@@ -85,8 +85,11 @@ sqs_round_trip() {
 {
   check api 200 '"status":"ok"' "https://api.$domain/healthz" &
   check console 200 'id="root"' "https://console.$domain/" &
+  # The login page as the console asks for it, with a PKCE challenge, which FF's realm requires of the console's client:
+  # without one, Keycloak sends the browser back with an error. RFC 7636's example challenge: the probe never signs in.
   check login 200 'name="username"' -G "https://login.$domain/realms/ff/protocol/openid-connect/auth" -d client_id=ff-console \
-    --data-urlencode "redirect_uri=https://console.$domain/" -d response_type=code -d scope=openid &
+    --data-urlencode "redirect_uri=https://console.$domain/" -d response_type=code -d scope=openid \
+    -d code_challenge_method=S256 -d code_challenge=E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM &
   check lambda 200 canary --aws-sigv4 "aws:amz:$region:lambda" "${key[@]}" --data-binary '{}' "https://lambda.$domain/2015-03-31/functions/$function/invocations" &
   check s3 200 "FF's status probe" --aws-sigv4 "aws:amz:$region:s3" "${key[@]}" "https://s3.$domain/$bucket/index.html" &
   sqs_round_trip &

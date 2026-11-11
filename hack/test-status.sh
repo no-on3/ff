@@ -123,6 +123,10 @@ class Ff(http.server.BaseHTTPRequestHandler):
         if check == "console" and url.path == "/":
             return 200, b'<!doctype html><div id="root"></div>', "text/html", {}
         if check == "login" and url.path == "/realms/ff/protocol/openid-connect/auth" and query.get("client_id") == "ff-console":
+            # The console's client requires PKCE, as FF's realm sets it: without a challenge, Keycloak sends the browser
+            # back to the console with an error, and shows no login page.
+            if query.get("code_challenge_method") != "S256" or not re.fullmatch(r"[A-Za-z0-9._~-]{43,128}", query.get("code_challenge", "")):
+                return 302, b"", "text/plain", {"location": query.get("redirect_uri", "/") + "?error=invalid_request"}
             return 200, b'<form action="x"><input name="username"></form>', "text/html", {}
         if check == "lambda" and url.path == "/2015-03-31/functions/status-canary/invocations" and mine:
             return 200, json.dumps({"statusCode": 200, "body": CANARY}).encode(), "application/json", {}
