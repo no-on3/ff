@@ -25,7 +25,8 @@ You said: "read docs/dev-tools-tasks.md and start working on it". The list is th
 
 **72. `ff`'s downloads and the runtime images live on FF itself:** a site on a bucket of FF's own at `get.<domain>`, with GitHub's releases and `ghcr.io` as copies (the CLI plan's question 3; the step-6 plan's 7). ✅ Your answer: as recommended. No new service, reachable when GitHub isn't, and FF serves itself as it serves its customers.
 - **Changed already:** the site made and deployed by the release job, with its install scripts (M-03's part 3, `4d4a337`).
-- **Still to change:** M-04's part 1; the site's account, bucket and address set up by you, and `ghcr.io`'s packages made public (the questions at the end).
+- **Changed since:** M-04's part 1 (`3fd82b4`); the site's account, bucket and address, set up on 2026-11-11 on the development server, `https://get.dev.ffunc.cloud`.
+- **Still to change:** `ghcr.io`'s packages made public, after the first release (the questions at the end).
 
 **73. `ff` for Windows and macOS now,** cross-compiled on Linux where M-01's spike allows and on a macOS runner otherwise, signed with minisign; Apple's notarization later (the CLI plan's question 5; the step-6 plan's 8). ✅ Your answer: as recommended. Many developers here work on Windows, and Apple's program is paid by card, every year.
 - **Changed already:** M-01's part 1 found the way; the five builds, each tested on its own system (M-03's part 1, `858b959`), signed by the release job (part 2, `ce927a1`).

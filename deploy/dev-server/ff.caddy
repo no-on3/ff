@@ -30,6 +30,14 @@ status.@DOMAIN@ {
 	reverse_proxy ff-status-web:8080
 }
 
+# FF's downloads site, the tenth, where the release job publishes ff (README.md, "The downloads site"): a bucket's
+# site with its own domain, proved by its CNAME to the site's host, which the edge serves as any site's own domain;
+# its certificate from Let's Encrypt here, which a customer's `curl … | sh` trusts, where the sites' wildcard below
+# has this proxy's own.
+get.@DOMAIN@ {
+	import ff-edge
+}
+
 # Function URLs, buckets and sites, a host each: one certificate for each wildcard, from this proxy's own authority,
 # whose root a browser must trust (README.md). Let's Encrypt's would take a DNS-01 challenge, through a key that can
 # change every record of the domain, or a certificate per host on demand, through the proxy's main file.

@@ -389,10 +389,11 @@ else
 fi
 
 step "every hostname, through the server's proxy, as from the internet"
-# Let's Encrypt's certificates for the nine fixed names, which the proxy asks for once it has the route: a minute
+# Let's Encrypt's certificates for the ten fixed names, which the proxy asks for once it has the route: a minute
 # or so the first time. Checked against the system's roots alone. Each name needs its record in the DNS (README.md).
-# The status page answers once its own step has started its web server; the proxy has its certificate before.
-for name in api console admin login s3 sqs email lambda status; do
+# The status page answers once its own step has started its web server, and the downloads site once its account has
+# it (README.md); the proxy has their certificates before.
+for name in api console admin login s3 sqs email lambda status get; do
   for i in $(seq 1 60); do
     curl -s -o /dev/null --cacert /etc/ssl/certs/ca-certificates.crt --resolve "$name.$domain:443:127.0.0.1" "https://$name.$domain/" && break
     [ "$i" -lt 60 ] || fail "no certificate from Let's Encrypt for $name.$domain after 3 minutes: the proxy's log says why (docker compose --project-directory $proxy logs caddy)"
