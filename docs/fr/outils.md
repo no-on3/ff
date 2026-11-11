@@ -20,7 +20,7 @@
 ```bash
 curl -fsSL https://get.<domaine>/install.sh | sh   # Linux et macOS, dans ~/.local/bin
 irm https://get.<domaine>/install.ps1 | iex        # Windows, dans PowerShell
-ff version --verbose                              # … release key <ID> : celle de la page de téléchargement
+ff version --verbose                              # … release key 76C3DA51D8F8D047 : celle de FF, comme sur la page de téléchargement
 ```
 
 Le script choisit la version de votre système et de votre processeur (Linux x86_64 et arm64, macOS sur processeur Apple ou Intel, Windows x86_64), vérifie son SHA-256 et, si [minisign](https://jedisct1.github.io/minisign/) est installé, sa signature avec la clé de FF ; une vérification qui échoue n'installe rien. Une fois par jour au plus, `ff` dit quand une version plus récente est sortie, avec la ligne qui l'installe ; `FF_NO_UPDATE_CHECK=1` ou `ff config set update_check false` l'en empêche.
