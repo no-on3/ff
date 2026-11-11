@@ -214,7 +214,7 @@ In a CI, [`examples/ci/`](../examples/ci/) has a GitHub Actions job and a GitLab
 
 ## Install
 
-From the downloads site, once FF publishes releases there (the getting-started guide's "A release of `ff`"), its address in place of `get.<domain>`:
+From the downloads site, where each release is published (the getting-started guide's "A release of `ff`"), its address in place of `get.<domain>`: `https://get.dev.ffunc.cloud` for FF's development server.
 
 ```bash
 curl -fsSL https://get.<domain>/install.sh | sh                  # Linux and macOS, into ~/.local/bin
@@ -223,7 +223,7 @@ irm https://get.<domain>/install.ps1 | iex                       # Windows, in P
 & ([scriptblock]::Create((irm https://get.<domain>/install.ps1))) -Prefix C:\Tools\ff
 ```
 
-Each script picks the build for the system and the processor, checks its SHA-256 against the site's `latest.json`, and both signatures against the release's public key when [minisign](https://jedisct1.github.io/minisign/) is on the machine, then installs it through a temporary name and says what to add to `PATH`; a check that fails installs nothing. The site's page gives the key's ID, which `ff version --verbose` prints too. Running the script again installs the newest release over the one there.
+Each script picks the build for the system and the processor, checks its SHA-256 against the site's `latest.json`, and both signatures against the release's public key when [minisign](https://jedisct1.github.io/minisign/) is on the machine, then installs it through a temporary name and says what to add to `PATH`; a check that fails installs nothing. The site's page gives the key's ID, `76C3DA51D8F8D047`, which `ff version --verbose` prints too. Running the script again installs the newest release over the one there.
 
 **The update notice.** Once a day at most, after a command that reached the API and succeeded, ff reads the site's `latest.json` and its signature, verifies it against the release's public key built into it, and when a newer version is out says so on stderr, with this system's line that installs it:
 
